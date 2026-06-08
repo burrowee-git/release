@@ -41,24 +41,30 @@ Tell the operator:
 
 > Open `https://console.burrowee.com`, go to **Edge relays → Add edge relay**, enter
 > the public hostname this box will serve on (its `hostname_base`), and copy the
-> **pairing code** it shows. Paste that code back here.
+> **blob** and **PIN** it shows. Paste both back here.
 
-Wait for the pairing code. (Backend: `POST /api/v1/relays {hostname_base}` →
-`{relay_id, blob, pin, salt}`, owner-tier — spec §4 ①, §7.)
+Wait for the blob + PIN. (Backend: `POST /api/v1/relays {hostname_base}` →
+`{relay_id, blob, pin}`, owner-tier — spec §4 ①, §7. The blob is self-contained:
+its header carries `console_url`, `console_pub` and the scrypt salt, so blob + PIN
+is everything the edge needs.)
 
 ---
 
 ## 2. Enroll
 
 ```bash
-burrowee-edge enroll <pairing-code>
+burrowee-edge enroll <blob> <pin>
 ```
 
 This generates the edge's Ed25519 identity (private key never leaves the box),
-decodes the enroll secret, and runs the one-shot enroll handshake against
-`console.burrowee.com`. On success it prints the edge **fingerprint** and
-`awaiting approval`. Record the fingerprint — the operator approves *that exact*
-fingerprint next. (Backend: the one-shot enroll handshake presents the self-pubkey + sealed secret; **console** binds the pubkey to the pending row, then the identity handshake loops on `relay-pending` — spec §4 ②.)
+recovers `console_url`/`console_pub`/`salt` from the blob header (the PIN
+authenticates them via the AEAD AAD), decodes the enroll secret, and runs the
+one-shot enroll handshake against `console.burrowee.com`. On success it prints the
+edge **fingerprint** and `awaiting approval`, and persists the console identity into
+`$HOME/.burrowee-edge` so later `run` needs no env. Record the fingerprint — the
+operator approves *that exact* fingerprint next. (Backend: the one-shot enroll
+handshake presents the self-pubkey + sealed secret; the **console** binds the pubkey
+to the pending row, then the identity handshake loops on `relay-pending` — spec §4 ②.)
 
 ---
 
@@ -120,8 +126,8 @@ Then poll for the cert:
 burrowee-edge doctor        # watch the "custom-domain cert" line flip to ✓
 ```
 
-(Backend: the `acme.burrowee.net` certbot DNS-01 pipeline issues the LE cert, console
-seals it + pushes it to this edge via `relay/cert/upsert`, and pushes the
+(Backend: the `acme.burrowee.net` certbot DNS-01 pipeline issues the LE cert, the
+console seals it + pushes it to this edge via `relay/cert/upsert`, and pushes the
 `hostname→(gateway_fp, svc)` route via `relay/route/upsert` — spec §9.)
 
 > **Web serving:** the relay's `:443` Host-ingress proxies browser requests to the
