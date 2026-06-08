@@ -341,14 +341,19 @@ NOTES
 
     # (7) regenerate bootstraps + refresh edge skills + scp the static surface.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
-    if [ -d "${EDGE_SKILLS_SRC}" ]; then
-        mkdir -p "${REPO_ROOT}/skills"
-        for d in "${EDGE_SKILLS_SRC}"/burrowee-edge-*; do
-            [ -d "${d}" ] || continue
-            mkdir -p "${REPO_ROOT}/skills/$(basename "${d}")"
-            cp "${d}/SKILL.md" "${REPO_ROOT}/skills/$(basename "${d}")/SKILL.md"
-        done
-    fi
+    # Edge skills are OWNED by the edge repo; mirror them in from its worktree on
+    # every release so the served copy can never drift from source. (The cli +
+    # gateway skills are authored in THIS repo and are left untouched.) Fail loudly
+    # if the edge source is gone — a stale snapshot must not ship silently.
+    [ -d "${EDGE_SKILLS_SRC}" ] \
+        || { echo "✗ edge skills source missing: ${EDGE_SKILLS_SRC} (set BURROWEE_SRC_EDGE)" >&2; exit 1; }
+    mkdir -p "${REPO_ROOT}/skills"
+    for d in "${EDGE_SKILLS_SRC}"/burrowee-edge-*; do
+        [ -d "${d}" ] || continue
+        mkdir -p "${REPO_ROOT}/skills/$(basename "${d}")"
+        cp "${d}/SKILL.md" "${REPO_ROOT}/skills/$(basename "${d}")/SKILL.md"
+        echo "→ synced edge skill $(basename "${d}") from ${EDGE_SKILLS_SRC}" >&2
+    done
 
     ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
     scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
