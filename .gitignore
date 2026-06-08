@@ -1,0 +1,8 @@
+# build artifacts
+/dist/
+/build/
+# decrypted secrets (never commit)
+*.key
+*.minisign.key
+*.age.dec
+.tmp-*
