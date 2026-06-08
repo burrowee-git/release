@@ -1,4 +1,3 @@
-# REPLACE AT ACTIVATION: hex of the live console.burrowee.com Ed25519 signing pubkey.
-# Source: the value recorded when console was deployed (BURROWEE_CLOUD_SIGNING_KEY pubkey).
-# A single line, 64 hex chars, no prefix. release.sh bakes this into edge builds.
-0000000000000000000000000000000000000000000000000000000000000000
+# Live console.burrowee.com Ed25519 signing pubkey (public). Verified 2026-06-08 via the manage System page.
+# release.sh bakes this into edge (cloudPubHexProd) and uses it as the relay BURROWEE_CLOUD_PUB.
+6b63fcb13ec04e1fe37bfc6fe9b286378943363a04e18dfc02306d1fa47cba3d
