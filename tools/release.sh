@@ -280,6 +280,7 @@ do_release() {
         assemble="${stage}/burrowee-${comp}-${os}-${arch}"
         rm -rf "${assemble}"
         mkdir -p "${assemble}"
+        # shellcheck disable=SC2086  # ${bins} is an intentional space-list of bin names from bins_for(); word-splitting is the point.
         for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
         cp "${DISP_DIR}/${os}-${arch}/burrowee" "${assemble}/burrowee"
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
@@ -293,6 +294,7 @@ do_release() {
     done
 
     # (4) sums over the four zips.
+    # shellcheck disable=SC2086  # ${SHA256} is an intentional space-split command string ("shasum -a 256" | "sha256sum"); word-splitting is the point.
     ( cd "${stage}" && ${SHA256} burrowee-"${comp}"-*.zip | sort > SHA256SUMS.txt )
 
     # (5) sign.
@@ -300,6 +302,7 @@ do_release() {
         -t "burrowee ${comp} ${stamp}" >/dev/null )
 
     echo "Built ${#zips[@]} zips + SHA256SUMS.txt + SHA256SUMS.txt.minisig:"
+    # shellcheck disable=SC2012  # cosmetic listing of our own controlled asset names (no untrusted filenames); ls keeps the plain one-per-line format.
     ( cd "${stage}" && ls -1 burrowee-"${comp}"-*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
 
     if [ "${DRY_RUN}" = 1 ]; then
@@ -324,7 +327,7 @@ Install:
   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/${comp}/install.sh | sh
 
 Pin this version:
-  BURROWEE_$(printf '%s' "${comp}" | tr 'a-z' 'A-Z')_VERSION=${tag} \\
+  BURROWEE_$(printf '%s' "${comp}" | tr '[:lower:]' '[:upper:]')_VERSION=${tag} \\
     curl -fsSL https://release.burrowee.com/${comp}/install.sh | sh
 
 Verify by hand:
@@ -355,6 +358,7 @@ NOTES
         echo "→ synced edge skill $(basename "${d}") from ${EDGE_SKILLS_SRC}" >&2
     done
 
+    # shellcheck disable=SC2029  # ${STATIC_DIR}/${comp} are local, controlled values — expanding client-side into the remote command is intended.
     ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
     scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
     if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
@@ -367,6 +371,7 @@ NOTES
         [ -d "${d}" ] || continue
         [ -f "${d}SKILL.md" ] || continue
         sk="$(basename "${d}")"
+        # shellcheck disable=SC2029  # ${STATIC_DIR}/skills/${sk} are local, controlled values — expanding client-side into the remote command is intended.
         ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/skills/${sk}'"
         scp -q "${d}SKILL.md" "${RELEASE_HOST}:${STATIC_DIR}/skills/${sk}/SKILL.md"
     done

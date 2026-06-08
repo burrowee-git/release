@@ -37,6 +37,7 @@ read_semver() {
     [[ "${raw}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "✗ versions/${COMP} '${raw}' not MAJOR.MINOR.PATCH" >&2; exit 1; }
     printf '%s' "${raw}"
 }
+# Side-effect: stages versions/<comp> so the caller (release.sh) can commit/revert it as one unit.
 write_semver() { printf '%s\n' "$1" > "${VERSION_FILE}"; ( cd "${REPO_ROOT}" && git add "versions/${COMP}" ); }
 
 src_sha() {

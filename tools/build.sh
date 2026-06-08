@@ -60,6 +60,7 @@ mkdir -p "${OUT_DIR}"
 HOST_OS="$(uname -s)"
 
 cd "${SRC_DIR}"
+# shellcheck disable=SC2086  # ${MAP} is an intentional space-list of "bin:pkg" pairs; word-splitting into pairs is the point.
 for pair in ${MAP}; do
     bin="${pair%%:*}"
     pkg="${pair#*:}"

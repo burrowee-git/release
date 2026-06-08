@@ -18,7 +18,7 @@
 # non-comment line) — exactly what `minisign -V -P <pubkey>` expects inline.
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 TEMPLATE="$ROOT/tools/bootstrap.template.sh"
 [ -f "$TEMPLATE" ] || { echo "✗ missing template: $TEMPLATE" >&2; exit 1; }
 

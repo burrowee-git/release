@@ -29,7 +29,7 @@ PUBKEY="RWQspcYOi6NXeZYBXk1hiSCavFes9WXajHrWFz/b3oWxej9AZQedmS0B"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
-VER_ENV="BURROWEE_$(printf '%s' "$COMP" | tr 'a-z' 'A-Z')_VERSION"
+VER_ENV="BURROWEE_$(printf '%s' "$COMP" | tr '[:lower:]' '[:upper:]')_VERSION"
 
 # Production downloads are pinned to HTTPS/TLS1.2 (--proto =https). The
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
@@ -80,6 +80,7 @@ else
     info "resolving latest ${COMP} release"
     api="https://api.github.com/repos/${REPO}/releases?per_page=100"
     # newest-first list; the FIRST tag matching "<comp>/v" is that component's latest.
+    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
     TAG="$($CURL "$api" 2>/dev/null \
         | grep '"tag_name"' \
         | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' \
@@ -99,6 +100,7 @@ ZIP="burrowee-${COMP}-${OS}-${ARCH}.zip"
 
 dl() {
     # dl <remote-name> <local-name>  (local goes under $TMP)
+    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
     $CURL -o "$TMP/$2" "$BASE/$1" \
         || fail "download failed: $1 (from $BASE) — refusing to install unverified bytes"
 }
@@ -125,6 +127,7 @@ else
         # last resort: official static linux build over HTTPS into the temp dir
         if [ "$OS" = linux ] && [ "$ARCH" = amd64 ]; then
             mb="https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz"
+            # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
             if $CURL -o "$TMP/minisign.tgz" "$mb" 2>/dev/null \
                && tar -xzf "$TMP/minisign.tgz" -C "$TMP" 2>/dev/null; then
                 ms="$(find "$TMP" -type f -name minisign -perm -u+x 2>/dev/null | head -n1)"
