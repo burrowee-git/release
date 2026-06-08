@@ -1,6 +1,6 @@
 ---
 name: burrowee-cli-install
-description: Install the burrowee cli (the local client + forwarder) on this machine (macOS + Linux). Use when the operator asks to "install burrowee cli", "get the burrowee client", or pastes release.burrowee.com/cli/install.sh or release.burrowee.com/skills/burrowee-cli-install/SKILL.md. Stop after the dispatcher is on PATH and reports its version — pairing + connect live in the burrowee-cli-setup skill, which the operator triggers next.
+description: Install the burrowee cli (the local client + forwarder) on this machine (macOS + Linux). Use when the operator asks to "install burrowee cli", "get the burrowee client", or pastes release.burrowee.com/cli/install.sh or release.burrowee.com/skills/burrowee-cli-install/SKILL.md. Stop after the binaries are on PATH and `burrowee cli version` reports a version — pairing + connect live in the burrowee-cli-setup skill, which the operator triggers next.
 ---
 
 # burrowee-cli-install
@@ -39,8 +39,8 @@ If `unzip` is missing, install it (`brew install unzip` on macOS; `sudo apt
 install unzip` on Debian/Ubuntu; `sudo dnf install unzip` on RHEL/Fedora) and
 retry the pre-flight.
 
-Already installed? If `burrowee --version` already prints a version line, the
-dispatcher is present — route the operator straight to `burrowee-cli-setup` and
+Already installed? If `burrowee cli version` already prints a version line, the
+cli is present — route the operator straight to `burrowee-cli-setup` and
 stop.
 
 ---
@@ -67,20 +67,20 @@ aborts without writing anything — surface the raw output and stop.
 
 ```bash
 # Preferred:
-burrowee --version
+burrowee cli version
 
 # Fallback if PATH isn't refreshed yet:
-"$HOME/.local/bin/burrowee" --version
+"$HOME/.local/bin/burrowee" cli version
 ```
 
-`burrowee --version` prints `burrowee dispatcher <version>`. That is the real,
-source-backed version command. **STOP here once a real version line prints.**
+`burrowee cli version` prints `burrowee-cli <version>`. That is the real,
+source-backed version command for the component. **STOP here once a real version
+line prints.**
 
-> There is **no** per-component `version` subcommand. `burrowee cli …` and
-> `burrowee-cli …` dispatch to the cli, whose subcommands are `connect`, `ssh`,
-> `pair`, `daemon`, `relays` (covered in `burrowee-cli-setup`) — running them with
-> no/invalid arguments prints a usage line. Use `burrowee --version` to confirm the
-> install landed.
+> The unified `burrowee cli version` and the bare `burrowee-cli version` are
+> equivalent — the dispatcher just execs the cli component. The cli's other
+> subcommands are `connect`, `ssh`, `pair`, `daemon`, `relays` (covered in
+> `burrowee-cli-setup`).
 
 If the bin dir isn't on PATH, tell the operator to add this to their shell rc
 (`~/.zshrc`, `~/.bashrc`, …) and open a new shell:
@@ -96,7 +96,7 @@ error) means the install didn't land — surface the output and stop.
 
 ## 3. Hand back
 
-Once `burrowee --version` succeeds, **stop**. Tell the operator:
+Once `burrowee cli version` succeeds, **stop**. Tell the operator:
 
 > burrowee cli is installed at `$HOME/.local/bin` (`burrowee` + `burrowee-cli`). To
 > pair against a gateway and open your first connection, run the

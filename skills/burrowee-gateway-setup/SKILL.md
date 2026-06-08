@@ -8,17 +8,18 @@ description: Configure and run an installed burrowee gateway — point it at a r
 You are an LLM coding agent bringing up an already-installed **burrowee gateway**:
 the home-NAT tunnel endpoint that dials out to the relay, authenticates its carrier
 with the per-pair PSK, and forwards opaque streams to local services. The binaries
-must be on PATH — if `burrowee --version` fails, route to
+must be on PATH — if `burrowee gateway version` fails, route to
 `burrowee-gateway-install` and stop.
 
 Both `burrowee gateway …` and the bare `burrowee-gateway …` are the same surface
 (the dispatcher just execs the component); likewise `burrowee register …` ==
 `burrowee-register …`.
 
-**The gateway is configured by environment variables only** — it takes no
-subcommands and no flags. It starts running the moment it is invoked, so do not
-launch it until the required env is in place. `burrowee-register` is the one
-flag-driven helper (`-sock`/`-name`/`-target`).
+**The gateway is configured by environment variables only** — apart from the
+`version` subcommand (install check), it takes no subcommands and no flags. It
+starts running the moment it is invoked with no subcommand, so do not launch it
+until the required env is in place. `burrowee-register` is the one flag-driven
+helper (`-sock`/`-name`/`-target`).
 
 This skill **requires interactive operator inputs**: the relay URL, the gateway's
 Ed25519 private key file, and the per-pair PSK file. Pause and ask; resume on
@@ -29,11 +30,11 @@ confirmation. Do not invent key material.
 ## 0. Pre-flight
 
 ```bash
-burrowee --version
+burrowee gateway version
 uname -s
 ```
 
-`burrowee --version` must print a real version line (else →
+`burrowee gateway version` must print a real version line (else →
 burrowee-gateway-install).
 
 ---

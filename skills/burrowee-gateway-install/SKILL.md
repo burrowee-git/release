@@ -1,6 +1,6 @@
 ---
 name: burrowee-gateway-install
-description: Install the burrowee gateway (home-NAT tunnel endpoint) on this machine (macOS + Linux). Use when the operator asks to "install burrowee gateway", "get the gateway binary", or pastes release.burrowee.com/gateway/install.sh or release.burrowee.com/skills/burrowee-gateway-install/SKILL.md. Stop after the dispatcher is on PATH and reports its version — configuration + run live in the burrowee-gateway-setup skill, which the operator triggers next.
+description: Install the burrowee gateway (home-NAT tunnel endpoint) on this machine (macOS + Linux). Use when the operator asks to "install burrowee gateway", "get the gateway binary", or pastes release.burrowee.com/gateway/install.sh or release.burrowee.com/skills/burrowee-gateway-install/SKILL.md. Stop after the binaries are on PATH and `burrowee gateway version` reports a version — configuration + run live in the burrowee-gateway-setup skill, which the operator triggers next.
 ---
 
 # burrowee-gateway-install
@@ -41,8 +41,8 @@ If `unzip` is missing, install it (`brew install unzip` on macOS; `sudo apt
 install unzip` on Debian/Ubuntu; `sudo dnf install unzip` on RHEL/Fedora) and
 retry the pre-flight.
 
-Already installed? If `burrowee --version` already prints a version line, the
-dispatcher is present — route the operator straight to `burrowee-gateway-setup` and
+Already installed? If `burrowee gateway version` already prints a version line, the
+gateway is present — route the operator straight to `burrowee-gateway-setup` and
 stop.
 
 ---
@@ -69,21 +69,22 @@ aborts without writing anything — surface the raw output and stop.
 
 ```bash
 # Preferred:
-burrowee --version
+burrowee gateway version
 
 # Fallback if PATH isn't refreshed yet:
-"$HOME/.local/bin/burrowee" --version
+"$HOME/.local/bin/burrowee" gateway version
 ```
 
-`burrowee --version` prints `burrowee dispatcher <version>`. That is the real,
-source-backed version command. **STOP here once a real version line prints.**
+`burrowee gateway version` prints `burrowee-gateway <version>`. That is the real,
+source-backed version command for the component. **STOP here once a real version
+line prints.**
 
-> There is **no** `burrowee gateway version` subcommand. `burrowee-gateway` is
-> configured entirely by environment variables (covered in
-> `burrowee-gateway-setup`) and starts running immediately when invoked, and
-> `burrowee-register` takes `-sock`/`-name`/`-target` flags — neither prints a
-> version. Use `burrowee --version` to confirm the install landed; do not run
-> `burrowee-gateway` here (it would try to start with missing env).
+> The unified `burrowee gateway version` and the bare `burrowee-gateway version`
+> are equivalent — the dispatcher just execs the gateway component. Apart from
+> `version`, `burrowee-gateway` is configured entirely by environment variables
+> (covered in `burrowee-gateway-setup`) and starts running when invoked with no
+> subcommand, and `burrowee-register` takes `-sock`/`-name`/`-target` flags. Do not
+> run a bare `burrowee gateway` here (it would try to start with missing env).
 
 If the bin dir isn't on PATH, tell the operator to add this to their shell rc
 (`~/.zshrc`, `~/.bashrc`, …) and open a new shell:
@@ -99,7 +100,7 @@ error) means the install didn't land — surface the output and stop.
 
 ## 3. Hand back
 
-Once `burrowee --version` succeeds, **stop**. Tell the operator:
+Once `burrowee gateway version` succeeds, **stop**. Tell the operator:
 
 > burrowee gateway is installed at `$HOME/.local/bin` (`burrowee` +
 > `burrowee-gateway` + `burrowee-register`). To configure its keys/PSK/relay and

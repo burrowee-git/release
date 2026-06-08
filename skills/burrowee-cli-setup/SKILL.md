@@ -7,7 +7,7 @@ description: First real use of the burrowee cli — pair against a gateway from 
 
 You are an LLM coding agent driving the **burrowee cli** for its first real use:
 pair against a gateway, then forward or SSH through the relay. The binaries must be
-on PATH — if `burrowee --version` fails, route to `burrowee-cli-install` and stop.
+on PATH — if `burrowee cli version` fails, route to `burrowee-cli-install` and stop.
 
 Every command below uses the `burrowee cli <subcommand>` form; the bare
 `burrowee-cli <subcommand>` is identical (the dispatcher just execs the component).
@@ -17,19 +17,20 @@ salt come from the gateway's dashboard, and the relay URL + gateway/service name
 are operator-specific. Pause and ask; resume on confirmation. Do not invent these
 values.
 
-The cli subcommands are exactly: `connect`, `ssh`, `pair`, `daemon`, `relays`.
-There is no `version` subcommand — confirm install with `burrowee --version`.
+The cli subcommands are exactly: `version`, `connect`, `ssh`, `pair`, `daemon`,
+`relays`. Confirm install with `burrowee cli version` (the bare `burrowee-cli
+version` is equivalent).
 
 ---
 
 ## 0. Pre-flight
 
 ```bash
-burrowee --version
+burrowee cli version
 ls -l "$HOME/.burrowee" 2>/dev/null || echo "no .burrowee dir yet"
 ```
 
-`burrowee --version` must print a real version line (else → burrowee-cli-install).
+`burrowee cli version` must print a real version line (else → burrowee-cli-install).
 
 ---
 
