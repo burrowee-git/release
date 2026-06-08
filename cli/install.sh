@@ -31,7 +31,15 @@ PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
 VER_ENV="BURROWEE_$(printf '%s' "$COMP" | tr 'a-z' 'A-Z')_VERSION"
 
-CURL="curl -fsSL --proto =https --tlsv1.2 --connect-timeout 15 --max-time 300"
+# Production downloads are pinned to HTTPS/TLS1.2 (--proto =https). The
+# BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
+# set we drop the TLS-only flags (they'd reject http://); the version-pin guard
+# below keeps even that path scheme-locked to the test base.
+if [ -n "$DL_BASE" ]; then
+    CURL="curl -fsSL --connect-timeout 15 --max-time 300"
+else
+    CURL="curl -fsSL --proto =https --tlsv1.2 --connect-timeout 15 --max-time 300"
+fi
 
 # ---- helpers ------------------------------------------------------------
 fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
@@ -156,4 +164,6 @@ unzip -q -o "$TMP/$ZIP" -d "$TMP/x" || fail "zip extraction failed — corrupt d
 [ -f "$TMP/x/install.sh" ] || fail "release zip missing inner install.sh — aborting"
 
 ok "verified — running inner installer"
-PREFIX="$PREFIX" BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh "$TMP/x/install.sh"
+# Run with cwd = the unzipped dir: the inner installer resolves the binaries
+# relative to its own location (./burrowee, ./burrowee-cli, …).
+( cd "$TMP/x" && PREFIX="$PREFIX" BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh ./install.sh )
