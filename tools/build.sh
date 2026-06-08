@@ -47,6 +47,12 @@ esac
 LDFLAGS="-X main.version=${STAMP}"
 if [ "${COMP}" = "edge" ]; then
     : "${CLOUD_PUB_HEX:?CLOUD_PUB_HEX is required for edge builds (cloud signing pubkey hex)}"
+    # The 64-zero placeholder is valid hex of valid length, so edge's runtime check
+    # cannot catch it — it would silently pin a dead key. Reject it at build time.
+    [ "${CLOUD_PUB_HEX}" != "0000000000000000000000000000000000000000000000000000000000000000" ] || {
+        echo "✗ CLOUD_PUB_HEX is the placeholder — set config/cloud-pub.hex to the real console signing key before an edge release" >&2
+        exit 1
+    }
     LDFLAGS="${LDFLAGS} -X main.cloudPubHexProd=${CLOUD_PUB_HEX}"
 fi
 
