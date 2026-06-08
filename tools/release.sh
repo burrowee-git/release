@@ -193,9 +193,16 @@ resolve_sign_key() {
 }
 resolve_sign_key
 
-# ---- edge cloud pubkey ------------------------------------------------------
-cloud_pub_hex() {
-    grep -v '^#' "${REPO_ROOT}/config/cloud-pub.hex" | grep -v '^[[:space:]]*$' | head -n1
+# ---- edge console pubkey ----------------------------------------------------
+# Precedence: BURROWEE_CONSOLE_PUB (or legacy BURROWEE_CLOUD_PUB) override, else
+# config/console-pub.hex. The override lets a dev release bake a non-prod key.
+console_pub_hex() {
+    if [ -n "${BURROWEE_CONSOLE_PUB:-}" ]; then printf '%s' "${BURROWEE_CONSOLE_PUB}"; return; fi
+    if [ -n "${BURROWEE_CLOUD_PUB:-}" ]; then
+        echo "⚠ deprecated env var BURROWEE_CLOUD_PUB — use BURROWEE_CONSOLE_PUB" >&2
+        printf '%s' "${BURROWEE_CLOUD_PUB}"; return
+    fi
+    grep -v '^#' "${REPO_ROOT}/config/console-pub.hex" | grep -v '^[[:space:]]*$' | head -n1
 }
 
 # ---- dispatcher build cache (one build per os/arch, reused across comps) -----
@@ -268,7 +275,7 @@ do_release() {
         if [ "${comp}" = edge ]; then
             COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \
                 STAMP="${stamp}" OUT_DIR="${out_bins}" GO_BIN="${GO_BIN}" \
-                CLOUD_PUB_HEX="$(cloud_pub_hex)" \
+                CONSOLE_PUB_HEX="$(console_pub_hex)" \
                 bash "${REPO_ROOT}/tools/build.sh" >&2
         else
             COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \

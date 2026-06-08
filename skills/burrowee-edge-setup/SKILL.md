@@ -8,7 +8,7 @@ description: Pair an installed burrowee-edge relay to your Burrowee account, app
 > **STATUS — target guideline.** Drives the `burrowee-edge` CLI + the owner-tier
 > "Edge relays" portal section, both part of the `burrowee.edge` build subsystem
 > (spec §10) and **not built yet**. The pairing flow it documents (mint → enroll →
-> approve → carrier) is already implemented in cloud + relay (spec §4); this skill
+> approve → carrier) is already implemented in console + relay (spec §4); this skill
 > becomes runnable when the CLI + portal section land. Until then it is the design
 > target.
 
@@ -19,8 +19,8 @@ against `console.burrowee.com`. The binary must be on PATH — if not, route to
 This skill **requires interactive operator steps** (portal mint, explicit approve,
 service-vs-foreground choice). Pause and ask; resume on confirmation.
 
-The edge is **hard-bound to `console.burrowee.com`** — there is no cloud-selection
-flag. If the operator needs a different cloud, that is a different (dev) build.
+The edge is **hard-bound to `console.burrowee.com`** — there is no console-selection
+flag. If the operator needs a different console, that is a different (dev) build.
 
 ## 0. Pre-flight
 
@@ -58,7 +58,7 @@ This generates the edge's Ed25519 identity (private key never leaves the box),
 decodes the enroll secret, and runs the one-shot enroll handshake against
 `console.burrowee.com`. On success it prints the edge **fingerprint** and
 `awaiting approval`. Record the fingerprint — the operator approves *that exact*
-fingerprint next. (Backend: the one-shot enroll handshake presents the self-pubkey + sealed secret; **cloud** binds the pubkey to the pending row, then the identity handshake loops on `relay-pending` — spec §4 ②.)
+fingerprint next. (Backend: the one-shot enroll handshake presents the self-pubkey + sealed secret; **console** binds the pubkey to the pending row, then the identity handshake loops on `relay-pending` — spec §4 ②.)
 
 ---
 
@@ -120,7 +120,7 @@ Then poll for the cert:
 burrowee-edge doctor        # watch the "custom-domain cert" line flip to ✓
 ```
 
-(Backend: the `acme.burrowee.net` certbot DNS-01 pipeline issues the LE cert, cloud
+(Backend: the `acme.burrowee.net` certbot DNS-01 pipeline issues the LE cert, console
 seals it + pushes it to this edge via `relay/cert/upsert`, and pushes the
 `hostname→(gateway_fp, svc)` route via `relay/route/upsert` — spec §9.)
 
@@ -163,13 +163,13 @@ When green, tell the operator:
 - **"awaiting approval" never flips to active.** The operator approved a *different*
   edge, or is signed into the wrong account. Confirm the fingerprint in the portal
   matches step 2; confirm they're the owner-tier account that minted it.
-- **Cloud unreachable.** The edge only talks to `console.burrowee.com` (compiled in —
+- **Console unreachable.** The edge only talks to `console.burrowee.com` (compiled in —
   no override). Check the VPS's outbound HTTPS/WSS to `console.burrowee.com`; honor
   `HTTPS_PROXY` if behind a proxy.
 - **`doctor` shows custom-domain cert ✗ for a while.** DNS propagation + LE issuance
   take time; the `_acme-challenge` CNAME must resolve to `<slug>.acme.burrowee.net`.
   Re-run `doctor` after a few minutes.
 - **Re-pair from scratch.** `rm -rf $HOME/.burrowee-edge` then re-run from step 1.
-  This wipes the identity; the cloud-side pending row must be re-minted.
+  This wipes the identity; the console-side pending row must be re-minted.
 - **`service install` fails: systemd not available.** Non-systemd init (OpenRC,
   runit) — fall back to Option B (foreground) or a custom supervisor.

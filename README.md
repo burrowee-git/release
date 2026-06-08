@@ -92,7 +92,7 @@ bootstrap scripts and skills are mirrored to `release.burrowee.com`
 cli/  gateway/  edge/      ← per-component outer bootstrap (install.sh, generated)
 inner/<comp>/install.sh    ← inner installer (ships inside each verified zip)
 versions/<comp>            ← per-component SemVer source of truth
-config/cloud-pub.hex       ← live cloud signing pubkey, baked into edge builds
+config/console-pub.hex     ← live console signing pubkey, baked into edge builds
 skills/                    ← *-install / *-setup SKILL.md packages
 site/index.html            ← release.burrowee.com landing page
 tools/                     ← version.sh, build.sh, gen-bootstraps.sh, release.sh

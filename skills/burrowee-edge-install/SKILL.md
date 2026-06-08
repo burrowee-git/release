@@ -14,7 +14,7 @@ description: Install the burrowee-edge relay binary on the user's own VPS (macOS
 You are an LLM coding agent installing the **burrowee-edge** binary on a user's own
 VPS. An edge is a self-hosted, account-bound relay that serves only the owner's
 gateways over the owner's custom domain, and is hard-bound to `console.burrowee.com`
-(no `--cloud` override — the cloud identity is compiled in). This skill only gets
+(no `--console` override — the console identity is compiled in). This skill only gets
 the binary onto PATH; pairing + run are in `burrowee-edge-setup`.
 
 ## 0. Pre-flight
