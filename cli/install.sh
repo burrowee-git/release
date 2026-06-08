@@ -25,7 +25,7 @@ set -eu
 
 # ---- knobs --------------------------------------------------------------
 COMP="cli"
-PUBKEY="RWTEMP_PLACEHOLDER_REGENERATE_AFTER_PHASE5A_OR_A2_xxxxxxxxxxxx"
+PUBKEY="RWQspcYOi6NXeZYBXk1hiSCavFes9WXajHrWFz/b3oWxej9AZQedmS0B"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
