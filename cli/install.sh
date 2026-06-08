@@ -25,7 +25,7 @@ set -eu
 
 # ---- knobs --------------------------------------------------------------
 COMP="cli"
-PUBKEY="RWQspcYOi6NXeZYBXk1hiSCavFes9WXajHrWFz/b3oWxej9AZQedmS0B"
+PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
