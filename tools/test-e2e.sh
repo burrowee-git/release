@@ -21,8 +21,8 @@ GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 export GO_BIN
 
-# component source worktrees (release-prep carry the Phase-0 version hooks) -----
-export BURROWEE_SRC_CLI="${BURROWEE_SRC_CLI:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/cli/code/.worktrees/release-prep}"
+# component source dirs — build from main checkout --------------------------------
+export BURROWEE_SRC_CLI="${BURROWEE_SRC_CLI:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/cli/code/cli}"
 export BURROWEE_SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/burrowee/code/burrowee}"
 
 COMP=cli
@@ -99,6 +99,14 @@ case "${GOT}" in
     *"${STAMP}"*) printf '\nHAPPY-PATH OK\n' ;;
     *) die "version mismatch: expected stamp '${STAMP}' in output, got: ${GOT}" ;;
 esac
+
+# release-guard: the shipped gateway binary must carry no config/env literals.
+GW_SRC="${BURROWEE_SRC_GATEWAY:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/gateway/code/gateway}"
+GW_BIN="${TMPDIR:-/tmp}/e2e-gateway-bin"
+( cd "${GW_SRC}" && CGO_ENABLED=0 "${GO_BIN}" build -trimpath -o "${GW_BIN}" ./cmd/burrowee-gateway )
+"${REPO_ROOT}/tools/verify-no-env.sh" "${GW_BIN}"
+rm -f "${GW_BIN}"
+echo "ENV-GUARD OK"
 
 # ---- (6) TAMPER PATH --------------------------------------------------------
 say "TAMPER PATH — flip one byte inside the served ${ZIP}"
