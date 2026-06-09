@@ -36,24 +36,26 @@ esac
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
 # ---- first-run bootstrap (interactive only) ----------------------------------
-# Offer to bootstrap right after install. stdin is the curl pipe (not a tty), so
-# read from the controlling terminal. Non-interactive (CI / no tty) just prints
-# the next step. Reads are guarded so an EOF can't abort the install under set -e.
-if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' > /dev/tty
-    printf 'blob> ' > /dev/tty
-    blob=''; IFS= read -r blob < /dev/tty || blob=''
+# Read from the controlling terminal (stdin is the curl pipe, not a tty). Only
+# prompt if /dev/tty is genuinely usable — open it read-write on fd 3; if that
+# fails (CI / detached / no controlling terminal) just print the next step. All
+# tty I/O is fault-tolerant so it can never abort the already-successful install.
+if { exec 3<>/dev/tty; } 2>/dev/null; then
+    printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
+    printf 'blob> ' >&3 2>/dev/null || true
+    blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''
     if [ -n "$blob" ]; then
-        printf 'pin>  ' > /dev/tty
-        pin=''; IFS= read -r pin < /dev/tty || pin=''
+        printf 'pin>  ' >&3 2>/dev/null || true
+        pin=''; IFS= read -r pin <&3 2>/dev/null || pin=''
         if [ -n "$pin" ]; then
-            "$BIN_DIR/burrowee" "$COMP" bootstrap "$blob" "$pin" < /dev/tty || true
+            "$BIN_DIR/burrowee" "$COMP" bootstrap "$blob" "$pin" <&3 || true
         else
-            printf 'No PIN — skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" > /dev/tty
+            printf 'No PIN — skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
         fi
     else
-        printf 'Skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" > /dev/tty
+        printf 'Skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
     fi
+    exec 3>&- 2>/dev/null || true
 else
     echo "next: burrowee $COMP bootstrap <blob> <pin>"
 fi
