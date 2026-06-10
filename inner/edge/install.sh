@@ -35,12 +35,17 @@ esac
 
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
-# ---- first-run bootstrap (interactive only) ----------------------------------
-# Read from the controlling terminal (stdin is the curl pipe, not a tty). Only
-# prompt if /dev/tty is genuinely usable — open it read-write on fd 3; if that
-# fails (CI / detached / no controlling terminal) just print the next step. All
-# tty I/O is fault-tolerant so it can never abort the already-successful install.
-if { exec 3<>/dev/tty; } 2>/dev/null; then
+# ---- first-run bootstrap (interactive only, fresh installs) -------------------
+# Re-install short-circuit: if this component already has persisted state under
+# ~/.burrowee/<comp> (the gateway db/keys, cli/edge identity, …) it is already
+# set up — never re-prompt for a setup blob. Otherwise read blob+PIN from the
+# controlling terminal (stdin is the curl pipe, not a tty): prompt only if
+# /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
+# next step. All tty I/O is fault-tolerant so it can never abort the install.
+COMP_HOME="$HOME/.burrowee/$COMP"
+if [ -d "$COMP_HOME" ] && [ -n "$(ls -A "$COMP_HOME" 2>/dev/null || true)" ]; then
+    echo "$COMP already set up ($COMP_HOME) — skipping setup."
+elif { exec 3<>/dev/tty; } 2>/dev/null; then
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
     printf 'blob> ' >&3 2>/dev/null || true
     blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''
