@@ -26,11 +26,11 @@ flag. If the operator needs a different console, that is a different (dev) build
 
 ```bash
 burrowee-edge version
-ls -ld "$HOME/.burrowee-edge" 2>/dev/null || echo "no .burrowee-edge dir"
+ls -ld "$HOME/.burrowee/edge" 2>/dev/null || echo "no ~/.burrowee/edge dir"
 ```
 
 `burrowee-edge version` must print a real version line (else → burrowee-edge-install).
-If `$HOME/.burrowee-edge` already holds an identity from a prior pairing, ask the
+If `$HOME/.burrowee/edge` already holds an identity from a prior pairing, ask the
 operator: keep that identity (just re-pair/refresh) or wipe and start over.
 
 ---
@@ -50,10 +50,10 @@ is everything the edge needs.)
 
 ---
 
-## 2. Enroll
+## 2. Bootstrap
 
 ```bash
-burrowee-edge enroll <blob> <pin>
+burrowee-edge bootstrap <blob> <pin>
 ```
 
 This generates the edge's Ed25519 identity (private key never leaves the box),
@@ -61,7 +61,7 @@ recovers `console_url`/`console_pub`/`salt` from the blob header (the PIN
 authenticates them via the AEAD AAD), decodes the enroll secret, and runs the
 one-shot enroll handshake against `console.burrowee.com`. On success it prints the
 edge **fingerprint** and `awaiting approval`, and persists the console identity into
-`$HOME/.burrowee-edge` so later `run` needs no env. Record the fingerprint — the
+`$HOME/.burrowee/edge` so later `run` needs no env. Record the fingerprint — the
 operator approves *that exact* fingerprint next. (Backend: the one-shot enroll
 handshake presents the self-pubkey + sealed secret; the **console** binds the pubkey
 to the pending row, then the identity handshake loops on `relay-pending` — spec §4 ②.)
@@ -157,7 +157,7 @@ When green, tell the operator:
 > Your edge is paired and serving. Useful commands:
 > - `burrowee-edge status` — enroll state, tenant, served domains, caps
 > - `burrowee-edge doctor` — re-verify any time
-> - Service logs (macOS): `tail -f $HOME/.burrowee-edge/logs/launchd.out.log`
+> - Service logs (macOS): `tail -f $HOME/.burrowee/edge/logs/launchd.out.log`
 > - Service logs (linux): `journalctl --user -u burrowee-edge.service -f`
 >
 > Adding more domains/services happens in `console.burrowee.com → Edge relays`.
@@ -175,7 +175,7 @@ When green, tell the operator:
 - **`doctor` shows custom-domain cert ✗ for a while.** DNS propagation + LE issuance
   take time; the `_acme-challenge` CNAME must resolve to `<slug>.acme.burrowee.net`.
   Re-run `doctor` after a few minutes.
-- **Re-pair from scratch.** `rm -rf $HOME/.burrowee-edge` then re-run from step 1.
+- **Re-pair from scratch.** `rm -rf $HOME/.burrowee/edge` then re-run from step 1.
   This wipes the identity; the console-side pending row must be re-minted.
 - **`service install` fails: systemd not available.** Non-systemd init (OpenRC,
   runit) — fall back to Option B (foreground) or a custom supervisor.
