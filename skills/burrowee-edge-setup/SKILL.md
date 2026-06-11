@@ -110,19 +110,27 @@ operator's primary debugging surface. Wait for the operator to confirm it's up.
 
 ---
 
-## 5. nginx fronting (default for new installs)
+## 5. nginx fronting (automatic default)
 
-Skip this section only if the edge process will own external ports directly (e.g.
-a container or VM where it is the sole listener). For any host where another process
-already owns `:443`, or where the process must not bind privileged ports directly,
-complete this section before attaching a domain.
+nginx TCP-passthrough fronting is the **unconditional default** for every new edge
+install. Two sub-topologies exist:
+
+- **LAN-only** — no public domain planned. nginx external port **8445** → edge
+  `127.0.0.1:9445`. No TLS listener; the edge sets `tls_listen=off`.
+- **Domain-fronted** — a custom domain is planned (or already attached). nginx also
+  listens on **443** → edge `127.0.0.1:9443` in addition to the LAN pair above.
+
+> **Exception — direct bind:** skip this section only if the edge process will own
+> external ports directly (e.g. a container or VM where it is the sole listener and
+> privileged port binding is not a concern). This is the unusual case; follow the
+> nginx path by default.
 
 > QUIC (UDP), if enabled via `quic_addr`, is not fronted — it stays direct.
 
 **5a. Install nginx**
 
 ```bash
-# Debian / Ubuntu
+# Debian / Ubuntu  (apt auto-starts nginx after install)
 sudo apt-get install -y nginx
 # RHEL / Fedora / Rocky  (dnf does NOT auto-start; apt does)
 sudo dnf install -y nginx
@@ -131,22 +139,59 @@ sudo systemctl enable --now nginx
 brew install nginx && brew services start nginx
 ```
 
-**5b. Rebind the edge to localhost and advertise the fronted port**
+**5b. Port availability check**
 
-Append to `~/.burrowee/edge/config`:
+Before writing any config, verify that the required ports are free:
 
+```bash
+# Always check (LAN pair):
+nc -z 127.0.0.1 8445 && echo "8445 TAKEN" || echo "8445 free"
+nc -z 127.0.0.1 9445 && echo "9445 TAKEN" || echo "9445 free"
+
+# Additionally when a domain is planned (domain-fronted only):
+nc -z 127.0.0.1 443  && echo "443 TAKEN"  || echo "443 free"
+nc -z 127.0.0.1 9443 && echo "9443 TAKEN" || echo "9443 free"
+```
+
+If **any** required port is taken, **stop and ask the operator to choose both
+replacement ports** — one external port for nginx and one localhost port for the
+edge — and use that chosen pair in every step below. (The `burrowee-edge nginx`
+subcommand also pre-flights ports and will name the right flag
+(`--listen-lan`/`--listen-tls`) if anything slips through.)
+
+**5c. Write the edge config**
+
+Write `~/.burrowee/edge/config` with the appropriate block:
+
+*LAN-only (no domain planned):*
+```
+tls_listen=off
+lan_listen=127.0.0.1:9445
+lan_advertise_port=8445
+```
+
+*Domain-fronted (custom domain planned):*
 ```
 tls_listen=127.0.0.1:9443
 lan_listen=127.0.0.1:9445
-lan_advertise_port=9444
+lan_advertise_port=8445
 ```
 
-The edge now binds only loopback; nginx owns the external ports (`:443` / `:9444`).
+The edge now binds only loopback; nginx owns the external ports (`:443` for
+domain-fronted, `:8445` for LAN).
 
-**5c. Generate + install the passthrough config**
+**5d. Generate + install the passthrough config**
 
 ```bash
-sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" --write --reload
+# LAN-only:
+sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" \
+    --listen-lan 8445 --write --reload
+
+# Domain-fronted (the :443 block is emitted automatically because the config has
+# tls_listen=127.0.0.1:9443 rather than off; --listen-tls only overrides the
+# nginx external TLS port if you chose a different one in 5b):
+sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" \
+    --listen-lan 8445 --write --reload
 ```
 
 `--home` is required: `sudo` replaces `$HOME` with root's, so the flag points the
@@ -154,7 +199,10 @@ subcommand back at the service user's edge directory. `--write` installs
 `burrowee-edge-stream.conf` into the nginx conf dir (`/etc/nginx` on Linux,
 `/opt/homebrew/etc/nginx` on macOS); `--reload` runs `nginx -t && nginx -s reload`.
 
-**5d. If the subcommand reports the config is not loaded**
+The subcommand defaults `--listen-lan` to **8445** (the standard LAN port). Pass a
+different value only when you chose a replacement port in step 5b.
+
+**5e. If the subcommand reports the config is not loaded**
 
 The subcommand will print:
 
@@ -171,7 +219,7 @@ re-run the command. This is the classic conf.d-only trap: many distros auto-incl
 `conf.d/*.conf` from *inside* `http {}`, where a `stream {}` block is silently
 dead — the include must sit at the top level.
 
-**5e. Restart the edge service and verify**
+**5f. Restart the edge service and verify**
 
 ```bash
 # restart
@@ -182,21 +230,25 @@ launchctl kickstart -k gui/$(id -u)/org.burrowee.edge
 # Fallback — re-install the unit file (first-time or after binary move):
 burrowee-edge service install
 
-# verify: nginx owns + forwards :443
-nc -z 127.0.0.1 443
+# verify: nginx owns + forwards the LAN port
+nc -z 127.0.0.1 8445
 
-# verify: LAN port accessible from the local network
-nc -z <lan-ip> 9444
+# domain-fronted only — verify nginx owns + forwards :443
+nc -z 127.0.0.1 443
 ```
 
-Both `nc` probes must succeed. A TLS or cert error from a bare-IP `curl https://127.0.0.1/`
-still proves forwarding is working — the edge rejects the handshake because there is no SNI
-hostname, not because nginx dropped the connection. Judge TLS and certificate correctness with
-the real domain via the domain-verify step in §7, not a bare-IP probe.
+The LAN port probe (`127.0.0.1:8445`) must succeed for all topologies. For
+domain-fronted installs, both probes must succeed.
 
-If the `:443` probe is refused entirely, check `nginx -T | grep stream` (the stream
-block must appear), and confirm the edge config has the `tls_listen`/`lan_listen`
-rebinds above.
+A TLS or cert error from a bare-IP `curl https://127.0.0.1/` still proves
+forwarding is working — the edge rejects the handshake because there is no SNI
+hostname, not because nginx dropped the connection. Judge TLS and certificate
+correctness with the real domain via the domain-verify step in §7, not a bare-IP
+probe.
+
+If the LAN port probe is refused entirely, check `nginx -T | grep stream` (the
+stream block must appear), and confirm the edge config has the `lan_listen`/
+`lan_advertise_port` lines above. For domain-fronted, also check `tls_listen`.
 
 ---
 

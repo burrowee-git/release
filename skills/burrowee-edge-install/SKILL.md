@@ -78,10 +78,12 @@ If it can't, the binary didn't build — resolve before continuing.
 
 ## 3. Note: nginx-fronted topology
 
-For new installs where the edge process must not own external ports directly, the
-nginx TCP-passthrough topology is the default. The steps live in the **nginx
-fronting** section of `burrowee-edge-setup` (§5) — nothing to do here at install
-time.
+nginx TCP-passthrough fronting is the **automatic default** for every new edge
+install. It is set up in `burrowee-edge-setup` §5 (immediately after the service is
+running) — nothing to do here at install time. §5 covers both topologies: LAN-only
+(nginx `:8445` → edge `127.0.0.1:9445`, `tls_listen=off`) and domain-fronted (adds
+nginx `:443` → edge `127.0.0.1:9443`), including the port availability check and
+operator port-conflict resolution.
 
 ---
 
