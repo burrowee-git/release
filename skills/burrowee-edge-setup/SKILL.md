@@ -112,13 +112,17 @@ operator's primary debugging surface. Wait for the operator to confirm it's up.
 
 ## 5. nginx fronting (automatic default)
 
-nginx TCP-passthrough fronting is the **unconditional default** for every new edge
-install. Two sub-topologies exist:
+nginx fronting is the **unconditional default** for every new edge install. Two
+sub-topologies exist:
 
-- **LAN-only** — no public domain planned. nginx external port **8445** → edge
-  `127.0.0.1:9445`. No TLS listener; the edge sets `tls_listen=off`.
+- **LAN-only** — no public domain planned. nginx external port **8445** terminates
+  TLS with a locally-generated 10-year self-signed cert, then proxies raw TCP to the
+  edge at `127.0.0.1:9445`. The LAN port serves **wss** — gateways and CLIs verify
+  by pinned cert fingerprint (synced via endpoint reports); no CA or browser trust is
+  implied. The edge sets `tls_listen=off`.
 - **Domain-fronted** — a custom domain is planned (or already attached). nginx also
-  listens on **443** → edge `127.0.0.1:9443` in addition to the LAN pair above.
+  listens on **443** → edge `127.0.0.1:9443` (TCP passthrough; TLS terminates inside
+  the edge via console-pushed SNI certs) in addition to the LAN wss pair above.
 
 > **Exception — direct bind:** skip this section only if the edge process will own
 > external ports directly (e.g. a container or VM where it is the sole listener and
@@ -167,40 +171,49 @@ Write `~/.burrowee/edge/config` with the appropriate block:
 ```
 tls_listen=off
 lan_listen=127.0.0.1:9445
-lan_advertise_port=8445
 ```
 
 *Domain-fronted (custom domain planned):*
 ```
 tls_listen=127.0.0.1:9443
 lan_listen=127.0.0.1:9445
-lan_advertise_port=8445
 ```
+
+`lan_advertise_port=8445` is **not** set here — the `nginx` subcommand persists it
+automatically into the config. If the host has noisy interfaces and you want to
+restrict LAN connections to a specific IP, add `lan_allow_ips=10.10.101.100`
+(comma-separated positive allowlist).
 
 The edge now binds only loopback; nginx owns the external ports (`:443` for
 domain-fronted, `:8445` for LAN).
 
-**5d. Generate + install the passthrough config**
+**5d. Apply: generate the LAN cert + install the nginx config**
 
 ```bash
-# LAN-only:
-sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" \
-    --listen-lan 8445 --write --reload
-
-# Domain-fronted (the :443 block is emitted automatically because the config has
-# tls_listen=127.0.0.1:9443 rather than off; --listen-tls only overrides the
-# nginx external TLS port if you chose a different one in 5b):
-sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" \
-    --listen-lan 8445 --write --reload
+sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" --listen-lan 8445
 ```
 
-`--home` is required: `sudo` replaces `$HOME` with root's, so the flag points the
-subcommand back at the service user's edge directory. `--write` installs
+This single command does everything: generates the 10-year LAN cert at
+`~/.burrowee/edge/lan-cert/` when absent, writes
 `burrowee-edge-stream.conf` into the nginx conf dir (`/etc/nginx` on Linux,
-`/opt/homebrew/etc/nginx` on macOS); `--reload` runs `nginx -t && nginx -s reload`.
+`/opt/homebrew/etc/nginx` on macOS), persists `lan_advertise_port` and `lan_cert`
+into the config automatically, verifies nginx loads the file, runs `nginx -t`, and
+reloads. Apply is the default — `--write`/`--reload` are deprecated no-op aliases.
+Use `--print` to preview the config without writing anything.
+
+`--home` is required: `sudo` replaces `$HOME` with root's, so the flag points the
+subcommand back at the service user's edge directory.
 
 The subcommand defaults `--listen-lan` to **8445** (the standard LAN port). Pass a
 different value only when you chose a replacement port in step 5b.
+
+For domain-fronted installs the command is identical — the `:443` passthrough block
+is emitted automatically because the config has `tls_listen=127.0.0.1:9443`
+rather than `off`.
+
+When the command succeeds it prints the **LAN cert fingerprint** and confirms the
+pin reaches gateways and CLIs automatically via the next endpoint report — no manual
+distribution needed.
 
 **5e. If the subcommand reports the config is not loaded**
 
@@ -211,7 +224,7 @@ Add this line at the TOP LEVEL of /etc/nginx/nginx.conf (outside http{}):
 
     include /etc/nginx/burrowee-edge-stream.conf;
 
-then re-run with --reload.
+then re-run.
 ```
 
 Add that `include` line to `nginx.conf` **outside** any `http {}` block, then
@@ -230,25 +243,37 @@ launchctl kickstart -k gui/$(id -u)/org.burrowee.edge
 # Fallback — re-install the unit file (first-time or after binary move):
 burrowee-edge service install
 
-# verify: nginx owns + forwards the LAN port
+# verify: nginx owns + forwards the LAN port (TCP reachable)
 nc -z 127.0.0.1 8445
 
-# domain-fronted only — verify nginx owns + forwards :443
+# confirm the self-signed LAN cert is served:
+openssl s_client -connect 127.0.0.1:8445 </dev/null 2>/dev/null | head -3
+```
+
+A "verify error" from openssl is **expected** — the LAN cert is self-signed; clients
+authenticate it by pinned fingerprint, not by a CA chain.
+
+The LAN port probe (`127.0.0.1:8445`) must succeed for all topologies. For
+domain-fronted installs, also probe:
+
+```bash
 nc -z 127.0.0.1 443
 ```
 
-The LAN port probe (`127.0.0.1:8445`) must succeed for all topologies. For
-domain-fronted installs, both probes must succeed.
-
-A TLS or cert error from a bare-IP `curl https://127.0.0.1/` still proves
-forwarding is working — the edge rejects the handshake because there is no SNI
-hostname, not because nginx dropped the connection. Judge TLS and certificate
-correctness with the real domain via the domain-verify step in §7, not a bare-IP
-probe.
-
 If the LAN port probe is refused entirely, check `nginx -T | grep stream` (the
-stream block must appear), and confirm the edge config has the `lan_listen`/
-`lan_advertise_port` lines above. For domain-fronted, also check `tls_listen`.
+stream block must appear), and confirm the edge config has the `lan_listen` line
+above. For domain-fronted, also check `tls_listen`.
+
+**Cert rotation**
+
+```bash
+sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" \
+    --listen-lan 8445 --rotate-lan-cert
+```
+
+`--rotate-lan-cert` mints a new LAN cert and re-applies. Consequence: CLI relay
+blobs must be re-pasted (CLIs have no push channel). Gateway clients heal
+automatically via the next endpoint report push.
 
 ---
 

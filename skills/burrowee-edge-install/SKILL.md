@@ -78,11 +78,17 @@ If it can't, the binary didn't build — resolve before continuing.
 
 ## 3. Note: nginx-fronted topology
 
-nginx TCP-passthrough fronting is the **automatic default** for every new edge
-install. It is set up in `burrowee-edge-setup` §5 (immediately after the service is
-running) — nothing to do here at install time. §5 covers both topologies: LAN-only
-(nginx `:8445` → edge `127.0.0.1:9445`, `tls_listen=off`) and domain-fronted (adds
-nginx `:443` → edge `127.0.0.1:9443`), including the port availability check and
+nginx fronting is the **automatic default** for every new edge install. It is set up
+in `burrowee-edge-setup` §5 (immediately after the service is running) — nothing to
+do here at install time. A single `sudo burrowee-edge nginx` command applies the
+config: it generates a 10-year LAN cert, writes and verifies the nginx stream config,
+and reloads nginx. The LAN port (`:8445`) serves **wss** — TLS is terminated by nginx
+using the locally-generated cert; gateways and CLIs authenticate it by pinned
+fingerprint (distributed automatically via endpoint reports), not by a CA chain.
+
+§5 covers both topologies: LAN-only (nginx `:8445` wss → edge `127.0.0.1:9445`,
+`tls_listen=off`) and domain-fronted (adds nginx `:443` TCP passthrough → edge
+`127.0.0.1:9443`, TLS inside the edge), including the port availability check and
 operator port-conflict resolution.
 
 ---
