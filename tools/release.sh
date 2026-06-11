@@ -28,6 +28,7 @@
 #   DP_DIR                  path to the release.dp secrets repo
 #   SIGN_KEY                minisign secret key file (overrides the default resolution)
 #   AGE_IDENTITY            age identity file used to decrypt the real signing key
+#                           (default ~/.age/burrowee-release.txt — created at activation A2)
 #   BURROWEE_SRC_CLI        cli component source worktree (default: cli main worktree)
 #   BURROWEE_SRC_GATEWAY    gateway component source worktree
 #   BURROWEE_SRC_EDGE       edge component source worktree
@@ -66,7 +67,7 @@ STATIC_DIR="${STATIC_DIR:-/ebs_storage/apps/release.burrowee.com/static}"
 RELEASE_REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 DP_DIR="${DP_DIR:-${REPO_ROOT}/../../../release.dp/code/release.dp}"
 AGE_KEY_AGE="${DP_DIR}/burrowee-release.key.age"
-AGE_IDENTITY="${AGE_IDENTITY:-${HOME}/.config/age/keys.txt}"
+AGE_IDENTITY="${AGE_IDENTITY:-${HOME}/.age/burrowee-release.txt}"
 
 # component source worktrees (default: each component's MAIN worktree)
 BB="/Volumes/MacintoshED/Workstation/Coding/Burrowee"
