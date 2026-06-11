@@ -168,7 +168,16 @@ shred_key() {
     fi
     SHRED_FILE=""
 }
-trap shred_key EXIT INT TERM
+# revert_dispatcher_version restores versions/burrowee when a real release
+# bumped it (below) but died before the first component's marker commit staged
+# it in. On success the bump is committed (no staged diff) → this is a no-op;
+# dry-runs never bump → also a no-op.
+revert_dispatcher_version() {
+    git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee 2>/dev/null && return 0
+    git -C "${REPO_ROOT}" restore --staged versions/burrowee 2>/dev/null || true
+    git -C "${REPO_ROOT}" checkout -- versions/burrowee 2>/dev/null || true
+}
+trap 'shred_key; revert_dispatcher_version' EXIT INT TERM
 
 resolve_sign_key() {
     if [ -n "${SIGN_KEY:-}" ]; then
@@ -206,7 +215,15 @@ console_pub_hex() {
     grep -v '^#' "${REPO_ROOT}/config/console-pub.hex" | grep -v '^[[:space:]]*$' | head -n1
 }
 
-# ---- dispatcher build cache (one build per os/arch, reused across comps) -----
+# ---- dispatcher version + build cache (one build per os/arch, reused) --------
+# The `burrowee` dispatcher is built once per run and bundled into EVERY
+# component zip. Bump its patch once here (real releases only) so it tracks
+# releases instead of sitting at 0.1.0 forever — `version.sh --bump-patch`
+# stages versions/burrowee, which then rides the first component's [RELEASED]
+# marker commit (`git commit` with no pathspec commits all staged files).
+if [ "${DRY_RUN}" != 1 ]; then
+    SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --bump-patch >/dev/null
+fi
 DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
 DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
 build_dispatcher() {
