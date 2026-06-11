@@ -162,8 +162,15 @@ shred_key() {
     if command -v shred >/dev/null 2>&1; then
         shred -u "${SHRED_FILE}" 2>/dev/null || rm -f "${SHRED_FILE}"
     else
-        # no shred on macOS — overwrite then unlink
-        dd if=/dev/urandom of="${SHRED_FILE}" bs=1k count=2 conv=notrunc 2>/dev/null || true
+        # no shred on macOS — overwrite then unlink. The decrypted signing key
+        # must NEVER survive on disk un-overwritten (rm alone leaves it
+        # recoverable), so a dd failure aborts loudly instead of silently
+        # rm'ing the still-readable key.
+        if ! dd if=/dev/urandom of="${SHRED_FILE}" bs=1k count=2 conv=notrunc 2>/dev/null; then
+            rm -f "${SHRED_FILE}"
+            echo "✗ FAILED to overwrite decrypted signing key at ${SHRED_FILE} — it may be recoverable; investigate" >&2
+            exit 1
+        fi
         rm -f "${SHRED_FILE}"
     fi
     SHRED_FILE=""

@@ -29,7 +29,6 @@ PUBKEY="@PUBKEY@"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
-VER_ENV="BURROWEE_$(printf '%s' "$COMP" | tr '[:lower:]' '[:upper:]')_VERSION"
 
 # Production downloads are pinned to HTTPS/TLS1.2 (--proto =https). The
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
@@ -71,8 +70,14 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/burrowee-${COMP}-XXXXXX")" || fail "could not 
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 # ---- version resolution -------------------------------------------------
-# Indirect-expand the per-component pin env var without bashisms.
-PIN="$(eval "printf '%s' \"\${$VER_ENV:-}\"")"
+# Read the per-component pin env var by name (no eval). $COMP is a baked
+# literal, so a direct case over the three known components is exhaustive.
+case "$COMP" in
+    cli)     PIN="${BURROWEE_CLI_VERSION:-}" ;;
+    gateway) PIN="${BURROWEE_GATEWAY_VERSION:-}" ;;
+    edge)    PIN="${BURROWEE_EDGE_VERSION:-}" ;;
+    *)       fail "unknown component '$COMP' — cannot resolve its version pin" ;;
+esac
 if [ -n "$PIN" ]; then
     TAG="$PIN"
     info "using pinned version: $TAG"
@@ -80,12 +85,23 @@ else
     info "resolving latest ${COMP} release"
     api="https://api.github.com/repos/${REPO}/releases?per_page=100"
     # newest-first list; the FIRST tag matching "<comp>/v" is that component's latest.
+    # Extract only the real "tag_name" FIELD — anchored to the start of its line —
+    # so release-notes/body text that merely contains the literal `"tag_name"`
+    # can't spoof the tag. Prefer jq (structural) and fall back to grep/sed.
     # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    TAG="$($CURL "$api" 2>/dev/null \
-        | grep '"tag_name"' \
-        | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' \
-        | grep -E "^${COMP}/v" \
-        | head -n1)" || true
+    body="$($CURL "$api" 2>/dev/null)" || true
+    if command -v jq >/dev/null 2>&1; then
+        TAG="$(printf '%s' "$body" \
+            | jq -r '.[].tag_name // empty' \
+            | grep -E "^${COMP}/v" \
+            | head -n1)" || true
+    else
+        TAG="$(printf '%s' "$body" \
+            | grep -E '^[[:space:]]*"tag_name"[[:space:]]*:' \
+            | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
+            | grep -E "^${COMP}/v" \
+            | head -n1)" || true
+    fi
     [ -n "$TAG" ] || fail "no published release found for ${COMP} on ${REPO}"
     info "latest: $TAG"
 fi
@@ -110,32 +126,23 @@ info "downloading SHA256SUMS.txt + signature"
 dl "SHA256SUMS.txt"         "SHA256SUMS.txt"
 dl "SHA256SUMS.txt.minisig" "SHA256SUMS.txt.minisig"
 
-# ---- ensure minisign ----------------------------------------------------
-MINISIGN=""
+# ---- require minisign ---------------------------------------------------
+# minisign is the trust root: it must already be on PATH from a trusted source
+# (your package manager). We never auto-fetch the verifier — a binary pulled
+# over the network and run unverified would itself become an unverified trust
+# root, defeating the whole signature chain. Verification is mandatory and is
+# only ever performed by a minisign the operator already trusts.
 if command -v minisign >/dev/null 2>&1; then
     MINISIGN=minisign
 else
-    info "minisign not found — attempting install (verification is mandatory)"
-    if [ "$OS" = darwin ] && command -v brew >/dev/null 2>&1; then
-        brew install minisign >/dev/null 2>&1 && command -v minisign >/dev/null 2>&1 && MINISIGN=minisign
-    elif [ "$OS" = linux ] && command -v apt-get >/dev/null 2>&1; then
-        if [ "$(id -u)" = 0 ]; then SUDO=""; elif command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=""; fi
-        DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y minisign >/dev/null 2>&1 \
-            && command -v minisign >/dev/null 2>&1 && MINISIGN=minisign
-    fi
-    if [ -z "$MINISIGN" ]; then
-        # last resort: official static linux build over HTTPS into the temp dir
-        if [ "$OS" = linux ] && [ "$ARCH" = amd64 ]; then
-            mb="https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz"
-            # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-            if $CURL -o "$TMP/minisign.tgz" "$mb" 2>/dev/null \
-               && tar -xzf "$TMP/minisign.tgz" -C "$TMP" 2>/dev/null; then
-                ms="$(find "$TMP" -type f -name minisign -perm -u+x 2>/dev/null | head -n1)"
-                [ -n "$ms" ] && { chmod +x "$ms"; MINISIGN="$ms"; }
-            fi
-        fi
-    fi
-    [ -n "$MINISIGN" ] || fail "minisign is required and could not be installed automatically — install it (\`brew install minisign\` / \`apt-get install minisign\`) and retry; verification will NOT be skipped"
+    case "$OS" in
+        darwin) hint="brew install minisign" ;;
+        *)      hint="apt-get install minisign  (or your distro's package manager)" ;;
+    esac
+    fail "minisign is required and is not installed — install it and re-run.
+    $hint
+    upstream: https://github.com/jedisct1/minisign
+    Verification is mandatory; this installer will NOT run an unverified verifier."
 fi
 
 # ---- VERIFY (the trust gate) --------------------------------------------
