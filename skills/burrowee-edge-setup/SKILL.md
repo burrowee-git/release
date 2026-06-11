@@ -110,7 +110,97 @@ operator's primary debugging surface. Wait for the operator to confirm it's up.
 
 ---
 
-## 5. Attach a custom domain
+## 5. nginx fronting (default for new installs)
+
+Skip this section only if the edge process will own external ports directly (e.g.
+a container or VM where it is the sole listener). For any host where another process
+already owns `:443`, or where the process must not bind privileged ports directly,
+complete this section before attaching a domain.
+
+> QUIC (UDP), if enabled via `quic_addr`, is not fronted — it stays direct.
+
+**5a. Install nginx**
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y nginx
+# RHEL / Fedora / Rocky  (dnf does NOT auto-start; apt does)
+sudo dnf install -y nginx
+sudo systemctl enable --now nginx
+# macOS (Homebrew, dev only)
+brew install nginx && brew services start nginx
+```
+
+**5b. Rebind the edge to localhost and advertise the fronted port**
+
+Append to `~/.burrowee/edge/config`:
+
+```
+tls_listen=127.0.0.1:9443
+lan_listen=127.0.0.1:9445
+lan_advertise_port=9444
+```
+
+The edge now binds only loopback; nginx owns the external ports (`:443` / `:9444`).
+
+**5c. Generate + install the passthrough config**
+
+```bash
+sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" --write --reload
+```
+
+`--home` is required: `sudo` replaces `$HOME` with root's, so the flag points the
+subcommand back at the service user's edge directory. `--write` installs
+`burrowee-edge-stream.conf` into the nginx conf dir (`/etc/nginx` on Linux,
+`/opt/homebrew/etc/nginx` on macOS); `--reload` runs `nginx -t && nginx -s reload`.
+
+**5d. If the subcommand reports the config is not loaded**
+
+The subcommand will print:
+
+```
+Add this line at the TOP LEVEL of /etc/nginx/nginx.conf (outside http{}):
+
+    include /etc/nginx/burrowee-edge-stream.conf;
+
+then re-run with --reload.
+```
+
+Add that `include` line to `nginx.conf` **outside** any `http {}` block, then
+re-run the command. This is the classic conf.d-only trap: many distros auto-include
+`conf.d/*.conf` from *inside* `http {}`, where a `stream {}` block is silently
+dead — the include must sit at the top level.
+
+**5e. Restart the edge service and verify**
+
+```bash
+# restart
+# Linux (user unit):
+systemctl --user restart burrowee-edge.service
+# macOS (launchd):
+launchctl kickstart -k gui/$(id -u)/org.burrowee.edge
+# Fallback — re-install the unit file (first-time or after binary move):
+burrowee-edge service install
+
+# verify: nginx owns + forwards :443
+nc -z 127.0.0.1 443
+
+# verify: LAN port accessible from the local network
+nc -z <lan-ip> 9444
+```
+
+Both `nc` probes must succeed. A TLS or cert error from a bare-IP `curl https://127.0.0.1/`
+still proves forwarding is working — the edge rejects the handshake because there is no SNI
+hostname, not because nginx dropped the connection. Judge TLS and certificate correctness with
+the real domain via the domain-verify step in §7, not a bare-IP probe.
+
+If the `:443` probe is refused entirely, check `nginx -T | grep stream` (the stream
+block must appear), and confirm the edge config has the `tls_listen`/`lan_listen`
+rebinds above.
+
+---
+
+## 6. Attach a custom domain
 
 The edge serves **custom domains only**. Tell the operator:
 
@@ -137,7 +227,7 @@ console seals it + pushes it to this edge via `relay/cert/upsert`, and pushes th
 
 ---
 
-## 6. Verify
+## 7. Verify
 
 ```bash
 burrowee-edge doctor        # every line ✓
@@ -150,7 +240,7 @@ web-ingress is live).
 
 ---
 
-## 7. Hand back
+## 8. Hand back
 
 When green, tell the operator:
 

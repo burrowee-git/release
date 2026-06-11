@@ -76,7 +76,16 @@ If it can't, the binary didn't build — resolve before continuing.
 
 ---
 
-## 3. Hand back
+## 3. Note: nginx-fronted topology
+
+For new installs where the edge process must not own external ports directly, the
+nginx TCP-passthrough topology is the default. The steps live in the **nginx
+fronting** section of `burrowee-edge-setup` (§5) — nothing to do here at install
+time.
+
+---
+
+## 4. Hand back
 
 When `burrowee-edge version` works, tell the operator:
 
