@@ -115,9 +115,9 @@ operator's primary debugging surface. Wait for the operator to confirm it's up.
 nginx fronting is the **unconditional default** for every new edge install. Two
 sub-topologies exist:
 
-- **LAN-only** — no public domain planned. nginx external port **8445** terminates
+- **LAN-only** — no public domain planned. nginx external port **8448** terminates
   TLS with a locally-generated 10-year self-signed cert, then proxies raw TCP to the
-  edge at `127.0.0.1:9445`. The LAN port serves **wss** — gateways and CLIs verify
+  edge at `127.0.0.1:9448`. The LAN port serves **wss** — gateways and CLIs verify
   by pinned cert fingerprint (synced via endpoint reports); no CA or browser trust is
   implied. The edge sets `tls_listen=off`.
 - **Domain-fronted** — a custom domain is planned (or already attached). nginx also
@@ -149,8 +149,8 @@ Before writing any config, verify that the required ports are free:
 
 ```bash
 # Always check (LAN pair):
-nc -z 127.0.0.1 8445 && echo "8445 TAKEN" || echo "8445 free"
-nc -z 127.0.0.1 9445 && echo "9445 TAKEN" || echo "9445 free"
+nc -z 127.0.0.1 8448 && echo "8448 TAKEN" || echo "8448 free"
+nc -z 127.0.0.1 9448 && echo "9448 TAKEN" || echo "9448 free"
 
 # Additionally when a domain is planned (domain-fronted only):
 nc -z 127.0.0.1 443  && echo "443 TAKEN"  || echo "443 free"
@@ -170,27 +170,27 @@ Write `~/.burrowee/edge/config` with the appropriate block:
 *LAN-only (no domain planned):*
 ```
 tls_listen=off
-lan_listen=127.0.0.1:9445
+lan_listen=127.0.0.1:9448
 ```
 
 *Domain-fronted (custom domain planned):*
 ```
 tls_listen=127.0.0.1:9443
-lan_listen=127.0.0.1:9445
+lan_listen=127.0.0.1:9448
 ```
 
-`lan_advertise_port=8445` is **not** set here — the `nginx` subcommand persists it
+`lan_advertise_port=8448` is **not** set here — the `nginx` subcommand persists it
 automatically into the config. If the host has noisy interfaces and you want to
 restrict LAN connections to a specific IP, add `lan_allow_ips=10.10.101.100`
 (comma-separated positive allowlist).
 
 The edge now binds only loopback; nginx owns the external ports (`:443` for
-domain-fronted, `:8445` for LAN).
+domain-fronted, `:8448` for LAN).
 
 **5d. Apply: generate the LAN cert + install the nginx config**
 
 ```bash
-sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" --listen-lan 8445
+sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" --listen-lan 8448
 ```
 
 This single command does everything: generates the 10-year LAN cert at
@@ -204,7 +204,7 @@ Use `--print` to preview the config without writing anything.
 `--home` is required: `sudo` replaces `$HOME` with root's, so the flag points the
 subcommand back at the service user's edge directory.
 
-The subcommand defaults `--listen-lan` to **8445** (the standard LAN port). Pass a
+The subcommand defaults `--listen-lan` to **8448** (the standard LAN port). Pass a
 different value only when you chose a replacement port in step 5b.
 
 For domain-fronted installs the command is identical — the `:443` passthrough block
@@ -244,16 +244,16 @@ launchctl kickstart -k gui/$(id -u)/org.burrowee.edge
 burrowee-edge service install
 
 # verify: nginx owns + forwards the LAN port (TCP reachable)
-nc -z 127.0.0.1 8445
+nc -z 127.0.0.1 8448
 
 # confirm the self-signed LAN cert is served:
-openssl s_client -connect 127.0.0.1:8445 </dev/null 2>/dev/null | head -3
+openssl s_client -connect 127.0.0.1:8448 </dev/null 2>/dev/null | head -3
 ```
 
 A "verify error" from openssl is **expected** — the LAN cert is self-signed; clients
 authenticate it by pinned fingerprint, not by a CA chain.
 
-The LAN port probe (`127.0.0.1:8445`) must succeed for all topologies. For
+The LAN port probe (`127.0.0.1:8448`) must succeed for all topologies. For
 domain-fronted installs, also probe:
 
 ```bash
@@ -268,7 +268,7 @@ above. For domain-fronted, also check `tls_listen`.
 
 ```bash
 sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" \
-    --listen-lan 8445 --rotate-lan-cert
+    --listen-lan 8448 --rotate-lan-cert
 ```
 
 `--rotate-lan-cert` mints a new LAN cert and re-applies. Consequence: CLI relay
