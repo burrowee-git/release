@@ -345,6 +345,19 @@ do_release() {
     fi
 
     # (6) tag + GitHub Release.
+    # Change summary: component commits since the previous release's source sha.
+    # The stamp's trailing field IS the 8-char source sha, so the previous
+    # release's sha is the suffix of the highest existing <comp>/v… tag.
+    local prev_tag prev_sha changes
+    prev_tag="$(/usr/bin/git tag -l "${comp}/v*" --sort=version:refname | tail -n1)"
+    prev_sha="${prev_tag##*.}"
+    if [ -n "${prev_sha}" ] && git -C "${src}" cat-file -e "${prev_sha}^{commit}" 2>/dev/null; then
+        changes="$(git -C "${src}" log --oneline --no-merges "${prev_sha}..HEAD" 2>/dev/null)"
+        [ -n "${changes}" ] || changes="No code changes since ${prev_tag} (re-release)."
+    else
+        changes="Initial release."
+    fi
+
     local tag="${comp}/${stamp}"
     if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
         echo "✗ tag ${tag} already exists locally — reverting version" >&2; exit 1
@@ -354,6 +367,9 @@ do_release() {
     local notes; notes="${stage}/release-notes.md"
     cat > "${notes}" <<NOTES
 burrowee ${comp} ${stamp} — $(date -u +%Y-%m-%d)
+
+## Changes
+${changes}
 
 Install:
   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/${comp}/install.sh | sh
