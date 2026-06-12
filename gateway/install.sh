@@ -84,7 +84,8 @@ if [ -n "$PIN" ]; then
 else
     info "resolving latest ${COMP} release"
     api="https://api.github.com/repos/${REPO}/releases?per_page=100"
-    # newest-first list; the FIRST tag matching "<comp>/v" is that component's latest.
+    # The GitHub /releases order is by tag-commit date, NOT publish order, so it is
+    # unreliable for "latest" — pick the highest "<comp>/v<semver>" via version sort.
     # Extract only the real "tag_name" FIELD — anchored to the start of its line —
     # so release-notes/body text that merely contains the literal `"tag_name"`
     # can't spoof the tag. Prefer jq (structural) and fall back to grep/sed.
@@ -94,13 +95,15 @@ else
         TAG="$(printf '%s' "$body" \
             | jq -r '.[].tag_name // empty' \
             | grep -E "^${COMP}/v" \
-            | head -n1)" || true
+            | sort -V \
+            | tail -n1)" || true
     else
         TAG="$(printf '%s' "$body" \
             | grep -E '^[[:space:]]*"tag_name"[[:space:]]*:' \
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
             | grep -E "^${COMP}/v" \
-            | head -n1)" || true
+            | sort -V \
+            | tail -n1)" || true
     fi
     [ -n "$TAG" ] || fail "no published release found for ${COMP} on ${REPO}"
     info "latest: $TAG"
