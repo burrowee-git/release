@@ -290,7 +290,7 @@ The edge serves **custom domains only**. Tell the operator:
 Then poll for the cert:
 
 ```bash
-burrowee-edge doctor        # watch the "custom-domain cert" line flip to ✓
+burrowee-edge status        # watch the domain appear under "served domains"
 ```
 
 (Backend: the `acme.burrowee.net` certbot DNS-01 pipeline issues the LE cert, the
@@ -310,8 +310,9 @@ console seals it + pushes it to this edge via `relay/cert/upsert`, and pushes th
 burrowee-edge doctor        # every line ✓
 ```
 
-Confirm the carrier is up (heartbeat), enroll state `active`, TLS listener up, and
-the custom-domain cert present. Then confirm end-to-end through the custom domain —
+Confirm the carrier is up (heartbeat), enroll state `active`, the TLS listener up
+(`doctor`), and the domain listed under `status`'s served domains. Then confirm
+end-to-end through the custom domain —
 a raw TCP/SSH connect, or a browser request for a web service (the `:443` W4
 web-ingress is live).
 
@@ -324,7 +325,8 @@ When green, tell the operator:
 > Your edge is paired and serving. Useful commands:
 > - `burrowee-edge status` — enroll state, tenant, served domains, caps
 > - `burrowee-edge doctor` — re-verify any time
-> - Service logs (macOS): `tail -f $HOME/.burrowee/edge/logs/launchd.out.log`
+> - Service logs (macOS): the launchd agent writes no log file — for log output,
+>   stop the service and run `burrowee-edge run` in the foreground
 > - Service logs (linux): `journalctl --user -u burrowee-edge.service -f`
 >
 > Adding more domains/services happens in `console.burrowee.com → Edge relays`.
@@ -336,12 +338,13 @@ When green, tell the operator:
 - **"awaiting approval" never flips to active.** The operator approved a *different*
   edge, or is signed into the wrong account. Confirm the fingerprint in the portal
   matches step 2; confirm they're the owner-tier account that minted it.
-- **Console unreachable.** The edge only talks to `console.burrowee.com` (compiled in —
-  no override). Check the VPS's outbound HTTPS/WSS to `console.burrowee.com`; honor
-  `HTTPS_PROXY` if behind a proxy.
-- **`doctor` shows custom-domain cert ✗ for a while.** DNS propagation + LE issuance
+- **Console unreachable.** The edge dials the console only via its compiled-in
+  relay-API host `edge-relay-api.burrowee.org` (no override; the portal stays
+  `console.burrowee.com`). Check the VPS's outbound HTTPS/WSS to
+  `edge-relay-api.burrowee.org`; honor `HTTPS_PROXY` if behind a proxy.
+- **`status` doesn't list the new domain for a while.** DNS propagation + LE issuance
   take time; the `_acme-challenge` CNAME must resolve to `<slug>.acme.burrowee.net`.
-  Re-run `doctor` after a few minutes.
+  Re-run `status` after a few minutes.
 - **Re-pair from scratch.** `rm -rf $HOME/.burrowee/edge` then re-run from step 1.
   This wipes the identity; the console-side pending row must be re-minted.
 - **`service install` fails: systemd not available.** Non-systemd init (OpenRC,
