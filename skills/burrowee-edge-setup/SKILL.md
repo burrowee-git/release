@@ -131,17 +131,32 @@ sub-topologies exist:
 
 > QUIC (UDP), if enabled via `quic_addr`, is not fronted — it stays direct.
 
-**5a. Install nginx**
+**5a. Stand up the front — `burrowee-edge doctor --fix` (the one command)**
+
+A single command brings the whole LAN front up: it installs nginx if missing
+(prompting for consent first), generates the 10-year LAN cert, writes + loads the
+nginx front config, starts nginx as a managed service, then re-checks that the
+advertised LAN port is reachable. It replaces the manual install + apply + start
+(the breakdown in 5b–5f):
 
 ```bash
-# Debian / Ubuntu  (apt auto-starts nginx after install)
-sudo apt-get install -y nginx
-# RHEL / Fedora / Rocky  (dnf does NOT auto-start; apt does)
-sudo dnf install -y nginx
-sudo systemctl enable --now nginx
-# macOS (Homebrew, dev only)
-brew install nginx && brew services start nginx
+# macOS (Homebrew — no sudo needed):
+burrowee-edge doctor --fix
+
+# Linux (the nginx install + `systemctl enable` need root; --home points the
+# front config + cert back at the service user's edge dir, since sudo swaps $HOME):
+sudo "$(command -v burrowee-edge)" doctor --fix --home "$HOME/.burrowee/edge"
+
+# Unattended (CI / scripted) — assume yes for the install/start prompts:
+sudo "$(command -v burrowee-edge)" doctor --fix --yes --home "$HOME/.burrowee/edge"
 ```
+
+`burrowee-edge doctor` (without `--fix`) is the **read-only** check — it prints
+nginx installed / running / front config / **LAN front reachable**, so you can
+confirm the front before and after. For the **domain-fronted** topology, write the
+config (5c) first so the `:443` passthrough block is emitted. The steps below
+(5b–5f) are what `--fix` automates — follow them by hand only for non-default ports
+(`doctor --fix` uses the standard 8448) or to understand each step.
 
 **5b. Port availability check**
 
