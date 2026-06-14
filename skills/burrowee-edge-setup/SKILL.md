@@ -15,6 +15,10 @@ service-vs-foreground choice). Pause and ask; resume on confirmation.
 The edge is **hard-bound to `console.burrowee.com`** — there is no console-selection
 flag. If the operator needs a different console, that is a different (dev) build.
 
+The slim `burrowee-edge` binary runs only the service (`version` / `run` / `update`);
+every setup/operator command below is `burrowee edge cli <command>` (the companion
+`burrowee-edge-cli`, installed alongside and routed through the `burrowee` dispatcher).
+
 ## 0. Pre-flight
 
 ```bash
@@ -46,7 +50,7 @@ is everything the edge needs.)
 ## 2. Bootstrap
 
 ```bash
-burrowee-edge bootstrap <blob> <pin>
+burrowee edge cli bootstrap <blob> <pin>
 ```
 
 This generates the edge's Ed25519 identity (private key never leaves the box),
@@ -76,12 +80,12 @@ must be running (`burrowee-edge run`, or the managed service from §4) for the c
 to land — run `status` again after the run loop reports the carrier connected.
 
 ```bash
-burrowee-edge status        # repeat until it prints the signed-config dump
+burrowee edge cli status    # repeat until it prints the signed-config dump
                             # (owner tenant / served domains), not "no config yet"
 ```
 
 You can also confirm console reachability directly with
-`burrowee-edge doctor` (the `console reachable` line). (Backend:
+`burrowee edge cli doctor` (the `console reachable` line). (Backend:
 `GET /api/v1/relays/pending` + `POST /api/v1/relays/{id}/approve`, owner-owns
 check — spec §4 ③.) Do not proceed until `status` prints the signed-config dump.
 
@@ -94,8 +98,8 @@ Ask the operator; don't pick for them.
 **Option A — managed service (recommended for an always-on VPS):**
 
 ```bash
-burrowee-edge service install
-burrowee-edge service status        # confirm loaded/started
+burrowee edge cli service install
+burrowee edge cli service status    # confirm loaded/started
 ```
 
 Writes the launchd plist (macOS) / systemd unit (Linux) and bootstraps it; the
@@ -132,7 +136,7 @@ sub-topologies exist:
 
 > QUIC (UDP), if enabled via `quic_addr`, is not fronted — it stays direct.
 
-**5a. Stand up the front — `burrowee-edge doctor --fix` (the one command)**
+**5a. Stand up the front — `burrowee edge cli doctor --fix` (the one command)**
 
 A single command brings the whole LAN front up: it installs nginx if missing
 (prompting for consent first), generates the 10-year LAN cert, writes + loads the
@@ -142,17 +146,17 @@ advertised LAN port is reachable. It replaces the manual install + apply + start
 
 ```bash
 # macOS (Homebrew — no sudo needed):
-burrowee-edge doctor --fix
+burrowee edge cli doctor --fix
 
 # Linux (the nginx install + `systemctl enable` need root; --home points the
 # front config + cert back at the service user's edge dir, since sudo swaps $HOME):
-sudo "$(command -v burrowee-edge)" doctor --fix --home "$HOME/.burrowee/edge"
+sudo "$(command -v burrowee-edge-cli)" doctor --fix --home "$HOME/.burrowee/edge"
 
 # Unattended (CI / scripted) — assume yes for the install/start prompts:
-sudo "$(command -v burrowee-edge)" doctor --fix --yes --home "$HOME/.burrowee/edge"
+sudo "$(command -v burrowee-edge-cli)" doctor --fix --yes --home "$HOME/.burrowee/edge"
 ```
 
-`burrowee-edge doctor` (without `--fix`) is the **read-only** check — it prints
+`burrowee edge cli doctor` (without `--fix`) is the **read-only** check — it prints
 nginx installed / running / front config / **LAN front reachable**, so you can
 confirm the front before and after. For the **domain-fronted** topology, write the
 config (5c) first so the `:443` passthrough block is emitted. The steps below
@@ -175,7 +179,7 @@ nc -z 127.0.0.1 9443 && echo "9443 TAKEN" || echo "9443 free"
 
 If **any** required port is taken, **stop and ask the operator to choose both
 replacement ports** — one external port for nginx and one localhost port for the
-edge — and use that chosen pair in every step below. (The `burrowee-edge nginx`
+edge — and use that chosen pair in every step below. (The `burrowee edge cli nginx`
 subcommand also pre-flights ports and will name the right flag
 (`--listen-lan`/`--listen-tls`) if anything slips through.)
 
@@ -206,7 +210,7 @@ domain-fronted, `:8448` for LAN).
 **5d. Apply: generate the LAN cert + install the nginx config**
 
 ```bash
-sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" --listen-lan 8448
+sudo "$(command -v burrowee-edge-cli)" nginx --home "$HOME/.burrowee/edge" --listen-lan 8448
 ```
 
 This single command does everything: generates the 10-year LAN cert at
@@ -233,7 +237,7 @@ distribution needed.
 
 **5e. If the subcommand reports the config is not loaded**
 
-`burrowee-edge nginx` auto-manages a top-level `stream {}` block in `nginx.conf`
+`burrowee edge cli nginx` auto-manages a top-level `stream {}` block in `nginx.conf`
 itself; it normally needs no manual edit. If its heuristic can't place the block
 (an unusual `nginx.conf` layout), it prints:
 
@@ -265,7 +269,7 @@ systemctl --user restart burrowee-edge.service
 # macOS (launchd):
 launchctl kickstart -k gui/$(id -u)/org.burrowee.edge
 # Fallback — re-install the unit file (first-time or after binary move):
-burrowee-edge service install
+burrowee edge cli service install
 
 # verify: nginx owns + forwards the LAN port (TCP reachable)
 nc -z 127.0.0.1 8448
@@ -291,7 +295,7 @@ above. For domain-fronted, also check `tls_listen`.
 **Cert rotation**
 
 ```bash
-sudo "$(command -v burrowee-edge)" nginx --home "$HOME/.burrowee/edge" \
+sudo "$(command -v burrowee-edge-cli)" nginx --home "$HOME/.burrowee/edge" \
     --listen-lan 8448 --rotate-lan-cert
 ```
 
@@ -314,7 +318,7 @@ The edge serves **custom domains only**. Tell the operator:
 Then poll for the cert:
 
 ```bash
-burrowee-edge status        # watch the domain appear under "served domains"
+burrowee edge cli status    # watch the domain appear under "served domains"
 ```
 
 (Backend: the `acme.burrowee.net` certbot DNS-01 pipeline issues the LE cert, the
@@ -331,7 +335,7 @@ console seals it + pushes it to this edge via `relay/cert/upsert`, and pushes th
 ## 7. Verify
 
 ```bash
-burrowee-edge doctor        # every line ✓
+burrowee edge cli doctor    # every line ✓
 ```
 
 Confirm the carrier is up (heartbeat), enroll state `active`, the TLS listener up
@@ -347,9 +351,9 @@ web-ingress is live).
 When green, tell the operator:
 
 > Your edge is paired and serving. Useful commands:
-> - `burrowee-edge status` — enroll state, tenant, served domains, caps
-> - `burrowee-edge doctor` — re-verify any time (`--fix` brings the nginx front up)
-> - `burrowee-edge restart` — restart the managed service
+> - `burrowee edge cli status` — enroll state, tenant, served domains, caps
+> - `burrowee edge cli doctor` — re-verify any time (`--fix` brings the nginx front up)
+> - `burrowee edge cli service restart` — restart the managed service
 > - `burrowee-edge update` — install the latest release, then restart the service
 >   (`--dry` reports the version gap + changelog only)
 > - Service logs (macOS): the launchd agent writes no log file — for log output,

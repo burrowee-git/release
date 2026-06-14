@@ -1,6 +1,6 @@
 ---
 name: burrowee-edge-install
-description: Install the burrowee-edge relay binary on the user's own VPS (macOS + Linux). Use when the operator asks to "install burrowee edge", "get the edge relay binary", or pastes release.burrowee.com/skills/burrowee-edge-install/SKILL.md. Stop after the binary is on PATH and reports its version — pairing + run live in the burrowee-edge-setup skill, which the operator triggers next.
+description: Install the burrowee-edge relay binary plus its companion burrowee-edge-cli setup tool on the user's own VPS (macOS + Linux). Use when the operator asks to "install burrowee edge", "get the edge relay binary", or pastes release.burrowee.com/skills/burrowee-edge-install/SKILL.md. Stop after the binary is on PATH and reports its version — pairing + run live in the burrowee-edge-setup skill, which the operator triggers next.
 ---
 
 # burrowee-edge-install
@@ -40,11 +40,18 @@ git clone git@github.com:burrowee-git/edge.git
 cd edge
 # Linux (typical VPS):
 go build -o burrowee-edge ./cmd/burrowee-edge
+(cd cli && GOWORK=off go build -o ../burrowee-edge-cli .)
 # macOS Burrowee dev tree only (a per-dir PATH hook strips /opt/homebrew/bin):
 /opt/homebrew/bin/go build -o burrowee-edge ./cmd/burrowee-edge
+(cd cli && GOWORK=off /opt/homebrew/bin/go build -o ../burrowee-edge-cli .)
 ```
 
-Move the resulting `burrowee-edge` onto PATH.
+The published GitHub-release installer ships `burrowee` (the dispatcher),
+`burrowee-edge`, and `burrowee-edge-cli` together; a bare source build produces only
+the two component binaries, so invoke the cli directly as `burrowee-edge-cli <cmd>`
+(there is no dispatcher in a source build).
+
+Move both resulting binaries — `burrowee-edge` and `burrowee-edge-cli` — onto PATH.
 
 ---
 
@@ -70,7 +77,7 @@ If it can't, the binary didn't build — resolve before continuing.
 
 nginx fronting is the **automatic default** for every new edge install. It is set up
 in `burrowee-edge-setup` §5 (immediately after the service is running) — nothing to
-do here at install time. A single `sudo burrowee-edge nginx` command applies the
+do here at install time. A single `burrowee edge cli nginx` command applies the
 config: it generates a 10-year LAN cert, writes and verifies the nginx stream config,
 and reloads nginx. The LAN port (`:8448`) serves **wss** — TLS is terminated by nginx
 using the locally-generated cert; gateways and CLIs authenticate it by pinned
