@@ -53,14 +53,14 @@ elif { exec 3<>/dev/tty; } 2>/dev/null; then
         printf 'pin>  ' >&3 2>/dev/null || true
         pin=''; IFS= read -r pin <&3 2>/dev/null || pin=''
         if [ -n "$pin" ]; then
-            "$BIN_DIR/burrowee" "$COMP" bootstrap "$blob" "$pin" <&3 || true
+            "$BIN_DIR/burrowee" "$COMP" cli bootstrap "$blob" "$pin" <&3 || true
         else
-            printf 'No PIN — skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
+            printf 'No PIN — skipped. Run later: burrowee %s cli bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
         fi
     else
-        printf 'Skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
+        printf 'Skipped. Run later: burrowee %s cli bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
     fi
     exec 3>&- 2>/dev/null || true
 else
-    echo "next: burrowee $COMP bootstrap <blob> <pin>"
+    echo "next: burrowee $COMP cli bootstrap <blob> <pin>"
 fi
