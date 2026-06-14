@@ -99,7 +99,7 @@ bins_for() {
     case "$1" in
         cli)     printf '%s' "burrowee-cli" ;;
         gateway) printf '%s' "burrowee-gateway burrowee-register" ;;
-        edge)    printf '%s' "burrowee-edge" ;;
+        edge)    printf '%s' "burrowee-edge burrowee-edge-cli" ;;
     esac
 }
 
