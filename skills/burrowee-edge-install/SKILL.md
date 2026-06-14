@@ -1,100 +1,69 @@
 ---
 name: burrowee-edge-install
-description: Install the burrowee-edge relay binary on the user's own VPS (macOS + Linux). Use when the operator asks to "install burrowee edge", "get the edge relay binary", or pastes release.burrowee.com/skills/burrowee-edge-install/SKILL.md. Stop after the binary is on PATH and reports its version — pairing + run live in the burrowee-edge-setup skill, which the operator triggers next.
+description: Install the Burrowee edge binaries through an AI agent — downloads and minisign-verifies the release zip and places burrowee-edge-cli + burrowee-edge, by driving `burrowee-agent install edge`. Use when the user says "install burrowee edge", "get the edge relay binary", or pastes release.burrowee.com/skills/burrowee-edge-install/SKILL.md. Stop once the binaries are on disk — pairing + run live in burrowee-edge-setup, which auto-ensures install anyway.
 ---
 
 # burrowee-edge-install
 
-You are an LLM coding agent installing the **burrowee-edge** binary on a user's own
-VPS. An edge is a self-hosted, account-bound relay that serves only the owner's
-gateways over the owner's custom domain, and is hard-bound to `console.burrowee.com`
-(no `--console` override — the console identity is compiled in). This skill only gets
-the binary onto PATH; pairing + run are in `burrowee-edge-setup`.
+You are installing the **Burrowee edge** binaries for the user through the
+`burrowee-agent` CLI. The agent downloads the release zip and minisign-verifies it
+before placing anything — you NEVER fetch or run an unverified byte yourself; you
+only run `burrowee-agent …` and relay its result.
 
-## 0. Pre-flight
+This is the **agent** install path. The raw operator path (source build, hand-placing
+a binary on PATH, manual checksum checks) is the manual fallback the agent verb
+automates — do NOT drive that here.
 
-```bash
-uname -sm                          # OS + arch (e.g. "Linux x86_64", "Darwin arm64")
-command -v burrowee-edge && burrowee-edge version || echo "not installed"
-```
+> In most flows you do not need this skill on its own: **`burrowee-edge-setup`
+> auto-ensures the install** as its first step. Run this only when the user wants to
+> install without setting up yet, or to surface an install fault early.
 
-If `burrowee-edge version` already prints a real version line, the binary is
-installed — route the operator straight to `burrowee-edge-setup` and stop.
+## 0. Preflight — bound?
+Run `burrowee-agent status`. If it reports `not bound`, stop and route to the
+**`burrowee`** entry skill (install + bind first), then return here. (The component
+install itself is purely local, but the rest of the edge flow needs a bound
+identity, so confirm it up front.)
 
----
-
-## 1. Get the binary
-
-**Preferred — GitHub Releases (when published):** download the asset matching the
-host platform from the `burrowee.edge` releases (the burrowee release-repo pattern,
-Doc 8 §5), `chmod +x`, move onto PATH (`/usr/local/bin` or `$HOME/.local/bin`).
-Verify the checksum against the release `SHA256SUMS.txt` (use `shasum -a 256` on
-macOS, `sha256sum` on Linux — detect either).
-
-> If no release asset exists yet for the host platform, use the source build below.
-
-**Source build (dev):**
+## 1. Run the install verb
 
 ```bash
-git clone git@github.com:burrowee-git/edge.git
-cd edge
-# Linux (typical VPS):
-go build -o burrowee-edge ./cmd/burrowee-edge
-# macOS Burrowee dev tree only (a per-dir PATH hook strips /opt/homebrew/bin):
-/opt/homebrew/bin/go build -o burrowee-edge ./cmd/burrowee-edge
+burrowee-agent install edge
 ```
 
-Move the resulting `burrowee-edge` onto PATH.
+This resolves the latest edge release, downloads the per-component zip +
+`SHA256SUMS.txt` + its minisig, verifies the **minisign signature** over the sums,
+verifies the **zip's sha256** against the now-trusted sums, and only then unzips and
+places the binaries under `~/.burrowee/agent/bin`:
 
----
+- `burrowee-edge-cli` — the setup binary the agent drives (bootstrap / service /
+  status / doctor). This is the binary the install returns the PATH of.
+- `burrowee-edge` — the serving binary that the managed service registers (placed
+  alongside the cli so `service install` finds it as its sibling).
 
-## 2. Verify
+A failed signature or checksum aborts **without installing anything**. On a platform
+the native path does not ship, the agent falls back to the verified public
+`install.sh`. It is idempotent — a second run with the binary already present is a
+no-op.
 
-```bash
-burrowee-edge version
-```
+## 2. Apply the next-action loop
+Read the single line of JSON `burrowee-agent` prints on stdout and branch:
 
-Must print a real version line. If `burrowee-edge` isn't found, invoke it by full path to confirm it built:
+- `{"status":"done","summary":"installed edge","wrote":["…/burrowee-edge-cli"]}` →
+  tell the user the edge binaries are installed; mention the `wrote` PATH by path
+  only. Then route to **`burrowee-edge-setup`** to enroll + start the relay.
+- `{"status":"error","code":"install_failed","message":"…"}` → surface `message`
+  (a download, signature, or checksum failure). Nothing was installed — suggest
+  re-running once the cause (network, platform support) is resolved.
+- `{"status":"need_human",…}` → show the `message` + `url` and stop.
 
-```bash
-$HOME/.local/bin/burrowee-edge version    # or /usr/local/bin/burrowee-edge version
-```
+**Secret discipline:** never open or echo files the agent wrote. Refer to any
+`wrote` path by path only.
 
-If that works, the bin dir isn't on PATH — add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc and open a new shell.
+## 3. Hand back
+When `done`, tell the user:
 
-If it can't, the binary didn't build — resolve before continuing.
+> The Burrowee edge binaries are installed. Next, run **burrowee-edge-setup** to
+> enroll the relay to your account, start it, and approve it.
 
----
-
-## 3. Note: nginx-fronted topology
-
-nginx fronting is the **automatic default** for every new edge install. It is set up
-in `burrowee-edge-setup` §5 (immediately after the service is running) — nothing to
-do here at install time. A single `sudo burrowee-edge nginx` command applies the
-config: it generates a 10-year LAN cert, writes and verifies the nginx stream config,
-and reloads nginx. The LAN port (`:8448`) serves **wss** — TLS is terminated by nginx
-using the locally-generated cert; gateways and CLIs authenticate it by pinned
-fingerprint (distributed automatically via endpoint reports), not by a CA chain.
-
-§5 covers both topologies: LAN-only (nginx `:8448` wss → edge `127.0.0.1:9448`,
-`tls_listen=off`) and domain-fronted (adds nginx `:443` TCP passthrough → edge
-`127.0.0.1:9443`, TLS inside the edge), including the port availability check and
-operator port-conflict resolution.
-
----
-
-## 4. Hand back
-
-When `burrowee-edge version` works, tell the operator:
-
-> burrowee-edge is installed. Next, run the **burrowee-edge-setup** skill to pair it
-> to your Burrowee account, approve it, and start serving.
-
----
-
-## Troubleshooting
-
-- **`go build` fails with "no such package ./cmd/burrowee-edge".** You are not in the
-  repo root — `cd` into the cloned `edge` checkout and re-run.
-- **"command not found: go" while building.** On Linux, ensure Go is installed + on PATH. On the macOS Burrowee dev tree only, a per-dir hook strips `/opt/homebrew/bin` — use the absolute `/opt/homebrew/bin/go`.
-- **(macOS only) Gatekeeper blocks the downloaded binary.** `xattr -d com.apple.quarantine ./burrowee-edge`.
+(`burrowee-edge-setup` re-checks and re-ensures the install, so it is safe to go
+straight there even without running this skill.)
