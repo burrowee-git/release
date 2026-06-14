@@ -5,12 +5,6 @@ description: Install the burrowee-edge relay binary on the user's own VPS (macOS
 
 # burrowee-edge-install
 
-> **STATUS — target guideline.** This skill drives the `burrowee-edge` CLI, which is
-> part of the `burrowee.edge` *build subsystem* (spec §10) and is **not built yet**.
-> Until it lands, treat this as the design target: the version/download commands below
-> describe the intended UX. If `burrowee-edge` is absent and no source build exists,
-> stop and route the operator to the build spec.
-
 You are an LLM coding agent installing the **burrowee-edge** binary on a user's own
 VPS. An edge is a self-hosted, account-bound relay that serves only the owner's
 gateways over the owner's custom domain, and is hard-bound to `console.burrowee.com`
@@ -37,22 +31,18 @@ Doc 8 §5), `chmod +x`, move onto PATH (`/usr/local/bin` or `$HOME/.local/bin`).
 Verify the checksum against the release `SHA256SUMS.txt` (use `shasum -a 256` on
 macOS, `sha256sum` on Linux — detect either).
 
-> Release assets do not exist until the CLI build + release pipeline land (spec §10).
-> If there is no release yet, use the source build below.
+> If no release asset exists yet for the host platform, use the source build below.
 
 **Source build (dev):**
 
 ```bash
 git clone git@github.com:burrowee-git/edge.git
-cd burrowee.edge
+cd edge
 # Linux (typical VPS):
 go build -o burrowee-edge ./cmd/burrowee-edge
 # macOS Burrowee dev tree only (a per-dir PATH hook strips /opt/homebrew/bin):
 /opt/homebrew/bin/go build -o burrowee-edge ./cmd/burrowee-edge
 ```
-
-> `cmd/burrowee-edge` is the follow-on build (spec §10). If it is absent, the CLI is
-> not built yet — stop and tell the operator the edge CLI is pending.
 
 Move the resulting `burrowee-edge` onto PATH.
 
@@ -104,7 +94,7 @@ When `burrowee-edge version` works, tell the operator:
 
 ## Troubleshooting
 
-- **`go build` fails with "no such package ./cmd/burrowee-edge".** The CLI isn't
-  built yet (spec §10). Stop; route to the build spec.
+- **`go build` fails with "no such package ./cmd/burrowee-edge".** You are not in the
+  repo root — `cd` into the cloned `edge` checkout and re-run.
 - **"command not found: go" while building.** On Linux, ensure Go is installed + on PATH. On the macOS Burrowee dev tree only, a per-dir hook strips `/opt/homebrew/bin` — use the absolute `/opt/homebrew/bin/go`.
 - **(macOS only) Gatekeeper blocks the downloaded binary.** `xattr -d com.apple.quarantine ./burrowee-edge`.

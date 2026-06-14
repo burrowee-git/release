@@ -5,13 +5,6 @@ description: Pair an installed burrowee-edge relay to your Burrowee account, app
 
 # burrowee-edge-setup
 
-> **STATUS — target guideline.** Drives the `burrowee-edge` CLI + the owner-tier
-> "Edge relays" portal section, both part of the `burrowee.edge` build subsystem
-> (spec §10) and **not built yet**. The pairing flow it documents (mint → enroll →
-> approve → carrier) is already implemented in console + relay (spec §4); this skill
-> becomes runnable when the CLI + portal section land. Until then it is the design
-> target.
-
 You are an LLM coding agent setting up an already-installed **burrowee-edge** relay
 against `console.burrowee.com`. The binary must be on PATH — if not, route to
 `burrowee-edge-install` and stop.
@@ -75,14 +68,22 @@ Tell the operator:
 > Back in `console.burrowee.com → Edge relays`, find the pending edge with fingerprint
 > `<fingerprint from step 2>` and click **Approve**.
 
-Then poll until active:
+`status` reflects approval by what it prints: before the console pushes the
+signed config it prints `enrolled; no config received yet (...)`; once approved
+and connected it prints the signed-config dump (`owner tenant:`, `served domains:`,
+`max gateways:`, …). Note: the signed config arrives over the carrier, so the edge
+must be running (`burrowee-edge run`, or the managed service from §4) for the config
+to land — run `status` again after the run loop reports the carrier connected.
 
 ```bash
-burrowee-edge status        # repeat until state shows "active"
+burrowee-edge status        # repeat until it prints the signed-config dump
+                            # (owner tenant / served domains), not "no config yet"
 ```
 
-(Backend: `GET /api/v1/relays/pending` + `POST /api/v1/relays/{id}/approve`,
-owner-owns check — spec §4 ③.) Do not proceed until `status` is `active`.
+You can also confirm console reachability directly with
+`burrowee-edge doctor` (the `console reachable` line). (Backend:
+`GET /api/v1/relays/pending` + `POST /api/v1/relays/{id}/approve`, owner-owns
+check — spec §4 ③.) Do not proceed until `status` prints the signed-config dump.
 
 ---
 
@@ -232,20 +233,28 @@ distribution needed.
 
 **5e. If the subcommand reports the config is not loaded**
 
-The subcommand will print:
+`burrowee-edge nginx` auto-manages a top-level `stream {}` block in `nginx.conf`
+itself; it normally needs no manual edit. If its heuristic can't place the block
+(an unusual `nginx.conf` layout), it prints:
 
 ```
-Add this line at the TOP LEVEL of /etc/nginx/nginx.conf (outside http{}):
+<conf-dir>/servers-stream/burrowee-edge-stream.conf is NOT loaded by nginx.
+This command auto-manages a top-level stream block in <conf-dir>/nginx.conf:
 
-    include /etc/nginx/burrowee-edge-stream.conf;
+    stream {
+        include servers-stream/*.conf;
+    }
 
-then re-run.
+If the file is still not loaded, confirm that block is present at the TOP
+LEVEL of nginx.conf (outside http{}) and that nginx was built with the stream
+module (nginx -V should list --with-stream), then re-run.
 ```
 
-Add that `include` line to `nginx.conf` **outside** any `http {}` block, then
+Add that `stream { include servers-stream/*.conf; }` block to `nginx.conf`
+**outside** any `http {}` block, confirm `nginx -V` lists `--with-stream`, then
 re-run the command. This is the classic conf.d-only trap: many distros auto-include
 `conf.d/*.conf` from *inside* `http {}`, where a `stream {}` block is silently
-dead — the include must sit at the top level.
+dead — the block must sit at the top level.
 
 **5f. Restart the edge service and verify**
 
@@ -339,7 +348,10 @@ When green, tell the operator:
 
 > Your edge is paired and serving. Useful commands:
 > - `burrowee-edge status` — enroll state, tenant, served domains, caps
-> - `burrowee-edge doctor` — re-verify any time
+> - `burrowee-edge doctor` — re-verify any time (`--fix` brings the nginx front up)
+> - `burrowee-edge restart` — restart the managed service
+> - `burrowee-edge update` — install the latest release, then restart the service
+>   (`--dry` reports the version gap + changelog only)
 > - Service logs (macOS): the launchd agent writes no log file — for log output,
 >   stop the service and run `burrowee-edge run` in the foreground
 > - Service logs (linux): `journalctl --user -u burrowee-edge.service -f`
