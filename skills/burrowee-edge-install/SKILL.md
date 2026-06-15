@@ -77,9 +77,12 @@ If it can't, the binary didn't build — resolve before continuing.
 
 nginx fronting is the **automatic default** for every new edge install. It is set up
 in `burrowee-edge-setup` §5 (immediately after the service is running) — nothing to
-do here at install time. A single `burrowee edge cli nginx` command applies the
-config: it generates a 10-year LAN cert, writes and verifies the nginx stream config,
-and reloads nginx. The LAN port (`:8448`) serves **wss** — TLS is terminated by nginx
+do here at install time. A single `burrowee edge cli nginx install` (SNI/domain-fronted)
+or `nginx apply` (LAN-only) command stands the front up: it writes and verifies the
+nginx stream config (generating a 10-year LAN cert for the LAN-only path) and reloads
+nginx. On Debian/Ubuntu the nginx stream module is a **separate package**
+(`libnginx-mod-stream`); `doctor --fix` installs it automatically. The LAN port
+(`:8448`) serves **wss** — TLS is terminated by nginx
 using the locally-generated cert; gateways and CLIs authenticate it by pinned
 fingerprint (distributed automatically via endpoint reports), not by a CA chain.
 
