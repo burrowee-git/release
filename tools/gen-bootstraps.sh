@@ -1,10 +1,16 @@
 #!/bin/sh
-# gen-bootstraps.sh — generate the three self-contained outer bootstraps
-# (cli/install.sh, gateway/install.sh, edge/install.sh) from one template.
+# gen-bootstraps.sh — generate the four self-contained outer bootstraps
+# (cli/install.sh, gateway/install.sh, edge/install.sh, relay/install.sh)
+# from their respective templates.
 #
-# Each generated file is byte-identical to the others except for the @COMP@
-# and @PUBKEY@ substitutions. The outer bootstrap is THE TRUST ANCHOR, so the
-# baked @PUBKEY@ must be the real release signing pubkey before activation.
+# cli/gateway/edge use tools/bootstrap.template.sh (public GitHub-release
+# channel). relay uses tools/relay-bootstrap.template.sh (private gated
+# channel: challenge-response ed25519 signing + gated downloads).
+#
+# Each generated file is byte-identical within its template family except for
+# the @COMP@ and @PUBKEY@ substitutions. The outer bootstrap is THE TRUST
+# ANCHOR, so the baked @PUBKEY@ must be the real release signing pubkey before
+# activation.
 #
 # Pubkey resolution (first that exists wins):
 #   1. $BURROWEE_PUBKEY_FILE   (explicit override; used by the offline E2E test)
@@ -20,7 +26,9 @@ set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 TEMPLATE="$ROOT/tools/bootstrap.template.sh"
+RELAY_TEMPLATE="$ROOT/tools/relay-bootstrap.template.sh"
 [ -f "$TEMPLATE" ] || { echo "✗ missing template: $TEMPLATE" >&2; exit 1; }
+[ -f "$RELAY_TEMPLATE" ] || { echo "✗ missing relay template: $RELAY_TEMPLATE" >&2; exit 1; }
 
 # ---- resolve the pubkey -------------------------------------------------
 pubfile=""
@@ -43,7 +51,7 @@ else
     echo "! create the key (Phase 5a: minisign -G ... or Phase A2) and re-run." >&2
 fi
 
-# ---- generate -----------------------------------------------------------
+# ---- generate cli/gateway/edge (public GitHub-release channel) ----------
 for comp in cli gateway edge; do
     out="$ROOT/$comp/install.sh"
     mkdir -p "$ROOT/$comp"
@@ -55,3 +63,15 @@ for comp in cli gateway edge; do
     mv -f "$tmp" "$out"
     echo "✓ wrote $out"
 done
+
+# ---- generate relay (private gated channel) -----------------------------
+# Uses the relay-specific template — distinct from the public template above.
+# Same @PUBKEY@ trust anchor (minisign integrity layer); @COMP@=relay.
+comp=relay
+out="$ROOT/$comp/install.sh"
+mkdir -p "$ROOT/$comp"
+tmp="$out.tmp.$$"
+sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" "$RELAY_TEMPLATE" > "$tmp"
+chmod +x "$tmp"
+mv -f "$tmp" "$out"
+echo "✓ wrote $out  (relay gated-channel bootstrap)"
