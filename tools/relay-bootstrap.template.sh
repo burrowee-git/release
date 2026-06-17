@@ -140,10 +140,15 @@ gated_get() {
     [ -n "$_nonce" ] || fail "challenge: empty nonce from $BASE/relay/challenge"
 
     # Sign: nonce:path (raw input, output base64-STD via openssl base64 -A)
-    _sig="$(printf '%s' "$_nonce:$_path" \
-        | "$OPENSSL" pkeyutl -sign -inkey "$KEY" -rawin 2>/dev/null \
-        | "$OPENSSL" base64 -A)" || fail "signing failed — is $KEY a valid ed25519 PEM private key?"
-    [ -n "$_sig" ] || fail "signing returned empty signature"
+    # Write the message to a temp file first: openssl pkeyutl -rawin requires a
+    # seekable input to determine the message length (stdin is not seekable on
+    # some OpenSSL 3.x builds, producing "unable to determine file size").
+    _msg="$(mktemp "${TMPDIR:-/tmp}/burrowee-sign-XXXXXX")" || fail "could not create signing temp file"
+    printf '%s' "$_nonce:$_path" > "$_msg"
+    _sig="$("$OPENSSL" pkeyutl -sign -inkey "$KEY" -rawin -in "$_msg" 2>/dev/null \
+        | "$OPENSSL" base64 -A)"
+    rm -f "$_msg"
+    [ -n "$_sig" ] || fail "signing failed or returned empty signature — is $KEY a valid ed25519 PEM private key?"
 
     # Gated fetch: send the three required headers
     # shellcheck disable=SC2086  # $CURL is an intentional space-split command string; POSIX sh has no arrays.
