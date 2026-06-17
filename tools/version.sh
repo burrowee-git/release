@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # version.sh — per-component version + deploy stamp for the Burrowee release repo.
 #
-# Each component (cli|gateway|edge|burrowee) has its own one-line
+# Each component (cli|gateway|edge|relay|burrowee) has its own one-line
 # MAJOR.MINOR.PATCH file under versions/<comp> — the single source of
 # truth for that component's semver segment. This composes the full
 # stamp used in ldflags, git tags, and marker commits:
@@ -25,8 +25,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 COMP="${1:-}"
 case "${COMP}" in
-    cli|gateway|edge|burrowee) ;;
-    "")  echo "✗ usage: version.sh <cli|gateway|edge|burrowee> <action>" >&2; exit 2 ;;
+    cli|gateway|edge|relay|burrowee) ;;
+    "")  echo "✗ usage: version.sh <cli|gateway|edge|relay|burrowee> <action>" >&2; exit 2 ;;
     *)   echo "✗ unknown component: ${COMP}" >&2; exit 2 ;;
 esac
 VERSION_FILE="${REPO_ROOT}/versions/${COMP}"

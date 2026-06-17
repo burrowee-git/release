@@ -6,7 +6,7 @@
 # binary→package map is fixed below. CGO is always off (pure-Go, portable).
 #
 # Env in (all required unless noted):
-#   COMP          cli | gateway | edge | burrowee
+#   COMP          cli | gateway | edge | relay | burrowee
 #   SRC_DIR       the component's source worktree (cd target)
 #   TARGETOS      GOOS  (darwin | linux)
 #   TARGETARCH    GOARCH (arm64 | amd64)
@@ -22,7 +22,7 @@
 # native binaries. Cross-compiled (linux) outputs are left untouched.
 set -euo pipefail
 
-: "${COMP:?COMP is required (cli|gateway|edge|burrowee)}"
+: "${COMP:?COMP is required (cli|gateway|edge|relay|burrowee)}"
 : "${SRC_DIR:?SRC_DIR is required (component source worktree)}"
 : "${TARGETOS:?TARGETOS is required (darwin|linux)}"
 : "${TARGETARCH:?TARGETARCH is required (arm64|amd64)}"
@@ -52,6 +52,7 @@ case "${COMP}" in
     cli)      MAP="burrowee-cli:./cmd/burrowee-cli" ;;
     gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-register:./cmd/burrowee-register" ;;
     edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:@cli:." ;;
+    relay)    MAP="burrowee-relay:./cmd/burrowee-relay" ;;
     burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
     *)        echo "✗ unknown COMP: ${COMP}" >&2; exit 2 ;;
 esac
