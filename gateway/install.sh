@@ -19,6 +19,10 @@
 #   PREFIX                       install root (default $HOME/.local; bins at PREFIX/bin)
 #   BURROWEE_UNINSTALL=1         pass through to the inner installer to remove bins
 #   BURROWEE_RELEASE_REPO        GitHub repo serving releases (default burrowee-git/release)
+#   BURROWEE_SKIP_PREFLIGHT=1    skip the OS-dependency preflight (manage deps yourself)
+#   BURROWEE_SKIP_NGINX=1        (edge) skip nginx + stream module in the preflight
+#   BURROWEE_NO_PATH_EDIT=1      do not persist PREFIX/bin to your shell rc
+#   BURROWEE_CHANNEL_BASE        base URL for the static channel (preflight.sh lives here)
 #   BURROWEE_DL_BASE             (test hook) download assets from this base instead of GitHub
 
 set -eu
@@ -26,9 +30,13 @@ set -eu
 # ---- knobs --------------------------------------------------------------
 COMP="gateway"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
+PREFLIGHT_SHA256="4b8eb0778dc7ada812e3e787355b3455f29b74044b22931d89be1591181e5aaf"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
+# Static channel base (where preflight.sh lives — a sibling static file, NOT a
+# GitHub release asset). $COMP is a baked literal, safe to interpolate.
+CHANNEL_BASE="${BURROWEE_CHANNEL_BASE:-https://release.burrowee.com/$COMP}"
 
 # Production downloads are pinned to HTTPS/TLS1.2 (--proto =https). The
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
@@ -44,6 +52,12 @@ fi
 fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
 info() { printf '  → %s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
+
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else return 1; fi
+}
 
 # ---- platform detection -------------------------------------------------
 case "$(uname -s)" in
@@ -68,6 +82,29 @@ esac
 # ---- temp workspace -----------------------------------------------------
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/burrowee-${COMP}-XXXXXX")" || fail "could not create temp dir"
 trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# ---- preflight (install OS deps before the trust gate) ------------------
+# preflight.sh installs minisign/unzip/curl (the trust gate's deps) + nginx for
+# edge, with root, from the OS package manager. It runs BEFORE `require minisign`.
+# It is fetched from the static CHANNEL_BASE (a sibling static file, NOT a GitHub
+# release asset), and verified against a baked sha256 — there is no minisign yet,
+# so the sha256 pin is the integrity anchor (preflight only invokes the OS package
+# manager, whose repos are themselves signed). Skipped on uninstall or via env.
+if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_SKIP_PREFLIGHT:-}" ]; then
+    info "preflight: ensuring OS dependencies"
+    PF_BASE="${DL_BASE:-$CHANNEL_BASE}"
+    # shellcheck disable=SC2086
+    $CURL -o "$TMP/preflight.sh" "$PF_BASE/preflight.sh" \
+        || fail "could not download preflight.sh from $PF_BASE — set BURROWEE_SKIP_PREFLIGHT=1 to install deps yourself"
+    case "$PREFLIGHT_SHA256" in
+        ""|*PLACEHOLDER*|*TEMP*) fail "preflight checksum not baked — regenerate with tools/gen-bootstraps.sh" ;;
+    esac
+    pf_got="$(sha256_of "$TMP/preflight.sh")" || fail "cannot checksum preflight (need shasum or sha256sum)"
+    [ "$pf_got" = "$PREFLIGHT_SHA256" ] \
+        || fail "preflight.sh checksum mismatch (expected $PREFLIGHT_SHA256, got $pf_got) — refusing to run a tampered preflight"
+    ok "preflight verified"
+    sh "$TMP/preflight.sh" || info "preflight could not complete fully — continuing; the trust gate will verify required tools"
+fi
 
 # ---- version resolution -------------------------------------------------
 # Read the per-component pin env var by name (no eval). $COMP is a baked
@@ -180,3 +217,32 @@ ok "verified — running inner installer"
 # Run with cwd = the unzipped dir: the inner installer resolves the binaries
 # relative to its own location (./burrowee, ./burrowee-cli, …).
 ( cd "$TMP/x" && PREFIX="$PREFIX" BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" BURROWEE_VERSION="$TAG" sh ./install.sh )
+
+# ---- PATH persistence ---------------------------------------------------
+# On a real install, idempotently add PREFIX/bin to the operator's shell rc so a
+# fresh shell finds `burrowee` (the live-VPS `command not found`). Fault-tolerant:
+# an unwritable rc must never abort the script (the bins are already installed).
+if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ]; then
+    BIN_DIR="$PREFIX/bin"
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) : ;;   # already on PATH this shell
+        *)
+            # choose rc by login shell
+            case "$(basename "${SHELL:-}")" in
+                zsh)  rc="$HOME/.zshrc" ;;
+                bash) rc="$HOME/.bashrc" ;;
+                *)    rc="$HOME/.profile" ;;
+            esac
+            if [ -f "$rc" ] && grep -q 'burrowee PATH' "$rc" 2>/dev/null; then
+                : # marker already present
+            else
+                {
+                    printf '\n# >>> burrowee PATH >>>\n'
+                    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
+                    printf '# <<< burrowee PATH <<<\n'
+                } >> "$rc" 2>/dev/null && info "added $BIN_DIR to PATH in $rc"
+            fi
+            info "run: export PATH=\"$BIN_DIR:\$PATH\"   (or open a new shell) to use burrowee now"
+            ;;
+    esac
+fi
