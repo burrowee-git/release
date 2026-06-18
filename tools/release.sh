@@ -636,9 +636,22 @@ do_release() {
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
+        # edge decoy covers (copied from the edge.web repo at package time)
+        if [ "${comp}" = edge ]; then
+            EDGE_WEB="${EDGE_WEB_DIR:-${BB}/edge.web/code/edge.web}"
+            mkdir -p "${assemble}/covers"
+            cp "${EDGE_WEB}/admin.html" "${assemble}/covers/admin.html"
+            cp "${EDGE_WEB}/login.html" "${assemble}/covers/default.html"
+        fi
+
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
+        # Edge payload carries covers/ — zip -j skips directories, so append them
+        # recursively to preserve the covers/ path inside the zip.
+        if [ "${comp}" = edge ]; then
+            ( cd "${assemble}" && zip -r -q "${stage}/${asset}" covers/ )
+        fi
         zips+=("${asset}")
         rm -rf "${out_bins}"
     done
