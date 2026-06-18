@@ -119,6 +119,119 @@ bins_for() {
 
 GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
 
+# ---- console registration (Phase C) -----------------------------------------
+# register_staged <comp> <stamp> <semver> <stage_dir> [<gh_tag>]
+#
+# Builds an artifacts JSON from the four per-platform zips in <stage_dir>,
+# then POSTs to the console manage API to record a `staged` release row.
+#
+# Config-optional: if BURROWEE_CONSOLE_URL or BURROWEE_CONSOLE_RELEASE_TOKEN
+# is unset, prints a warning and returns 0 (never fails the release).
+# Dry-run-safe: when DRY_RUN=1, prints the would-POST and does NOT call curl.
+# Post-failure non-fatal: if curl fails, warns loudly but does not exit.
+#
+# For public comps: url_or_key is the GitHub asset download URL.
+# For relay: url_or_key is the host path under RELAY_PRIVATE_DIR/<stamp>/.
+# gated=true iff comp==relay. github_release=<comp>/<stamp> for public, ""
+# for relay. prerelease=true always.
+register_staged() {
+    local comp="$1" stamp="$2" semver="$3" stage_dir="$4"
+    local gh_tag="${5:-}"
+
+    # Config-optional: skip if credentials not set.
+    if [ -z "${BURROWEE_CONSOLE_URL:-}" ] || [ -z "${BURROWEE_CONSOLE_RELEASE_TOKEN:-}" ]; then
+        echo "⚠ console registration skipped: BURROWEE_CONSOLE_URL/TOKEN unset" >&2
+        return 0
+    fi
+
+    local url="${BURROWEE_CONSOLE_URL}/api/v1/manage/releases"
+    local gated=false
+    local github_release="${gh_tag}"
+    [ "${comp}" = relay ] && gated=true && github_release=""
+
+    # Build artifacts JSON.
+    # For each platform zip, extract sha256 + size, derive url_or_key.
+    # Public comps: zips are named burrowee-<comp>-<os>-<arch>.zip in stage_dir.
+    # Relay: zips are named latest.<os>-<arch>.zip in stage_dir (the latest_stage).
+    local artifacts_json="{" first=1
+    for pair in "darwin arm64" "darwin amd64" "linux arm64" "linux amd64"; do
+        local os arch
+        # shellcheck disable=SC2086  # pair is a controlled two-word string; word-splitting gives os arch.
+        read -r os arch <<<"${pair}"
+        local plat="${os}-${arch}"
+
+        local zip_name url_or_key zip_path
+        if [ "${comp}" = relay ]; then
+            zip_name="latest.${plat}.zip"
+            url_or_key="${RELAY_PRIVATE_DIR}/${stamp}/${zip_name}"
+        else
+            zip_name="burrowee-${comp}-${plat}.zip"
+            url_or_key="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/${zip_name}"
+        fi
+        zip_path="${stage_dir}/${zip_name}"
+
+        if [ ! -f "${zip_path}" ]; then
+            echo "⚠ console registration: zip not found: ${zip_path} — skipping" >&2
+            return 0
+        fi
+
+        # sha256: read from SHA256SUMS.txt (already computed) for consistency.
+        local sha256
+        # SHA256SUMS.txt lines: "<hash>  <filename>" (shasum) or "<hash>  <filename>" (sha256sum)
+        sha256="$(grep " ${zip_name}$" "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')"
+        if [ -z "${sha256}" ]; then
+            # Fallback: compute directly.
+            # shellcheck disable=SC2086
+            sha256="$(${SHA256} "${zip_path}" | awk '{print $1}')"
+        fi
+
+        # size in bytes.
+        local size
+        size="$(wc -c < "${zip_path}" | tr -d ' ')"
+
+        local sep=""
+        [ "${first}" = 1 ] || sep=","
+        first=0
+        artifacts_json="${artifacts_json}${sep}\"${plat}\":{\"url_or_key\":\"${url_or_key}\",\"sha256\":\"${sha256}\",\"size\":${size}}"
+    done
+    artifacts_json="${artifacts_json}}"
+
+    # sums_ref and minisig_ref: public = GitHub asset URLs; relay = host paths.
+    local sums_ref minisig_ref
+    if [ "${comp}" = relay ]; then
+        sums_ref="${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt"
+        minisig_ref="${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt.minisig"
+    else
+        sums_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt"
+        minisig_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt.minisig"
+    fi
+
+    local body
+    body="{\"component\":\"${comp}\",\"version\":\"${stamp}\",\"semver\":\"${semver}\",\"gated\":${gated},\"artifacts\":${artifacts_json},\"sums_ref\":\"${sums_ref}\",\"minisig_ref\":\"${minisig_ref}\",\"github_release\":\"${github_release}\",\"prerelease\":true}"
+
+    if [ "${DRY_RUN}" = 1 ]; then
+        echo "→ dry-run: would POST ${url}"
+        echo "  body: ${body}"
+        return 0
+    fi
+
+    echo "→ registering staged release with console: ${comp} ${stamp}" >&2
+    local http_code
+    http_code="$(curl -fsS -w '%{http_code}' -o /dev/null \
+        -X POST "${url}" \
+        -H "Authorization: Bearer ${BURROWEE_CONSOLE_RELEASE_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "${body}" 2>/dev/null)" || {
+        echo "⚠ console registration failed for ${comp} ${stamp} — artifacts already published; re-register manually" >&2
+        return 0
+    }
+    case "${http_code}" in
+        201) echo "✓ console: staged row created (201)" ;;
+        409) echo "⚠ console: duplicate (component,version) — row already exists (409)" ;;
+        *)   echo "⚠ console registration returned HTTP ${http_code} for ${comp} ${stamp} — re-register manually" >&2 ;;
+    esac
+}
+
 # ---- pre-flight -------------------------------------------------------------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "✗ required tool not found: $1" >&2; exit 1; }; }
 need zip
@@ -373,6 +486,8 @@ do_release_relay() {
         echo "    SHA256SUMS.txt.minisig → ${RELAY_PRIVATE_DIR}/"
         echo "  prune: would list ${RELAY_PRIVATE_DIR}/ → keep newest 3 stamp dirs, delete rest"
         echo "(artifacts under ${stage}/; version bump reverted; no scp/ssh)"
+        # (9) dry-run registration preview.
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}"
         revert_relay_version
         trap shred_key ERR
         return 0
@@ -434,6 +549,9 @@ do_release_relay() {
     # marker commit (no gh release / no git tag)
     git add "versions/${comp}"
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+
+    # (9) register staged row in the console catalog.
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}"
 
     echo "✓ released relay ${stamp} (private, ${RELAY_PRIVATE_DIR})"
     trap shred_key ERR
@@ -535,6 +653,9 @@ do_release() {
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "✓ dry-run ${comp}: artifacts under ${stage}/ (version bump reverted; no tag/release/scp)"
+        # (9) dry-run registration preview (uses the dry-run stamp for URLs).
+        local dry_tag="${comp}/${stamp}"
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${dry_tag}"
         revert_version
         trap shred_key ERR
         return 0
@@ -624,6 +745,9 @@ NOTES
     git add "versions/${comp}" "${comp}/install.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
+
+    # (9) register staged row in the console catalog.
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${tag}"
 
     echo "✓ released ${tag}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${tag}"
