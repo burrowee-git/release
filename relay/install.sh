@@ -135,7 +135,7 @@ gated_get() {
 
     # Challenge: fetch nonce
     # shellcheck disable=SC2086  # $CURL is an intentional space-split command string; POSIX sh has no arrays.
-    _nonce="$($CURL "$BASE/relay/challenge" 2>/dev/null \
+    _nonce="$($CURL "$BASE/relay/challenge" \
         | sed -n 's/.*"nonce":"\([^"]*\)".*/\1/p')"
     [ -n "$_nonce" ] || fail "challenge: empty nonce from $BASE/relay/challenge"
 
