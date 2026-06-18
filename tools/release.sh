@@ -134,6 +134,7 @@ GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
 # For relay: url_or_key is the host path under RELAY_PRIVATE_DIR/<stamp>/.
 # gated=true iff comp==relay. github_release=<comp>/<stamp> for public, ""
 # for relay. prerelease=true always.
+warn() { echo "⚠ $*" >&2; }
 register_staged() {
     local comp="$1" stamp="$2" semver="$3" stage_dir="$4"
     local gh_tag="${5:-}"
@@ -144,10 +145,12 @@ register_staged() {
         return 0
     fi
 
-    local url="${BURROWEE_CONSOLE_URL}/api/v1/manage/releases"
+    local url="${BURROWEE_CONSOLE_URL}"
     local gated=false
     local github_release="${gh_tag}"
     [ "${comp}" = relay ] && gated=true && github_release=""
+
+    json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
     # Build artifacts JSON.
     # For each platform zip, extract sha256 + size, derive url_or_key.
@@ -192,7 +195,7 @@ register_staged() {
         local sep=""
         [ "${first}" = 1 ] || sep=","
         first=0
-        artifacts_json="${artifacts_json}${sep}\"${plat}\":{\"url_or_key\":\"${url_or_key}\",\"sha256\":\"${sha256}\",\"size\":${size}}"
+        artifacts_json="${artifacts_json}${sep}\"${plat}\":{\"url_or_key\":\"$(json_escape "${url_or_key}")\",\"sha256\":\"$(json_escape "${sha256}")\",\"size\":${size}}"
     done
     artifacts_json="${artifacts_json}}"
 
@@ -207,29 +210,30 @@ register_staged() {
     fi
 
     local body
-    body="{\"component\":\"${comp}\",\"version\":\"${stamp}\",\"semver\":\"${semver}\",\"gated\":${gated},\"artifacts\":${artifacts_json},\"sums_ref\":\"${sums_ref}\",\"minisig_ref\":\"${minisig_ref}\",\"github_release\":\"${github_release}\",\"prerelease\":true}"
+    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":${artifacts_json},\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true}"
 
     if [ "${DRY_RUN}" = 1 ]; then
-        echo "→ dry-run: would POST ${url}"
+        echo "→ dry-run: would POST ${url}/api/v1/manage/releases"
         echo "  body: ${body}"
         return 0
     fi
 
     echo "→ registering staged release with console: ${comp} ${stamp}" >&2
+    local token="${BURROWEE_CONSOLE_RELEASE_TOKEN}"
     local http_code
-    http_code="$(curl -fsS -w '%{http_code}' -o /dev/null \
-        -X POST "${url}" \
-        -H "Authorization: Bearer ${BURROWEE_CONSOLE_RELEASE_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "${body}" 2>/dev/null)" || {
-        echo "⚠ console registration failed for ${comp} ${stamp} — artifacts already published; re-register manually" >&2
-        return 0
-    }
+    http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+        -X POST --data "${body}" "${url}/api/v1/manage/releases" 2>/dev/null)"
+    local rc=$?
+    if [ "${rc}" -ne 0 ] || [ -z "${http_code}" ]; then
+        warn "console registration: could not reach ${url} (curl rc=${rc}); register manually later"; return 0
+    fi
     case "${http_code}" in
-        201) echo "✓ console: staged row created (201)" ;;
-        409) echo "⚠ console: duplicate (component,version) — row already exists (409)" ;;
-        *)   echo "⚠ console registration returned HTTP ${http_code} for ${comp} ${stamp} — re-register manually" >&2 ;;
+        201|200) echo "✓ registered staged release in console (${comp} ${stamp})" ;;
+        409)     warn "console: ${comp} ${stamp} already registered (409) — ok" ;;
+        *)       warn "console registration failed: HTTP ${http_code} for ${comp} ${stamp}; register manually" ;;
     esac
+    return 0
 }
 
 # ---- pre-flight -------------------------------------------------------------

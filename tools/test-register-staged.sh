@@ -249,13 +249,14 @@ PYEOF
     SERVER_PID=$!
 
     # Poll until the server is accepting connections (up to 5 s).
+    # Drop -f so any HTTP response (including 404 from the stub's GET handler
+    # absence) counts as ready — with -f, curl exits non-zero on 4xx and the
+    # loop only exits on timeout.
     i=0
-    until curl -fsS --connect-timeout 0.5 "http://127.0.0.1:${TEST2_PORT}/" \
-          -o /dev/null 2>/dev/null || [ "${i}" -ge 100 ]; do
+    until curl -sS -o /dev/null --connect-timeout 0.5 "http://127.0.0.1:${TEST2_PORT}/" \
+          >/dev/null 2>&1 || [ "${i}" -ge 100 ]; do
         i=$((i+1)); sleep 0.05
     done
-    # A GET to the root will 404 (no GET handler) — we just need it to connect.
-    # That's fine; we only need it listening before our POST.
 
     STAGE2="${W}/stage2"
     make_stage "${STAGE2}" "gateway"
@@ -366,6 +367,89 @@ printf '%s\n' "${RESULT4}" | grep -q '"component":"relay"' \
     || die "TEST 4: expected component=relay. Output:\n${RESULT4}"
 
 echo "✓ TEST 4 PASSED — relay: gated=true, empty github_release, host-path artifacts"
+
+# =============================================================================
+# TEST 5 — 409 response: treated as success (warning logged, exit 0).
+# =============================================================================
+say "TEST 5 — 409 response: warning logged, function returns 0"
+
+if [ -z "${PYTHON_BIN}" ]; then
+    skip "TEST 5 — python3 not found; skipping 409-stub test"
+else
+    TEST5_PORT="${REGISTER_TEST5_PORT:-18544}"
+
+    # One-shot HTTP server: always replies 409.
+    SERVER5_SCRIPT="${W}/stub_server_409.py"
+    cat > "${SERVER5_SCRIPT}" <<PYEOF
+import socketserver, http.server, sys, threading
+
+port = int(sys.argv[1])
+done = threading.Event()
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        self.rfile.read(length)
+        self.send_response(409)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{"error":"already exists"}')
+        done.set()
+    def log_message(self, *a): pass
+
+class ReuseTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with ReuseTCPServer(('127.0.0.1', port), Handler) as s:
+    t = threading.Thread(target=s.serve_forever)
+    t.daemon = True
+    t.start()
+    done.wait(timeout=15)
+    s.shutdown()
+PYEOF
+
+    "${PYTHON_BIN}" "${SERVER5_SCRIPT}" "${TEST5_PORT}" &
+    SERVER_PID=$!
+
+    # Poll until ready (any HTTP response counts).
+    i=0
+    until curl -sS -o /dev/null --connect-timeout 0.5 "http://127.0.0.1:${TEST5_PORT}/" \
+          >/dev/null 2>&1 || [ "${i}" -ge 100 ]; do
+        i=$((i+1)); sleep 0.05
+    done
+
+    STAGE5="${W}/stage5"
+    make_stage "${STAGE5}" "cli"
+    EXTRACT5="${W}/fn5.sh"
+    extract_register_staged "${EXTRACT5}"
+
+    RESULT5="$(
+        DRY_RUN=0 \
+        BURROWEE_CONSOLE_URL="http://127.0.0.1:${TEST5_PORT}" \
+        BURROWEE_CONSOLE_RELEASE_TOKEN="tok-409-test" \
+        RELEASE_REPO="${RELEASE_REPO}" \
+        RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR}" \
+        SHA256="${SHA256}" \
+        bash -c "
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            . '${EXTRACT5}'
+            register_staged cli v0.1.0.2026.06.17.abcd0409 0.1.0 '${STAGE5}' cli/v0.1.0.2026.06.17.abcd0409
+            echo 'exit_code:0'
+        " 2>&1
+    )"
+
+    wait "${SERVER_PID}" 2>/dev/null || true
+    SERVER_PID=""
+
+    printf '%s\n' "${RESULT5}" | grep -q 'already registered' \
+        || die "TEST 5: 'already registered' warning not found. Output:\n${RESULT5}"
+    printf '%s\n' "${RESULT5}" | grep -q '409' \
+        || die "TEST 5: '409' not mentioned in output. Output:\n${RESULT5}"
+    printf '%s\n' "${RESULT5}" | grep -q 'exit_code:0' \
+        || die "TEST 5: function returned non-zero on 409 (shell exited before sentinel). Output:\n${RESULT5}"
+
+    echo "✓ TEST 5 PASSED — 409 response: warning logged, returns 0"
+fi
 
 # =============================================================================
 echo ""
