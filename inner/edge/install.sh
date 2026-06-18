@@ -71,6 +71,22 @@ for b in $BINS; do
 done
 echo "installed to $BIN_DIR: $BINS"
 
+# ---- cover assets (decoy pages for handleCover file mode) -------------------
+# Lay admin.html + default.html into the component covers dir, non-clobbering
+# (operator-customized covers survive). Force with BURROWEE_FORCE_COVER=1.
+if [ -d "./covers" ]; then
+    mkdir -p "$COMP_HOME/covers"
+    for cf in admin.html default.html; do
+        [ -f "./covers/$cf" ] || continue
+        if [ -f "$COMP_HOME/covers/$cf" ] && [ -z "${BURROWEE_FORCE_COVER:-}" ]; then
+            continue
+        fi
+        install -m 0644 "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
+            || cp "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
+            || echo "warning: could not install cover $cf" >&2
+    done
+fi
+
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
