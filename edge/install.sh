@@ -179,4 +179,4 @@ unzip -q -o "$TMP/$ZIP" -d "$TMP/x" || fail "zip extraction failed — corrupt d
 ok "verified — running inner installer"
 # Run with cwd = the unzipped dir: the inner installer resolves the binaries
 # relative to its own location (./burrowee, ./burrowee-cli, …).
-( cd "$TMP/x" && PREFIX="$PREFIX" BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh ./install.sh )
+( cd "$TMP/x" && PREFIX="$PREFIX" BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" BURROWEE_VERSION="$TAG" sh ./install.sh )
