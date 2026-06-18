@@ -237,6 +237,45 @@ ok "verified — running inner installer"
 # relative to its own location.
 ( cd "$TMP/x" && PREFIX="$PREFIX" BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh ./install.sh )
 
+# ---- PATH persistence ---------------------------------------------------
+# Idempotently add PREFIX/bin to the operator's shell rc so a fresh shell finds
+# the binaries. bash reads ~/.bashrc for INTERACTIVE shells, but a LOGIN shell
+# (ssh) reads the first of ~/.bash_profile / ~/.bash_login / ~/.profile and does
+# NOT auto-source ~/.bashrc — so write to both the interactive rc and the login
+# file, else PATH is missing over ssh. An unset/unknown $SHELL defaults to bash.
+# Fault-tolerant: an unwritable rc never aborts (the bins are already installed).
+if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ]; then
+    BIN_DIR="$PREFIX/bin"
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) : ;;   # already on PATH this shell
+        *)
+            case "$(basename "${SHELL:-bash}")" in
+                zsh)
+                    rc_files="$HOME/.zshrc"
+                    [ -f "$HOME/.zprofile" ] && rc_files="$rc_files $HOME/.zprofile"
+                    ;;
+                *)  # bash (and any unrecognized shell defaults to bash rc files)
+                    rc_files="$HOME/.bashrc"
+                    if   [ -f "$HOME/.bash_profile" ]; then rc_files="$rc_files $HOME/.bash_profile"
+                    elif [ -f "$HOME/.bash_login" ];   then rc_files="$rc_files $HOME/.bash_login"
+                    else rc_files="$rc_files $HOME/.profile"; fi
+                    ;;
+            esac
+            for rc in $rc_files; do
+                if [ -f "$rc" ] && grep -q 'burrowee PATH' "$rc" 2>/dev/null; then
+                    continue   # marker already present in this file
+                fi
+                {
+                    printf '\n# >>> burrowee PATH >>>\n'
+                    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
+                    printf '# <<< burrowee PATH <<<\n'
+                } >> "$rc" 2>/dev/null && info "added $BIN_DIR to PATH in $rc"
+            done
+            info "run: export PATH=\"$BIN_DIR:\$PATH\"   (or open a new shell) to use it now"
+            ;;
+    esac
+fi
+
 # ---- store operator key for relay update --------------------------------
 # Store the key at the canonical path so `relay update` can find it without
 # requiring --key on every invocation.
