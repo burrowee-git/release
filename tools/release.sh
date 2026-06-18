@@ -2,7 +2,7 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|all> [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|all> [--dry-run] [--apple] [--bump-minor|--bump-major]
 #
 # For each requested component this:
 #   1. Stamps the version (bump unless --dry-run) via tools/version.sh.
@@ -10,7 +10,10 @@
 #   3. Cross-compiles the component for darwin/{arm64,amd64} + linux/{arm64,amd64},
 #      assembling each target into dist/<stamp>/burrowee-<comp>-<os>-<arch>/ that
 #      carries the component bins + `burrowee` + the inner installer renamed to
-#      install.sh, then `zip -j`s it.
+#      install.sh; with --apple, Developer-ID-signs the darwin Mach-O bins, then
+#      `zip -j`s it; with --apple, notarizes each darwin zip (online ticket — bare
+#      Mach-O/zip can't be stapled). All Apple steps run BEFORE the sums step so
+#      the checksums cover the exact signed/notarized bytes.
 #   4. Writes a sorted SHA256SUMS.txt over the four zips.
 #   5. Signs SHA256SUMS.txt with minisign (real key from release.dp, or the TEST
 #      key on --dry-run).
@@ -35,6 +38,7 @@
 #   BURROWEE_SRC_DISPATCHER burrowee dispatcher source worktree
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
+#   MODERNECH_SIGN          Apple signer path (default ~/bin/modernech-sign; --apple only)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,17 +53,19 @@ export GO_BIN
 WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
+APPLE_SIGN=0   # Developer ID sign + notarize macOS binaries (opt-in, --apple)
 for arg in "$@"; do
     case "${arg}" in
         cli|gateway|edge|all) WHAT="${arg}" ;;
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
+        --apple)              APPLE_SIGN=1 ;;
         -h|--help)            sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
-[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|all> [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|all> [--dry-run] [--apple] [--bump-minor|--bump-major]" >&2; exit 2; }
 
 # ---- config / defaults ------------------------------------------------------
 RELEASE_HOST="${RELEASE_HOST:-nsm.renative.com}"
@@ -131,6 +137,23 @@ if [ "${DRY_RUN}" != 1 ]; then
         || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
     [ -f "${AGE_KEY_AGE}" ] \
         || { echo "✗ release.dp signing key not found: ${AGE_KEY_AGE}" >&2; exit 1; }
+fi
+
+# ---- Apple signing pre-flight (only when --apple) ---------------------------
+# Developer-ID-sign + notarize the macOS binaries via the shared modernech-sign
+# tool (Modernech LLC, ~/bin/modernech-sign — see ~/.claude/guidelines/APPLE-SIGNING.md).
+# RELEASE-ONLY + EXPLICIT: off by default; only this gate touches codesign/notary.
+# Pre-flight is fail-fast so a long build never dies at the signing step.
+if [ "${APPLE_SIGN}" = 1 ]; then
+    [ "$(uname -s)" = "Darwin" ] \
+        || { echo "✗ --apple requires a macOS build host (codesign/notarytool are macOS-only)" >&2; exit 1; }
+    MODERNECH_SIGN="${MODERNECH_SIGN:-${HOME}/bin/modernech-sign}"
+    command -v "${MODERNECH_SIGN}" >/dev/null 2>&1 || [ -x "${MODERNECH_SIGN}" ] \
+        || { echo "✗ --apple set but modernech-sign not found (tried '${MODERNECH_SIGN}')" >&2; exit 1; }
+    # The Developer ID Application identity must be present in the login keychain.
+    security find-identity -v -p codesigning 2>/dev/null | grep -q "$("${MODERNECH_SIGN}" id)" \
+        || { echo "✗ Developer ID signing identity not found ($("${MODERNECH_SIGN}" id 2>/dev/null)) — import it and retry" >&2; exit 1; }
+    echo "→ Apple signing enabled (Developer ID + notarize via ${MODERNECH_SIGN})" >&2
 fi
 
 # components to cut
@@ -318,9 +341,32 @@ do_release() {
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
+        # Apple sign (darwin only, --apple only): Developer-ID-sign every Mach-O
+        # in the assembled dir (component bins + the `burrowee` dispatcher; NOT the
+        # install.sh shell script) BEFORE zipping, so the signed bytes are what the
+        # zip — and therefore SHA256SUMS.txt — covers. macOS only needs the binary
+        # signed (the zip is then notarized below). modernech-sign uses Developer
+        # ID + --options runtime + --timestamp (see APPLE-SIGNING.md).
+        if [ "${APPLE_SIGN}" = 1 ] && [ "${os}" = darwin ]; then
+            # shellcheck disable=SC2086  # ${bins} is an intentional space-list of bin names; word-splitting is the point.
+            for b in ${bins} burrowee; do
+                "${MODERNECH_SIGN}" sign "${assemble}/${b}" >&2
+            done
+        fi
+
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
+
+        # Notarize the darwin zip (--apple only) BEFORE the checksum/minisign step
+        # so SHA256SUMS.txt covers the exact published bytes. notarytool submit does
+        # NOT alter the zip; a bare Mach-O / .zip cannot be stapled, so the ticket
+        # lives in Apple's online DB and Gatekeeper checks it online on first run
+        # (quarantined browser downloads only). See APPLE-SIGNING.md § Stapling.
+        if [ "${APPLE_SIGN}" = 1 ] && [ "${os}" = darwin ]; then
+            "${MODERNECH_SIGN}" notarize "${stage}/${asset}" >&2
+        fi
+
         zips+=("${asset}")
         rm -rf "${out_bins}"
     done
