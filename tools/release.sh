@@ -730,6 +730,11 @@ NOTES
     # shellcheck disable=SC2029  # ${STATIC_DIR}/${comp} are local, controlled values — expanding client-side into the remote command is intended.
     ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
     scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
+    # preflight.sh is a sibling static file the installer fetches before the trust
+    # gate (sha256-pinned in install.sh). Ship it alongside install.sh.
+    if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/preflight.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/preflight.sh"
+    fi
     if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
         scp -q "${REPO_ROOT}/burrowee-release.pub" "${RELEASE_HOST}:${STATIC_DIR}/burrowee-release.pub"
     fi
@@ -746,7 +751,7 @@ NOTES
     done
 
     # (8) marker commit.
-    git add "versions/${comp}" "${comp}/install.sh"
+    git add "versions/${comp}" "${comp}/install.sh" "${comp}/preflight.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
