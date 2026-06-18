@@ -2,7 +2,7 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|all> [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|relay|all> [--dry-run] [--bump-minor|--bump-major]
 #
 # For each requested component this:
 #   1. Stamps the version (bump unless --dry-run) via tools/version.sh.
@@ -19,6 +19,13 @@
 #      scp's the static surface to the release host.
 #   8. (non-dry-run) records a [RELEASED: <comp>] marker commit.
 #
+# The relay target is a PRIVATE publish (scp to RELAY_PRIVATE_DIR on RELEASE_HOST).
+# It does NOT push a GitHub Release, git tag, or update the public site. It does:
+#   - Build 4 platform zips + SHA256SUMS.txt + .minisig (same as public comps).
+#   - scp zips + SHA256SUMS.txt + .minisig to RELEASE_HOST:RELAY_PRIVATE_DIR/<stamp>/.
+#   - Update top-level latest.* set in that dir (latest.<os>-<arch>.zip + SHA256SUMS.txt + .minisig).
+#   - Prune stamp dirs to keep the newest 3.
+#
 # On --dry-run only steps 1-5 run, and the version bump is REVERTED — the tree is
 # left exactly as it was, just with throwaway artifacts under dist/<stamp>/.
 #
@@ -33,6 +40,9 @@
 #   BURROWEE_SRC_GATEWAY    gateway component source worktree
 #   BURROWEE_SRC_EDGE       edge component source worktree
 #   BURROWEE_SRC_DISPATCHER burrowee dispatcher source worktree
+#   BURROWEE_SRC_RELAY      relay component source worktree (default: relay main worktree)
+#   RELAY_PRIVATE_DIR       private dir on the release host for relay artifacts
+#                           (default /srv/relay-releases)
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
 set -euo pipefail
@@ -51,7 +61,7 @@ DRY_RUN=0
 BUMP_KIND="patch"
 for arg in "$@"; do
     case "${arg}" in
-        cli|gateway|edge|all) WHAT="${arg}" ;;
+        cli|gateway|edge|relay|all) WHAT="${arg}" ;;
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
@@ -59,7 +69,7 @@ for arg in "$@"; do
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
-[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|all> [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|relay|all> [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
 
 # ---- config / defaults ------------------------------------------------------
 RELEASE_HOST="${RELEASE_HOST:-nsm.renative.com}"
@@ -75,6 +85,8 @@ SRC_CLI="${BURROWEE_SRC_CLI:-${BB}/cli/code/cli}"
 SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/gateway}"
 SRC_EDGE="${BURROWEE_SRC_EDGE:-${BB}/edge/code/edge}"
 SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}"
+SRC_RELAY="${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}"
+RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR:-/srv/relay-releases}"
 
 # edge skills source-of-truth (the edge repo owns these)
 EDGE_SKILLS_SRC="${SRC_EDGE}/skills"
@@ -91,6 +103,7 @@ src_for() {
         cli)     printf '%s' "${SRC_CLI}" ;;
         gateway) printf '%s' "${SRC_GATEWAY}" ;;
         edge)    printf '%s' "${SRC_EDGE}" ;;
+        relay)   printf '%s' "${SRC_RELAY}" ;;
     esac
 }
 
@@ -100,6 +113,7 @@ bins_for() {
         cli)     printf '%s' "burrowee-cli" ;;
         gateway) printf '%s' "burrowee-gateway burrowee-register" ;;
         edge)    printf '%s' "burrowee-edge burrowee-edge-cli" ;;
+        relay)   printf '%s' "burrowee-relay" ;;
     esac
 }
 
@@ -150,7 +164,12 @@ for comp in "${COMPONENTS[@]}"; do
             || { echo "✗ ${comp} source worktree is dirty: ${src}" >&2; exit 1; }
     fi
 done
-[ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
+# relay does not bundle the dispatcher; skip the dispatcher-check for relay-only runs.
+relay_only=0
+[ "${#COMPONENTS[@]}" = 1 ] && [ "${COMPONENTS[0]}" = relay ] && relay_only=1
+if [ "${relay_only}" != 1 ]; then
+    [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
+fi
 
 # ---- resolve the signing key ------------------------------------------------
 # Sets SIGN_KEY. For the real key we age-decrypt into a chmod-600 tmpfile and
@@ -228,11 +247,13 @@ console_pub_hex() {
 # releases instead of sitting at 0.1.0 forever — `version.sh --bump-patch`
 # stages versions/burrowee, which then rides the first component's [RELEASED]
 # marker commit (`git commit` with no pathspec commits all staged files).
-if [ "${DRY_RUN}" != 1 ]; then
-    SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --bump-patch >/dev/null
+if [ "${relay_only}" != 1 ]; then
+    if [ "${DRY_RUN}" != 1 ]; then
+        SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --bump-patch >/dev/null
+    fi
+    DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
+    DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
 fi
-DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
-DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
 build_dispatcher() {
     # build_dispatcher <os> <arch> — idempotent; populates $DISP_DIR/<os>-<arch>/burrowee
     local os="$1" arch="$2" out="${DISP_DIR}/$1-$2"
@@ -241,6 +262,181 @@ build_dispatcher() {
     COMP=burrowee SRC_DIR="${SRC_DISPATCHER}" TARGETOS="${os}" TARGETARCH="${arch}" \
         STAMP="${DISP_STAMP}" OUT_DIR="${out}" GO_BIN="${GO_BIN}" \
         bash "${REPO_ROOT}/tools/build.sh" >&2
+}
+
+# ---- relay private-publish ---------------------------------------------------
+do_release_relay() {
+    local src="${SRC_RELAY}"
+    local comp=relay
+
+    echo
+    echo "=== burrowee relay release (private) ==="
+
+    # (1) stamp — bump unless dry-run.
+    local old_semver new_semver stamp
+    old_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+    if [ "${DRY_RUN}" = 1 ]; then
+        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
+        new_semver="${old_semver}"
+    else
+        case "${BUMP_KIND}" in
+            patch) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-patch >/dev/null ;;
+            minor) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-minor >/dev/null ;;
+            major) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-major >/dev/null ;;
+        esac
+        new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
+    fi
+
+    revert_relay_version() {
+        git restore --staged "versions/${comp}" 2>/dev/null || true
+        git checkout -- "versions/${comp}" 2>/dev/null || true
+    }
+    trap 'revert_relay_version; shred_key' ERR
+
+    echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
+    echo "Stamp   : ${stamp}"
+    echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
+    echo "Dry-run : ${DRY_RUN}"
+
+    local stage="${REPO_ROOT}/dist/${stamp}"
+    rm -rf "${stage}"
+    mkdir -p "${stage}"
+
+    # (2) per-target build + assemble + zip.
+    local zips=() pair os arch out_bins assemble asset b
+    for pair in "${TARGETS[@]}"; do
+        read -r os arch <<<"${pair}"
+        out_bins="${stage}/.bins-${os}-${arch}"
+        mkdir -p "${out_bins}"
+
+        COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \
+            STAMP="${stamp}" OUT_DIR="${out_bins}" GO_BIN="${GO_BIN}" \
+            bash "${REPO_ROOT}/tools/build.sh" >&2
+
+        # assemble: component bin + inner installer (→ install.sh). NO dispatcher.
+        assemble="${stage}/burrowee-${comp}-${os}-${arch}"
+        rm -rf "${assemble}"
+        mkdir -p "${assemble}"
+        # shellcheck disable=SC2086
+        for b in burrowee-relay; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
+        cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
+        chmod 0755 "${assemble}/install.sh"
+
+        asset="burrowee-${comp}-${os}-${arch}.zip"
+        rm -f "${stage}/${asset}"
+        ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
+        zips+=("${asset}")
+        rm -rf "${out_bins}"
+    done
+
+    # (3) sums + sign over the LATEST-NAMED set.
+    # We name the zips as latest.<os>-<arch>.zip so the gate-served paths are
+    # stable filenames the installer can hard-code:
+    #   /relay/release/latest.darwin-arm64.zip, etc.
+    # We also archive a copy under <stamp>/ for the prune-to-3 retention.
+    local latest_stage="${REPO_ROOT}/dist/${stamp}/.latest"
+    mkdir -p "${latest_stage}"
+    for pair in "${TARGETS[@]}"; do
+        read -r os arch <<<"${pair}"
+        cp "${stage}/burrowee-${comp}-${os}-${arch}.zip" \
+           "${latest_stage}/latest.${os}-${arch}.zip"
+    done
+    # SHA256SUMS over the latest.* filenames (what the installer verifies).
+    # shellcheck disable=SC2086
+    ( cd "${latest_stage}" && ${SHA256} latest.*.zip | sort > SHA256SUMS.txt )
+    ( cd "${latest_stage}" && minisign -S -s "${SIGN_KEY}" -m SHA256SUMS.txt \
+        -t "burrowee relay ${stamp}" >/dev/null )
+
+    echo "Built ${#zips[@]} zips + latest.* set + SHA256SUMS.txt + SHA256SUMS.txt.minisig:"
+    # shellcheck disable=SC2012
+    ( cd "${latest_stage}" && ls -1 latest.*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
+
+    if [ "${DRY_RUN}" = 1 ]; then
+        # Print the would-scp / would-prune plan.
+        echo ""
+        echo "✓ dry-run relay: would publish to ${RELEASE_HOST}:${RELAY_PRIVATE_DIR}"
+        echo "  stamp dir  : ${RELAY_PRIVATE_DIR}/${stamp}/"
+        echo "  scp files  :"
+        for pair in "${TARGETS[@]}"; do
+            read -r os arch <<<"${pair}"
+            echo "    latest.${os}-${arch}.zip → ${RELAY_PRIVATE_DIR}/${stamp}/"
+        done
+        echo "    SHA256SUMS.txt → ${RELAY_PRIVATE_DIR}/${stamp}/"
+        echo "    SHA256SUMS.txt.minisig → ${RELAY_PRIVATE_DIR}/${stamp}/"
+        echo "  latest.* update :"
+        for pair in "${TARGETS[@]}"; do
+            read -r os arch <<<"${pair}"
+            echo "    latest.${os}-${arch}.zip → ${RELAY_PRIVATE_DIR}/"
+        done
+        echo "    SHA256SUMS.txt → ${RELAY_PRIVATE_DIR}/"
+        echo "    SHA256SUMS.txt.minisig → ${RELAY_PRIVATE_DIR}/"
+        echo "  prune: would list ${RELAY_PRIVATE_DIR}/ → keep newest 3 stamp dirs, delete rest"
+        echo "(artifacts under ${stage}/; version bump reverted; no scp/ssh)"
+        revert_relay_version
+        trap shred_key ERR
+        return 0
+    fi
+
+    # (4) non-dry-run: scp stamp dir + update latest.* + prune.
+    # pre-flight: ssh check already done above in the non-relay path, but relay
+    # uses the same RELEASE_HOST; verify it's still reachable.
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "${RELEASE_HOST}" 'true' 2>/dev/null \
+        || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
+
+    # shellcheck disable=SC2029
+    ssh "${RELEASE_HOST}" "mkdir -p '${RELAY_PRIVATE_DIR}/${stamp}'"
+    # scp stamp copies (archived versions: latest-named zips + sums)
+    # The SHA256SUMS.txt covers latest.<os>-<arch>.zip filenames, so the stamp
+    # dir carries the latest-named copies too — making it internally consistent
+    # (the stamped burrowee-relay-<os>-<arch>.zip names are for local retention
+    # only and are NOT referenced by SHA256SUMS.txt).
+    for pair in "${TARGETS[@]}"; do
+        read -r os arch <<<"${pair}"
+        scp -q "${latest_stage}/latest.${os}-${arch}.zip" \
+            "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/${stamp}/latest.${os}-${arch}.zip"
+    done
+    scp -q "${latest_stage}/SHA256SUMS.txt" \
+        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt"
+    scp -q "${latest_stage}/SHA256SUMS.txt.minisig" \
+        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt.minisig"
+
+    # update top-level latest.* set (atomic enough — each file overwritten in place)
+    for pair in "${TARGETS[@]}"; do
+        read -r os arch <<<"${pair}"
+        scp -q "${latest_stage}/latest.${os}-${arch}.zip" \
+            "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/latest.${os}-${arch}.zip"
+    done
+    scp -q "${latest_stage}/SHA256SUMS.txt" \
+        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/SHA256SUMS.txt"
+    scp -q "${latest_stage}/SHA256SUMS.txt.minisig" \
+        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/SHA256SUMS.txt.minisig"
+
+    # prune: keep newest 3 stamp dirs
+    # shellcheck source=tools/prune_releases_keep.sh
+    . "${REPO_ROOT}/tools/prune_releases_keep.sh"
+    # list stamp dirs on the remote (lines like "v0.1.0.2026.06.17.abc12345")
+    # shellcheck disable=SC2029
+    remote_stamps="$(ssh "${RELEASE_HOST}" "find '${RELAY_PRIVATE_DIR}' -maxdepth 1 -type d -name 'v*' -printf '%f\n'" 2>/dev/null || true)"
+    if [ -n "${remote_stamps}" ]; then
+        # shellcheck disable=SC2086
+        to_delete="$(keep_latest 3 ${remote_stamps})"
+        if [ -n "${to_delete}" ]; then
+            while IFS= read -r d; do
+                [ -n "${d}" ] || continue
+                echo "→ pruning ${RELAY_PRIVATE_DIR}/${d}" >&2
+                # shellcheck disable=SC2029
+                ssh "${RELEASE_HOST}" "rm -rf '${RELAY_PRIVATE_DIR}/${d}'"
+            done <<<"${to_delete}"
+        fi
+    fi
+
+    # marker commit (no gh release / no git tag)
+    git add "versions/${comp}"
+    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+
+    echo "✓ released relay ${stamp} (private, ${RELAY_PRIVATE_DIR})"
+    trap shred_key ERR
 }
 
 # ---- per-component release --------------------------------------------------
@@ -434,11 +630,15 @@ NOTES
 }
 
 for comp in "${COMPONENTS[@]}"; do
-    do_release "${comp}"
+    if [ "${comp}" = relay ]; then
+        do_release_relay
+    else
+        do_release "${comp}"
+    fi
 done
 
 # leave dispatcher build cache for inspection on dry-run; clean on real release
-if [ "${DRY_RUN}" != 1 ]; then rm -rf "${DISP_DIR}"; fi
+if [ "${DRY_RUN}" != 1 ] && [ "${relay_only}" != 1 ]; then rm -rf "${DISP_DIR}"; fi
 
 echo
 echo "✓ done (${WHAT}${DRY_RUN:+, dry-run=${DRY_RUN}})"
