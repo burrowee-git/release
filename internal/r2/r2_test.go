@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -38,8 +39,18 @@ func TestPutSignsAndSends(t *testing.T) {
 	if f.got.URL.String() != "https://acct.r2.cloudflarestorage.com/downloads/cli/v1/x.zip" {
 		t.Errorf("url: %s", f.got.URL.String())
 	}
-	if f.got.Header.Get("Authorization") == "" || f.got.Header.Get("X-Amz-Content-Sha256") == "" {
+	authz := f.got.Header.Get("Authorization")
+	if authz == "" || f.got.Header.Get("X-Amz-Content-Sha256") == "" {
 		t.Error("missing sigv4 headers")
+	}
+	if !strings.HasPrefix(authz, "AWS4-HMAC-SHA256 Credential=AKID/") {
+		t.Errorf("Authorization missing expected prefix: %s", authz)
+	}
+	if !strings.Contains(authz, "/auto/s3/aws4_request") {
+		t.Errorf("Authorization missing scope: %s", authz)
+	}
+	if f.got.Header.Get("X-Amz-Date") == "" {
+		t.Error("missing X-Amz-Date header")
 	}
 	if f.got.Header.Get("Content-Type") != "application/zip" {
 		t.Errorf("content-type: %s", f.got.Header.Get("Content-Type"))
