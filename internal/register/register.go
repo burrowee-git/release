@@ -26,6 +26,10 @@ func Register(cfg Config, payload []byte, dryRun bool) error {
 		return nil
 	}
 
+	if cfg.ConsoleURL == "" {
+		return fmt.Errorf("register: console_url not configured (set it in ~/.burrowee/release/config.toml or BURROWEE_CONSOLE_URL)")
+	}
+
 	// Step 1: fetch a nonce.
 	nonceRaw, nonceB64, err := fetchNonce(cfg)
 	if err != nil {
@@ -52,7 +56,7 @@ func Register(cfg Config, payload []byte, dryRun bool) error {
 		return fmt.Errorf("POST releases: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
@@ -80,6 +84,7 @@ func fetchNonce(cfg Config) (raw []byte, b64 string, err error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, "", fmt.Errorf("nonce: unexpected status %d", resp.StatusCode)
 	}
 
