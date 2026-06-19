@@ -55,21 +55,25 @@ GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 export GO_BIN
 
+# ---- build_register_helper: compile burrowee-release-register to dist/.tools/ ----
+# Called from both the publish intercept and the release-cut flow.
+REGISTER_BIN="${REPO_ROOT}/dist/.tools/burrowee-release-register"
+build_register_helper() {
+    mkdir -p "${REPO_ROOT}/dist/.tools"
+    echo "→ building burrowee-release-register helper" >&2
+    "${GO_BIN}" build -buildvcs=false -o "${REGISTER_BIN}" ./cmd/burrowee-release-register \
+        || { echo "✗ failed to build burrowee-release-register" >&2; exit 1; }
+}
+
 # ---- publish: push a promoted version's public binaries to R2 ----------------
 # Handled before the normal arg loop so the release-cut pre-flight (signing key,
-# ssh, ghp) is never entered.  REGISTER_BIN is built inline here since the
-# release-cut block that normally builds it runs later.
+# ssh, ghp) is never entered.
 if [ "${1:-}" = "publish" ]; then
     shift
     comp="${1:-}"
     [ -n "${comp}" ] || { echo "usage: release.sh publish <cli|gateway|edge|all> [--version <v>]" >&2; exit 1; }
     shift || true
-    # NOTE: keep in sync with the REGISTER_BIN build block in the release-cut flow below.
-    REGISTER_BIN="${REPO_ROOT}/dist/.tools/burrowee-release-register"
-    mkdir -p "${REPO_ROOT}/dist/.tools"
-    echo "→ building burrowee-release-register helper" >&2
-    "${GO_BIN}" build -buildvcs=false -o "${REGISTER_BIN}" ./cmd/burrowee-release-register \
-        || { echo "✗ failed to build burrowee-release-register" >&2; exit 1; }
+    build_register_helper
     exec "${REGISTER_BIN}" publish --comp "${comp}" "$@"
 fi
 
@@ -365,11 +369,7 @@ resolve_sign_key() {
 resolve_sign_key
 
 # ---- build the register helper (host-only; validates it compiles) ------------
-REGISTER_BIN="${REPO_ROOT}/dist/.tools/burrowee-release-register"
-mkdir -p "${REPO_ROOT}/dist/.tools"
-echo "→ building burrowee-release-register helper" >&2
-"${GO_BIN}" build -buildvcs=false -o "${REGISTER_BIN}" ./cmd/burrowee-release-register \
-    || { echo "✗ failed to build burrowee-release-register" >&2; exit 1; }
+build_register_helper
 
 # ---- edge console pubkey ----------------------------------------------------
 # Precedence: BURROWEE_CONSOLE_PUB (or legacy BURROWEE_CLOUD_PUB) override, else

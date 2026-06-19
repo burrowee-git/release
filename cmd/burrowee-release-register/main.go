@@ -114,16 +114,12 @@ func runPublish(args []string) {
 		fs.Usage()
 		os.Exit(1)
 	}
-	consoleURL, err := register.ConsoleURLFrom(*dir)
-	if err != nil {
-		log.Fatalf("publish: %v", err)
-	}
-	r2cfg, err := register.LoadR2Config(*dir)
+	consoleURL, r2cfg, err := register.LoadPublishConfig(*dir)
 	if err != nil {
 		log.Fatalf("publish: %v", err)
 	}
 	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
-	deps := register.PublishDeps{ConsoleURL: consoleURL, HTTP: http.DefaultClient, R2: client}
+	deps := register.PublishDeps{ConsoleURL: consoleURL, HTTP: http.DefaultClient, R2: client, Out: os.Stdout}
 
 	comps := []string{*comp}
 	if *comp == "all" {

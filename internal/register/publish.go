@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 )
 
 // Putter uploads an object to R2. Satisfied by *r2.Client.
@@ -27,6 +28,15 @@ type PublishDeps struct {
 	ConsoleURL string
 	HTTP       Getter
 	R2         Putter
+	// Out receives progress lines ("✓ <key>", "⚠ …"). Defaults to io.Discard when nil.
+	Out io.Writer
+}
+
+func (d PublishDeps) out() io.Writer {
+	if d.Out != nil {
+		return d.Out
+	}
+	return io.Discard
 }
 
 type artifactEntry struct {
@@ -56,11 +66,22 @@ func Publish(ctx context.Context, d PublishDeps, comp, version string) error {
 		return fmt.Errorf("publish: %s: empty version in catalog", comp)
 	}
 
-	// Binaries (sha256-verified).
-	for plat, a := range row.Artifacts {
+	// Binaries (size + sha256 verified). Upload in deterministic platform order.
+	plats := make([]string, 0, len(row.Artifacts))
+	for plat := range row.Artifacts {
+		plats = append(plats, plat)
+	}
+	sort.Strings(plats)
+
+	for _, plat := range plats {
+		a := row.Artifacts[plat]
 		body, err := download(d.HTTP, a.URLOrKey)
 		if err != nil {
 			return fmt.Errorf("publish: %s/%s: %w", comp, plat, err)
+		}
+		// Size cross-check (belt-and-suspenders; sha256 below is the hard gate).
+		if a.Size > 0 && int64(len(body)) != a.Size {
+			return fmt.Errorf("publish: %s/%s: size mismatch (catalog %d, got %d)", comp, plat, a.Size, len(body))
 		}
 		sum := sha256.Sum256(body)
 		if got := hex.EncodeToString(sum[:]); got != a.Sha256 {
@@ -70,15 +91,16 @@ func Publish(ctx context.Context, d PublishDeps, comp, version string) error {
 		if err := d.R2.Put(ctx, key, body, "application/zip"); err != nil {
 			return err
 		}
-		fmt.Printf("✓ %s\n", key)
+		fmt.Fprintf(d.out(), "✓ %s\n", key)
 	}
 
 	// SHA256SUMS.txt + .minisig (no per-file catalog hash; uploaded as fetched).
-	for _, ref := range []struct{ url, ctype string }{
-		{row.SumsRef, "text/plain; charset=utf-8"},
-		{row.MinisigRef, "application/octet-stream"},
+	for _, ref := range []struct{ url, ctype, label string }{
+		{row.SumsRef, "text/plain; charset=utf-8", "sums_ref"},
+		{row.MinisigRef, "application/octet-stream", "minisig_ref"},
 	} {
 		if ref.url == "" {
+			fmt.Fprintf(d.out(), "⚠ %s %s: empty ref, skipping\n", comp, ref.label)
 			continue
 		}
 		body, err := download(d.HTTP, ref.url)
@@ -89,7 +111,7 @@ func Publish(ctx context.Context, d PublishDeps, comp, version string) error {
 		if err := d.R2.Put(ctx, key, body, ref.ctype); err != nil {
 			return err
 		}
-		fmt.Printf("✓ %s\n", key)
+		fmt.Fprintf(d.out(), "✓ %s\n", key)
 	}
 	return nil
 }
