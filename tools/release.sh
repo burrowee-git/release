@@ -154,7 +154,7 @@ register_staged() {
     # sha256_bundle: sha256 of SHA256SUMS.txt (covers all four platform zips).
     local sha256_bundle
     # shellcheck disable=SC2086
-    sha256_bundle="$(${SHA256} "${stage_dir}/SHA256SUMS.txt" | awk '{print $1}')"
+    sha256_bundle="$(${SHA256} "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')" || sha256_bundle=""
 
     # Build artifacts JSON.
     # For each platform zip, extract sha256 + size, derive url_or_key.
