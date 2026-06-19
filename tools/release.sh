@@ -120,15 +120,17 @@ bins_for() {
 GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
 
 # ---- console registration (Phase C) -----------------------------------------
-# register_staged <comp> <stamp> <semver> <stage_dir> [<gh_tag>]
+# register_staged <comp> <stamp> <semver> <stage_dir> <src_dir> [<gh_tag>]
 #
 # Builds an artifacts JSON from the four per-platform zips in <stage_dir>,
-# then POSTs to the console manage API to record a `staged` release row.
+# then calls burrowee-release-register to record a `staged` release row in
+# the console via the pubkey/nonce handshake.
 #
-# Config-optional: if BURROWEE_CONSOLE_URL or BURROWEE_CONSOLE_RELEASE_TOKEN
-# is unset, prints a warning and returns 0 (never fails the release).
-# Dry-run-safe: when DRY_RUN=1, prints the would-POST and does NOT call curl.
-# Post-failure non-fatal: if curl fails, warns loudly but does not exit.
+# Config-optional: if ~/.burrowee/release/config.toml is absent, prints a
+# warning and returns 0 (never fails the release).
+# Dry-run-safe: when DRY_RUN=1, prints the would-register body and returns 0
+# without touching config or keys.
+# Post-failure non-fatal: if the helper fails, warns loudly but does not exit.
 #
 # For public comps: url_or_key is the GitHub asset download URL.
 # For relay: url_or_key is the host path under RELAY_PRIVATE_DIR/<stamp>/.
@@ -136,21 +138,23 @@ GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
 # for relay. prerelease=true always.
 warn() { echo "⚠ $*" >&2; }
 register_staged() {
-    local comp="$1" stamp="$2" semver="$3" stage_dir="$4"
-    local gh_tag="${5:-}"
+    local comp="$1" stamp="$2" semver="$3" stage_dir="$4" src_dir="$5"
+    local gh_tag="${6:-}"
 
-    # Config-optional: skip if credentials not set.
-    if [ -z "${BURROWEE_CONSOLE_URL:-}" ] || [ -z "${BURROWEE_CONSOLE_RELEASE_TOKEN:-}" ]; then
-        echo "⚠ console registration skipped: BURROWEE_CONSOLE_URL/TOKEN unset" >&2
-        return 0
-    fi
-
-    local url="${BURROWEE_CONSOLE_URL}"
     local gated=false
     local github_release="${gh_tag}"
     [ "${comp}" = relay ] && gated=true && github_release=""
 
     json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+    # source_sha: git HEAD of the component source repo.
+    local source_sha
+    source_sha="$(/usr/bin/git -C "${src_dir}" rev-parse HEAD 2>/dev/null || echo '')"
+
+    # sha256_bundle: sha256 of SHA256SUMS.txt (covers all four platform zips).
+    local sha256_bundle
+    # shellcheck disable=SC2086
+    sha256_bundle="$(${SHA256} "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')" || sha256_bundle=""
 
     # Build artifacts JSON.
     # For each platform zip, extract sha256 + size, derive url_or_key.
@@ -210,29 +214,25 @@ register_staged() {
     fi
 
     local body
-    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":${artifacts_json},\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true}"
+    # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
+    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\"}"
 
     if [ "${DRY_RUN}" = 1 ]; then
-        echo "→ dry-run: would POST ${url}/api/v1/manage/releases"
+        echo "→ dry-run: would register ${comp} ${stamp} via burrowee-release-register"
         echo "  body: ${body}"
         return 0
     fi
 
-    echo "→ registering staged release with console: ${comp} ${stamp}" >&2
-    local token="${BURROWEE_CONSOLE_RELEASE_TOKEN}"
-    local http_code
-    http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
-        -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
-        -X POST --data "${body}" "${url}/api/v1/manage/releases" 2>/dev/null)"
-    local rc=$?
-    if [ "${rc}" -ne 0 ] || [ -z "${http_code}" ]; then
-        warn "console registration: could not reach ${url} (curl rc=${rc}); register manually later"; return 0
+    # Config-optional: skip if the release identity directory is not provisioned.
+    if [ ! -f "${HOME}/.burrowee/release/config.toml" ]; then
+        warn "console registration skipped: ~/.burrowee/release not configured"
+        return 0
     fi
-    case "${http_code}" in
-        201|200) echo "✓ registered staged release in console (${comp} ${stamp})" ;;
-        409)     warn "console: ${comp} ${stamp} already registered (409) — ok" ;;
-        *)       warn "console registration failed: HTTP ${http_code} for ${comp} ${stamp}; register manually" ;;
-    esac
+
+    printf '%s' "${body}" > "${stage_dir}/.register-payload.json"
+    if ! "${REGISTER_BIN}" register --payload-file "${stage_dir}/.register-payload.json"; then
+        warn "console registration failed for ${comp} ${stamp}; register manually later"
+    fi
     return 0
 }
 
@@ -345,6 +345,13 @@ resolve_sign_key() {
     echo "→ signing with the real key (decrypted from release.dp)" >&2
 }
 resolve_sign_key
+
+# ---- build the register helper (host-only; validates it compiles) ------------
+REGISTER_BIN="${REPO_ROOT}/dist/.tools/burrowee-release-register"
+mkdir -p "${REPO_ROOT}/dist/.tools"
+echo "→ building burrowee-release-register helper" >&2
+"${GO_BIN}" build -buildvcs=false -o "${REGISTER_BIN}" ./cmd/burrowee-release-register \
+    || { echo "✗ failed to build burrowee-release-register" >&2; exit 1; }
 
 # ---- edge console pubkey ----------------------------------------------------
 # Precedence: BURROWEE_CONSOLE_PUB (or legacy BURROWEE_CLOUD_PUB) override, else
@@ -491,7 +498,7 @@ do_release_relay() {
         echo "  prune: would list ${RELAY_PRIVATE_DIR}/ → keep newest 3 stamp dirs, delete rest"
         echo "(artifacts under ${stage}/; version bump reverted; no scp/ssh)"
         # (9) dry-run registration preview.
-        register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}"
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
         revert_relay_version
         trap shred_key ERR
         return 0
@@ -555,7 +562,7 @@ do_release_relay() {
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
 
     # (9) register staged row in the console catalog.
-    register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}"
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
 
     echo "✓ released relay ${stamp} (private, ${RELAY_PRIVATE_DIR})"
     trap shred_key ERR
@@ -672,7 +679,7 @@ do_release() {
         echo "✓ dry-run ${comp}: artifacts under ${stage}/ (version bump reverted; no tag/release/scp)"
         # (9) dry-run registration preview (uses the dry-run stamp for URLs).
         local dry_tag="${comp}/${stamp}"
-        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${dry_tag}"
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${dry_tag}"
         revert_version
         trap shred_key ERR
         return 0
@@ -769,7 +776,7 @@ NOTES
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
     # (9) register staged row in the console catalog.
-    register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${tag}"
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}"
 
     echo "✓ released ${tag}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${tag}"
