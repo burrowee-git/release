@@ -1,19 +1,24 @@
-// burrowee-release-register manages the Ed25519 release signing identity
-// and performs the nonce→sign→POST handshake against the Burrowee console.
+// burrowee-release-register manages the Ed25519 release signing identity,
+// performs the nonce→sign→POST handshake against the Burrowee console, and
+// publishes binaries to R2.
 //
 // Usage:
 //
 //	burrowee-release-register keygen [--dir <d>]
 //	burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
+//	burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 
+	"github.com/burrowee-git/release/internal/r2"
 	"github.com/burrowee-git/release/internal/register"
 )
 
@@ -31,6 +36,8 @@ func main() {
 		runKeygen(os.Args[2:])
 	case "register":
 		runRegister(os.Args[2:])
+	case "publish":
+		runPublish(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		usage()
@@ -49,7 +56,8 @@ func defaultDir() string {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   burrowee-release-register keygen [--dir <d>]
-  burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]`)
+  burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
+  burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]`)
 }
 
 func runKeygen(args []string) {
@@ -91,5 +99,35 @@ func runRegister(args []string) {
 		// Non-fatal: log and exit non-zero so release.sh can note it.
 		log.Printf("register: %v (register manually later)", err)
 		os.Exit(1)
+	}
+}
+
+func runPublish(args []string) {
+	fs := flag.NewFlagSet("publish", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
+	comp := fs.String("comp", "", "component: cli|gateway|edge|all (required)")
+	version := fs.String("version", "", "specific public version (default: current)")
+	fs.Parse(args) //nolint:errcheck
+
+	if *comp == "" {
+		fmt.Fprintln(os.Stderr, "publish: --comp is required (cli|gateway|edge|all)")
+		fs.Usage()
+		os.Exit(1)
+	}
+	consoleURL, r2cfg, err := register.LoadPublishConfig(*dir)
+	if err != nil {
+		log.Fatalf("publish: %v", err)
+	}
+	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
+	deps := register.PublishDeps{ConsoleURL: consoleURL, HTTP: http.DefaultClient, R2: client, Out: os.Stdout}
+
+	comps := []string{*comp}
+	if *comp == "all" {
+		comps = []string{"cli", "gateway", "edge"}
+	}
+	for _, c := range comps {
+		if err := register.Publish(context.Background(), deps, c, *version); err != nil {
+			log.Fatalf("publish %s: %v", c, err)
+		}
 	}
 }

@@ -1,7 +1,6 @@
 package register
 
 import (
-	"bufio"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -38,33 +37,13 @@ func LoadConfig(dir string) (Config, error) {
 	}
 	cfg.priv = ed25519.PrivateKey(privBytes)
 
-	// Read config.toml (optional — console_url and client_id may be absent).
-	tomlPath := filepath.Join(dir, "config.toml")
-	if data, err := os.ReadFile(tomlPath); err == nil {
-		scanner := bufio.NewScanner(strings.NewReader(string(data)))
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			idx := strings.IndexByte(line, '=')
-			if idx < 0 {
-				continue
-			}
-			key := strings.TrimSpace(line[:idx])
-			val := strings.TrimSpace(line[idx+1:])
-			// Strip surrounding double-quotes.
-			if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
-				val = val[1 : len(val)-1]
-			}
-			switch key {
-			case "console_url":
-				cfg.ConsoleURL = val
-			case "client_id":
-				cfg.ClientID = val
-			}
-		}
+	// Read config.toml via the shared TOML parser (optional — keys may be absent).
+	conf, err := parseSimpleTOML(filepath.Join(dir, "config.toml"))
+	if err != nil {
+		return cfg, fmt.Errorf("read config.toml: %w", err)
 	}
+	cfg.ConsoleURL = conf["console_url"]
+	cfg.ClientID = conf["client_id"]
 
 	// Env override.
 	if v := os.Getenv("BURROWEE_CONSOLE_URL"); v != "" {
