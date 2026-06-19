@@ -55,6 +55,23 @@ GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 export GO_BIN
 
+# ---- publish: push a promoted version's public binaries to R2 ----------------
+# Handled before the normal arg loop so the release-cut pre-flight (signing key,
+# ssh, ghp) is never entered.  REGISTER_BIN is built inline here since the
+# release-cut block that normally builds it runs later.
+if [ "${1:-}" = "publish" ]; then
+    shift
+    comp="${1:-}"
+    [ -n "${comp}" ] || { echo "usage: release.sh publish <cli|gateway|edge|all> [--version <v>]" >&2; exit 1; }
+    shift || true
+    REGISTER_BIN="${REPO_ROOT}/dist/.tools/burrowee-release-register"
+    mkdir -p "${REPO_ROOT}/dist/.tools"
+    echo "→ building burrowee-release-register helper" >&2
+    "${GO_BIN}" build -buildvcs=false -o "${REGISTER_BIN}" ./cmd/burrowee-release-register \
+        || { echo "✗ failed to build burrowee-release-register" >&2; exit 1; }
+    exec "${REGISTER_BIN}" publish --comp "${comp}" "$@"
+fi
+
 # ---- args -------------------------------------------------------------------
 WHAT=""
 DRY_RUN=0
