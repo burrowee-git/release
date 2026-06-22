@@ -7,6 +7,7 @@
 //	burrowee-release-register keygen [--dir <d>]
 //	burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
 //	burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]
+//	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
 package main
 
 import (
@@ -38,6 +39,8 @@ func main() {
 		runRegister(os.Args[2:])
 	case "publish":
 		runPublish(os.Args[2:])
+	case "publish-relay":
+		runPublishRelay(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		usage()
@@ -57,7 +60,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   burrowee-release-register keygen [--dir <d>]
   burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
-  burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]`)
+  burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]
+  burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]`)
 }
 
 func runKeygen(args []string) {
@@ -129,5 +133,37 @@ func runPublish(args []string) {
 		if err := register.Publish(context.Background(), deps, c, *version); err != nil {
 			log.Fatalf("publish %s: %v", c, err)
 		}
+	}
+}
+
+// runPublishRelay uploads relay artifacts from a local directory to R2 under
+// relay/<stamp>/. It reads R2 credentials from <dir>/config.toml + r2.key (the
+// same location the register tool uses for public components). No catalog row is
+// required — the files are read directly from --from-dir and verified against
+// SHA256SUMS.txt before upload.
+//
+// This is called by do_release_relay in release.sh after the signing step, in
+// place of the former scp block.
+func runPublishRelay(args []string) {
+	fs := flag.NewFlagSet("publish-relay", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
+	stamp := fs.String("stamp", "", "release stamp (e.g. v0.1.3.2026.06.21.abc12345) — becomes the R2 prefix relay/<stamp>/")
+	fromDir := fs.String("from-dir", "", "local directory containing the relay artifacts (required)")
+	fs.Parse(args) //nolint:errcheck
+
+	if *stamp == "" || *fromDir == "" {
+		fmt.Fprintln(os.Stderr, "publish-relay: --stamp and --from-dir are required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	_, r2cfg, err := register.LoadPublishConfig(*dir)
+	if err != nil {
+		log.Fatalf("publish-relay: %v", err)
+	}
+	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
+
+	if err := register.PublishFromDir(context.Background(), client, *fromDir, *stamp, os.Stdout); err != nil {
+		log.Fatalf("publish-relay: %v", err)
 	}
 }
