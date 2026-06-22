@@ -24,6 +24,8 @@
 #   BURROWEE_NO_PATH_EDIT=1      do not persist PREFIX/bin to your shell rc
 #   BURROWEE_CHANNEL_BASE        base URL for the static channel (preflight.sh lives here)
 #   BURROWEE_DL_BASE             (test hook) download assets from this base instead of GitHub
+#   CONSOLE_URL                  Burrowee console base URL; used by the R2 fallback when
+#                                GitHub is unreachable (default https://console.burrowee.com)
 
 set -eu
 
@@ -37,6 +39,10 @@ DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
 # Static channel base (where preflight.sh lives — a sibling static file, NOT a
 # GitHub release asset). $COMP is a baked literal, safe to interpolate.
 CHANNEL_BASE="${BURROWEE_CHANNEL_BASE:-https://release.burrowee.com/$COMP}"
+# Console base for R2 fallback (version catalog + presigned asset URLs via
+# `burrowee download-url`). Only used when GitHub is unreachable AND the host
+# has an authorized `burrowee` with a device grant.
+CONSOLE_URL="${CONSOLE_URL:-https://console.burrowee.com}"
 
 # Production downloads are pinned to HTTPS/TLS1.2 (--proto =https). The
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
@@ -142,9 +148,30 @@ else
             | sort -V \
             | tail -n1)" || true
     fi
-    [ -n "$TAG" ] || fail "no published release found for ${COMP} on ${REPO}"
+    if [ -z "$TAG" ]; then
+        # GitHub unreachable or no releases published. Try the console catalog
+        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/gateway/current.
+        # This is the R2 fallback path — assets are served via `burrowee download-url`
+        # (see the dl() function below), which requires a device grant.
+        info "GitHub unreachable — trying console catalog for latest gateway version"
+        catalog_url="${CONSOLE_URL}/api/v1/releases/gateway/current"
+        # Use plain curl (no TLS-only flags) when DL_BASE is set for tests, else
+        # standard hardened curl.
+        # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+        catalog_body="$($CURL "$catalog_url" 2>/dev/null)" || true
+        TAG="$(printf '%s' "$catalog_body" \
+            | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n1)" || true
+        [ -n "$TAG" ] \
+            || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest gateway version; retry when either is available"
+        info "console catalog: $TAG"
+        R2_FALLBACK=1
+    else
+        R2_FALLBACK=0
+    fi
     info "latest: $TAG"
 fi
+R2_FALLBACK="${R2_FALLBACK:-0}"
 
 # ---- download -----------------------------------------------------------
 if [ -n "$DL_BASE" ]; then
@@ -156,9 +183,35 @@ ZIP="burrowee-${COMP}-${OS}-${ARCH}.zip"
 
 dl() {
     # dl <remote-name> <local-name>  (local goes under $TMP)
+    #
+    # Primary: download from $BASE (GitHub release or $BURROWEE_DL_BASE test hook).
+    # Fallback (R2 gate): if the primary fails AND `burrowee download-url` is
+    # available with a device grant, resolve a presigned URL and download from it.
+    # Verification (minisign + sha256) is unchanged regardless of download source.
+    #
+    # Only the grant-gated R2 fallback relies on `burrowee` being on PATH. A plain
+    # `curl install.sh | sh` with GitHub down and no `burrowee` fails with a clear
+    # message — the fallback is for hosts that have already installed burrowee.
+    _asset="$1"
+    _local="$2"
     # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    $CURL -o "$TMP/$2" "$BASE/$1" \
-        || fail "download failed: $1 (from $BASE) — refusing to install unverified bytes"
+    if $CURL -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
+        return 0
+    fi
+    # Primary download failed. Attempt R2 fallback only when `burrowee` is on PATH.
+    if command -v burrowee >/dev/null 2>&1; then
+        info "primary download failed for $_asset; trying R2 fallback via burrowee"
+        _r2url="$(burrowee download-url gateway "$TAG" "$_asset" 2>/dev/null)" || true
+        if [ -n "$_r2url" ]; then
+            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+            $CURL -o "$TMP/$_local" "$_r2url" 2>/dev/null \
+                || fail "R2 fallback download failed for $_asset — check device grant and retry"
+            ok "downloaded $_asset via R2 fallback"
+            return 0
+        fi
+        fail "burrowee download-url returned no URL for $_asset — device grant may be expired; run 'burrowee login' to renew, or retry when GitHub is reachable"
+    fi
+    fail "download failed: $_asset (from $BASE) — GitHub unreachable and no authorized burrowee on PATH — install burrowee + run 'burrowee login' to enable the backup channel, or retry when GitHub is reachable"
 }
 info "downloading $ZIP"
 dl "$ZIP" "$ZIP"
