@@ -19,12 +19,11 @@
 #      scp's the static surface to the release host.
 #   8. (non-dry-run) records a [RELEASED: <comp>] marker commit.
 #
-# The relay target is a PRIVATE publish (scp to RELAY_PRIVATE_DIR on RELEASE_HOST).
-# It does NOT push a GitHub Release, git tag, or update the public site. It does:
+# The relay target is a PRIVATE publish (uploads to R2).
+# It does NOT push a GitHub Release or git tag. It does:
 #   - Build 4 platform zips + SHA256SUMS.txt + .minisig (same as public comps).
-#   - scp zips + SHA256SUMS.txt + .minisig to RELEASE_HOST:RELAY_PRIVATE_DIR/<stamp>/.
-#   - Update top-level latest.* set in that dir (latest.<os>-<arch>.zip + SHA256SUMS.txt + .minisig).
-#   - Prune stamp dirs to keep the newest 3.
+#   - Upload zips + SHA256SUMS.txt + .minisig to R2 under relay/<stamp>/.
+#   - Update top-level latest.* set (latest.<os>-<arch>.zip + SHA256SUMS.txt + .minisig).
 #
 # On --dry-run only steps 1-5 run, and the version bump is REVERTED — the tree is
 # left exactly as it was, just with throwaway artifacts under dist/<stamp>/.
@@ -41,8 +40,6 @@
 #   BURROWEE_SRC_EDGE       edge component source worktree
 #   BURROWEE_SRC_DISPATCHER burrowee dispatcher source worktree
 #   BURROWEE_SRC_RELAY      relay component source worktree (default: relay main worktree)
-#   RELAY_PRIVATE_DIR       private dir on the release host for relay artifacts
-#                           (default /srv/relay-releases)
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
 set -euo pipefail
@@ -108,7 +105,6 @@ SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/gateway}"
 SRC_EDGE="${BURROWEE_SRC_EDGE:-${BB}/edge/code/edge}"
 SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}"
 SRC_RELAY="${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}"
-RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR:-/srv/relay-releases}"
 
 # edge skills source-of-truth (the edge repo owns these)
 EDGE_SKILLS_SRC="${SRC_EDGE}/skills"
@@ -155,7 +151,7 @@ GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
 # Post-failure non-fatal: if the helper fails, warns loudly but does not exit.
 #
 # For public comps: url_or_key is the GitHub asset download URL.
-# For relay: url_or_key is the host path under RELAY_PRIVATE_DIR/<stamp>/.
+# For relay: url_or_key is the R2 key under relay/<stamp>/.
 # gated=true iff comp==relay. github_release=<comp>/<stamp> for public, ""
 # for relay. prerelease=true always.
 warn() { echo "⚠ $*" >&2; }

@@ -63,6 +63,10 @@ type catalogRow struct {
 // produces local artifacts instead of publishing a GitHub Release. The catalog
 // row's url_or_key/sums_ref/minisig_ref already point at the R2 keys
 // relay/<stamp>/... before this function runs.
+//
+// Integrity is gated by sha256 of each file against the minisign-signed
+// SHA256SUMS.txt; there is no catalog size reference on the local-upload path,
+// so size-from-catalog verification (as in Publish) does not apply here.
 func PublishFromDir(ctx context.Context, r2 Putter, dir, stamp string, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
