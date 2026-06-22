@@ -165,13 +165,9 @@ else
         [ -n "$TAG" ] \
             || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest edge version; retry when either is available"
         info "console catalog: $TAG"
-        R2_FALLBACK=1
-    else
-        R2_FALLBACK=0
     fi
     info "latest: $TAG"
 fi
-R2_FALLBACK="${R2_FALLBACK:-0}"
 
 # ---- download -----------------------------------------------------------
 if [ -n "$DL_BASE" ]; then
