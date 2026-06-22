@@ -9,8 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
+	"strings"
 )
 
 // Putter uploads an object to R2. Satisfied by *r2.Client.
@@ -52,12 +54,89 @@ type catalogRow struct {
 	MinisigRef string                   `json:"minisig_ref"`
 }
 
-// Publish uploads comp's public binaries to R2 under <comp>/<version>/.
-// version "" uses the current-public row. comp "relay" is refused (private).
-func Publish(ctx context.Context, d PublishDeps, comp, version string) error {
-	if comp == "relay" {
-		return fmt.Errorf("publish: relay is private and is never pushed to R2")
+// PublishFromDir uploads the relay artifacts from a local directory to R2 under
+// relay/<stamp>/. It uploads every latest.<os>-<arch>.zip, SHA256SUMS.txt, and
+// SHA256SUMS.txt.minisig found in dir. Size+sha256 are verified against
+// SHA256SUMS.txt before upload.
+//
+// This is used by the relay cut flow (do_release_relay in release.sh) which
+// produces local artifacts instead of publishing a GitHub Release. The catalog
+// row's url_or_key/sums_ref/minisig_ref already point at the R2 keys
+// relay/<stamp>/... before this function runs.
+//
+// Integrity is gated by sha256 of each file against the minisign-signed
+// SHA256SUMS.txt; there is no catalog size reference on the local-upload path,
+// so size-from-catalog verification (as in Publish) does not apply here.
+func PublishFromDir(ctx context.Context, r2 Putter, dir, stamp string, out io.Writer) error {
+	if out == nil {
+		out = io.Discard
 	}
+	sumsPath := dir + "/SHA256SUMS.txt"
+	sumsBody, err := os.ReadFile(sumsPath)
+	if err != nil {
+		return fmt.Errorf("publish-relay: read SHA256SUMS.txt: %w", err)
+	}
+	// parse SHA256SUMS.txt: each line is "<hex>  <filename>"
+	hashByFile := map[string]string{}
+	for _, line := range strings.Split(string(sumsBody), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		hashByFile[fields[1]] = fields[0]
+	}
+
+	// Upload the four platform zips with sha256 verification.
+	platforms := []string{"darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64"}
+	for _, plat := range platforms {
+		filename := "latest." + plat + ".zip"
+		body, err := os.ReadFile(dir + "/" + filename)
+		if err != nil {
+			return fmt.Errorf("publish-relay: read %s: %w", filename, err)
+		}
+		expectedHash, ok := hashByFile[filename]
+		if !ok {
+			return fmt.Errorf("publish-relay: %s not found in SHA256SUMS.txt", filename)
+		}
+		sum := sha256.Sum256(body)
+		if got := hex.EncodeToString(sum[:]); got != expectedHash {
+			return fmt.Errorf("publish-relay: %s: sha256 mismatch (sums %s, got %s)", filename, expectedHash, got)
+		}
+		key := "relay/" + stamp + "/" + filename
+		if err := r2.Put(ctx, key, body, "application/zip"); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "✓ %s\n", key)
+	}
+
+	// Upload SHA256SUMS.txt + .minisig (no hash verification needed — sums file is self-referential).
+	for _, entry := range []struct {
+		filename    string
+		contentType string
+	}{
+		{"SHA256SUMS.txt", "text/plain; charset=utf-8"},
+		{"SHA256SUMS.txt.minisig", "application/octet-stream"},
+	} {
+		body, err := os.ReadFile(dir + "/" + entry.filename)
+		if err != nil {
+			return fmt.Errorf("publish-relay: read %s: %w", entry.filename, err)
+		}
+		key := "relay/" + stamp + "/" + entry.filename
+		if err := r2.Put(ctx, key, body, entry.contentType); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "✓ %s\n", key)
+	}
+	return nil
+}
+
+// Publish uploads comp's public binaries to R2 under <comp>/<version>/.
+// version "" uses the current-public row.
+func Publish(ctx context.Context, d PublishDeps, comp, version string) error {
 	row, err := fetchCatalogRow(d, comp, version)
 	if err != nil {
 		return err

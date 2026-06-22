@@ -19,12 +19,11 @@
 #      scp's the static surface to the release host.
 #   8. (non-dry-run) records a [RELEASED: <comp>] marker commit.
 #
-# The relay target is a PRIVATE publish (scp to RELAY_PRIVATE_DIR on RELEASE_HOST).
-# It does NOT push a GitHub Release, git tag, or update the public site. It does:
+# The relay target is a PRIVATE publish (uploads to R2).
+# It does NOT push a GitHub Release or git tag. It does:
 #   - Build 4 platform zips + SHA256SUMS.txt + .minisig (same as public comps).
-#   - scp zips + SHA256SUMS.txt + .minisig to RELEASE_HOST:RELAY_PRIVATE_DIR/<stamp>/.
-#   - Update top-level latest.* set in that dir (latest.<os>-<arch>.zip + SHA256SUMS.txt + .minisig).
-#   - Prune stamp dirs to keep the newest 3.
+#   - Upload zips + SHA256SUMS.txt + .minisig to R2 under relay/<stamp>/.
+#   - Update top-level latest.* set (latest.<os>-<arch>.zip + SHA256SUMS.txt + .minisig).
 #
 # On --dry-run only steps 1-5 run, and the version bump is REVERTED — the tree is
 # left exactly as it was, just with throwaway artifacts under dist/<stamp>/.
@@ -41,8 +40,6 @@
 #   BURROWEE_SRC_EDGE       edge component source worktree
 #   BURROWEE_SRC_DISPATCHER burrowee dispatcher source worktree
 #   BURROWEE_SRC_RELAY      relay component source worktree (default: relay main worktree)
-#   RELAY_PRIVATE_DIR       private dir on the release host for relay artifacts
-#                           (default /srv/relay-releases)
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
 set -euo pipefail
@@ -108,7 +105,6 @@ SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/gateway}"
 SRC_EDGE="${BURROWEE_SRC_EDGE:-${BB}/edge/code/edge}"
 SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}"
 SRC_RELAY="${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}"
-RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR:-/srv/relay-releases}"
 
 # edge skills source-of-truth (the edge repo owns these)
 EDGE_SKILLS_SRC="${SRC_EDGE}/skills"
@@ -155,7 +151,7 @@ GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
 # Post-failure non-fatal: if the helper fails, warns loudly but does not exit.
 #
 # For public comps: url_or_key is the GitHub asset download URL.
-# For relay: url_or_key is the host path under RELAY_PRIVATE_DIR/<stamp>/.
+# For relay: url_or_key is the R2 key under relay/<stamp>/.
 # gated=true iff comp==relay. github_release=<comp>/<stamp> for public, ""
 # for relay. prerelease=true always.
 warn() { echo "⚠ $*" >&2; }
@@ -192,7 +188,7 @@ register_staged() {
         local zip_name url_or_key zip_path
         if [ "${comp}" = relay ]; then
             zip_name="latest.${plat}.zip"
-            url_or_key="${RELAY_PRIVATE_DIR}/${stamp}/${zip_name}"
+            url_or_key="relay/${stamp}/${zip_name}"
         else
             zip_name="burrowee-${comp}-${plat}.zip"
             url_or_key="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/${zip_name}"
@@ -225,11 +221,11 @@ register_staged() {
     done
     artifacts_json="${artifacts_json}}"
 
-    # sums_ref and minisig_ref: public = GitHub asset URLs; relay = host paths.
+    # sums_ref and minisig_ref: public = GitHub asset URLs; relay = R2 keys.
     local sums_ref minisig_ref
     if [ "${comp}" = relay ]; then
-        sums_ref="${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt"
-        minisig_ref="${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt.minisig"
+        sums_ref="relay/${stamp}/SHA256SUMS.txt"
+        minisig_ref="relay/${stamp}/SHA256SUMS.txt.minisig"
     else
         sums_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt"
         minisig_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt.minisig"
@@ -276,14 +272,17 @@ fi
 
 if [ "${DRY_RUN}" != 1 ]; then
     need age
-    need ghp
-    [ -x "${GHP}" ] || { echo "✗ ghp wrapper not found at ${GHP}" >&2; exit 1; }
-    "${GHP}" repo view "${RELEASE_REPO}" --json name >/dev/null 2>&1 \
-        || { echo "✗ ghp cannot access ${RELEASE_REPO} — check gh.account + auth" >&2; exit 1; }
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "${RELEASE_HOST}" 'true' 2>/dev/null \
-        || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
     [ -f "${AGE_KEY_AGE}" ] \
         || { echo "✗ release.dp signing key not found: ${AGE_KEY_AGE}" >&2; exit 1; }
+    # relay-only runs publish to R2 (no scp/ssh); public component runs need ghp + ssh.
+    if [ "${WHAT}" != relay ]; then
+        need ghp
+        [ -x "${GHP}" ] || { echo "✗ ghp wrapper not found at ${GHP}" >&2; exit 1; }
+        "${GHP}" repo view "${RELEASE_REPO}" --json name >/dev/null 2>&1 \
+            || { echo "✗ ghp cannot access ${RELEASE_REPO} — check gh.account + auth" >&2; exit 1; }
+        ssh -o BatchMode=yes -o ConnectTimeout=5 "${RELEASE_HOST}" 'true' 2>/dev/null \
+            || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
+    fi
 fi
 
 # components to cut
@@ -495,26 +494,17 @@ do_release_relay() {
     ( cd "${latest_stage}" && ls -1 latest.*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
 
     if [ "${DRY_RUN}" = 1 ]; then
-        # Print the would-scp / would-prune plan.
+        # Print the would-upload plan (R2 keys, no scp).
         echo ""
-        echo "✓ dry-run relay: would publish to ${RELEASE_HOST}:${RELAY_PRIVATE_DIR}"
-        echo "  stamp dir  : ${RELAY_PRIVATE_DIR}/${stamp}/"
-        echo "  scp files  :"
+        echo "✓ dry-run relay: would upload to R2 under relay/${stamp}/"
+        echo "  R2 keys:"
         for pair in "${TARGETS[@]}"; do
             read -r os arch <<<"${pair}"
-            echo "    latest.${os}-${arch}.zip → ${RELAY_PRIVATE_DIR}/${stamp}/"
+            echo "    relay/${stamp}/latest.${os}-${arch}.zip"
         done
-        echo "    SHA256SUMS.txt → ${RELAY_PRIVATE_DIR}/${stamp}/"
-        echo "    SHA256SUMS.txt.minisig → ${RELAY_PRIVATE_DIR}/${stamp}/"
-        echo "  latest.* update :"
-        for pair in "${TARGETS[@]}"; do
-            read -r os arch <<<"${pair}"
-            echo "    latest.${os}-${arch}.zip → ${RELAY_PRIVATE_DIR}/"
-        done
-        echo "    SHA256SUMS.txt → ${RELAY_PRIVATE_DIR}/"
-        echo "    SHA256SUMS.txt.minisig → ${RELAY_PRIVATE_DIR}/"
-        echo "  prune: would list ${RELAY_PRIVATE_DIR}/ → keep newest 3 stamp dirs, delete rest"
-        echo "(artifacts under ${stage}/; version bump reverted; no scp/ssh)"
+        echo "    relay/${stamp}/SHA256SUMS.txt"
+        echo "    relay/${stamp}/SHA256SUMS.txt.minisig"
+        echo "(artifacts under ${latest_stage}/; version bump reverted; no scp)"
         # (9) dry-run registration preview.
         register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
         revert_relay_version
@@ -522,58 +512,13 @@ do_release_relay() {
         return 0
     fi
 
-    # (4) non-dry-run: scp stamp dir + update latest.* + prune.
-    # pre-flight: ssh check already done above in the non-relay path, but relay
-    # uses the same RELEASE_HOST; verify it's still reachable.
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "${RELEASE_HOST}" 'true' 2>/dev/null \
-        || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
-
-    # shellcheck disable=SC2029
-    ssh "${RELEASE_HOST}" "mkdir -p '${RELAY_PRIVATE_DIR}/${stamp}'"
-    # scp stamp copies (archived versions: latest-named zips + sums)
-    # The SHA256SUMS.txt covers latest.<os>-<arch>.zip filenames, so the stamp
-    # dir carries the latest-named copies too — making it internally consistent
-    # (the stamped burrowee-relay-<os>-<arch>.zip names are for local retention
-    # only and are NOT referenced by SHA256SUMS.txt).
-    for pair in "${TARGETS[@]}"; do
-        read -r os arch <<<"${pair}"
-        scp -q "${latest_stage}/latest.${os}-${arch}.zip" \
-            "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/${stamp}/latest.${os}-${arch}.zip"
-    done
-    scp -q "${latest_stage}/SHA256SUMS.txt" \
-        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt"
-    scp -q "${latest_stage}/SHA256SUMS.txt.minisig" \
-        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/${stamp}/SHA256SUMS.txt.minisig"
-
-    # update top-level latest.* set (atomic enough — each file overwritten in place)
-    for pair in "${TARGETS[@]}"; do
-        read -r os arch <<<"${pair}"
-        scp -q "${latest_stage}/latest.${os}-${arch}.zip" \
-            "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/latest.${os}-${arch}.zip"
-    done
-    scp -q "${latest_stage}/SHA256SUMS.txt" \
-        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/SHA256SUMS.txt"
-    scp -q "${latest_stage}/SHA256SUMS.txt.minisig" \
-        "${RELEASE_HOST}:${RELAY_PRIVATE_DIR}/SHA256SUMS.txt.minisig"
-
-    # prune: keep newest 3 stamp dirs
-    # shellcheck source=tools/prune_releases_keep.sh
-    . "${REPO_ROOT}/tools/prune_releases_keep.sh"
-    # list stamp dirs on the remote (lines like "v0.1.0.2026.06.17.abc12345")
-    # shellcheck disable=SC2029
-    remote_stamps="$(ssh "${RELEASE_HOST}" "find '${RELAY_PRIVATE_DIR}' -maxdepth 1 -type d -name 'v*' -printf '%f\n'" 2>/dev/null || true)"
-    if [ -n "${remote_stamps}" ]; then
-        # shellcheck disable=SC2086
-        to_delete="$(keep_latest 3 ${remote_stamps})"
-        if [ -n "${to_delete}" ]; then
-            while IFS= read -r d; do
-                [ -n "${d}" ] || continue
-                echo "→ pruning ${RELAY_PRIVATE_DIR}/${d}" >&2
-                # shellcheck disable=SC2029
-                ssh "${RELEASE_HOST}" "rm -rf '${RELAY_PRIVATE_DIR}/${d}'"
-            done <<<"${to_delete}"
-        fi
-    fi
+    # (4) non-dry-run: upload relay artifacts to R2 under relay/<stamp>/.
+    # Uses the register tool's publish-relay subcommand which reads R2 creds from
+    # ~/.burrowee/release/config.toml + r2.key and verifies sha256 before upload.
+    # No scp, no ssh to the release host.
+    "${REGISTER_BIN}" publish-relay \
+        --stamp "${stamp}" \
+        --from-dir "${latest_stage}"
 
     # marker commit (no gh release / no git tag)
     git add "versions/${comp}"
@@ -582,7 +527,7 @@ do_release_relay() {
     # (9) register staged row in the console catalog.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
 
-    echo "✓ released relay ${stamp} (private, ${RELAY_PRIVATE_DIR})"
+    echo "✓ released relay ${stamp} (private, R2 relay/${stamp}/)"
     trap shred_key ERR
 }
 
