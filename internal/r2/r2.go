@@ -85,7 +85,12 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 		if token != "" {
 			q.Set("continuation-token", token)
 		}
-		reqURL := fmt.Sprintf("%s/%s?%s", c.endpoint, c.bucket, q.Encode())
+		// url.Values.Encode encodes spaces as '+', but SigV4 canonicalization
+		// (signer.go signs req.URL.RawQuery verbatim) requires '%20'. Convert so
+		// the signed query matches what S3/R2 re-encodes for verification — a
+		// latent 403 once any value carries a space.
+		enc := strings.ReplaceAll(q.Encode(), "+", "%20")
+		reqURL := fmt.Sprintf("%s/%s?%s", c.endpoint, c.bucket, enc)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("r2: list %q: new request: %w", prefix, err)
@@ -95,8 +100,11 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("r2: list %q: %w", prefix, err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("r2: list %q: read response: %w", prefix, err)
+		}
 		if resp.StatusCode/100 != 2 {
 			return nil, fmt.Errorf("r2: list %q: status %d: %s", prefix, resp.StatusCode, body)
 		}

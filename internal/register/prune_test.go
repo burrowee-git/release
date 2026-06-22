@@ -68,6 +68,33 @@ func TestVersionLessMatchesSortV(t *testing.T) {
 	}
 }
 
+func TestVersionLessShaTieBreak(t *testing.T) {
+	// Stamps sharing the same vX.Y.Z triple + date, differing only in the
+	// trailing 8-hex git sha. Field-wise lexical comparison gets this wrong;
+	// GNU `sort -V` interleaves alpha-leading and numeric-leading shas. The
+	// want order below is exactly what `sort -V` produces (verified against the
+	// shell binary).
+	in := []string{
+		"v0.1.34.2026.06.22.0abcdef0",
+		"v0.1.34.2026.06.22.abcdef00",
+		"v0.1.34.2026.06.22.5048cdba",
+		"v0.1.34.2026.06.22.f048cdba",
+	}
+	want := []string{
+		"v0.1.34.2026.06.22.abcdef00",
+		"v0.1.34.2026.06.22.f048cdba",
+		"v0.1.34.2026.06.22.0abcdef0",
+		"v0.1.34.2026.06.22.5048cdba",
+	}
+	got := append([]string(nil), in...)
+	sort.Sort(byVersionSort(got))
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sha tie-break mismatch:\n got: %v\nwant: %v", got, want)
+		}
+	}
+}
+
 func TestPruneRelayKeepsThree(t *testing.T) {
 	versions := []string{
 		"v0.1.1.2026.06.01.aaaaaaaa",

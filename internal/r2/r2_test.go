@@ -113,6 +113,23 @@ func TestListSignsAndPaginates(t *testing.T) {
 	}
 }
 
+func TestListEncodesSpaceAsPercent20(t *testing.T) {
+	// SigV4 signs req.URL.RawQuery verbatim, so the query must encode spaces as
+	// %20 (not '+') or the signature won't match S3/R2's canonicalization.
+	body := `<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>`
+	d := &scriptedDoer{bodies: []string{body}}
+	c := New("acct", "downloads", "AKID", "SECRET", d)
+	if _, err := c.List(context.Background(), "a b/"); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !strings.Contains(d.urls[0], "prefix=a%20b") {
+		t.Errorf("space must encode as %%20: %s", d.urls[0])
+	}
+	if strings.Contains(d.urls[0], "prefix=a+b") {
+		t.Errorf("space encoded as '+' (breaks SigV4): %s", d.urls[0])
+	}
+}
+
 func TestListErrorsOnNon2xx(t *testing.T) {
 	c := New("acct", "downloads", "AKID", "SECRET", &fakeDoer{status: 403})
 	if _, err := c.List(context.Background(), "relay/"); err == nil {
