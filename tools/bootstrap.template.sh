@@ -165,13 +165,9 @@ else
         [ -n "$TAG" ] \
             || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest @COMP@ version; retry when either is available"
         info "console catalog: $TAG"
-        R2_FALLBACK=1
-    else
-        R2_FALLBACK=0
     fi
     info "latest: $TAG"
 fi
-R2_FALLBACK="${R2_FALLBACK:-0}"
 
 # ---- download -----------------------------------------------------------
 if [ -n "$DL_BASE" ]; then
@@ -203,11 +199,32 @@ dl() {
         info "primary download failed for $_asset; trying R2 fallback via burrowee"
         _r2url="$(burrowee download-url @COMP@ "$TAG" "$_asset" 2>/dev/null)" || true
         if [ -n "$_r2url" ]; then
-            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            $CURL -o "$TMP/$_local" "$_r2url" 2>/dev/null \
-                || fail "R2 fallback download failed for $_asset — check device grant and retry"
-            ok "downloaded $_asset via R2 fallback"
-            return 0
+            # Scheme guard: the resolved URL MUST be https:// in production, or
+            # https:// / http:// in test mode (BURROWEE_DL_BASE set). This prevents
+            # a compromised `burrowee` from redirecting to file://, ftp://, or
+            # other unsafe schemes. Fail the fallback (not the whole install) if
+            # the URL doesn't pass this check — user will see the no-burrowee error path.
+            _valid_scheme=0
+            case "$_r2url" in
+                https://*)
+                    _valid_scheme=1
+                    ;;
+                http://*)
+                    # Allow http:// only in test mode (when DL_BASE is set).
+                    if [ -n "$DL_BASE" ]; then
+                        _valid_scheme=1
+                    fi
+                    ;;
+            esac
+            if [ "$_valid_scheme" -eq 1 ]; then
+                # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+                $CURL -o "$TMP/$_local" "$_r2url" 2>/dev/null \
+                    || fail "R2 fallback download failed for $_asset — check device grant and retry"
+                ok "downloaded $_asset via R2 fallback"
+                return 0
+            fi
+            # URL scheme invalid — treat as a fallback failure so the caller
+            # sees the standard "no authorized burrowee" error.
         fi
         fail "burrowee download-url returned no URL for $_asset — device grant may be expired; run 'burrowee login' to renew, or retry when GitHub is reachable"
     fi
