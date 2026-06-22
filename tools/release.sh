@@ -65,13 +65,26 @@ build_register_helper() {
 # ---- publish: push a promoted version's public binaries to R2 ----------------
 # Handled before the normal arg loop so the release-cut pre-flight (signing key,
 # ssh, ghp) is never entered.
+#
+# After the R2 push, retention is reported (NOT applied): the R2 prune-to-10 and
+# the GitHub prune-to-10 both run DRY-RUN so the cut surfaces what is now over
+# the retention limit. The destructive drain (--execute) is a deploy-phase step,
+# never run automatically from a publish.
 if [ "${1:-}" = "publish" ]; then
     shift
     comp="${1:-}"
     [ -n "${comp}" ] || { echo "usage: release.sh publish <cli|gateway|edge|all> [--version <v>]" >&2; exit 1; }
     shift || true
     build_register_helper
-    exec "${REGISTER_BIN}" publish --comp "${comp}" "$@"
+    "${REGISTER_BIN}" publish --comp "${comp}" "$@"
+    echo
+    echo "→ retention (dry-run — run prune with --execute in the deploy phase to apply):"
+    "${REGISTER_BIN}" prune --comp "${comp}" || true
+    # GitHub prune scope is cli/gateway/edge only (relay has no GitHub release).
+    gh_comps="${comp}"
+    [ "${comp}" = all ] && gh_comps="cli gateway edge"
+    COMPONENTS="${gh_comps}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
+    exit 0
 fi
 
 # ---- args -------------------------------------------------------------------
@@ -520,6 +533,12 @@ do_release_relay() {
         --stamp "${stamp}" \
         --from-dir "${latest_stage}"
 
+    # (4b) retention (dry-run): report relay R2 prefixes now over keep=3. The
+    # destructive drain (prune --comp relay --execute) is a deploy-phase step.
+    echo
+    echo "→ relay R2 retention (dry-run — run prune --comp relay --execute in the deploy phase to apply):"
+    "${REGISTER_BIN}" prune --comp relay || true
+
     # marker commit (no gh release / no git tag)
     git add "versions/${comp}"
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
@@ -740,6 +759,12 @@ NOTES
 
     # (9) register staged row in the console catalog.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}"
+
+    # (10) GitHub-release retention (dry-run): report tags now over keep=10. The
+    # destructive drain (prune-releases.sh --execute) is a deploy-phase step.
+    echo
+    echo "→ GitHub release retention (dry-run — run prune-releases.sh --execute in the deploy phase to apply):"
+    COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
 
     echo "✓ released ${tag}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${tag}"

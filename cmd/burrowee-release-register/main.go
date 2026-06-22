@@ -8,6 +8,7 @@
 //	burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
 //	burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]
 //	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
+//	burrowee-release-register prune --comp <cli|gateway|edge|relay|all> [--dir <d>] [--execute]
 package main
 
 import (
@@ -41,6 +42,8 @@ func main() {
 		runPublish(os.Args[2:])
 	case "publish-relay":
 		runPublishRelay(os.Args[2:])
+	case "prune":
+		runPrune(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		usage()
@@ -61,7 +64,8 @@ func usage() {
   burrowee-release-register keygen [--dir <d>]
   burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
   burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]
-  burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]`)
+  burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
+  burrowee-release-register prune --comp <cli|gateway|edge|relay|all> [--dir <d>] [--execute]`)
 }
 
 func runKeygen(args []string) {
@@ -165,5 +169,37 @@ func runPublishRelay(args []string) {
 
 	if err := register.PublishFromDir(context.Background(), client, *fromDir, *stamp, os.Stdout); err != nil {
 		log.Fatalf("publish-relay: %v", err)
+	}
+}
+
+// runPrune drops all but the newest N version prefixes for a component in R2
+// (relay keeps 3; cli/gateway/edge keep 10). Dry-run by default; --execute
+// performs the deletions. R2 credentials come from <dir>/config.toml + r2.key.
+func runPrune(args []string) {
+	fs := flag.NewFlagSet("prune", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
+	comp := fs.String("comp", "", "component: cli|gateway|edge|relay|all (required)")
+	execute := fs.Bool("execute", false, "actually delete (default: dry-run)")
+	fs.Parse(args) //nolint:errcheck
+
+	if *comp == "" {
+		fmt.Fprintln(os.Stderr, "prune: --comp is required (cli|gateway|edge|relay|all)")
+		fs.Usage()
+		os.Exit(1)
+	}
+	_, r2cfg, err := register.LoadPublishConfig(*dir)
+	if err != nil {
+		log.Fatalf("prune: %v", err)
+	}
+	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
+
+	comps := []string{*comp}
+	if *comp == "all" {
+		comps = []string{"cli", "gateway", "edge", "relay"}
+	}
+	for _, c := range comps {
+		if _, err := register.Prune(context.Background(), client, c, *execute, os.Stdout); err != nil {
+			log.Fatalf("prune %s: %v", c, err)
+		}
 	}
 }
