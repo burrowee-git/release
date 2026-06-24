@@ -50,7 +50,7 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /o
 # binary -> package map (space-separated "bin:pkg" pairs per component)
 case "${COMP}" in
     cli)      MAP="burrowee-cli:./cmd/burrowee-cli" ;;
-    gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-register:./cmd/burrowee-register" ;;
+    gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register" ;;
     edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:@cli:." ;;
     relay)    MAP="burrowee-relay:./cmd/burrowee-relay" ;;
     burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
