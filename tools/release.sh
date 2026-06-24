@@ -142,7 +142,7 @@ src_for() {
 bins_for() {
     case "$1" in
         cli)     printf '%s' "burrowee-cli" ;;
-        gateway) printf '%s' "burrowee-gateway burrowee-register" ;;
+        gateway) printf '%s' "burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register" ;;
         edge)    printf '%s' "burrowee-edge burrowee-edge-cli" ;;
         relay)   printf '%s' "burrowee-relay" ;;
     esac
