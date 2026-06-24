@@ -89,8 +89,8 @@ TimeoutStopSec=330
 [Install]
 WantedBy=default.target
 EOF
-        systemctl --user daemon-reload
-        systemctl --user enable --now burrowee-gateway.service
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user enable --now burrowee-gateway.service 2>/dev/null || true
         echo "service unit: $_core_svc"
 
         # Updater unit.
@@ -108,7 +108,7 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
-        systemctl --user enable --now burrowee-gateway-updater.service
+        systemctl --user enable --now burrowee-gateway-updater.service 2>/dev/null || true
         echo "service unit: $_upd_svc"
         ;;
 
