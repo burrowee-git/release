@@ -6,7 +6,9 @@
 # cwd = the unzipped dir, so the binaries sit alongside this script. It installs
 # them into PREFIX/bin (default $HOME/.local/bin). Set BURROWEE_UNINSTALL to
 # remove them instead. Set BURROWEE_UNITS_ONLY=1 to write+load both service
-# units without touching binaries or running bootstrap.
+# units without touching binaries or running bootstrap. Set BURROWEE_UPDATE=1
+# to run update mode: per-binary sha256 change detection, transactional swap,
+# and a final BURROWEE_CHANGED=<names> line.
 set -eu
 
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
@@ -117,11 +119,108 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# sha256_of — portable sha256 digest of a file (shasum on darwin, sha256sum on linux).
+# ---------------------------------------------------------------------------
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else echo "sha256_of: no shasum or sha256sum found" >&2; exit 1; fi
+}
+
+# ---------------------------------------------------------------------------
 # Mode dispatch.
 # ---------------------------------------------------------------------------
 
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     write_units
+    exit 0
+fi
+
+if [ -n "${BURROWEE_UPDATE:-}" ]; then
+    # ------------------------------------------------------------------
+    # Update mode: per-binary sha256 change detection, transactional swap.
+    # ------------------------------------------------------------------
+
+    # Parse --version <ver> if present (does NOT gate the swap; sha256 does).
+    _install_version=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --version)
+            shift
+            if [ $# -gt 0 ]; then
+                _install_version="$1"
+                shift
+            fi
+            ;;
+        *) shift ;;
+        esac
+    done
+
+    mkdir -p "$BIN_DIR"
+
+    # Phase 1: detect which binaries changed.
+    CHANGED=""
+    for b in $BINS; do
+        _staged="./$b"
+        [ -f "$_staged" ] || { echo "missing $b in bundle" >&2; exit 1; }
+        _staged_sum="$(sha256_of "$_staged")"
+        _cur_sum=""
+        if [ -f "$BIN_DIR/$b" ]; then
+            _cur_sum="$(sha256_of "$BIN_DIR/$b")"
+        fi
+        if [ "$_staged_sum" != "$_cur_sum" ]; then
+            CHANGED="${CHANGED:+$CHANGED }$b"
+        fi
+    done
+
+    # Phase 2: transactional backup of all to-be-replaced binaries.
+    _backed_up=""
+    for b in $CHANGED; do
+        if [ -f "$BIN_DIR/$b" ]; then
+            cp "$BIN_DIR/$b" "$BIN_DIR/$b.bak-$$"
+            _backed_up="${_backed_up:+$_backed_up }$b"
+        fi
+    done
+
+    # Phase 3: place changed binaries; rollback on any failure.
+    _placed=""
+    for b in $CHANGED; do
+        if install -m 0755 "./$b" "$BIN_DIR/$b"; then
+            if [ "$(uname -s)" = "Darwin" ]; then
+                xattr -d com.apple.quarantine "$BIN_DIR/$b" 2>/dev/null || true
+            fi
+            _placed="${_placed:+$_placed }$b"
+        else
+            # Restore all backups and abort.
+            for _rb in $_backed_up; do
+                if [ -f "$BIN_DIR/$_rb.bak-$$" ]; then
+                    cp "$BIN_DIR/$_rb.bak-$$" "$BIN_DIR/$_rb" 2>/dev/null || true
+                    rm -f "$BIN_DIR/$_rb.bak-$$"
+                fi
+            done
+            echo "update: failed to install $b — rolled back" >&2
+            exit 1
+        fi
+    done
+
+    # Phase 4: remove backups on success.
+    for b in $_backed_up; do
+        rm -f "$BIN_DIR/$b.bak-$$"
+    done
+
+    # Record installed version if provided.
+    if [ -n "$_install_version" ]; then
+        mkdir -p "$GW_HOME"
+        printf '%s\n' "$_install_version" > "$GW_HOME/.installed-version"
+    fi
+
+    # Write units and self-copy.
+    write_units
+    mkdir -p "$GW_HOME"
+    cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
+
+    # Final change-set line (MUST be the last stdout line).
+    printf 'BURROWEE_CHANGED=%s\n' "$CHANGED"
     exit 0
 fi
 
