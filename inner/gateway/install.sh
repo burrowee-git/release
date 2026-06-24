@@ -44,7 +44,7 @@ write_units() {
 </dict></plist>
 EOF
         launchctl bootout "gui/$(id -u)/com.burrowee.gateway" 2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$_core_plist"
+        launchctl bootstrap "gui/$(id -u)" "$_core_plist" 2>/dev/null || true
         echo "service unit: $_core_plist"
 
         # Updater unit.
@@ -63,7 +63,7 @@ EOF
 </dict></plist>
 EOF
         launchctl bootout "gui/$(id -u)/com.burrowee.gateway.updater" 2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$_upd_plist"
+        launchctl bootstrap "gui/$(id -u)" "$_upd_plist" 2>/dev/null || true
         echo "service unit: $_upd_plist"
         ;;
 
