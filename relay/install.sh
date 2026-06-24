@@ -36,7 +36,7 @@ set -eu
 
 # ---- knobs --------------------------------------------------------------
 COMP="relay"
-PUBKEY="RWQnYbeXyI0mXzDH2TylGV7ea0cU3usVsNPYsxEQ0MmH+xmfI7o0HCYi"
+PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
 PREFIX="${PREFIX:-$HOME/.local}"
 BASE="${BURROWEE_DL_BASE:-https://release.burrowee.com}"
 OPENSSL="${OPENSSL:-openssl}"
