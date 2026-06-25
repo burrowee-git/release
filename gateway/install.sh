@@ -199,6 +199,13 @@ else
     BASE="https://github.com/${REPO}/releases/download/${TAG}"
 fi
 ZIP="burrowee-${COMP}-${OS}-${ARCH}.zip"
+# gh-proxy mirrors route a release download by treating the release TAG as a
+# SINGLE path segment. Our tags contain a slash (<comp>/v…), so a LITERAL slash
+# splits the tag across two path segments and some mirror edges then fail to
+# serve the asset (or return wrong bytes that later fail verification). Build a
+# mirror-only base with the tag's slash percent-encoded (%2F) so the tag stays
+# one segment. Direct GitHub ($BASE) keeps the literal slash (it 404s on %2F).
+MIRROR_BASE="https://github.com/${REPO}/releases/download/$(printf '%s' "${TAG}" | sed 's#/#%2F#g')"
 
 dl() {
     # dl <remote-name> <local-name>  (local goes under $TMP)
@@ -220,13 +227,14 @@ dl() {
     if $CURL -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
         return 0
     fi
-    # Mirror fallback: route the GitHub URL through each mirror in turn. Only for
-    # the real GitHub BASE (skip under the DL_BASE test hook) and when enabled.
+    # Mirror fallback: route the %2F-encoded GitHub URL (MIRROR_BASE) through each
+    # mirror in turn. Only for the real GitHub BASE (skip under the DL_BASE test
+    # hook) and when enabled.
     if [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
         for _proxy in $GH_PROXIES; do
             info "primary download failed for $_asset; retrying via mirror $_proxy"
             # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            if $CURL -o "$TMP/$_local" "$_proxy/$BASE/$_asset" 2>/dev/null; then
+            if $CURL -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset" 2>/dev/null; then
                 ok "downloaded $_asset via mirror $_proxy"
                 return 0
             fi
