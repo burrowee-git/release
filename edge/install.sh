@@ -26,9 +26,11 @@
 #   BURROWEE_DL_BASE             (test hook) download assets from this base instead of GitHub
 #   CONSOLE_URL                  Burrowee console base URL; used by the R2 fallback when
 #                                GitHub is unreachable (default https://console.burrowee.com)
-#   BURROWEE_GH_PROXY            GitHub HTTP mirror, tried ONLY when github.com / api.github.com
-#                                are unreachable (default https://gh-proxy.com; set empty to
-#                                disable). Downloads stay minisign + sha256 verified.
+#   BURROWEE_GH_PROXY            Space-separated list of GitHub HTTP mirrors, tried in order
+#                                ONLY when github.com / api.github.com are unreachable
+#                                (default: gh-proxy.com gh-proxy.org cdn.gh-proxy.org
+#                                v6.gh-proxy.org; set empty to disable). minisign + sha256
+#                                verified, so an untrusted mirror cannot tamper undetected.
 
 set -eu
 
@@ -46,14 +48,14 @@ CHANNEL_BASE="${BURROWEE_CHANNEL_BASE:-https://release.burrowee.com/$COMP}"
 # `burrowee download-url`). Only used when GitHub is unreachable AND the host
 # has an authorized `burrowee` with a device grant.
 CONSOLE_URL="${CONSOLE_URL:-https://console.burrowee.com}"
-# GitHub HTTP mirror, tried ONLY as a fallback when github.com / api.github.com
-# are unreachable (e.g. networks that block or throttle GitHub). Assets are
-# fetched as <GH_PROXY>/<original-https-github-url>; the downloaded bytes are
-# still minisign- + sha256-verified below, so an untrusted mirror cannot inject
-# tampered bytes undetected. ${VAR-default} (not :-) lets `BURROWEE_GH_PROXY=`
-# explicitly disable the mirror while an unset value gets the default. Never
-# used when the DL_BASE test hook is set.
-GH_PROXY="${BURROWEE_GH_PROXY-https://gh-proxy.com}"
+# GitHub HTTP mirrors, tried in order ONLY as a fallback when github.com /
+# api.github.com are unreachable (e.g. networks that block or throttle GitHub).
+# Each is tried as <mirror>/<original-https-github-url> until one succeeds; the
+# downloaded bytes are still minisign- + sha256-verified below, so an untrusted
+# mirror cannot inject tampered bytes undetected. Space-separated list.
+# ${VAR-default} (not :-) lets `BURROWEE_GH_PROXY=` explicitly disable the
+# mirrors while an unset value gets the default. Never used when DL_BASE is set.
+GH_PROXIES="${BURROWEE_GH_PROXY-https://gh-proxy.com https://gh-proxy.org https://cdn.gh-proxy.org https://v6.gh-proxy.org}"
 
 # Production downloads are pinned to HTTPS/TLS1.2 (--proto =https). The
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
@@ -157,15 +159,17 @@ else
     # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
     body="$($CURL "$api" 2>/dev/null)" || true
     TAG="$(printf '%s' "$body" | latest_tag)" || true
-    # GitHub API unreachable/empty — retry through the mirror BEFORE the console
-    # catalog (the mirror needs no authorized burrowee, so it serves fresh hosts).
-    # Skipped under the DL_BASE test hook and when the mirror is disabled (empty).
-    if [ -z "$TAG" ] && [ -z "$DL_BASE" ] && [ -n "$GH_PROXY" ]; then
-        info "GitHub API unreachable — retrying via mirror $GH_PROXY"
-        # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-        body="$($CURL "$GH_PROXY/$api" 2>/dev/null)" || true
-        TAG="$(printf '%s' "$body" | latest_tag)" || true
-        [ -n "$TAG" ] && info "mirror resolved: $TAG"
+    # GitHub API unreachable/empty — retry through each mirror in turn BEFORE the
+    # console catalog (mirrors need no authorized burrowee, so they serve fresh
+    # hosts). Skipped under the DL_BASE test hook and when mirrors are disabled.
+    if [ -z "$TAG" ] && [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
+        for _proxy in $GH_PROXIES; do
+            info "GitHub API unreachable — retrying via mirror $_proxy"
+            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+            body="$($CURL "$_proxy/$api" 2>/dev/null)" || true
+            TAG="$(printf '%s' "$body" | latest_tag)" || true
+            if [ -n "$TAG" ]; then info "mirror resolved: $TAG"; break; fi
+        done
     fi
     if [ -z "$TAG" ]; then
         # GitHub unreachable or no releases published. Try the console catalog
@@ -200,9 +204,9 @@ dl() {
     # dl <remote-name> <local-name>  (local goes under $TMP)
     #
     # Primary: download from $BASE (GitHub release or $BURROWEE_DL_BASE test hook).
-    # Mirror fallback: if the primary fails, retry the SAME GitHub URL through the
-    # GH_PROXY HTTP mirror (no auth, helps GitHub-blocked networks).
-    # R2 fallback (grant gate): if both fail AND `burrowee download-url` is
+    # Mirror fallback: if the primary fails, retry the SAME GitHub URL through each
+    # GH_PROXIES HTTP mirror in turn (no auth, helps GitHub-blocked networks).
+    # R2 fallback (grant gate): if all fail AND `burrowee download-url` is
     # available with a device grant, resolve a presigned URL and download from it.
     # Verification (minisign + sha256) is unchanged regardless of download source,
     # so neither the mirror nor R2 can inject tampered bytes undetected.
@@ -216,17 +220,19 @@ dl() {
     if $CURL -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
         return 0
     fi
-    # Mirror fallback: route the GitHub URL through GH_PROXY. Only for the real
-    # GitHub BASE (skip under the DL_BASE test hook) and when the mirror is enabled.
-    if [ -z "$DL_BASE" ] && [ -n "$GH_PROXY" ]; then
-        info "primary download failed for $_asset; retrying via mirror $GH_PROXY"
-        # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-        if $CURL -o "$TMP/$_local" "$GH_PROXY/$BASE/$_asset" 2>/dev/null; then
-            ok "downloaded $_asset via mirror"
-            return 0
-        fi
+    # Mirror fallback: route the GitHub URL through each mirror in turn. Only for
+    # the real GitHub BASE (skip under the DL_BASE test hook) and when enabled.
+    if [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
+        for _proxy in $GH_PROXIES; do
+            info "primary download failed for $_asset; retrying via mirror $_proxy"
+            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+            if $CURL -o "$TMP/$_local" "$_proxy/$BASE/$_asset" 2>/dev/null; then
+                ok "downloaded $_asset via mirror $_proxy"
+                return 0
+            fi
+        done
     fi
-    # Primary + mirror failed. Attempt R2 fallback only when `burrowee` is on PATH.
+    # Primary + mirrors failed. Attempt R2 fallback only when `burrowee` is on PATH.
     if command -v burrowee >/dev/null 2>&1; then
         info "primary download failed for $_asset; trying R2 fallback via burrowee"
         _r2url="$(burrowee download-url edge "$TAG" "$_asset" 2>/dev/null)" || true
@@ -260,7 +266,7 @@ dl() {
         fi
         fail "burrowee download-url returned no URL for $_asset — device grant may be expired; run 'burrowee login' to renew, or retry when GitHub is reachable"
     fi
-    fail "download failed: $_asset (from $BASE, mirror $GH_PROXY) — GitHub and the mirror are unreachable and there is no authorized burrowee on PATH — install burrowee + run 'burrowee login' to enable the backup channel, or retry when GitHub is reachable"
+    fail "download failed: $_asset (from $BASE; mirrors: $GH_PROXIES) — GitHub and all mirrors are unreachable and there is no authorized burrowee on PATH — install burrowee + run 'burrowee login' to enable the backup channel, or retry when GitHub is reachable"
 }
 info "downloading $ZIP"
 dl "$ZIP" "$ZIP"
