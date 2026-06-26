@@ -229,8 +229,14 @@ dl() {
     _asset="$1"
     _local="$2"
     info "GET $BASE/$_asset"
+    # Primary (GitHub) gets a tight 30s cap (the trailing --max-time overrides
+    # $CURL's baked --max-time 300 — curl honours the last occurrence) so a slow or
+    # throttled GitHub fails over to the mirrors fast instead of creeping for minutes.
+    # The mirror attempts below keep the longer budget: they're the fallback of last
+    # resort, so abandoning a working-but-slow mirror at 30s would risk failing the
+    # whole install. --connect-timeout 15 + --speed-time 20 (stall) still apply.
     # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    if $CURL -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
+    if $CURL --max-time 30 -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
         return 0
     fi
     # Mirror fallback: route the %2F-encoded GitHub URL (MIRROR_BASE) through each
@@ -299,7 +305,9 @@ if command -v minisign >/dev/null 2>&1; then
     MINISIGN=minisign
 else
     case "$OS" in
-        darwin) hint="brew install minisign" ;;
+        darwin) hint="install Homebrew if you don't have it, then minisign:
+      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
+      brew install minisign" ;;
         *)      hint="apt-get install minisign  (or your distro's package manager)" ;;
     esac
     fail "minisign is required and is not installed — install it and re-run.

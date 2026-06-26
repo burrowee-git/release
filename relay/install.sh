@@ -195,7 +195,9 @@ if command -v minisign >/dev/null 2>&1; then
     MINISIGN=minisign
 else
     case "$OS" in
-        darwin) hint="brew install minisign" ;;
+        darwin) hint="install Homebrew if you don't have it, then minisign:
+      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
+      brew install minisign" ;;
         *)      hint="apt-get install minisign  (or your distro's package manager)" ;;
     esac
     fail "minisign is required and is not installed — install it and re-run.
