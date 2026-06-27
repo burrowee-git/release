@@ -17,9 +17,11 @@ COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
 
 # ---------------------------------------------------------------------------
-# write_units — render + load both service units for the host init system.
+# render_units — write both service unit FILES for the host init system.
+# Does NOT start, stop, or reload any live services. Call load_units after
+# render_units when a live reload is desired (fresh install / --force).
 # ---------------------------------------------------------------------------
-write_units() {
+render_units() {
     case "$(uname -s)" in
     Darwin)
         _la_dir="$HOME/Library/LaunchAgents"
@@ -45,8 +47,6 @@ write_units() {
   <key>StandardErrorPath</key><string>$GW_HOME/logs/gateway.err.log</string>
 </dict></plist>
 EOF
-        launchctl bootout "gui/$(id -u)/com.burrowee.gateway" 2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$_core_plist" 2>/dev/null || true
         echo "service unit: $_core_plist"
 
         # Updater unit.
@@ -64,8 +64,6 @@ EOF
   <key>StandardErrorPath</key><string>$GW_HOME/logs/updater.err.log</string>
 </dict></plist>
 EOF
-        launchctl bootout "gui/$(id -u)/com.burrowee.gateway.updater" 2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$_upd_plist" 2>/dev/null || true
         echo "service unit: $_upd_plist"
         ;;
 
@@ -89,8 +87,6 @@ TimeoutStopSec=330
 [Install]
 WantedBy=default.target
 EOF
-        systemctl --user daemon-reload 2>/dev/null || true
-        systemctl --user enable --now burrowee-gateway.service 2>/dev/null || true
         echo "service unit: $_core_svc"
 
         # Updater unit.
@@ -108,12 +104,33 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
-        systemctl --user enable --now burrowee-gateway-updater.service 2>/dev/null || true
         echo "service unit: $_upd_svc"
         ;;
 
     *)
         echo "warning: unsupported OS — skipping service unit installation" >&2
+        ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# load_units — (re)load the rendered service units. Separated from render_units
+# so update mode can refresh the unit FILES without restarting services (the
+# updater restarts the kernel out-of-band; restarting the updater here would
+# bootout the very process running this script — see the design doc).
+# ---------------------------------------------------------------------------
+load_units() {
+    case "$(uname -s)" in
+    Darwin)
+        launchctl bootout   "gui/$(id -u)/com.burrowee.gateway"          2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.burrowee.gateway.plist"         2>/dev/null || true
+        launchctl bootout   "gui/$(id -u)/com.burrowee.gateway.updater"  2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+        ;;
+    Linux)
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user enable --now burrowee-gateway.service         2>/dev/null || true
+        systemctl --user enable --now burrowee-gateway-updater.service 2>/dev/null || true
         ;;
     esac
 }
@@ -132,7 +149,8 @@ sha256_of() {
 # ---------------------------------------------------------------------------
 
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
-    write_units
+    render_units
+    load_units
     exit 0
 fi
 
@@ -161,6 +179,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # Phase 1: detect which binaries changed.
     CHANGED=""
     for b in $BINS; do
+        [ "$b" = "burrowee-gateway-cli" ] && continue   # updater binary: updated separately, never during a gateway update
         _staged="./$b"
         [ -f "$_staged" ] || { echo "missing $b in bundle" >&2; exit 1; }
         _staged_sum="$(sha256_of "$_staged")"
@@ -214,8 +233,9 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         printf '%s\n' "$_install_version" > "$GW_HOME/.installed-version"
     fi
 
-    # Write units and self-copy.
-    write_units
+    # Render unit files only — do NOT load them (the updater restarts the kernel
+    # out-of-band; loading here would bootout the very process running this script).
+    render_units
     mkdir -p "$GW_HOME"
     cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
 
@@ -273,7 +293,8 @@ mkdir -p "$GW_HOME"
 cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
 
 # Write and load both service units.
-write_units
+render_units
+load_units
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------
 # Re-install short-circuit: if this component already has persisted state under

@@ -209,6 +209,104 @@ func TestUpdateAllIdenticalIsNoop(t *testing.T) {
 	}
 }
 
+// writeLaunchctlStub drops a fake `launchctl` into dir that appends its argv
+// to dir/launchctl.calls, so a test can assert whether install.sh restarted
+// services.
+func writeLaunchctlStub(t *testing.T, dir string) {
+	t.Helper()
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + filepath.Join(dir, "launchctl.calls") + "\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "launchctl"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateModeExcludesUpdaterBinary verifies that a changed
+// burrowee-gateway-cli is neither swapped nor named in BURROWEE_CHANGED.
+func TestUpdateModeExcludesUpdaterBinary(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+
+	// Pre-install: burrowee-gateway-cli is OLD, all others at v1.
+	installed := allBinsContent("v1-content")
+	installed["burrowee-gateway-cli"] = "OLD-CLI"
+	seedInstalled(t, binDir, installed)
+
+	// Stage: burrowee-gateway-cli differs (NEW-CLI) and burrowee-gateway differs (v2).
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway-cli"] = "NEW-CLI"
+	staged["burrowee-gateway"] = "v2-content"
+	stageDir := stageBundle(t, staged)
+
+	out := runUpdate(t, stageDir, home, stub,
+		[]string{"BURROWEE_UPDATE=1"},
+		"--version", "v2",
+	)
+
+	// burrowee-gateway-cli must NOT appear in BURROWEE_CHANGED.
+	if got := lastLineWithPrefix(out, "BURROWEE_CHANGED="); strings.Contains(got, "burrowee-gateway-cli") {
+		t.Fatalf("update mode must not change burrowee-gateway-cli; got %q", got)
+	}
+
+	// burrowee-gateway-cli must NOT be swapped — content stays OLD-CLI.
+	cur, err := os.ReadFile(filepath.Join(binDir, "burrowee-gateway-cli"))
+	if err != nil {
+		t.Fatalf("read burrowee-gateway-cli: %v", err)
+	}
+	if string(cur) != "OLD-CLI" {
+		t.Fatalf("burrowee-gateway-cli was swapped in update mode (got %q)", cur)
+	}
+}
+
+// TestUpdateModeDoesNotRestartServices verifies that update mode renders unit
+// files but issues no launchctl bootout/bootstrap (the updater restarts the
+// kernel out-of-band; restarting it here would bootout the running process).
+func TestUpdateModeDoesNotRestartServices(t *testing.T) {
+	home := t.TempDir()
+
+	// Create a stub dir with a recording launchctl (and a pass-through systemctl).
+	stubDir := t.TempDir()
+	writeLaunchctlStub(t, stubDir)
+	// Also stub systemctl so the script doesn't fail on Linux.
+	sysctl := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "systemctl"), []byte(sysctl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := home + "/.local/bin"
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+
+	// Stage one changed binary so the script does real work.
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "v2-content"
+	stageDir := stageBundle(t, staged)
+
+	runUpdate(t, stageDir, home, stubDir,
+		[]string{"BURROWEE_UPDATE=1"},
+	)
+
+	calls, _ := os.ReadFile(filepath.Join(stubDir, "launchctl.calls"))
+	callsStr := string(calls)
+	// The live labels (com.burrowee.gateway and com.burrowee.gateway.updater) must
+	// not be booted out or bootstrapped in update mode. The legacy org.burrowee.gateway
+	// bootout inside render_units is allowed (dead label, migration-only).
+	for _, verb := range []string{
+		"bootout gui/",
+		"bootstrap gui/",
+	} {
+		// Allow only the dead-label migration call; reject any live-label call.
+		for _, line := range strings.Split(strings.TrimRight(callsStr, "\n"), "\n") {
+			if !strings.Contains(line, verb) {
+				continue
+			}
+			if strings.Contains(line, "org.burrowee.gateway") {
+				continue // legacy migration — allowed
+			}
+			t.Fatalf("update mode must not reload live services; got call: %q\nall calls:\n%s", line, callsStr)
+		}
+	}
+}
+
 // TestUpdateRollsBackOnFailure verifies that when a binary cannot be placed
 // mid-swap, all previously placed (and backed-up) binaries are restored to
 // their original content, the script exits non-zero, and no BURROWEE_CHANGED
