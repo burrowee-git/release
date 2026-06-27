@@ -47,6 +47,14 @@ func (s *Server) Handler() http.Handler {
 
 // clientIP returns the client IP from X-Forwarded-For (nginx sets this to the
 // real client) when present, otherwise the host part of r.RemoteAddr.
+//
+// SECURITY INVARIANT: this trusts X-Forwarded-For unconditionally and is only
+// safe behind a trusted reverse proxy that *sets* (not appends) XFF to the real
+// client IP. The deployed topology binds this gate to 127.0.0.1 with nginx in
+// front (see ops/), so an external client cannot reach it directly to spoof the
+// header. Do NOT expose this listener publicly, and do NOT configure nginx to
+// append rather than overwrite XFF — either lets a client forge the value the
+// challenge rate-limiter keys on and mint a fresh per-IP bucket per request.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		// X-Forwarded-For may be comma-separated; take the first entry.

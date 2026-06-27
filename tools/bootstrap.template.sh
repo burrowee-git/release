@@ -187,9 +187,24 @@ else
         # standard hardened curl.
         # shellcheck disable=SC2086  # intentional word-split of $CURL flags
         catalog_body="$($CURL "$catalog_url" 2>/dev/null)" || true
-        TAG="$(printf '%s' "$catalog_body" \
-            | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-            | head -n1)" || true
+        # Resolve the tag the SAME hardened way as latest_tag(): prefer jq
+        # (structural — reads only the top-level "version" field), else a
+        # line-anchored grep/sed so a "version":"…" substring buried in notes or
+        # nested metadata can't spoof the tag. Then require it to look like a real
+        # @COMP@/v… tag. (Bytes are still minisign+sha256 verified downstream; this
+        # closes a downgrade / wrong-version vector at the resolution step.)
+        if command -v jq >/dev/null 2>&1; then
+            TAG="$(printf '%s' "$catalog_body" | jq -r '.version // empty' 2>/dev/null)" || true
+        else
+            TAG="$(printf '%s' "$catalog_body" \
+                | grep -E '^[[:space:]]*"version"[[:space:]]*:' \
+                | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
+                | head -n1)" || true
+        fi
+        case "$TAG" in
+            "$COMP"/v*) : ;;
+            *) TAG="" ;;
+        esac
         [ -n "$TAG" ] \
             || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest @COMP@ version; retry when either is available"
         info "console catalog: $TAG"

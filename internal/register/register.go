@@ -2,13 +2,21 @@ package register
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"time"
 )
+
+// httpTimeout bounds each console handshake call. Registration is best-effort
+// (the caller logs and continues on error), but a hung/black-holed console must
+// not stall the release cut indefinitely — a hang holds the decrypted signing
+// key on disk longer than a clean failure would.
+const httpTimeout = 30 * time.Second
 
 // Register performs the nonce→sign→POST handshake against the console.
 //
@@ -51,7 +59,7 @@ func Register(cfg Config, payload []byte, dryRun bool) error {
 		return fmt.Errorf("marshal register request: %w", err)
 	}
 
-	resp, err := http.Post(cfg.ConsoleURL+"/api/v1/manage/releases", "application/json", bytes.NewReader(bodyBytes)) //nolint:noctx
+	resp, err := postJSON(cfg.ConsoleURL+"/api/v1/manage/releases", bodyBytes)
 	if err != nil {
 		return fmt.Errorf("POST releases: %w", err)
 	}
@@ -77,7 +85,7 @@ func fetchNonce(cfg Config) (raw []byte, b64 string, err error) {
 		return nil, "", fmt.Errorf("marshal nonce request: %w", err)
 	}
 
-	resp, err := http.Post(cfg.ConsoleURL+"/api/v1/manage/releases/nonce", "application/json", bytes.NewReader(reqBody)) //nolint:noctx
+	resp, err := postJSON(cfg.ConsoleURL+"/api/v1/manage/releases/nonce", reqBody)
 	if err != nil {
 		return nil, "", fmt.Errorf("POST releases/nonce: %w", err)
 	}
@@ -101,4 +109,38 @@ func fetchNonce(cfg Config) (raw []byte, b64 string, err error) {
 		return nil, "", fmt.Errorf("decode nonce base64: %w", err)
 	}
 	return raw, out.Nonce, nil
+}
+
+// postJSON POSTs body as application/json with a bounded timeout so a hung
+// console cannot stall the release cut (see httpTimeout).
+func postJSON(url string, body []byte) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	// The caller closes resp.Body; cancel the context once it does so the
+	// timeout's resources are released. http.Response has no hook, so wrap Body.
+	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+// cancelBody calls cancel after the response body is closed, releasing the
+// request context's timer.
+type cancelBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }

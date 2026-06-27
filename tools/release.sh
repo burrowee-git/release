@@ -176,7 +176,20 @@ register_staged() {
     local github_release="${gh_tag}"
     [ "${comp}" = relay ] && gated=true && github_release=""
 
-    json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+    # json_escape: emit the INTERIOR of a JSON string (no surrounding quotes) so
+    # the existing "key":"$(json_escape …)" call sites stay unchanged. `jq -Rs`
+    # reads the whole raw arg as one string and escapes everything JSON requires —
+    # \, ", control chars (\n \t \r \b \f, U+0000–U+001F) — which the old sed
+    # (only \ and ") did not. The trailing slice strips jq's surrounding quotes
+    # (jq -Rs . always emits `"<escaped>"` on a single line).
+    json_escape() {
+        local q
+        q="$(printf '%s' "$1" | jq -Rs .)"
+        # drop the leading and trailing double-quote jq adds.
+        q="${q#\"}"
+        q="${q%\"}"
+        printf '%s' "$q"
+    }
 
     # source_sha: git HEAD of the component source repo.
     local source_sha
@@ -272,6 +285,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "✗ required tool not found:
 need zip
 need unzip
 need minisign
+need jq   # json_escape (console-register payload) builds JSON via `jq -Rs`, not hand-rolled sed
 command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found (tried '${GO_BIN}')" >&2; exit 1; }
 
 # sha256 tool (shasum on mac, sha256sum on linux)
