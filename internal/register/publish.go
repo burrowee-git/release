@@ -41,6 +41,15 @@ func (d PublishDeps) out() io.Writer {
 	return io.Discard
 }
 
+// Body-size caps for host-side fetches. The catalog/asset URLs come from the
+// console response (a network input), so an oversized/hostile body could OOM the
+// release host without these. Generous-but-finite; a real release zip is tens of
+// MB and a catalog body is small.
+const (
+	maxAssetBytes   = 512 << 20 // 512 MiB per release asset
+	maxCatalogBytes = 4 << 20   // 4 MiB per catalog JSON body
+)
+
 type artifactEntry struct {
 	URLOrKey string `json:"url_or_key"`
 	Sha256   string `json:"sha256"`
@@ -226,7 +235,7 @@ func getJSON(h Getter, rawURL string, out any) error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return json.NewDecoder(io.LimitReader(resp.Body, maxCatalogBytes)).Decode(out)
 }
 
 func download(h Getter, rawurl string) ([]byte, error) {
@@ -239,7 +248,16 @@ func download(h Getter, rawurl string) ([]byte, error) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("GET %s: status %d", rawurl, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	// Cap the read so a hostile/oversized asset can't OOM the release host.
+	// Read one byte past the limit to distinguish "exactly at cap" from "over".
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: read body: %w", rawurl, err)
+	}
+	if int64(len(body)) > maxAssetBytes {
+		return nil, fmt.Errorf("GET %s: asset exceeds %d-byte cap", rawurl, int64(maxAssetBytes))
+	}
+	return body, nil
 }
 
 func baseName(rawurl string) string {

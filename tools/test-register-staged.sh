@@ -1,27 +1,38 @@
 #!/usr/bin/env bash
 # test-register-staged.sh — offline tests for the register_staged hook (Phase C).
 #
-# Tests:
-#   1. dry-run: with DRY_RUN=1 and BURROWEE_CONSOLE_URL/TOKEN set, register_staged
-#      prints "would POST .../api/v1/manage/releases" with a body containing
-#      "component":"cli" and "prerelease":true, and does NOT call curl (asserted
-#      via a PATH-shadowed curl stub that exits 99 if invoked).
-#   2. configured POST: with BURROWEE_CONSOLE_URL pointed at a local one-shot
-#      Python 3 HTTP server, register_staged posts the correct body + Bearer.
-#      If python3 is absent, this test is skipped (not a failure).
-#   3. unconfigured skip: with BURROWEE_CONSOLE_URL/TOKEN unset, register_staged
-#      prints the skip warning and returns 0.
-#   4. relay-specific: gated=true, empty github_release, host-path artifacts.
+# What register_staged ACTUALLY does (post-relay-cut, current code):
+#   - Builds the console-register JSON BODY from the four per-platform zips in
+#     <stage_dir> (component/version/semver/gated/artifacts/refs/…), escaping
+#     every string field through json_escape (now `jq -Rs`, not hand-rolled sed).
+#   - On DRY_RUN=1: prints "would register … via burrowee-release-register" plus
+#     the body, and returns 0 — it does NOT POST.
+#   - On a real run: writes .register-payload.json and shells out to the Go
+#     helper `burrowee-release-register register --payload-file …`, which performs
+#     the pubkey/nonce/Ed25519-sig handshake against the console. register_staged
+#     itself sends NO HTTP and NO Bearer token — so this test does NOT assert a
+#     curl POST or an Authorization header (the prior version did; that path is
+#     dead). The handshake itself is covered by the Go register package tests
+#     (internal/register/register_test.go).
 #
-# All tests source register_staged in isolation (no real release.sh run required
-# for tests 2-4; test 1 verifies the function's dry-run branch directly).
+# Tests (all offline, via register_staged's DRY_RUN preview branch):
+#   1. dry-run public (cli): prints "would register", body carries
+#      "component":"cli", "prerelease":true, "gated":false, a GitHub artifact URL,
+#      and is VALID JSON. Asserts curl is NOT invoked.
+#   2. relay: gated=true, empty github_release, R2-key artifacts, valid JSON.
+#   3. unconfigured skip: with no config.toml, a real (non-dry) run prints the
+#      skip warning and returns 0 (and still does not POST).
+#   4. json_escape robustness (H1): a stamp containing a double-quote, backslash,
+#      newline, tab, and a control char still produces a body that parses as
+#      valid JSON (the old sed escaper would have emitted broken JSON here).
 #
 # Coverage limits:
-#   - Tests 1-4 exercise register_staged's 4 branches offline.
 #   - The extract_register_staged helper pulls the function out of release.sh by
 #     text; if release.sh's function boundary changes, the helper needs updating.
 #   - Full end-to-end (real release.sh --dry-run) is not exercised here to avoid
 #     the minisign + source-worktree dependency; see test-e2e.sh for that.
+#   - The real console POST handshake is not exercised in shell (it lives in the
+#     Go helper); see internal/register/register_test.go.
 #
 # Exits 0 iff all non-skipped tests pass.
 set -euo pipefail
@@ -39,6 +50,20 @@ elif command -v sha256sum >/dev/null 2>&1; then
 else
     echo "✗ neither shasum nor sha256sum found" >&2; exit 1
 fi
+# json_escape (in release.sh) requires jq; the tests source that function, so jq
+# must be present here too.
+command -v jq >/dev/null 2>&1 || { echo "✗ jq not found (register_staged's json_escape needs it)" >&2; exit 1; }
+
+# JSON validator: prefer jq, fall back to python3.
+json_ok() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -e . >/dev/null 2>&1
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1
+    else
+        return 0
+    fi
+}
 
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\n✗ TEST FAILED: %s\n' "$*" >&2; exit 1; }
@@ -46,11 +71,7 @@ skip() { printf '\n⚠ SKIPPED: %s\n' "$*"; }
 
 # ---- workdir + cleanup -------------------------------------------------------
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-register-staged-XXXXXX")"
-SERVER_PID=""
-cleanup() {
-    [ -z "${SERVER_PID}" ] || kill "${SERVER_PID}" 2>/dev/null || true
-    rm -rf "${W}"
-}
+cleanup() { rm -rf "${W}"; }
 trap cleanup EXIT INT TERM
 
 # ---- shared config -----------------------------------------------------------
@@ -61,7 +82,6 @@ TARGETS=(
     "linux amd64"
 )
 RELEASE_REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
-RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR:-/srv/relay-releases}"
 
 # =============================================================================
 # HELPERS
@@ -72,8 +92,6 @@ RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR:-/srv/relay-releases}"
 # file by locating the Phase-C block marker and copying through the function.
 extract_register_staged() {
     local out="$1"
-    # Pull from the Phase-C comment block through (and including) register_staged's
-    # closing brace. We detect the function by tracking brace depth.
     python3 - "${REPO_ROOT}/tools/release.sh" "${out}" <<'PYEOF'
 import sys
 
@@ -141,25 +159,23 @@ make_stage() {
     ( cd "${dir}" && ${SHA256} *.zip | sort > SHA256SUMS.txt )
 }
 
-# run_register_staged <extract_file> <env_pairs...> -- <args...>
-# Sources extract_file in a subshell with the given env, calls register_staged.
-# Returns the combined stdout+stderr output.
-run_fn() {
-    local extract="$1"; shift
-    # Remaining args are passed verbatim as the bash -c script body.
-    bash -c "$@" 2>&1 || true
+# body_of <dry_run_output>
+# Extracts the JSON body from register_staged's dry-run preview ("  body: {…}").
+body_of() {
+    printf '%s\n' "$1" | sed -n 's/^  body: //p' | head -n1
 }
 
 # =============================================================================
-# TEST 1 — dry-run: prints would POST, curl stub never called.
+# TEST 1 — dry-run public (cli): would register, valid JSON, no curl.
 # =============================================================================
-say "TEST 1 — dry-run: would POST printed, curl NOT called"
+say "TEST 1 — dry-run public: would register, valid JSON, curl NOT called"
 
-# PATH-shadowed curl stub that fails loudly if invoked.
+# PATH-shadowed curl stub that fails loudly if invoked (register_staged must not
+# POST — the Go helper does, and only on a real run).
 mkdir -p "${W}/bin"
 cat > "${W}/bin/curl" <<'STUB'
 #!/bin/sh
-echo "✗ curl was called during dry-run — test FAILED" >&2
+echo "✗ curl was called by register_staged — it must not POST directly" >&2
 exit 99
 STUB
 chmod +x "${W}/bin/curl"
@@ -172,10 +188,7 @@ extract_register_staged "${EXTRACT1}"
 RESULT1="$(
     PATH="${W}/bin:${PATH}" \
     DRY_RUN=1 \
-    BURROWEE_CONSOLE_URL="https://console.example.com" \
-    BURROWEE_CONSOLE_RELEASE_TOKEN="tok-test" \
     RELEASE_REPO="${RELEASE_REPO}" \
-    RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR}" \
     SHA256="${SHA256}" \
     bash -c "
         TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
@@ -184,139 +197,74 @@ RESULT1="$(
     " 2>&1
 )"
 
-printf '%s\n' "${RESULT1}" | grep -q 'would POST' \
-    || die "TEST 1: 'would POST' line not found. Output:\n${RESULT1}"
+printf '%s\n' "${RESULT1}" | grep -q 'would register' \
+    || die "TEST 1: 'would register' line not found. Output:\n${RESULT1}"
 printf '%s\n' "${RESULT1}" | grep -q '"component":"cli"' \
     || die "TEST 1: '\"component\":\"cli\"' not found. Output:\n${RESULT1}"
 printf '%s\n' "${RESULT1}" | grep -q '"prerelease":true' \
     || die "TEST 1: '\"prerelease\":true' not found. Output:\n${RESULT1}"
-printf '%s\n' "${RESULT1}" | grep -q '/api/v1/manage/releases' \
-    || die "TEST 1: URL '/api/v1/manage/releases' not found. Output:\n${RESULT1}"
+printf '%s\n' "${RESULT1}" | grep -q '"gated":false' \
+    || die "TEST 1: '\"gated\":false' not found. Output:\n${RESULT1}"
+printf '%s\n' "${RESULT1}" | grep -q 'github.com' \
+    || die "TEST 1: expected GitHub artifact URL. Output:\n${RESULT1}"
+printf '%s' "$(body_of "${RESULT1}")" | json_ok \
+    || die "TEST 1: register body is not valid JSON. Output:\n${RESULT1}"
 
-echo "✓ TEST 1 PASSED — dry-run prints would POST with correct fields; curl not called"
+echo "✓ TEST 1 PASSED — dry-run prints would register with correct fields, valid JSON, curl not called"
 
 # =============================================================================
-# TEST 2 — configured POST: correct body + Bearer to a local HTTP stub.
+# TEST 2 — relay: gated=true, empty github_release, R2-key artifacts.
 # =============================================================================
-say "TEST 2 — configured POST: correct body + Bearer sent to local stub"
+say "TEST 2 — relay: gated=true, empty github_release, R2 keys in artifacts"
 
-PYTHON_BIN=""
-command -v python3 >/dev/null 2>&1 && PYTHON_BIN="python3"
+STAGE2="${W}/stage2"
+make_stage "${STAGE2}" "relay"
+EXTRACT2="${W}/fn2.sh"
+extract_register_staged "${EXTRACT2}"
 
-if [ -z "${PYTHON_BIN}" ]; then
-    skip "TEST 2 — python3 not found; skipping live-stub POST test"
-else
-    TEST2_PORT="${REGISTER_TEST_PORT:-18543}"
-    REQUEST_FILE="${W}/request.txt"
-
-    # One-shot HTTP server: captures POST body + headers → file, replies 201, exits.
-    SERVER_SCRIPT="${W}/stub_server.py"
-    cat > "${SERVER_SCRIPT}" <<PYEOF
-import socketserver, http.server, sys, threading
-
-port = int(sys.argv[1])
-req_file = sys.argv[2]
-done = threading.Event()
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length).decode()
-        auth = self.headers.get('Authorization', '')
-        with open(req_file, 'w') as f:
-            f.write('PATH: ' + self.path + '\n')
-            f.write('AUTH: ' + auth + '\n')
-            f.write('BODY: ' + body + '\n')
-        self.send_response(201)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(b'{"id":"test-id"}')
-        done.set()
-    def log_message(self, *a): pass
-
-class ReuseTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
-
-with ReuseTCPServer(('127.0.0.1', port), Handler) as s:
-    t = threading.Thread(target=s.serve_forever)
-    t.daemon = True
-    t.start()
-    done.wait(timeout=15)
-    s.shutdown()
-PYEOF
-
-    "${PYTHON_BIN}" "${SERVER_SCRIPT}" "${TEST2_PORT}" "${REQUEST_FILE}" &
-    SERVER_PID=$!
-
-    # Poll until the server is accepting connections (up to 5 s).
-    # Drop -f so any HTTP response (including 404 from the stub's GET handler
-    # absence) counts as ready — with -f, curl exits non-zero on 4xx and the
-    # loop only exits on timeout.
-    i=0
-    until curl -sS -o /dev/null --connect-timeout 0.5 "http://127.0.0.1:${TEST2_PORT}/" \
-          >/dev/null 2>&1 || [ "${i}" -ge 100 ]; do
-        i=$((i+1)); sleep 0.05
-    done
-
-    STAGE2="${W}/stage2"
-    make_stage "${STAGE2}" "gateway"
-    EXTRACT2="${W}/fn2.sh"
-    extract_register_staged "${EXTRACT2}"
-
-    DRY_RUN=0 \
-    BURROWEE_CONSOLE_URL="http://127.0.0.1:${TEST2_PORT}" \
-    BURROWEE_CONSOLE_RELEASE_TOKEN="tok-bearer-test" \
+RESULT2="$(
+    DRY_RUN=1 \
     RELEASE_REPO="${RELEASE_REPO}" \
-    RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR}" \
     SHA256="${SHA256}" \
     bash -c "
         TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
         . '${EXTRACT2}'
-        register_staged gateway v0.1.0.2026.06.17.abcd5678 0.1.0 '${STAGE2}' gateway/v0.1.0.2026.06.17.abcd5678
-    " >/dev/null 2>&1 || true
+        register_staged relay v0.1.0.2026.06.17.abcd9999 0.1.0 '${STAGE2}'
+    " 2>&1
+)"
 
-    # Wait for the server to write the file (up to 5 s).
-    i=0
-    until [ -f "${REQUEST_FILE}" ] || [ "${i}" -ge 100 ]; do
-        i=$((i+1)); sleep 0.05
-    done
-    wait "${SERVER_PID}" 2>/dev/null || true
-    SERVER_PID=""
+printf '%s\n' "${RESULT2}" | grep -q '"gated":true' \
+    || die "TEST 2: expected gated=true for relay. Output:\n${RESULT2}"
+printf '%s\n' "${RESULT2}" | grep -q '"github_release":""' \
+    || die "TEST 2: expected empty github_release for relay. Output:\n${RESULT2}"
+printf '%s\n' "${RESULT2}" | grep -q 'relay/v0.1.0.2026.06.17.abcd9999/' \
+    || die "TEST 2: expected relay R2 key in artifacts. Output:\n${RESULT2}"
+printf '%s\n' "${RESULT2}" | grep -q '"component":"relay"' \
+    || die "TEST 2: expected component=relay. Output:\n${RESULT2}"
+printf '%s' "$(body_of "${RESULT2}")" | json_ok \
+    || die "TEST 2: relay register body is not valid JSON. Output:\n${RESULT2}"
 
-    [ -f "${REQUEST_FILE}" ] || die "TEST 2: request file not written — POST may not have reached the server"
-    REQUEST_CONTENT="$(cat "${REQUEST_FILE}")"
-
-    printf '%s\n' "${REQUEST_CONTENT}" | grep -q '/api/v1/manage/releases' \
-        || die "TEST 2: wrong path. Got:\n${REQUEST_CONTENT}"
-    printf '%s\n' "${REQUEST_CONTENT}" | grep -q 'Bearer tok-bearer-test' \
-        || die "TEST 2: missing/wrong Authorization header. Got:\n${REQUEST_CONTENT}"
-    printf '%s\n' "${REQUEST_CONTENT}" | grep -q '"component":"gateway"' \
-        || die "TEST 2: expected component=gateway. Got:\n${REQUEST_CONTENT}"
-    printf '%s\n' "${REQUEST_CONTENT}" | grep -q '"prerelease":true' \
-        || die "TEST 2: expected prerelease=true. Got:\n${REQUEST_CONTENT}"
-    printf '%s\n' "${REQUEST_CONTENT}" | grep -q '"gated":false' \
-        || die "TEST 2: expected gated=false for gateway. Got:\n${REQUEST_CONTENT}"
-    printf '%s\n' "${REQUEST_CONTENT}" | grep -q 'github.com' \
-        || die "TEST 2: expected GitHub URL in artifacts. Got:\n${REQUEST_CONTENT}"
-
-    echo "✓ TEST 2 PASSED — POST sent with correct path, Bearer, component, gated, prerelease"
-fi
+echo "✓ TEST 2 PASSED — relay: gated=true, empty github_release, R2-key artifacts, valid JSON"
 
 # =============================================================================
-# TEST 3 — unconfigured skip: warning printed, returns 0.
+# TEST 3 — unconfigured skip: real run with no config.toml → warning, return 0.
 # =============================================================================
-say "TEST 3 — unconfigured skip: prints warning, returns 0"
+say "TEST 3 — unconfigured skip: prints warning, returns 0, no curl"
 
 STAGE3="${W}/stage3"
 make_stage "${STAGE3}" "edge"
 EXTRACT3="${W}/fn3.sh"
 extract_register_staged "${EXTRACT3}"
 
+# Point HOME at an empty dir so ~/.burrowee/release/config.toml is absent → skip.
+FAKE_HOME="${W}/fakehome"
+mkdir -p "${FAKE_HOME}"
+
 TEST3_OUT="$(
-    env -u BURROWEE_CONSOLE_URL -u BURROWEE_CONSOLE_RELEASE_TOKEN \
+    PATH="${W}/bin:${PATH}" \
+    HOME="${FAKE_HOME}" \
     DRY_RUN=0 \
     RELEASE_REPO="${RELEASE_REPO}" \
-    RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR}" \
     SHA256="${SHA256}" \
     bash -c "
         TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
@@ -334,122 +282,40 @@ printf '%s\n' "${TEST3_OUT}" | grep -q 'exit_code:0' \
 echo "✓ TEST 3 PASSED — unconfigured env: skip warning printed, return 0"
 
 # =============================================================================
-# TEST 4 — relay: gated=true, empty github_release, host-path artifacts.
+# TEST 4 — json_escape robustness (H1): control chars / quotes → valid JSON.
 # =============================================================================
-say "TEST 4 — relay: gated=true, empty github_release, host paths in artifacts"
+say "TEST 4 — H1: stamp with quote/backslash/newline/tab/control → valid JSON"
 
 STAGE4="${W}/stage4"
-make_stage "${STAGE4}" "relay"
+make_stage "${STAGE4}" "cli"
 EXTRACT4="${W}/fn4.sh"
 extract_register_staged "${EXTRACT4}"
 
+# A pathological version/semver carrying every class the old sed escaper missed:
+# embedded double-quote, backslash, newline, tab, and a U+0001 control char.
+EVIL_STAMP="$(printf 'v0.1.0"evil\\back\nNL\tTAB\001CTRL')"
+
 RESULT4="$(
     DRY_RUN=1 \
-    BURROWEE_CONSOLE_URL="https://console.example.com" \
-    BURROWEE_CONSOLE_RELEASE_TOKEN="tok-relay" \
     RELEASE_REPO="${RELEASE_REPO}" \
-    RELAY_PRIVATE_DIR="/srv/relay-releases" \
     SHA256="${SHA256}" \
-    bash -c "
-        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
-        . '${EXTRACT4}'
-        register_staged relay v0.1.0.2026.06.17.abcd9999 0.1.0 '${STAGE4}'
-    " 2>&1
+    EVIL_STAMP="${EVIL_STAMP}" \
+    bash -c '
+        TARGETS=("darwin arm64" "darwin amd64" "linux arm64" "linux amd64")
+        . '"'${EXTRACT4}'"'
+        register_staged cli "${EVIL_STAMP}" "${EVIL_STAMP}" '"'${STAGE4}'"' "cli/${EVIL_STAMP}"
+    ' 2>&1
 )"
 
-printf '%s\n' "${RESULT4}" | grep -q '"gated":true' \
-    || die "TEST 4: expected gated=true for relay. Output:\n${RESULT4}"
-printf '%s\n' "${RESULT4}" | grep -q '"github_release":""' \
-    || die "TEST 4: expected empty github_release for relay. Output:\n${RESULT4}"
-printf '%s\n' "${RESULT4}" | grep -q '/srv/relay-releases/' \
-    || die "TEST 4: expected relay host path in artifacts. Output:\n${RESULT4}"
-printf '%s\n' "${RESULT4}" | grep -q '"component":"relay"' \
-    || die "TEST 4: expected component=relay. Output:\n${RESULT4}"
+BODY4="$(body_of "${RESULT4}")"
+[ -n "${BODY4}" ] || die "TEST 4: no body emitted. Output:\n${RESULT4}"
+printf '%s' "${BODY4}" | json_ok \
+    || die "TEST 4: body with control chars is NOT valid JSON — json_escape regressed. Body:\n${BODY4}"
+# Confirm the control char was actually escaped (), not passed through raw.
+printf '%s' "${BODY4}" | grep -q '\\u0001' \
+    || die "TEST 4: control char U+0001 not escaped to \\u0001 in body. Body:\n${BODY4}"
 
-echo "✓ TEST 4 PASSED — relay: gated=true, empty github_release, host-path artifacts"
-
-# =============================================================================
-# TEST 5 — 409 response: treated as success (warning logged, exit 0).
-# =============================================================================
-say "TEST 5 — 409 response: warning logged, function returns 0"
-
-if [ -z "${PYTHON_BIN}" ]; then
-    skip "TEST 5 — python3 not found; skipping 409-stub test"
-else
-    TEST5_PORT="${REGISTER_TEST5_PORT:-18544}"
-
-    # One-shot HTTP server: always replies 409.
-    SERVER5_SCRIPT="${W}/stub_server_409.py"
-    cat > "${SERVER5_SCRIPT}" <<PYEOF
-import socketserver, http.server, sys, threading
-
-port = int(sys.argv[1])
-done = threading.Event()
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        length = int(self.headers.get('Content-Length', 0))
-        self.rfile.read(length)
-        self.send_response(409)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(b'{"error":"already exists"}')
-        done.set()
-    def log_message(self, *a): pass
-
-class ReuseTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
-
-with ReuseTCPServer(('127.0.0.1', port), Handler) as s:
-    t = threading.Thread(target=s.serve_forever)
-    t.daemon = True
-    t.start()
-    done.wait(timeout=15)
-    s.shutdown()
-PYEOF
-
-    "${PYTHON_BIN}" "${SERVER5_SCRIPT}" "${TEST5_PORT}" &
-    SERVER_PID=$!
-
-    # Poll until ready (any HTTP response counts).
-    i=0
-    until curl -sS -o /dev/null --connect-timeout 0.5 "http://127.0.0.1:${TEST5_PORT}/" \
-          >/dev/null 2>&1 || [ "${i}" -ge 100 ]; do
-        i=$((i+1)); sleep 0.05
-    done
-
-    STAGE5="${W}/stage5"
-    make_stage "${STAGE5}" "cli"
-    EXTRACT5="${W}/fn5.sh"
-    extract_register_staged "${EXTRACT5}"
-
-    RESULT5="$(
-        DRY_RUN=0 \
-        BURROWEE_CONSOLE_URL="http://127.0.0.1:${TEST5_PORT}" \
-        BURROWEE_CONSOLE_RELEASE_TOKEN="tok-409-test" \
-        RELEASE_REPO="${RELEASE_REPO}" \
-        RELAY_PRIVATE_DIR="${RELAY_PRIVATE_DIR}" \
-        SHA256="${SHA256}" \
-        bash -c "
-            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
-            . '${EXTRACT5}'
-            register_staged cli v0.1.0.2026.06.17.abcd0409 0.1.0 '${STAGE5}' cli/v0.1.0.2026.06.17.abcd0409
-            echo 'exit_code:0'
-        " 2>&1
-    )"
-
-    wait "${SERVER_PID}" 2>/dev/null || true
-    SERVER_PID=""
-
-    printf '%s\n' "${RESULT5}" | grep -q 'already registered' \
-        || die "TEST 5: 'already registered' warning not found. Output:\n${RESULT5}"
-    printf '%s\n' "${RESULT5}" | grep -q '409' \
-        || die "TEST 5: '409' not mentioned in output. Output:\n${RESULT5}"
-    printf '%s\n' "${RESULT5}" | grep -q 'exit_code:0' \
-        || die "TEST 5: function returned non-zero on 409 (shell exited before sentinel). Output:\n${RESULT5}"
-
-    echo "✓ TEST 5 PASSED — 409 response: warning logged, returns 0"
-fi
+echo "✓ TEST 4 PASSED — json_escape handles quote/backslash/newline/tab/control; body is valid JSON"
 
 # =============================================================================
 echo ""
