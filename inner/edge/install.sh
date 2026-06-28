@@ -1,17 +1,47 @@
 #!/bin/sh
-# Burrowee inner installer — edge (POSIX sh).
+# Burrowee inner installer — edge (POSIX sh, macOS + Linux).
 #
 # Ships at the ROOT of the verified release zip as `install.sh`. The outer
 # bootstrap verifies the zip (minisign + sha256) and ONLY THEN execs this with
-# cwd = the unzipped dir, so the binaries sit alongside this script. It installs
-# them into PREFIX/bin (default $HOME/.local/bin). Set BURROWEE_UNINSTALL to
-# remove them instead.
+# cwd = the unzipped dir, so the binaries sit alongside this script.
+#
+# ROOT-AWARE: when run as root (`curl ... | sudo sh`, the console-minted system
+# install), it installs the binaries to /usr/local/bin and sets up a MANAGED
+# ROOT SERVICE — a systemd system unit on Linux, a launchd LaunchDaemon on macOS
+# — running `burrowee-edge run`, then enables + (re)starts it. The service's
+# config home is /root/.burrowee/edge (HOME=/root in the unit). When run
+# unprivileged it keeps the historical behavior: a user-path binary drop under
+# $HOME/.local/bin with no service, plus a note that a managed system service
+# needs sudo.
+#
+# The system [Service] block mirrors the relay system unit (Restart / RestartSec
+# / TimeoutStopSec / HOME); ExecStart is `<bin> run` (the edge daemon verb).
+#
+# Idempotent: re-running replaces the binaries + unit and restarts the service,
+# so the same one-liner serves both fresh installs and in-place updates.
 set -eu
 
-BIN_DIR="${PREFIX:-$HOME/.local}/bin"
 BINS="burrowee burrowee-edge burrowee-edge-cli"
 COMP=edge
-COMP_HOME="$HOME/.burrowee/$COMP"
+
+# ── system (root) install paths ──────────────────────────────────────────────
+SYS_BIN_DIR="/usr/local/bin"
+SYSTEMD_UNIT="/etc/systemd/system/burrowee-edge.service"
+LAUNCHD_PLIST="/Library/LaunchDaemons/org.burrowee.edge.plist"
+LAUNCHD_LABEL="org.burrowee.edge"
+
+is_root() { [ "$(id -u)" = 0 ]; }
+
+# ── install target depends on privilege ──────────────────────────────────────
+# Root → /usr/local/bin + the root service's config home (/root/.burrowee/edge).
+# Non-root → $HOME/.local/bin + the invoking user's ~/.burrowee/edge (unchanged).
+if is_root; then
+    BIN_DIR="$SYS_BIN_DIR"
+    COMP_HOME="/root/.burrowee/$COMP"
+else
+    BIN_DIR="${PREFIX:-$HOME/.local}/bin"
+    COMP_HOME="$HOME/.burrowee/$COMP"
+fi
 VERSION_MARKER="$COMP_HOME/installed-version"
 
 # ver_lt A B — true (exit 0) when version A < B, comparing the vMAJOR.MINOR.PATCH
@@ -53,9 +83,20 @@ migrate_config() {
 
 # Test seam: when sourced with this var set, stop here so a test harness can call
 # the functions above without any install side-effect (tools/test-config-migrate.sh).
+# shellcheck disable=SC2317  # the `|| exit 0` IS reached when this script is run (not sourced)
 if [ -n "${BURROWEE_INSTALLER_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
+    if is_root; then
+        if [ "$(uname -s)" = "Darwin" ]; then
+            launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
+            rm -f "$LAUNCHD_PLIST"
+        else
+            systemctl disable --now burrowee-edge 2>/dev/null || true
+            rm -f "$SYSTEMD_UNIT"
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+    fi
     for b in $BINS; do rm -f "$BIN_DIR/$b"; done
     echo "removed from $BIN_DIR: $BINS"
     exit 0
@@ -108,6 +149,75 @@ if [ -n "${BURROWEE_VERSION:-}" ]; then
         echo "warning: could not write version marker" >&2
     fi
 fi
+
+# ---- ROOT: managed system service ------------------------------------------
+# A root install sets up a managed root service running `burrowee-edge run` and
+# (re)starts it, so the same one-liner is a fresh install AND an in-place update.
+# Non-root installs skip this and fall through to the user-path note + first-run
+# bootstrap below.
+if is_root; then
+    if [ "$(uname -s)" = "Darwin" ]; then
+        # ── macOS: root LaunchDaemon ──────────────────────────────────────────
+        cat > "$LAUNCHD_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LAUNCHD_LABEL</string>
+  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge</string><string>run</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>2</integer>
+</dict></plist>
+EOF
+        chmod 0644 "$LAUNCHD_PLIST"
+        echo "wrote LaunchDaemon → $LAUNCHD_PLIST"
+        launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
+        launchctl bootstrap system "$LAUNCHD_PLIST"
+        launchctl enable "system/$LAUNCHD_LABEL"
+        launchctl kickstart -k "system/$LAUNCHD_LABEL" 2>/dev/null || true
+        echo "launchd service $LAUNCHD_LABEL enabled + started"
+    else
+        # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
+        # HOME=/root so the daemon's os.UserHomeDir() resolves /root/.burrowee/edge
+        # (a root system service has no HOME otherwise).
+        mkdir -p "$(dirname "$SYSTEMD_UNIT")"
+        cat > "$SYSTEMD_UNIT" <<EOF
+[Unit]
+Description=burrowee edge (self-hosted relay-edge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=/root
+ExecStart=$SYS_BIN_DIR/burrowee-edge run
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        chmod 0644 "$SYSTEMD_UNIT"
+        echo "wrote systemd unit → $SYSTEMD_UNIT"
+        systemctl daemon-reload
+        systemctl enable --now burrowee-edge
+        systemctl restart burrowee-edge
+        echo "systemd service burrowee-edge enabled + (re)started"
+    fi
+    "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
+    echo "edge system install complete."
+    # The managed service runs the daemon; pairing is a separate operator step:
+    #   burrowee edge cli bootstrap <blob> <pin>   (or via the console)
+    if [ ! -d "$COMP_HOME/identity" ] && [ ! -f "$COMP_HOME/console.json" ]; then
+        echo "next: pair this edge — burrowee edge cli bootstrap <blob> <pin>"
+    fi
+    exit 0
+fi
+
+# ---- NON-ROOT: user-path note ----------------------------------------------
+echo "note: installed to $BIN_DIR (user path, no managed service);"
+echo "      for a managed system service re-run with sudo."
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------
 # Re-install short-circuit: if this component already has persisted state under
