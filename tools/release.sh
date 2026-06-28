@@ -144,7 +144,7 @@ bins_for() {
         cli)     printf '%s' "burrowee-cli" ;;
         gateway) printf '%s' "burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register" ;;
         edge)    printf '%s' "burrowee-edge burrowee-edge-cli" ;;
-        relay)   printf '%s' "burrowee-relay" ;;
+        relay)   printf '%s' "burrowee-relay burrowee-relay-cli burrowee-relay-updater" ;;
     esac
 }
 
@@ -329,12 +329,9 @@ for comp in "${COMPONENTS[@]}"; do
             || { echo "✗ ${comp} source worktree is dirty: ${src}" >&2; exit 1; }
     fi
 done
-# relay does not bundle the dispatcher; skip the dispatcher-check for relay-only runs.
-relay_only=0
-[ "${#COMPONENTS[@]}" = 1 ] && [ "${COMPONENTS[0]}" = relay ] && relay_only=1
-if [ "${relay_only}" != 1 ]; then
-    [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
-fi
+# Every component bundles the `burrowee` dispatcher (relay included), so its source
+# worktree is required for all release paths.
+[ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
 
 # ---- resolve the signing key ------------------------------------------------
 # Sets SIGN_KEY. For the real key we age-decrypt into a chmod-600 tmpfile and
@@ -415,13 +412,11 @@ console_pub_hex() {
 # releases instead of sitting at 0.1.0 forever — `version.sh --bump-patch`
 # stages versions/burrowee, which then rides the first component's [RELEASED]
 # marker commit (`git commit` with no pathspec commits all staged files).
-if [ "${relay_only}" != 1 ]; then
-    if [ "${DRY_RUN}" != 1 ]; then
-        SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --bump-patch >/dev/null
-    fi
-    DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
-    DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
+if [ "${DRY_RUN}" != 1 ]; then
+    SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --bump-patch >/dev/null
 fi
+DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
+DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
 build_dispatcher() {
     # build_dispatcher <os> <arch> — idempotent; populates $DISP_DIR/<os>-<arch>/burrowee
     local os="$1" arch="$2" out="${DISP_DIR}/$1-$2"
@@ -436,6 +431,7 @@ build_dispatcher() {
 do_release_relay() {
     local src="${SRC_RELAY}"
     local comp=relay
+    local bins; bins="$(bins_for "${comp}")"
 
     echo
     echo "=== burrowee relay release (private) ==="
@@ -465,6 +461,7 @@ do_release_relay() {
     echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
+    echo "Disp    : ${DISP_STAMP}"
     echo "Dry-run : ${DRY_RUN}"
 
     local stage="${REPO_ROOT}/dist/${stamp}"
@@ -472,24 +469,37 @@ do_release_relay() {
     mkdir -p "${stage}"
 
     # (2) per-target build + assemble + zip.
-    local zips=() pair os arch out_bins assemble asset b
+    local zips=() pair os arch out_bins assemble asset b s
     for pair in "${TARGETS[@]}"; do
         read -r os arch <<<"${pair}"
         out_bins="${stage}/.bins-${os}-${arch}"
         mkdir -p "${out_bins}"
 
+        # dispatcher for this target (built once, reused) — bundled like the public comps.
+        build_dispatcher "${os}" "${arch}"
+
+        # relay binaries: build.sh emits all three (serve + cli + updater); the cli
+        # and updater get console identity baked (console_pub_hex from
+        # config/console-pub.hex). The serve binary gets only -X main.version.
         COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \
             STAMP="${stamp}" OUT_DIR="${out_bins}" GO_BIN="${GO_BIN}" \
+            CONSOLE_PUB_HEX="$(console_pub_hex)" \
             bash "${REPO_ROOT}/tools/build.sh" >&2
 
-        # assemble: component bin + inner installer (→ install.sh). NO dispatcher.
+        # assemble: four binaries (3 relay-tree + dispatcher) + the three relay
+        # scripts copied from the relay source. The full installer install.sh is the
+        # zip's entrypoint; update.sh + updater.update.sh ride alongside it.
         assemble="${stage}/burrowee-${comp}-${os}-${arch}"
         rm -rf "${assemble}"
         mkdir -p "${assemble}"
-        # shellcheck disable=SC2086
-        for b in burrowee-relay; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
-        cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
-        chmod 0755 "${assemble}/install.sh"
+        # shellcheck disable=SC2086  # ${bins} is an intentional space-list from bins_for(); word-splitting is the point.
+        for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
+        cp "${DISP_DIR}/${os}-${arch}/burrowee" "${assemble}/burrowee"
+        for s in install.sh update.sh updater.update.sh; do
+            [ -f "${src}/${s}" ] || { echo "✗ relay script missing in source: ${src}/${s}" >&2; exit 1; }
+            cp "${src}/${s}" "${assemble}/${s}"
+            chmod 0755 "${assemble}/${s}"
+        done
 
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
@@ -793,7 +803,7 @@ for comp in "${COMPONENTS[@]}"; do
 done
 
 # leave dispatcher build cache for inspection on dry-run; clean on real release
-if [ "${DRY_RUN}" != 1 ] && [ "${relay_only}" != 1 ]; then rm -rf "${DISP_DIR}"; fi
+if [ "${DRY_RUN}" != 1 ]; then rm -rf "${DISP_DIR}"; fi
 
 echo
 echo "✓ done (${WHAT}${DRY_RUN:+, dry-run=${DRY_RUN}})"

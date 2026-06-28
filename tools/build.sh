@@ -12,11 +12,17 @@
 #   TARGETARCH    GOARCH (arm64 | amd64)
 #   STAMP           version string baked via -X main.version=…
 #   OUT_DIR         output directory for the built binaries (created if absent)
-#   CONSOLE_PUB_HEX edge ONLY — baked via -X main.consolePubHexProd=… (console signing pubkey).
+#   CONSOLE_PUB_HEX edge + relay — baked via -X main.consolePubHexProd=… (console signing pubkey).
 #                   Accepts the legacy BURROWEE_CLOUD_PUB / CLOUD_PUB_HEX names (env bridge).
+#   CONSOLE_URL_PROD relay ONLY — console carrier URL baked via -X main.consoleURLProd=…
+#                   (default wss://relay-api.burrowee.com; override via env).
 #
-# ldflags: always `-X main.version=$STAMP`; edge ALSO appends
-#          `-X main.consolePubHexProd=$CONSOLE_PUB_HEX`.
+# ldflags: always `-X main.version=$STAMP`. edge ALSO appends
+#          `-X main.consolePubHexProd=$CONSOLE_PUB_HEX` to every edge binary.
+#          relay bakes console identity (`-X main.consoleURLProd` +
+#          `-X main.consolePubHexProd`) into burrowee-relay-cli + burrowee-relay-updater
+#          ONLY — the serve binary (burrowee-relay) learns its console at bootstrap,
+#          so it gets just `-X main.version`.
 # If TARGETOS=darwin and the build host is darwin, each output is ad-hoc
 # codesigned (`codesign --sign - --force`) — macOS refuses to exec unsigned
 # native binaries. Cross-compiled (linux) outputs are left untouched.
@@ -52,7 +58,7 @@ case "${COMP}" in
     cli)      MAP="burrowee-cli:./cmd/burrowee-cli" ;;
     gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register" ;;
     edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:./cmd/burrowee-edge-cli" ;;
-    relay)    MAP="burrowee-relay:./cmd/burrowee-relay" ;;
+    relay)    MAP="burrowee-relay:./cmd/burrowee-relay burrowee-relay-cli:./cli burrowee-relay-updater:./cli/cmd/burrowee-relay-updater" ;;
     burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
     *)        echo "✗ unknown COMP: ${COMP}" >&2; exit 2 ;;
 esac
@@ -75,6 +81,25 @@ if [ "${COMP}" = "edge" ]; then
     LDFLAGS="${LDFLAGS} -X main.consolePubHexProd=${CONSOLE_PUB_HEX}"
 fi
 
+# relay: the cli + updater bake console identity (carrier URL + signing pubkey); the
+# serve binary (burrowee-relay) does NOT — it learns its console at bootstrap. So
+# relay applies these flags PER-BINARY in the build loop, never via the global
+# LDFLAGS (which would wrongly bake the key into the serve binary too).
+RELAY_CONSOLE_LDFLAGS=""
+if [ "${COMP}" = "relay" ]; then
+    CONSOLE_PUB_HEX="$(env_or CONSOLE_PUB_HEX CLOUD_PUB_HEX)"
+    [ -n "${CONSOLE_PUB_HEX}" ] || CONSOLE_PUB_HEX="$(env_or BURROWEE_CONSOLE_PUB BURROWEE_CLOUD_PUB)"
+    : "${CONSOLE_PUB_HEX:?CONSOLE_PUB_HEX is required for relay builds (console signing pubkey hex)}"
+    # The 64-zero placeholder is valid hex of valid length, so the runtime check
+    # cannot catch it — it would silently pin a dead key. Reject it (mirrors edge).
+    [ "${CONSOLE_PUB_HEX}" != "0000000000000000000000000000000000000000000000000000000000000000" ] || {
+        echo "✗ CONSOLE_PUB_HEX is the placeholder — set config/console-pub.hex to the real console signing key before a relay release" >&2
+        exit 1
+    }
+    CONSOLE_URL_PROD="${CONSOLE_URL_PROD:-wss://relay-api.burrowee.com}"
+    RELAY_CONSOLE_LDFLAGS="-X main.consoleURLProd=${CONSOLE_URL_PROD} -X main.consolePubHexProd=${CONSOLE_PUB_HEX}"
+fi
+
 mkdir -p "${OUT_DIR}"
 HOST_OS="$(uname -s)"
 
@@ -83,9 +108,16 @@ for pair in ${MAP}; do
     bin="${pair%%:*}"
     pkg="${pair#*:}"
     out="${OUT_DIR}/${bin}"
+    # Per-binary ldflags: relay bakes console identity into the cli + updater only.
+    bin_ldflags="${LDFLAGS}"
+    if [ "${COMP}" = "relay" ]; then
+        case "${bin}" in
+            burrowee-relay-cli|burrowee-relay-updater) bin_ldflags="${LDFLAGS} ${RELAY_CONSOLE_LDFLAGS}" ;;
+        esac
+    fi
     echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${STAMP})"
     ( cd "${SRC_DIR}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-        "${GO_BIN}" build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}" )
+        "${GO_BIN}" build -trimpath -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then
         codesign --sign - --force "${out}" >/dev/null 2>&1 || true
     fi
