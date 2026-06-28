@@ -51,7 +51,7 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /o
 case "${COMP}" in
     cli)      MAP="burrowee-cli:./cmd/burrowee-cli" ;;
     gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register" ;;
-    edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:@cli:." ;;
+    edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:./cmd/burrowee-edge-cli" ;;
     relay)    MAP="burrowee-relay:./cmd/burrowee-relay" ;;
     burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
     *)        echo "✗ unknown COMP: ${COMP}" >&2; exit 2 ;;
@@ -81,32 +81,11 @@ HOST_OS="$(uname -s)"
 # shellcheck disable=SC2086  # ${MAP} is an intentional space-list of "bin:pkg" pairs; word-splitting into pairs is the point.
 for pair in ${MAP}; do
     bin="${pair%%:*}"
-    rest="${pair#*:}"
-    # Nested-module pair: "bin:@subdir:pkg" — build from "${SRC_DIR}/${subdir}"
-    # rather than "${SRC_DIR}". The "@" prefix on the second field is the sentinel.
-    if [ "${rest#@}" != "${rest}" ]; then
-        rest_noat="${rest#@}"
-        build_subdir="${rest_noat%%:*}"
-        pkg="${rest_noat#*:}"
-        build_dir="${SRC_DIR}/${build_subdir}"
-        # The nested module has its own go.mod and uses tagged deps — build with
-        # GOWORK=off so the parent worktree's go.work (which does not include the
-        # nested module) does not shadow the module's own dependency resolution.
-        nested_module=1
-    else
-        pkg="${rest}"
-        build_dir="${SRC_DIR}"
-        nested_module=0
-    fi
+    pkg="${pair#*:}"
     out="${OUT_DIR}/${bin}"
     echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${STAMP})"
-    if [ "${nested_module}" = 1 ]; then
-        ( cd "${build_dir}" && GOWORK=off CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-            "${GO_BIN}" build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}" )
-    else
-        ( cd "${build_dir}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-            "${GO_BIN}" build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}" )
-    fi
+    ( cd "${SRC_DIR}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+        "${GO_BIN}" build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}" )
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then
         codesign --sign - --force "${out}" >/dev/null 2>&1 || true
     fi
