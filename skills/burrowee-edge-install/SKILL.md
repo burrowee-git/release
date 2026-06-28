@@ -40,10 +40,10 @@ git clone git@github.com:burrowee-git/edge.git
 cd edge
 # Linux (typical VPS):
 go build -o burrowee-edge ./cmd/burrowee-edge
-go build -o burrowee-edge-cli ./cmd/burrowee-edge-cli
+(cd cli && GOWORK=off go build -o ../burrowee-edge-cli .)
 # macOS Burrowee dev tree only (a per-dir PATH hook strips /opt/homebrew/bin):
 /opt/homebrew/bin/go build -o burrowee-edge ./cmd/burrowee-edge
-/opt/homebrew/bin/go build -o burrowee-edge-cli ./cmd/burrowee-edge-cli
+(cd cli && GOWORK=off /opt/homebrew/bin/go build -o ../burrowee-edge-cli .)
 ```
 
 The published GitHub-release installer ships `burrowee` (the dispatcher),
