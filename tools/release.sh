@@ -2,7 +2,13 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|relay|all> [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]
+#
+# --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
+#   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
+#   ad-hoc signed (the default) — fine for curl-install (no quarantine xattr);
+#   use --apple for release versions that may be browser-downloaded. Guideline:
+#   ~/.claude/guidelines/APPLE-SIGNING.md.
 #
 # For each requested component this:
 #   1. Stamps the version (bump unless --dry-run) via tools/version.sh.
@@ -91,17 +97,20 @@ fi
 WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
+APPLE_SIGN=""
 for arg in "$@"; do
     case "${arg}" in
         cli|gateway|edge|relay|all) WHAT="${arg}" ;;
+        --apple)              APPLE_SIGN=1 ;;
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
-        -h|--help)            sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)            sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
-[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|relay|all> [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+export APPLE_SIGN
 
 # ---- config / defaults ------------------------------------------------------
 RELEASE_HOST="${RELEASE_HOST:-nsm.renative.com}"
@@ -287,6 +296,21 @@ need unzip
 need minisign
 need jq   # json_escape (console-register payload) builds JSON via `jq -Rs`, not hand-rolled sed
 command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found (tried '${GO_BIN}')" >&2; exit 1; }
+
+# Apple-sign mode: resolve the shared Modernech signer + confirm the identity is
+# installed. Exported so tools/build.sh signs the darwin bins with the same tool;
+# darwin zips are notarized below after assembly.
+if [ -n "${APPLE_SIGN}" ]; then
+    [ "$(uname -s)" = Darwin ] || { echo "✗ --apple requires a macOS build host" >&2; exit 1; }
+    SIGN_BIN="${MODERNECH_SIGN:-modernech-sign}"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 || SIGN_BIN="${HOME}/bin/modernech-sign"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 \
+        || { echo "✗ --apple set but modernech-sign not found on PATH or ~/bin" >&2; exit 1; }
+    security find-identity -v -p codesigning 2>/dev/null | grep -q "$("${SIGN_BIN}" id)" \
+        || { echo "✗ Developer ID identity not in keychain: $("${SIGN_BIN}" id)" >&2; exit 1; }
+    export MODERNECH_SIGN="${SIGN_BIN}"
+    echo "→ --apple: Developer ID signing + notarization via ${SIGN_BIN}" >&2
+fi
 
 # sha256 tool (shasum on mac, sha256sum on linux)
 if command -v shasum >/dev/null 2>&1; then
@@ -504,6 +528,16 @@ do_release_relay() {
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
+
+        # Apple-sign mode: notarize the darwin zips (binaries were Developer ID
+        # signed by build.sh). Submitting doesn't alter the zip, so the latest.*
+        # copies below + their SHA256SUMS/minisig still cover these exact bytes.
+        # Bare-binary zips can't be stapled — the ticket lives in Apple's online
+        # DB. linux: skip.
+        if [ -n "${APPLE_SIGN}" ] && [ "${os}" = darwin ]; then
+            "${SIGN_BIN}" notarize "${stage}/${asset}" >&2
+        fi
+
         zips+=("${asset}")
         rm -rf "${out_bins}"
     done
@@ -665,6 +699,15 @@ do_release() {
         if [ "${comp}" = edge ]; then
             ( cd "${assemble}" && zip -r -q "${stage}/${asset}" covers/ )
         fi
+
+        # Apple-sign mode: notarize the darwin zips (binaries were Developer ID
+        # signed by build.sh). Submitting doesn't alter the zip, so the later
+        # SHA256SUMS + minisign still cover these exact bytes. Bare-binary zips
+        # can't be stapled — the ticket lives in Apple's online DB. linux: skip.
+        if [ -n "${APPLE_SIGN}" ] && [ "${os}" = darwin ]; then
+            "${SIGN_BIN}" notarize "${stage}/${asset}" >&2
+        fi
+
         zips+=("${asset}")
         rm -rf "${out_bins}"
     done

@@ -23,9 +23,18 @@
 #          `-X main.consolePubHexProd`) into burrowee-relay-cli + burrowee-relay-updater
 #          ONLY — the serve binary (burrowee-relay) learns its console at bootstrap,
 #          so it gets just `-X main.version`.
-# If TARGETOS=darwin and the build host is darwin, each output is ad-hoc
-# codesigned (`codesign --sign - --force`) — macOS refuses to exec unsigned
-# native binaries. Cross-compiled (linux) outputs are left untouched.
+# darwin signing (only when TARGETOS=darwin AND the build host is darwin):
+#   - default          → ad-hoc (`codesign --sign - --force`); macOS refuses to
+#                        exec an unsigned native binary. For dev/CI/normal builds.
+#   - APPLE_SIGN set    → real Developer ID signature via `modernech-sign sign`
+#                        (hardened runtime + secure timestamp). RELEASE-only;
+#                        release.sh sets it under its `--apple` flag. Notarization
+#                        of the assembled zip happens in release.sh, not here.
+# Cross-compiled (linux) outputs are left untouched.
+#
+# Optional env:
+#   APPLE_SIGN     non-empty → Developer ID sign darwin outputs (release mode)
+#   MODERNECH_SIGN path to the modernech-sign tool (default: PATH, then ~/bin)
 set -euo pipefail
 
 : "${COMP:?COMP is required (cli|gateway|edge|relay|burrowee)}"
@@ -52,6 +61,15 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /opt/homebrew/bin/go" >&2; exit 1; }
 
 [ -d "${SRC_DIR}" ] || { echo "✗ SRC_DIR '${SRC_DIR}' is not a directory" >&2; exit 1; }
+
+# Resolve the shared Modernech signer once, only when release-mode Apple signing
+# is requested (keeps normal/dev builds free of any dependency on it).
+if [ -n "${APPLE_SIGN:-}" ]; then
+    SIGN_BIN="${MODERNECH_SIGN:-modernech-sign}"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 || SIGN_BIN="${HOME}/bin/modernech-sign"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 \
+        || { echo "✗ APPLE_SIGN set but modernech-sign not found on PATH or ~/bin" >&2; exit 1; }
+fi
 
 # binary -> package map (space-separated "bin:pkg" pairs per component)
 case "${COMP}" in
@@ -119,7 +137,13 @@ for pair in ${MAP}; do
     ( cd "${SRC_DIR}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
         "${GO_BIN}" build -trimpath -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then
-        codesign --sign - --force "${out}" >/dev/null 2>&1 || true
+        if [ -n "${APPLE_SIGN:-}" ]; then
+            # release mode: real Developer ID signature (hardened runtime + timestamp)
+            "${SIGN_BIN}" sign "${out}" >&2
+        else
+            # default: ad-hoc — macOS only needs *a* signature to exec the binary
+            codesign --sign - --force "${out}" >/dev/null 2>&1 || true
+        fi
     fi
     echo "✓ ${out}"
 done
