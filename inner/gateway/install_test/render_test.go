@@ -121,6 +121,7 @@ func seedDummyBins(t *testing.T, dir string) {
 		"burrowee-gateway-cli",
 		"burrowee-gateway-console",
 		"burrowee-register",
+		"burrowee-gateway-updater",
 	}
 	for _, b := range bins {
 		p := filepath.Join(dir, b)
@@ -154,8 +155,8 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 		)
 		assertContains(t, upd,
 			"<string>com.burrowee.gateway.updater</string>",
-			"<string>"+binDir+"/burrowee-gateway-cli</string>",
-			"<string>updater</string>",
+			"<string>"+binDir+"/burrowee-gateway-updater</string>",
+			"<string>run</string>",
 			"<string>"+home+"/.burrowee/gateway/logs/updater.log</string>",
 			"<string>"+home+"/.burrowee/gateway/logs/updater.err.log</string>",
 		)
@@ -170,7 +171,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 		)
 		assertContains(t, upd,
 			"Description=burrowee-gateway updater",
-			"ExecStart="+binDir+"/burrowee-gateway-cli updater",
+			"ExecStart="+binDir+"/burrowee-gateway-updater run",
 		)
 	}
 }
@@ -211,6 +212,7 @@ func TestInstallShFreshInstall(t *testing.T) {
 		"burrowee-gateway-cli",
 		"burrowee-gateway-console",
 		"burrowee-register",
+		"burrowee-gateway-updater",
 	} {
 		if _, err := os.Stat(filepath.Join(binDir, b)); err != nil {
 			t.Errorf("binary not installed: %s: %v", b, err)
@@ -286,6 +288,7 @@ func TestInstallShUninstall(t *testing.T) {
 		"burrowee-gateway-cli",
 		"burrowee-gateway-console",
 		"burrowee-register",
+		"burrowee-gateway-updater",
 	} {
 		p := filepath.Join(binDir, b)
 		if _, err := os.Stat(p); err == nil {
