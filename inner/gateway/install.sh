@@ -12,7 +12,7 @@
 set -eu
 
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
-BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register"
+BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
 
@@ -56,7 +56,7 @@ EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway.updater</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway-cli</string><string>updater</string></array>
+  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway-updater</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -97,7 +97,7 @@ Description=burrowee-gateway updater
 After=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/burrowee-gateway-cli updater
+ExecStart=$BIN_DIR/burrowee-gateway-updater run
 Restart=on-failure
 RestartSec=2
 
@@ -179,7 +179,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # Phase 1: detect which binaries changed.
     CHANGED=""
     for b in $BINS; do
-        [ "$b" = "burrowee-gateway-cli" ] && continue   # updater binary: updated separately, never during a gateway update
+        { [ "$b" = "burrowee-gateway-cli" ] || [ "$b" = "burrowee-gateway-updater" ]; } && continue   # updater binaries: updated separately, never during a gateway update
         _staged="./$b"
         [ -f "$_staged" ] || { echo "missing $b in bundle" >&2; exit 1; }
         _staged_sum="$(sha256_of "$_staged")"
