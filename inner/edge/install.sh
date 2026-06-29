@@ -25,8 +25,13 @@ BINS="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater"
 COMP=edge
 
 # ── system (root) install paths ──────────────────────────────────────────────
-SYS_BIN_DIR="/usr/local/bin"
-SYSTEMD_UNIT="/etc/systemd/system/burrowee-edge.service"
+# SYS_BIN_DIR + SYSTEMD_UNIT_DIR default to the real system locations; they are
+# overridable only so the Go install-test harness can exercise the root branch in
+# a sandbox without actually being root.
+SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
+SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge-updater.service"
 LAUNCHD_PLIST="/Library/LaunchDaemons/org.burrowee.edge.plist"
 LAUNCHD_LABEL="org.burrowee.edge"
 
@@ -93,7 +98,8 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
             rm -f "$LAUNCHD_PLIST"
         else
             systemctl disable --now burrowee-edge 2>/dev/null || true
-            rm -f "$SYSTEMD_UNIT"
+            systemctl disable --now burrowee-edge-updater 2>/dev/null || true
+            rm -f "$SYSTEMD_UNIT" "$SYSTEMD_UPDATER_UNIT"
             systemctl daemon-reload 2>/dev/null || true
         fi
     fi
@@ -200,6 +206,31 @@ WantedBy=multi-user.target
 EOF
         chmod 0644 "$SYSTEMD_UNIT"
         echo "wrote systemd unit → $SYSTEMD_UNIT"
+
+        # Updater system unit ([Service] mirrors the serve unit; HOME=/root so its
+        # console.json + identity resolve to /root/.burrowee/edge). Rendered but
+        # left DISABLED — the auto-updater is owner opt-in (enable + start it with
+        # `systemctl enable --now burrowee-edge-updater`).
+        cat > "$SYSTEMD_UPDATER_UNIT" <<EOF
+[Unit]
+Description=burrowee edge updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=/root
+ExecStart=$SYS_BIN_DIR/burrowee-edge-updater run
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        chmod 0644 "$SYSTEMD_UPDATER_UNIT"
+        echo "wrote systemd unit → $SYSTEMD_UPDATER_UNIT (disabled — enable with: systemctl enable --now burrowee-edge-updater)"
+
         systemctl daemon-reload
         systemctl enable --now burrowee-edge
         systemctl restart burrowee-edge
