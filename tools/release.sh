@@ -141,9 +141,9 @@ src_for() {
 # binary list per component (the dispatcher `burrowee` is added at assembly time)
 bins_for() {
     case "$1" in
-        cli)     printf '%s' "burrowee-cli" ;;
-        gateway) printf '%s' "burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register" ;;
-        edge)    printf '%s' "burrowee-edge burrowee-edge-cli" ;;
+        cli)     printf '%s' "burrowee-cli burrowee-cli-updater" ;;
+        gateway) printf '%s' "burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater" ;;
+        edge)    printf '%s' "burrowee-edge burrowee-edge-cli burrowee-edge-updater" ;;
         relay)   printf '%s' "burrowee-relay burrowee-relay-cli burrowee-relay-updater" ;;
     esac
 }

@@ -55,9 +55,9 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /o
 
 # binary -> package map (space-separated "bin:pkg" pairs per component)
 case "${COMP}" in
-    cli)      MAP="burrowee-cli:./cmd/burrowee-cli" ;;
-    gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register" ;;
-    edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:./cmd/burrowee-edge-cli" ;;
+    cli)      MAP="burrowee-cli:./cmd/burrowee-cli burrowee-cli-updater:./cmd/burrowee-cli-updater" ;;
+    gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register burrowee-gateway-updater:./cmd/burrowee-gateway-updater" ;;
+    edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:./cmd/burrowee-edge-cli burrowee-edge-updater:./cmd/burrowee-edge-updater" ;;
     relay)    MAP="burrowee-relay:./cmd/burrowee-relay burrowee-relay-cli:./cli burrowee-relay-updater:./cli/cmd/burrowee-relay-updater" ;;
     burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
     *)        echo "✗ unknown COMP: ${COMP}" >&2; exit 2 ;;

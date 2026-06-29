@@ -21,7 +21,7 @@
 # so the same one-liner serves both fresh installs and in-place updates.
 set -eu
 
-BINS="burrowee burrowee-edge burrowee-edge-cli"
+BINS="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater"
 COMP=edge
 
 # ── system (root) install paths ──────────────────────────────────────────────
