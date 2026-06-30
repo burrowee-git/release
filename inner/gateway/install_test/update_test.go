@@ -18,6 +18,7 @@ var allBins = []string{
 	"burrowee-gateway-cli",
 	"burrowee-gateway-console",
 	"burrowee-register",
+	"burrowee-gateway-updater",
 }
 
 // seedInstalled writes each binary name→content into binDir with mode 0755.
