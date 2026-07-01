@@ -145,17 +145,20 @@ advertised LAN port is reachable. It replaces the manual install + apply + start
 (the breakdown in 5b–5f):
 
 ```bash
-# macOS (Homebrew — no sudo needed):
+# Run it as the edge's own user — NOT under sudo, no --home:
 burrowee edge cli doctor --fix
 
-# Linux (the nginx install + `systemctl enable` need root; --home points the
-# front config + cert back at the service user's edge dir, since sudo swaps $HOME.
-# --home is the ROOT ~/.burrowee — the cli appends the `edge` component itself):
-sudo "$(command -v burrowee-edge-cli)" doctor --fix --home "$HOME/.burrowee"
-
 # Unattended (CI / scripted) — assume yes for the install/start prompts:
-sudo "$(command -v burrowee-edge-cli)" doctor --fix --yes --home "$HOME/.burrowee"
+burrowee edge cli doctor --fix --yes
 ```
+
+> **Run `doctor --fix` as the edge's own user — never under `sudo`.** The nginx
+> steps that need root (`apt-get install libnginx-mod-stream`, writing the
+> `/etc/nginx` stream front, `systemctl` for nginx) **self-elevate via `sudo`
+> automatically** on Linux — you may be prompted for your password once. Everything
+> that must stay owned by the service user — the identity key, the host TLS cert,
+> the `systemd --user` service — is written unprivileged, so the daemon can still
+> read it. (On macOS the Homebrew conf dir is user-writable, so nothing elevates.)
 
 `burrowee edge cli doctor` (without `--fix`) is the **read-only** check — it prints
 nginx installed / running / front config / **LAN front reachable**, so you can
@@ -237,7 +240,7 @@ apply` (LAN-only)**
 *Domain-fronted (SNI front — the normal case):*
 
 ```bash
-sudo "$(command -v burrowee-edge-cli)" nginx install --home "$HOME/.burrowee"
+burrowee edge cli nginx install
 ```
 
 `nginx install` builds the `:443` `ssl_preread` stream front that routes the edge's
@@ -252,7 +255,7 @@ burrowee edge cli config set host_fqdn <this-edge's-public-fqdn>
 *LAN-only (passthrough front — only when the edge serves LAN-local gateways):*
 
 ```bash
-sudo "$(command -v burrowee-edge-cli)" nginx apply --home "$HOME/.burrowee" --listen-lan 8448
+burrowee edge cli nginx apply --listen-lan 8448
 ```
 
 `nginx apply` generates the 10-year LAN cert at `~/.burrowee/edge/lan-cert/` when
@@ -264,9 +267,11 @@ port) and takes `--listen-tls`/`--listen-lan` for the port pair; pass a differen
 `--listen-lan` only when you chose a replacement port in step 5b. `--print` previews
 the config without writing anything.
 
-`--home` is the ROOT `~/.burrowee` (the cli appends the `edge` component itself), and
-is required because `sudo` replaces `$HOME` with root's — the flag points the
-subcommand back at the service user's edge directory.
+Run these as the edge's own user — **not** under `sudo`. `nginx install`/`nginx apply`
+write `/etc/nginx`, so on Linux they **self-elevate via `sudo` automatically**,
+preserving `$HOME` so they still read the service user's `~/.burrowee/edge` config.
+On macOS the Homebrew conf dir is user-writable, so nothing elevates. Pass `--home`
+only to point at a non-default component dir.
 
 When the command succeeds it prints the **LAN cert fingerprint** (for `nginx apply`)
 and confirms the pin reaches gateways and CLIs automatically via the next endpoint
@@ -334,8 +339,7 @@ If a probe is refused on a port that should be live, check `nginx -T | grep stre
 **Cert rotation**
 
 ```bash
-sudo "$(command -v burrowee-edge-cli)" nginx apply --home "$HOME/.burrowee" \
-    --listen-lan 8448 --rotate-lan-cert
+burrowee edge cli nginx apply --listen-lan 8448 --rotate-lan-cert
 ```
 
 `--rotate-lan-cert` (a LAN-cert operation on the `nginx apply` path) mints a new LAN
