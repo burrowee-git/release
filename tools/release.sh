@@ -2,7 +2,13 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|all> [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]
+#
+# --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
+#   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
+#   ad-hoc signed (the default) — fine for curl-install (no quarantine xattr);
+#   use --apple for release versions that may be browser-downloaded. Guideline:
+#   ~/.claude/guidelines/APPLE-SIGNING.md.
 #
 # For each requested component this:
 #   1. Stamps the version (bump unless --dry-run) via tools/version.sh.
@@ -19,6 +25,12 @@
 #      scp's the static surface to the release host.
 #   8. (non-dry-run) records a [RELEASED: <comp>] marker commit.
 #
+# The relay target is a PRIVATE publish (uploads to R2).
+# It does NOT push a GitHub Release or git tag. It does:
+#   - Build 4 platform zips + SHA256SUMS.txt + .minisig (same as public comps).
+#   - Upload zips + SHA256SUMS.txt + .minisig to R2 under relay/<stamp>/.
+#   - Update top-level latest.* set (latest.<os>-<arch>.zip + SHA256SUMS.txt + .minisig).
+#
 # On --dry-run only steps 1-5 run, and the version bump is REVERTED — the tree is
 # left exactly as it was, just with throwaway artifacts under dist/<stamp>/.
 #
@@ -33,6 +45,7 @@
 #   BURROWEE_SRC_GATEWAY    gateway component source worktree
 #   BURROWEE_SRC_EDGE       edge component source worktree
 #   BURROWEE_SRC_DISPATCHER burrowee dispatcher source worktree
+#   BURROWEE_SRC_RELAY      relay component source worktree (default: relay main worktree)
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
 set -euo pipefail
@@ -45,21 +58,59 @@ GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 export GO_BIN
 
+# ---- build_register_helper: compile burrowee-release-register to dist/.tools/ ----
+# Called from both the publish intercept and the release-cut flow.
+REGISTER_BIN="${REPO_ROOT}/dist/.tools/burrowee-release-register"
+build_register_helper() {
+    mkdir -p "${REPO_ROOT}/dist/.tools"
+    echo "→ building burrowee-release-register helper" >&2
+    "${GO_BIN}" build -buildvcs=false -o "${REGISTER_BIN}" ./cmd/burrowee-release-register \
+        || { echo "✗ failed to build burrowee-release-register" >&2; exit 1; }
+}
+
+# ---- publish: push a promoted version's public binaries to R2 ----------------
+# Handled before the normal arg loop so the release-cut pre-flight (signing key,
+# ssh, ghp) is never entered.
+#
+# After the R2 push, retention is reported (NOT applied): the R2 prune-to-10 and
+# the GitHub prune-to-10 both run DRY-RUN so the cut surfaces what is now over
+# the retention limit. The destructive drain (--execute) is a deploy-phase step,
+# never run automatically from a publish.
+if [ "${1:-}" = "publish" ]; then
+    shift
+    comp="${1:-}"
+    [ -n "${comp}" ] || { echo "usage: release.sh publish <cli|gateway|edge|all> [--version <v>]" >&2; exit 1; }
+    shift || true
+    build_register_helper
+    "${REGISTER_BIN}" publish --comp "${comp}" "$@"
+    echo
+    echo "→ retention (dry-run — run prune with --execute in the deploy phase to apply):"
+    "${REGISTER_BIN}" prune --comp "${comp}" || true
+    # GitHub prune scope is cli/gateway/edge only (relay has no GitHub release).
+    gh_comps="${comp}"
+    [ "${comp}" = all ] && gh_comps="cli gateway edge"
+    COMPONENTS="${gh_comps}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
+    exit 0
+fi
+
 # ---- args -------------------------------------------------------------------
 WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
+APPLE_SIGN=""
 for arg in "$@"; do
     case "${arg}" in
-        cli|gateway|edge|all) WHAT="${arg}" ;;
+        cli|gateway|edge|relay|all) WHAT="${arg}" ;;
+        --apple)              APPLE_SIGN=1 ;;
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
-        -h|--help)            sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)            sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
-[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|all> [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+export APPLE_SIGN
 
 # ---- config / defaults ------------------------------------------------------
 RELEASE_HOST="${RELEASE_HOST:-nsm.renative.com}"
@@ -75,6 +126,7 @@ SRC_CLI="${BURROWEE_SRC_CLI:-${BB}/cli/code/cli}"
 SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/gateway}"
 SRC_EDGE="${BURROWEE_SRC_EDGE:-${BB}/edge/code/edge}"
 SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}"
+SRC_RELAY="${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}"
 
 # edge skills source-of-truth (the edge repo owns these)
 EDGE_SKILLS_SRC="${SRC_EDGE}/skills"
@@ -91,26 +143,174 @@ src_for() {
         cli)     printf '%s' "${SRC_CLI}" ;;
         gateway) printf '%s' "${SRC_GATEWAY}" ;;
         edge)    printf '%s' "${SRC_EDGE}" ;;
+        relay)   printf '%s' "${SRC_RELAY}" ;;
     esac
 }
 
 # binary list per component (the dispatcher `burrowee` is added at assembly time)
 bins_for() {
     case "$1" in
-        cli)     printf '%s' "burrowee-cli" ;;
-        gateway) printf '%s' "burrowee-gateway burrowee-register" ;;
-        edge)    printf '%s' "burrowee-edge burrowee-edge-cli" ;;
+        cli)     printf '%s' "burrowee-cli burrowee-cli-updater" ;;
+        gateway) printf '%s' "burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater" ;;
+        edge)    printf '%s' "burrowee-edge burrowee-edge-cli burrowee-edge-updater" ;;
+        relay)   printf '%s' "burrowee-relay burrowee-relay-cli burrowee-relay-updater" ;;
     esac
 }
 
 GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
+
+# ---- console registration (Phase C) -----------------------------------------
+# register_staged <comp> <stamp> <semver> <stage_dir> <src_dir> [<gh_tag>]
+#
+# Builds an artifacts JSON from the four per-platform zips in <stage_dir>,
+# then calls burrowee-release-register to record a `staged` release row in
+# the console via the pubkey/nonce handshake.
+#
+# Config-optional: if ~/.burrowee/release/config.toml is absent, prints a
+# warning and returns 0 (never fails the release).
+# Dry-run-safe: when DRY_RUN=1, prints the would-register body and returns 0
+# without touching config or keys.
+# Post-failure non-fatal: if the helper fails, warns loudly but does not exit.
+#
+# For public comps: url_or_key is the GitHub asset download URL.
+# For relay: url_or_key is the R2 key under relay/<stamp>/.
+# gated=true iff comp==relay. github_release=<comp>/<stamp> for public, ""
+# for relay. prerelease=true always.
+warn() { echo "⚠ $*" >&2; }
+register_staged() {
+    local comp="$1" stamp="$2" semver="$3" stage_dir="$4" src_dir="$5"
+    local gh_tag="${6:-}"
+
+    local gated=false
+    local github_release="${gh_tag}"
+    [ "${comp}" = relay ] && gated=true && github_release=""
+
+    # json_escape: emit the INTERIOR of a JSON string (no surrounding quotes) so
+    # the existing "key":"$(json_escape …)" call sites stay unchanged. `jq -Rs`
+    # reads the whole raw arg as one string and escapes everything JSON requires —
+    # \, ", control chars (\n \t \r \b \f, U+0000–U+001F) — which the old sed
+    # (only \ and ") did not. The trailing slice strips jq's surrounding quotes
+    # (jq -Rs . always emits `"<escaped>"` on a single line).
+    json_escape() {
+        local q
+        q="$(printf '%s' "$1" | jq -Rs .)"
+        # drop the leading and trailing double-quote jq adds.
+        q="${q#\"}"
+        q="${q%\"}"
+        printf '%s' "$q"
+    }
+
+    # source_sha: git HEAD of the component source repo.
+    local source_sha
+    source_sha="$(/usr/bin/git -C "${src_dir}" rev-parse HEAD 2>/dev/null || echo '')"
+
+    # sha256_bundle: sha256 of SHA256SUMS.txt (covers all four platform zips).
+    local sha256_bundle
+    # shellcheck disable=SC2086
+    sha256_bundle="$(${SHA256} "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')" || sha256_bundle=""
+
+    # Build artifacts JSON.
+    # For each platform zip, extract sha256 + size, derive url_or_key.
+    # Public comps: zips are named burrowee-<comp>-<os>-<arch>.zip in stage_dir.
+    # Relay: zips are named latest.<os>-<arch>.zip in stage_dir (the latest_stage).
+    local artifacts_json="{" first=1
+    for pair in "darwin arm64" "darwin amd64" "linux arm64" "linux amd64"; do
+        local os arch
+        # shellcheck disable=SC2086  # pair is a controlled two-word string; word-splitting gives os arch.
+        read -r os arch <<<"${pair}"
+        local plat="${os}-${arch}"
+
+        local zip_name url_or_key zip_path
+        if [ "${comp}" = relay ]; then
+            zip_name="latest.${plat}.zip"
+            url_or_key="relay/${stamp}/${zip_name}"
+        else
+            zip_name="burrowee-${comp}-${plat}.zip"
+            url_or_key="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/${zip_name}"
+        fi
+        zip_path="${stage_dir}/${zip_name}"
+
+        if [ ! -f "${zip_path}" ]; then
+            echo "⚠ console registration: zip not found: ${zip_path} — skipping" >&2
+            return 0
+        fi
+
+        # sha256: read from SHA256SUMS.txt (already computed) for consistency.
+        local sha256
+        # SHA256SUMS.txt lines: "<hash>  <filename>" (shasum) or "<hash>  <filename>" (sha256sum)
+        sha256="$(grep " ${zip_name}$" "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')"
+        if [ -z "${sha256}" ]; then
+            # Fallback: compute directly.
+            # shellcheck disable=SC2086
+            sha256="$(${SHA256} "${zip_path}" | awk '{print $1}')"
+        fi
+
+        # size in bytes.
+        local size
+        size="$(wc -c < "${zip_path}" | tr -d ' ')"
+
+        local sep=""
+        [ "${first}" = 1 ] || sep=","
+        first=0
+        artifacts_json="${artifacts_json}${sep}\"${plat}\":{\"url_or_key\":\"$(json_escape "${url_or_key}")\",\"sha256\":\"$(json_escape "${sha256}")\",\"size\":${size}}"
+    done
+    artifacts_json="${artifacts_json}}"
+
+    # sums_ref and minisig_ref: public = GitHub asset URLs; relay = R2 keys.
+    local sums_ref minisig_ref
+    if [ "${comp}" = relay ]; then
+        sums_ref="relay/${stamp}/SHA256SUMS.txt"
+        minisig_ref="relay/${stamp}/SHA256SUMS.txt.minisig"
+    else
+        sums_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt"
+        minisig_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt.minisig"
+    fi
+
+    local body
+    # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
+    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\"}"
+
+    if [ "${DRY_RUN}" = 1 ]; then
+        echo "→ dry-run: would register ${comp} ${stamp} via burrowee-release-register"
+        echo "  body: ${body}"
+        return 0
+    fi
+
+    # Config-optional: skip if the release identity directory is not provisioned.
+    if [ ! -f "${HOME}/.burrowee/release/config.toml" ]; then
+        warn "console registration skipped: ~/.burrowee/release not configured"
+        return 0
+    fi
+
+    printf '%s' "${body}" > "${stage_dir}/.register-payload.json"
+    if ! "${REGISTER_BIN}" register --payload-file "${stage_dir}/.register-payload.json"; then
+        warn "console registration failed for ${comp} ${stamp}; register manually later"
+    fi
+    return 0
+}
 
 # ---- pre-flight -------------------------------------------------------------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "✗ required tool not found: $1" >&2; exit 1; }; }
 need zip
 need unzip
 need minisign
+need jq   # json_escape (console-register payload) builds JSON via `jq -Rs`, not hand-rolled sed
 command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found (tried '${GO_BIN}')" >&2; exit 1; }
+
+# Apple-sign mode: resolve the shared Modernech signer + confirm the identity is
+# installed. Exported so tools/build.sh signs the darwin bins with the same tool;
+# darwin zips are notarized below after assembly.
+if [ -n "${APPLE_SIGN}" ]; then
+    [ "$(uname -s)" = Darwin ] || { echo "✗ --apple requires a macOS build host" >&2; exit 1; }
+    SIGN_BIN="${MODERNECH_SIGN:-modernech-sign}"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 || SIGN_BIN="${HOME}/bin/modernech-sign"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 \
+        || { echo "✗ --apple set but modernech-sign not found on PATH or ~/bin" >&2; exit 1; }
+    security find-identity -v -p codesigning 2>/dev/null | grep -q "$("${SIGN_BIN}" id)" \
+        || { echo "✗ Developer ID identity not in keychain: $("${SIGN_BIN}" id)" >&2; exit 1; }
+    export MODERNECH_SIGN="${SIGN_BIN}"
+    echo "→ --apple: Developer ID signing + notarization via ${SIGN_BIN}" >&2
+fi
 
 # sha256 tool (shasum on mac, sha256sum on linux)
 if command -v shasum >/dev/null 2>&1; then
@@ -123,14 +323,17 @@ fi
 
 if [ "${DRY_RUN}" != 1 ]; then
     need age
-    need ghp
-    [ -x "${GHP}" ] || { echo "✗ ghp wrapper not found at ${GHP}" >&2; exit 1; }
-    "${GHP}" repo view "${RELEASE_REPO}" --json name >/dev/null 2>&1 \
-        || { echo "✗ ghp cannot access ${RELEASE_REPO} — check gh.account + auth" >&2; exit 1; }
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "${RELEASE_HOST}" 'true' 2>/dev/null \
-        || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
     [ -f "${AGE_KEY_AGE}" ] \
         || { echo "✗ release.dp signing key not found: ${AGE_KEY_AGE}" >&2; exit 1; }
+    # relay-only runs publish to R2 (no scp/ssh); public component runs need ghp + ssh.
+    if [ "${WHAT}" != relay ]; then
+        need ghp
+        [ -x "${GHP}" ] || { echo "✗ ghp wrapper not found at ${GHP}" >&2; exit 1; }
+        "${GHP}" repo view "${RELEASE_REPO}" --json name >/dev/null 2>&1 \
+            || { echo "✗ ghp cannot access ${RELEASE_REPO} — check gh.account + auth" >&2; exit 1; }
+        ssh -o BatchMode=yes -o ConnectTimeout=5 "${RELEASE_HOST}" 'true' 2>/dev/null \
+            || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
+    fi
 fi
 
 # components to cut
@@ -150,6 +353,8 @@ for comp in "${COMPONENTS[@]}"; do
             || { echo "✗ ${comp} source worktree is dirty: ${src}" >&2; exit 1; }
     fi
 done
+# Every component bundles the `burrowee` dispatcher (relay included), so its source
+# worktree is required for all release paths.
 [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
 
 # ---- resolve the signing key ------------------------------------------------
@@ -210,6 +415,9 @@ resolve_sign_key() {
 }
 resolve_sign_key
 
+# ---- build the register helper (host-only; validates it compiles) ------------
+build_register_helper
+
 # ---- edge console pubkey ----------------------------------------------------
 # Precedence: BURROWEE_CONSOLE_PUB (or legacy BURROWEE_CLOUD_PUB) override, else
 # config/console-pub.hex. The override lets a dev release bake a non-prod key.
@@ -241,6 +449,163 @@ build_dispatcher() {
     COMP=burrowee SRC_DIR="${SRC_DISPATCHER}" TARGETOS="${os}" TARGETARCH="${arch}" \
         STAMP="${DISP_STAMP}" OUT_DIR="${out}" GO_BIN="${GO_BIN}" \
         bash "${REPO_ROOT}/tools/build.sh" >&2
+}
+
+# ---- relay private-publish ---------------------------------------------------
+do_release_relay() {
+    local src="${SRC_RELAY}"
+    local comp=relay
+    local bins; bins="$(bins_for "${comp}")"
+
+    echo
+    echo "=== burrowee relay release (private) ==="
+
+    # (1) stamp — bump unless dry-run.
+    local old_semver new_semver stamp
+    old_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+    if [ "${DRY_RUN}" = 1 ]; then
+        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
+        new_semver="${old_semver}"
+    else
+        case "${BUMP_KIND}" in
+            patch) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-patch >/dev/null ;;
+            minor) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-minor >/dev/null ;;
+            major) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-major >/dev/null ;;
+        esac
+        new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
+    fi
+
+    revert_relay_version() {
+        git restore --staged "versions/${comp}" 2>/dev/null || true
+        git checkout -- "versions/${comp}" 2>/dev/null || true
+    }
+    trap 'revert_relay_version; shred_key' ERR
+
+    echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
+    echo "Stamp   : ${stamp}"
+    echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
+    echo "Disp    : ${DISP_STAMP}"
+    echo "Dry-run : ${DRY_RUN}"
+
+    local stage="${REPO_ROOT}/dist/${stamp}"
+    rm -rf "${stage}"
+    mkdir -p "${stage}"
+
+    # (2) per-target build + assemble + zip.
+    local zips=() pair os arch out_bins assemble asset b s
+    for pair in "${TARGETS[@]}"; do
+        read -r os arch <<<"${pair}"
+        out_bins="${stage}/.bins-${os}-${arch}"
+        mkdir -p "${out_bins}"
+
+        # dispatcher for this target (built once, reused) — bundled like the public comps.
+        build_dispatcher "${os}" "${arch}"
+
+        # relay binaries: build.sh emits all three (serve + cli + updater); the cli
+        # and updater get console identity baked (console_pub_hex from
+        # config/console-pub.hex). The serve binary gets only -X main.version.
+        COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \
+            STAMP="${stamp}" OUT_DIR="${out_bins}" GO_BIN="${GO_BIN}" \
+            CONSOLE_PUB_HEX="$(console_pub_hex)" \
+            bash "${REPO_ROOT}/tools/build.sh" >&2
+
+        # assemble: four binaries (3 relay-tree + dispatcher) + the three relay
+        # scripts copied from the relay source. The full installer install.sh is the
+        # zip's entrypoint; update.sh + updater.update.sh ride alongside it.
+        assemble="${stage}/burrowee-${comp}-${os}-${arch}"
+        rm -rf "${assemble}"
+        mkdir -p "${assemble}"
+        # shellcheck disable=SC2086  # ${bins} is an intentional space-list from bins_for(); word-splitting is the point.
+        for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
+        cp "${DISP_DIR}/${os}-${arch}/burrowee" "${assemble}/burrowee"
+        for s in install.sh update.sh updater.update.sh; do
+            [ -f "${src}/${s}" ] || { echo "✗ relay script missing in source: ${src}/${s}" >&2; exit 1; }
+            cp "${src}/${s}" "${assemble}/${s}"
+            chmod 0755 "${assemble}/${s}"
+        done
+
+        asset="burrowee-${comp}-${os}-${arch}.zip"
+        rm -f "${stage}/${asset}"
+        ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
+
+        # Apple-sign mode: notarize the darwin zips (binaries were Developer ID
+        # signed by build.sh). Submitting doesn't alter the zip, so the latest.*
+        # copies below + their SHA256SUMS/minisig still cover these exact bytes.
+        # Bare-binary zips can't be stapled — the ticket lives in Apple's online
+        # DB. linux: skip.
+        if [ -n "${APPLE_SIGN}" ] && [ "${os}" = darwin ]; then
+            "${SIGN_BIN}" notarize "${stage}/${asset}" >&2
+        fi
+
+        zips+=("${asset}")
+        rm -rf "${out_bins}"
+    done
+
+    # (3) sums + sign over the LATEST-NAMED set.
+    # We name the zips as latest.<os>-<arch>.zip so the gate-served paths are
+    # stable filenames the installer can hard-code:
+    #   /relay/release/latest.darwin-arm64.zip, etc.
+    # We also archive a copy under <stamp>/ for the prune-to-3 retention.
+    local latest_stage="${REPO_ROOT}/dist/${stamp}/.latest"
+    mkdir -p "${latest_stage}"
+    for pair in "${TARGETS[@]}"; do
+        read -r os arch <<<"${pair}"
+        cp "${stage}/burrowee-${comp}-${os}-${arch}.zip" \
+           "${latest_stage}/latest.${os}-${arch}.zip"
+    done
+    # SHA256SUMS over the latest.* filenames (what the installer verifies).
+    # shellcheck disable=SC2086
+    ( cd "${latest_stage}" && ${SHA256} latest.*.zip | sort > SHA256SUMS.txt )
+    ( cd "${latest_stage}" && minisign -S -s "${SIGN_KEY}" -m SHA256SUMS.txt \
+        -t "burrowee relay ${stamp}" >/dev/null )
+
+    echo "Built ${#zips[@]} zips + latest.* set + SHA256SUMS.txt + SHA256SUMS.txt.minisig:"
+    # shellcheck disable=SC2012
+    ( cd "${latest_stage}" && ls -1 latest.*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
+
+    if [ "${DRY_RUN}" = 1 ]; then
+        # Print the would-upload plan (R2 keys, no scp).
+        echo ""
+        echo "✓ dry-run relay: would upload to R2 under relay/${stamp}/"
+        echo "  R2 keys:"
+        for pair in "${TARGETS[@]}"; do
+            read -r os arch <<<"${pair}"
+            echo "    relay/${stamp}/latest.${os}-${arch}.zip"
+        done
+        echo "    relay/${stamp}/SHA256SUMS.txt"
+        echo "    relay/${stamp}/SHA256SUMS.txt.minisig"
+        echo "(artifacts under ${latest_stage}/; version bump reverted; no scp)"
+        # (9) dry-run registration preview.
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
+        revert_relay_version
+        trap shred_key ERR
+        return 0
+    fi
+
+    # (4) non-dry-run: upload relay artifacts to R2 under relay/<stamp>/.
+    # Uses the register tool's publish-relay subcommand which reads R2 creds from
+    # ~/.burrowee/release/config.toml + r2.key and verifies sha256 before upload.
+    # No scp, no ssh to the release host.
+    "${REGISTER_BIN}" publish-relay \
+        --stamp "${stamp}" \
+        --from-dir "${latest_stage}"
+
+    # (4b) retention (dry-run): report relay R2 prefixes now over keep=3. The
+    # destructive drain (prune --comp relay --execute) is a deploy-phase step.
+    echo
+    echo "→ relay R2 retention (dry-run — run prune --comp relay --execute in the deploy phase to apply):"
+    "${REGISTER_BIN}" prune --comp relay || true
+
+    # marker commit (no gh release / no git tag)
+    git add "versions/${comp}"
+    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+
+    # (9) register staged row in the console catalog.
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
+
+    echo "✓ released relay ${stamp} (private, R2 relay/${stamp}/)"
+    trap shred_key ERR
 }
 
 # ---- per-component release --------------------------------------------------
@@ -318,9 +683,31 @@ do_release() {
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
+        # edge decoy covers (copied from the edge.web repo at package time)
+        if [ "${comp}" = edge ]; then
+            EDGE_WEB="${EDGE_WEB_DIR:-${BB}/edge.web/code/edge.web}"
+            mkdir -p "${assemble}/covers"
+            cp "${EDGE_WEB}/admin.html" "${assemble}/covers/admin.html"
+            cp "${EDGE_WEB}/login.html" "${assemble}/covers/default.html"
+        fi
+
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
+        # Edge payload carries covers/ — zip -j skips directories, so append them
+        # recursively to preserve the covers/ path inside the zip.
+        if [ "${comp}" = edge ]; then
+            ( cd "${assemble}" && zip -r -q "${stage}/${asset}" covers/ )
+        fi
+
+        # Apple-sign mode: notarize the darwin zips (binaries were Developer ID
+        # signed by build.sh). Submitting doesn't alter the zip, so the later
+        # SHA256SUMS + minisign still cover these exact bytes. Bare-binary zips
+        # can't be stapled — the ticket lives in Apple's online DB. linux: skip.
+        if [ -n "${APPLE_SIGN}" ] && [ "${os}" = darwin ]; then
+            "${SIGN_BIN}" notarize "${stage}/${asset}" >&2
+        fi
+
         zips+=("${asset}")
         rm -rf "${out_bins}"
     done
@@ -339,6 +726,9 @@ do_release() {
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "✓ dry-run ${comp}: artifacts under ${stage}/ (version bump reverted; no tag/release/scp)"
+        # (9) dry-run registration preview (uses the dry-run stamp for URLs).
+        local dry_tag="${comp}/${stamp}"
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${dry_tag}"
         revert_version
         trap shred_key ERR
         return 0
@@ -409,6 +799,11 @@ NOTES
     # shellcheck disable=SC2029  # ${STATIC_DIR}/${comp} are local, controlled values — expanding client-side into the remote command is intended.
     ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
     scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
+    # preflight.sh is a sibling static file the installer fetches before the trust
+    # gate (sha256-pinned in install.sh). Ship it alongside install.sh.
+    if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/preflight.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/preflight.sh"
+    fi
     if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
         scp -q "${REPO_ROOT}/burrowee-release.pub" "${RELEASE_HOST}:${STATIC_DIR}/burrowee-release.pub"
     fi
@@ -425,16 +820,29 @@ NOTES
     done
 
     # (8) marker commit.
-    git add "versions/${comp}" "${comp}/install.sh"
+    git add "versions/${comp}" "${comp}/install.sh" "${comp}/preflight.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
+
+    # (9) register staged row in the console catalog.
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}"
+
+    # (10) GitHub-release retention (dry-run): report tags now over keep=10. The
+    # destructive drain (prune-releases.sh --execute) is a deploy-phase step.
+    echo
+    echo "→ GitHub release retention (dry-run — run prune-releases.sh --execute in the deploy phase to apply):"
+    COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
 
     echo "✓ released ${tag}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${tag}"
 }
 
 for comp in "${COMPONENTS[@]}"; do
-    do_release "${comp}"
+    if [ "${comp}" = relay ]; then
+        do_release_relay
+    else
+        do_release "${comp}"
+    fi
 done
 
 # leave dispatcher build cache for inspection on dry-run; clean on real release

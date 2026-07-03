@@ -7,8 +7,9 @@
 #   tools/prune-releases.sh --execute  # actually delete
 #
 # Env (optional):
-#   KEEP                   newest versions to retain per component (default 3)
-#   COMPONENTS             space-separated set (default "cli gateway edge")
+#   KEEP                   newest versions to retain per component (default 10)
+#   COMPONENTS             space-separated set (default "cli gateway edge";
+#                          relay is excluded — it has no GitHub release)
 #   BURROWEE_RELEASE_REPO  GitHub repo (default burrowee-git/release)
 #
 # Per component it lists "<comp>/v*" release tags, version-sorts them with
@@ -21,7 +22,7 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/opt/homebrew/bin:${HOME}/.claude/bin:${PATH}"
 
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
-KEEP="${KEEP:-3}"
+KEEP="${KEEP:-10}"
 COMPONENTS="${COMPONENTS:-cli gateway edge}"
 
 EXECUTE=0

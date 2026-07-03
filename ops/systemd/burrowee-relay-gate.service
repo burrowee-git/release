@@ -1,0 +1,27 @@
+[Unit]
+Description=Burrowee relay-gate — signature-gated relay release channel
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/relay-gate \
+    --registry /var/lib/burrowee-relay-gate/registry.db \
+    --releases /srv/relay-releases \
+    --listen 127.0.0.1:8077
+Restart=always
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+# The gate needs read access to the registry db and release files.
+ReadOnlyPaths=/var/lib/burrowee-relay-gate /srv/relay-releases
+PrivateTmp=true
+ProtectHome=true
+
+# Run as a dedicated system user; create with:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin burrowee-relay-gate
+User=burrowee-relay-gate
+Group=burrowee-relay-gate
+
+[Install]
+WantedBy=multi-user.target

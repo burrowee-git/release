@@ -6,23 +6,38 @@
 # binary→package map is fixed below. CGO is always off (pure-Go, portable).
 #
 # Env in (all required unless noted):
-#   COMP          cli | gateway | edge | burrowee
+#   COMP          cli | gateway | edge | relay | burrowee
 #   SRC_DIR       the component's source worktree (cd target)
 #   TARGETOS      GOOS  (darwin | linux)
 #   TARGETARCH    GOARCH (arm64 | amd64)
 #   STAMP           version string baked via -X main.version=…
 #   OUT_DIR         output directory for the built binaries (created if absent)
-#   CONSOLE_PUB_HEX edge ONLY — baked via -X main.consolePubHexProd=… (console signing pubkey).
+#   CONSOLE_PUB_HEX edge + relay — baked via -X main.consolePubHexProd=… (console signing pubkey).
 #                   Accepts the legacy BURROWEE_CLOUD_PUB / CLOUD_PUB_HEX names (env bridge).
+#   CONSOLE_URL_PROD relay ONLY — console carrier URL baked via -X main.consoleURLProd=…
+#                   (default wss://relay-api.burrowee.com; override via env).
 #
-# ldflags: always `-X main.version=$STAMP`; edge ALSO appends
-#          `-X main.consolePubHexProd=$CONSOLE_PUB_HEX`.
-# If TARGETOS=darwin and the build host is darwin, each output is ad-hoc
-# codesigned (`codesign --sign - --force`) — macOS refuses to exec unsigned
-# native binaries. Cross-compiled (linux) outputs are left untouched.
+# ldflags: always `-X main.version=$STAMP`. edge ALSO appends
+#          `-X main.consolePubHexProd=$CONSOLE_PUB_HEX` to every edge binary.
+#          relay bakes console identity (`-X main.consoleURLProd` +
+#          `-X main.consolePubHexProd`) into burrowee-relay-cli + burrowee-relay-updater
+#          ONLY — the serve binary (burrowee-relay) learns its console at bootstrap,
+#          so it gets just `-X main.version`.
+# darwin signing (only when TARGETOS=darwin AND the build host is darwin):
+#   - default          → ad-hoc (`codesign --sign - --force`); macOS refuses to
+#                        exec an unsigned native binary. For dev/CI/normal builds.
+#   - APPLE_SIGN set    → real Developer ID signature via `modernech-sign sign`
+#                        (hardened runtime + secure timestamp). RELEASE-only;
+#                        release.sh sets it under its `--apple` flag. Notarization
+#                        of the assembled zip happens in release.sh, not here.
+# Cross-compiled (linux) outputs are left untouched.
+#
+# Optional env:
+#   APPLE_SIGN     non-empty → Developer ID sign darwin outputs (release mode)
+#   MODERNECH_SIGN path to the modernech-sign tool (default: PATH, then ~/bin)
 set -euo pipefail
 
-: "${COMP:?COMP is required (cli|gateway|edge|burrowee)}"
+: "${COMP:?COMP is required (cli|gateway|edge|relay|burrowee)}"
 : "${SRC_DIR:?SRC_DIR is required (component source worktree)}"
 : "${TARGETOS:?TARGETOS is required (darwin|linux)}"
 : "${TARGETARCH:?TARGETARCH is required (arm64|amd64)}"
@@ -47,11 +62,21 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /o
 
 [ -d "${SRC_DIR}" ] || { echo "✗ SRC_DIR '${SRC_DIR}' is not a directory" >&2; exit 1; }
 
+# Resolve the shared Modernech signer once, only when release-mode Apple signing
+# is requested (keeps normal/dev builds free of any dependency on it).
+if [ -n "${APPLE_SIGN:-}" ]; then
+    SIGN_BIN="${MODERNECH_SIGN:-modernech-sign}"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 || SIGN_BIN="${HOME}/bin/modernech-sign"
+    command -v "${SIGN_BIN}" >/dev/null 2>&1 \
+        || { echo "✗ APPLE_SIGN set but modernech-sign not found on PATH or ~/bin" >&2; exit 1; }
+fi
+
 # binary -> package map (space-separated "bin:pkg" pairs per component)
 case "${COMP}" in
-    cli)      MAP="burrowee-cli:./cmd/burrowee-cli" ;;
-    gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-register:./cmd/burrowee-register" ;;
-    edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:@cli:." ;;
+    cli)      MAP="burrowee-cli:./cmd/burrowee-cli burrowee-cli-updater:./cmd/burrowee-cli-updater" ;;
+    gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register burrowee-gateway-updater:./cmd/burrowee-gateway-updater" ;;
+    edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:./cmd/burrowee-edge-cli burrowee-edge-updater:./cmd/burrowee-edge-updater" ;;
+    relay)    MAP="burrowee-relay:./cmd/burrowee-relay burrowee-relay-cli:./cli burrowee-relay-updater:./cli/cmd/burrowee-relay-updater" ;;
     burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
     *)        echo "✗ unknown COMP: ${COMP}" >&2; exit 2 ;;
 esac
@@ -74,40 +99,51 @@ if [ "${COMP}" = "edge" ]; then
     LDFLAGS="${LDFLAGS} -X main.consolePubHexProd=${CONSOLE_PUB_HEX}"
 fi
 
+# relay: the cli + updater bake console identity (carrier URL + signing pubkey); the
+# serve binary (burrowee-relay) does NOT — it learns its console at bootstrap. So
+# relay applies these flags PER-BINARY in the build loop, never via the global
+# LDFLAGS (which would wrongly bake the key into the serve binary too).
+RELAY_CONSOLE_LDFLAGS=""
+if [ "${COMP}" = "relay" ]; then
+    CONSOLE_PUB_HEX="$(env_or CONSOLE_PUB_HEX CLOUD_PUB_HEX)"
+    [ -n "${CONSOLE_PUB_HEX}" ] || CONSOLE_PUB_HEX="$(env_or BURROWEE_CONSOLE_PUB BURROWEE_CLOUD_PUB)"
+    : "${CONSOLE_PUB_HEX:?CONSOLE_PUB_HEX is required for relay builds (console signing pubkey hex)}"
+    # The 64-zero placeholder is valid hex of valid length, so the runtime check
+    # cannot catch it — it would silently pin a dead key. Reject it (mirrors edge).
+    [ "${CONSOLE_PUB_HEX}" != "0000000000000000000000000000000000000000000000000000000000000000" ] || {
+        echo "✗ CONSOLE_PUB_HEX is the placeholder — set config/console-pub.hex to the real console signing key before a relay release" >&2
+        exit 1
+    }
+    CONSOLE_URL_PROD="${CONSOLE_URL_PROD:-wss://relay-api.burrowee.com}"
+    RELAY_CONSOLE_LDFLAGS="-X main.consoleURLProd=${CONSOLE_URL_PROD} -X main.consolePubHexProd=${CONSOLE_PUB_HEX}"
+fi
+
 mkdir -p "${OUT_DIR}"
 HOST_OS="$(uname -s)"
 
 # shellcheck disable=SC2086  # ${MAP} is an intentional space-list of "bin:pkg" pairs; word-splitting into pairs is the point.
 for pair in ${MAP}; do
     bin="${pair%%:*}"
-    rest="${pair#*:}"
-    # Nested-module pair: "bin:@subdir:pkg" — build from "${SRC_DIR}/${subdir}"
-    # rather than "${SRC_DIR}". The "@" prefix on the second field is the sentinel.
-    if [ "${rest#@}" != "${rest}" ]; then
-        rest_noat="${rest#@}"
-        build_subdir="${rest_noat%%:*}"
-        pkg="${rest_noat#*:}"
-        build_dir="${SRC_DIR}/${build_subdir}"
-        # The nested module has its own go.mod and uses tagged deps — build with
-        # GOWORK=off so the parent worktree's go.work (which does not include the
-        # nested module) does not shadow the module's own dependency resolution.
-        nested_module=1
-    else
-        pkg="${rest}"
-        build_dir="${SRC_DIR}"
-        nested_module=0
-    fi
+    pkg="${pair#*:}"
     out="${OUT_DIR}/${bin}"
-    echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${STAMP})"
-    if [ "${nested_module}" = 1 ]; then
-        ( cd "${build_dir}" && GOWORK=off CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-            "${GO_BIN}" build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}" )
-    else
-        ( cd "${build_dir}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-            "${GO_BIN}" build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}" )
+    # Per-binary ldflags: relay bakes console identity into the cli + updater only.
+    bin_ldflags="${LDFLAGS}"
+    if [ "${COMP}" = "relay" ]; then
+        case "${bin}" in
+            burrowee-relay-cli|burrowee-relay-updater) bin_ldflags="${LDFLAGS} ${RELAY_CONSOLE_LDFLAGS}" ;;
+        esac
     fi
+    echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${STAMP})"
+    ( cd "${SRC_DIR}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+        "${GO_BIN}" build -trimpath -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then
-        codesign --sign - --force "${out}" >/dev/null 2>&1 || true
+        if [ -n "${APPLE_SIGN:-}" ]; then
+            # release mode: real Developer ID signature (hardened runtime + timestamp)
+            "${SIGN_BIN}" sign "${out}" >&2
+        else
+            # default: ad-hoc — macOS only needs *a* signature to exec the binary
+            codesign --sign - --force "${out}" >/dev/null 2>&1 || true
+        fi
     fi
     echo "✓ ${out}"
 done

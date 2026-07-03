@@ -80,9 +80,12 @@ say "server up (serving ${ZIP})"
 # the exact install invocation, reused by both paths (only PREFIX differs) -----
 DL_BASE="http://127.0.0.1:${PORT}"
 run_install() {
-    # run_install <prefix>  — runs the real outer bootstrap against local server
+    # run_install <prefix>  — runs the real outer bootstrap against local server.
+    # Skip preflight: this E2E exercises the trust gate, and the local server
+    # serves only the release assets, not a preflight.sh.
     BURROWEE_DL_BASE="${DL_BASE}" \
     BURROWEE_CLI_VERSION="${PIN}" \
+    BURROWEE_SKIP_PREFLIGHT=1 \
     PREFIX="$1" \
         sh "${REPO_ROOT}/${COMP}/install.sh"
 }

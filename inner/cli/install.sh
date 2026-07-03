@@ -9,7 +9,7 @@
 set -eu
 
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
-BINS="burrowee burrowee-cli"
+BINS="burrowee burrowee-cli burrowee-cli-updater"
 COMP=cli
 
 if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
