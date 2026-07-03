@@ -40,15 +40,18 @@ written path in `wrote` — mention it by path only).
 `connect`/`ssh` to `burrowee-cli`):
 
 ```bash
-# open a tunnel to an exposed target (default service if --svc omitted):
-burrowee-cli connect <gateway>[:<target>]
+# open a tunnel to an exposed service (--svc is required; --local overrides the
+# ephemeral local listen address; --gw picks a gateway when more than one is paired):
+burrowee-cli connect --svc <service-name>
 
-# SSH through the gateway to its SSH target:
-burrowee-cli ssh <gateway>
+# SSH through the gateway to its SSH service:
+burrowee-cli ssh --svc <service-name>
 ```
 
-Run `burrowee-cli connect --help` / `burrowee-cli ssh --help` for the exact flags
-on the installed version (e.g. `--svc <service-name>` to pick a named target).
+There is no positional gateway/target argument — everything is a flag, and `--svc`
+is the only one always required (the rest default from the paired config). Run
+`burrowee-cli connect --help` / `burrowee-cli ssh --help` for the exact flags on
+the installed version.
 
 ## 3. The next-action loop (self-contained — for the `cli pair` verb)
 After running `burrowee-agent cli pair`, read the single-line JSON it prints and

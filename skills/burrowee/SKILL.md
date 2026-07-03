@@ -11,10 +11,10 @@ NEVER handle keys, signatures, tokens, or raw API calls — you only run
 or prompt-injected context therefore contains nothing reusable: the private key
 stays on the machine, inside the CLI process.
 
-The binary is `burrowee-agent`; invoke it directly (`burrowee-agent <verb>`). It
-is the open-source signing client — the universal `burrowee` dispatcher reaches
-the installed components (`gateway`, `edge`, `cli`, …) but does not yet route the
-`agent` word, so always call `burrowee-agent` by name.
+The binary is `burrowee-agent`; invoke it directly (`burrowee-agent <verb>`) — the
+universal `burrowee` dispatcher also routes the `agent` word now
+(`burrowee agent <verb>` ⇔ `burrowee-agent <verb>`, plain pass-through, no verb
+split), so either form works. It is the open-source signing client.
 
 ## 0. Install the CLI
 Run `burrowee-agent version`. If it prints a version line, skip to §1. If the
@@ -41,9 +41,9 @@ the only step the agent cannot complete alone:
   picks its tier, and approves. Then it prints `Bound: …`.
 
 `bootstrap`/`bind`/`status`/`whoami` print plain human-readable lines (not the
-next-action JSON below) — relay them as-is. The control-plane URL comes from
-`BURROWEE_CONTROL_PLANE_URL` (or `--url`); the default production console is
-`https://dash.burrowee.com`.
+next-action JSON below) — relay them as-is. The control-plane URL has no
+compiled-in default — pass `--url` or set `BURROWEE_CONTROL_PLANE_URL` to the
+production console, `https://dash.burrowee.com`.
 
 ## 2. The next-action loop (use this for EVERY workflow verb)
 The workflow verbs — `gateway`, `cli`, `edge`, `domain`, `session`, `account`,
