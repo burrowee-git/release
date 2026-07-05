@@ -119,15 +119,14 @@ done
 echo "installed to $BIN_DIR: $BINS"
 
 # ---- cover assets (decoy pages for handleCover file mode) -------------------
-# Lay admin.html + default.html into the component covers dir, non-clobbering
-# (operator-customized covers survive). Force with BURROWEE_FORCE_COVER=1.
+# Always refresh the two SHIPPED defaults (admin.html + default.html) on every
+# install/update: a stale hardcoded footer blows the decoy, so the shipped covers
+# must track the release. Operator-added per-host <host>.html covers are not
+# enumerated here, so they survive untouched (and still win in selectCover).
 if [ -d "./covers" ]; then
     mkdir -p "$COMP_HOME/covers"
     for cf in admin.html default.html; do
         [ -f "./covers/$cf" ] || continue
-        if [ -f "$COMP_HOME/covers/$cf" ] && [ -z "${BURROWEE_FORCE_COVER:-}" ]; then
-            continue
-        fi
         install -m 0644 "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
             || cp "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
             || echo "warning: could not install cover $cf" >&2
