@@ -846,20 +846,6 @@ NOTES
     # (9) register staged row in the console catalog.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}"
 
-    # (9b) mirror this version's binaries into R2 under <comp>/<stamp>/. The cut
-    # already published them to GitHub (step 6), but cloud-push updates fetch from
-    # R2 (console-minted keys), NOT GitHub — so without this a pushed update finds
-    # only the catalog metadata in R2 and 404s on the binaries, silently leaving
-    # nodes on the prior version. register publish reads the just-registered
-    # catalog row, re-downloads each asset from its GitHub URL, verifies
-    # size+sha256, and uploads to R2. Non-fatal (the tag/release already exist and
-    # can't be undone): warn loudly with the manual recovery command. relay is
-    # exempt — do_release_relay already uploads its bins to R2.
-    echo "→ mirroring ${comp} ${stamp} binaries to R2"
-    if ! "${REGISTER_BIN}" publish --comp "${comp}" --version "${stamp}"; then
-        warn "R2 mirror failed for ${comp} ${stamp}; run 'tools/release.sh publish ${comp} --version ${stamp}' before pushing updates"
-    fi
-
     # (10) GitHub-release retention (dry-run): report tags now over keep=10. The
     # destructive drain (prune-releases.sh --execute) is a deploy-phase step.
     echo
