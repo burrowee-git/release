@@ -688,6 +688,20 @@ do_release() {
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
+        # Cloud-push update scripts: the burrowee-<comp>-updater runs `sh ./update.sh`
+        # (service update) and `sh ./updater.update.sh` (self-update) with cwd = the
+        # unzipped bundle, so those scripts MUST ride in the payload alongside the
+        # bins — mirroring the relay bundle. Without them a pushed update extracts +
+        # verifies but then fails "cannot open ./update.sh". Copied from the component
+        # source. (edge ships an updater; extend this list as cli/gateway wire push.)
+        if [ "${comp}" = edge ]; then
+            for s in update.sh updater.update.sh; do
+                [ -f "${src}/${s}" ] || { echo "✗ ${comp} update script missing in source: ${src}/${s}" >&2; exit 1; }
+                cp "${src}/${s}" "${assemble}/${s}"
+                chmod 0755 "${assemble}/${s}"
+            done
+        fi
+
         # edge decoy covers (copied from the edge.web repo at package time)
         if [ "${comp}" = edge ]; then
             EDGE_WEB="${EDGE_WEB_DIR:-${BB}/edge.web/code/edge.web}"
