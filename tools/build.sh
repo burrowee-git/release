@@ -128,13 +128,26 @@ for pair in ${MAP}; do
     out="${OUT_DIR}/${bin}"
     # Per-binary ldflags: relay bakes console identity into the cli + updater only.
     bin_ldflags="${LDFLAGS}"
+    build_dir="${SRC_DIR}"
+    bin_gowork=""
     if [ "${COMP}" = "relay" ]; then
         case "${bin}" in
-            burrowee-relay-cli|burrowee-relay-updater) bin_ldflags="${LDFLAGS} ${RELAY_CONSOLE_LDFLAGS}" ;;
+            burrowee-relay-cli|burrowee-relay-updater)
+                bin_ldflags="${LDFLAGS} ${RELAY_CONSOLE_LDFLAGS}"
+                # The relay cli tree is a NESTED Go module (cli/go.mod pinning
+                # core by tag). Build from inside it with GOWORK=off so the
+                # pinned tags resolve: from SRC_DIR the package only resolves in
+                # workspace mode, which would silently substitute the LOCAL core
+                # worktrees via a gitignored go.work — a non-reproducible cut
+                # that can ship unmerged core.
+                build_dir="${SRC_DIR}/cli"
+                pkg=".${pkg#./cli}"   # ./cli → . ; ./cli/cmd/x → ./cmd/x
+                bin_gowork="off"
+                ;;
         esac
     fi
     echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${STAMP})"
-    ( cd "${SRC_DIR}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    ( cd "${build_dir}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOWORK="${bin_gowork}" \
         "${GO_BIN}" build -trimpath -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then
         if [ -n "${APPLE_SIGN:-}" ]; then

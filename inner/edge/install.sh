@@ -9,7 +9,9 @@
 # install), it installs the binaries to /usr/local/bin and sets up a MANAGED
 # ROOT SERVICE — a systemd system unit on Linux, a launchd LaunchDaemon on macOS
 # — running `burrowee-edge run`, then enables + (re)starts it. The service's
-# config home is /root/.burrowee/edge (HOME=/root in the unit). When run
+# config home is root's home + /.burrowee/edge — /root on Linux, /var/root on
+# macOS (NOT /root, which sits on the sealed system volume) — and HOME is set
+# to it in the unit/plist so the daemon resolves the same dir. When run
 # unprivileged it keeps the historical behavior: a user-path binary drop under
 # $HOME/.local/bin with no service, plus a note that a managed system service
 # needs sudo.
@@ -25,24 +27,38 @@ BINS="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater"
 COMP=edge
 
 # ── system (root) install paths ──────────────────────────────────────────────
-# SYS_BIN_DIR + SYSTEMD_UNIT_DIR default to the real system locations; they are
-# overridable only so the Go install-test harness can exercise the root branch in
-# a sandbox without actually being root.
+# SYS_BIN_DIR + SYSTEMD_UNIT_DIR + LAUNCHD_PLIST_DIR default to the real system
+# locations; they are overridable only so the Go install-test harness can
+# exercise the root branch in a sandbox without actually being root.
 SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
 SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge-updater.service"
-LAUNCHD_PLIST="/Library/LaunchDaemons/org.burrowee.edge.plist"
+LAUNCHD_PLIST_DIR="${LAUNCHD_PLIST_DIR:-/Library/LaunchDaemons}"
+LAUNCHD_PLIST="$LAUNCHD_PLIST_DIR/org.burrowee.edge.plist"
 LAUNCHD_LABEL="org.burrowee.edge"
+LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/org.burrowee.edge.updater.plist"
+LAUNCHD_UPDATER_LABEL="org.burrowee.edge.updater"
 
 is_root() { [ "$(id -u)" = 0 ]; }
 
 # ── install target depends on privilege ──────────────────────────────────────
-# Root → /usr/local/bin + the root service's config home (/root/.burrowee/edge).
+# Root → /usr/local/bin + the root service's config home (root's home +
+# /.burrowee/edge). Root's home is /root on Linux but /var/root on macOS — /root
+# sits on the sealed read-only system volume there, so any mkdir under it fails.
+# Resolve it robustly (tilde expansion), falling back to the well-known
+# /var/root; ROOT_HOME is overridable only for the Go install-test harness
+# (like SYS_BIN_DIR).
 # Non-root → $HOME/.local/bin + the invoking user's ~/.burrowee/edge (unchanged).
 if is_root; then
     BIN_DIR="$SYS_BIN_DIR"
-    COMP_HOME="/root/.burrowee/$COMP"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        ROOT_HOME="${ROOT_HOME:-$(eval echo ~root)}"
+        case "$ROOT_HOME" in /*) ;; *) ROOT_HOME=/var/root ;; esac
+    else
+        ROOT_HOME="${ROOT_HOME:-/root}"
+    fi
+    COMP_HOME="$ROOT_HOME/.burrowee/$COMP"
 else
     BIN_DIR="${PREFIX:-$HOME/.local}/bin"
     COMP_HOME="$HOME/.burrowee/$COMP"
@@ -95,7 +111,8 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     if is_root; then
         if [ "$(uname -s)" = "Darwin" ]; then
             launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
-            rm -f "$LAUNCHD_PLIST"
+            launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+            rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
         else
             systemctl disable --now burrowee-edge 2>/dev/null || true
             systemctl disable --now burrowee-edge-updater 2>/dev/null || true
@@ -103,8 +120,22 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
             systemctl daemon-reload 2>/dev/null || true
         fi
     fi
-    for b in $BINS; do rm -f "$BIN_DIR/$b"; done
-    echo "removed from $BIN_DIR: $BINS"
+    removed=""
+    for b in $BINS; do
+        case "$b" in burrowee) continue ;; esac
+        rm -f "$BIN_DIR/$b"
+        removed="$removed $b"
+    done
+    # The bare `burrowee` dispatcher is SHARED across co-installed components
+    # (e.g. a relay on the same host) — remove it only when no other
+    # burrowee-* binary remains in $BIN_DIR.
+    if ls "$BIN_DIR"/burrowee-* >/dev/null 2>&1; then
+        echo "kept $BIN_DIR/burrowee (dispatcher) — other burrowee components remain installed"
+    else
+        rm -f "$BIN_DIR/burrowee"
+        removed="$removed burrowee"
+    fi
+    echo "removed from $BIN_DIR:$removed"
     exit 0
 fi
 
@@ -163,6 +194,9 @@ fi
 if is_root; then
     if [ "$(uname -s)" = "Darwin" ]; then
         # ── macOS: root LaunchDaemon ──────────────────────────────────────────
+        # HOME=$ROOT_HOME (/var/root) so the daemon's os.UserHomeDir() resolves
+        # $ROOT_HOME/.burrowee/edge — launchd daemons get no HOME by default
+        # (mirrors the systemd unit's Environment=HOME=/root).
         cat > "$LAUNCHD_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -172,10 +206,30 @@ if is_root; then
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>2</integer>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>$ROOT_HOME</string></dict>
 </dict></plist>
 EOF
         chmod 0644 "$LAUNCHD_PLIST"
         echo "wrote LaunchDaemon → $LAUNCHD_PLIST"
+
+        # Updater LaunchDaemon (mirrors the disabled systemd updater unit; HOME
+        # so its console.json + identity resolve under $ROOT_HOME/.burrowee/edge).
+        # Rendered but NOT bootstrapped — the auto-updater is owner opt-in.
+        cat > "$LAUNCHD_UPDATER_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LAUNCHD_UPDATER_LABEL</string>
+  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge-updater</string><string>run</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>2</integer>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>$ROOT_HOME</string></dict>
+</dict></plist>
+EOF
+        chmod 0644 "$LAUNCHD_UPDATER_PLIST"
+        echo "wrote LaunchDaemon → $LAUNCHD_UPDATER_PLIST (not bootstrapped — enable with: launchctl bootstrap system $LAUNCHD_UPDATER_PLIST)"
+
         launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
         launchctl bootstrap system "$LAUNCHD_PLIST"
         launchctl enable "system/$LAUNCHD_LABEL"
