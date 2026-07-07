@@ -266,9 +266,14 @@ register_staged() {
         minisig_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt.minisig"
     fi
 
+    # binaries: the product's first-party sub-module names as a JSON array.
+    # dispatcher_version: the burrowee stamp bundled into this product's zip.
+    local binaries_json
+    binaries_json="$(printf '%s\n' $(bins_for "${comp}") | jq -Rsc 'split("\n") | map(select(length>0))')"
+
     local body
     # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
-    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\"}"
+    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\",\"binaries\":${binaries_json},\"dispatcher_version\":\"$(json_escape "${DISP_STAMP}")\"}"
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ dry-run: would register ${comp} ${stamp} via burrowee-release-register"
@@ -682,6 +687,20 @@ do_release() {
         cp "${DISP_DIR}/${os}-${arch}/burrowee" "${assemble}/burrowee"
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
+
+        # Cloud-push update scripts: the burrowee-<comp>-updater runs `sh ./update.sh`
+        # (service update) and `sh ./updater.update.sh` (self-update) with cwd = the
+        # unzipped bundle, so those scripts MUST ride in the payload alongside the
+        # bins — mirroring the relay bundle. Without them a pushed update extracts +
+        # verifies but then fails "cannot open ./update.sh". Copied from the component
+        # source. (edge ships an updater; extend this list as cli/gateway wire push.)
+        if [ "${comp}" = edge ]; then
+            for s in update.sh updater.update.sh; do
+                [ -f "${src}/${s}" ] || { echo "✗ ${comp} update script missing in source: ${src}/${s}" >&2; exit 1; }
+                cp "${src}/${s}" "${assemble}/${s}"
+                chmod 0755 "${assemble}/${s}"
+            done
+        fi
 
         # edge decoy covers (copied from the edge.web repo at package time)
         if [ "${comp}" = edge ]; then

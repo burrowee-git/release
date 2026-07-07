@@ -172,6 +172,106 @@ func TestEdgeRootInstallWritesUpdaterUnit(t *testing.T) {
 	assertContains(t, out, "burrowee-edge-updater.service")
 }
 
+// stubDarwinRootEnv builds a stub PATH dir so install.sh takes the macOS ROOT
+// branch in a sandbox: id → uid 0 (is_root true), uname -s → Darwin, launchctl
+// as a call recorder (launchctl bootstrap must succeed for install.sh to
+// proceed), xattr as a no-op.
+func stubDarwinRootEnv(t *testing.T) string {
+	t.Helper()
+	stub := t.TempDir()
+	stubBin(t, stub, "id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo 0; else echo \"id $*\" >> \"$STUB_LOG\"; fi\n")
+	stubBin(t, stub, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo Darwin; else /usr/bin/uname \"$@\"; fi\n")
+	stubBin(t, stub, "launchctl", "#!/bin/sh\necho \"launchctl $*\" >> \"$STUB_LOG\"\nexit 0\n")
+	stubBin(t, stub, "xattr", "#!/bin/sh\nexit 0\n")
+	return stub
+}
+
+// TestEdgeRootInstallDarwin is the regression guard for the macOS root install:
+// COMP_HOME must resolve under root's REAL macOS home (/var/root — never /root,
+// which sits on the sealed system volume), so installing the shipped covers/
+// cannot abort the script under set -eu before the LaunchDaemon is written; the
+// serve plist must pin HOME for the daemon (launchd daemons get no HOME); and
+// the opt-in updater plist is rendered but never bootstrapped.
+func TestEdgeRootInstallDarwin(t *testing.T) {
+	home := t.TempDir()
+	rootHome := filepath.Join(home, "var-root") // via the ROOT_HOME test seam
+	staging := t.TempDir()
+	seedEdgeBins(t, staging)
+	// Ship covers/ like every real edge zip does — pre-fix, the unwritable
+	// /root COMP_HOME made `mkdir -p "$COMP_HOME/covers"` abort right here.
+	if err := os.MkdirAll(filepath.Join(staging, "covers"), 0o755); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+	for _, cf := range []string{"admin.html", "default.html"} {
+		if err := os.WriteFile(filepath.Join(staging, "covers", cf), []byte("<html></html>"), 0o644); err != nil {
+			t.Fatalf("seed cover %s: %v", cf, err)
+		}
+	}
+
+	stub := stubDarwinRootEnv(t)
+	sysBinDir := filepath.Join(home, "sysbin")
+	launchdDir := filepath.Join(home, "launch-daemons")
+	if err := os.MkdirAll(launchdDir, 0o755); err != nil {
+		t.Fatalf("mkdir launchdDir: %v", err)
+	}
+
+	cmd := exec.Command("sh", installShPath(t))
+	cmd.Dir = staging
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + stub + ":/usr/bin:/bin",
+		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
+		"SYS_BIN_DIR=" + sysBinDir,
+		"LAUNCHD_PLIST_DIR=" + launchdDir,
+		"ROOT_HOME=" + rootHome,
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("install.sh output:\n%s", out)
+		t.Fatalf("install.sh (darwin root branch) failed: %v", err)
+	}
+
+	// All binaries landed in the system bin dir.
+	for _, b := range edgeBins {
+		if _, err := os.Stat(filepath.Join(sysBinDir, b)); err != nil {
+			t.Errorf("binary not installed to sys bin dir: %s: %v", b, err)
+		}
+	}
+	// Covers landed under root's home — the exact step that aborted pre-fix.
+	for _, cf := range []string{"admin.html", "default.html"} {
+		if _, err := os.Stat(filepath.Join(rootHome, ".burrowee", "edge", "covers", cf)); err != nil {
+			t.Errorf("cover not installed under root home: %s: %v", cf, err)
+		}
+	}
+
+	// Serve plist: rendered with HOME pinned to root's home (mirrors the
+	// systemd unit's Environment=HOME=/root).
+	servePlist := filepath.Join(launchdDir, "org.burrowee.edge.plist")
+	serve := readFile(t, servePlist)
+	assertContains(t, serve,
+		"<key>Label</key><string>org.burrowee.edge</string>",
+		"<string>"+sysBinDir+"/burrowee-edge</string>",
+		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>"+rootHome+"</string></dict>",
+	)
+
+	// Updater plist: rendered (parity with the disabled systemd updater unit)…
+	updater := readFile(t, filepath.Join(launchdDir, "org.burrowee.edge.updater.plist"))
+	assertContains(t, updater,
+		"<key>Label</key><string>org.burrowee.edge.updater</string>",
+		"<string>"+sysBinDir+"/burrowee-edge-updater</string>",
+		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>"+rootHome+"</string></dict>",
+	)
+
+	// …but never bootstrapped/enabled (owner opt-in); the SERVE daemon is.
+	log := readFile(t, filepath.Join(home, "stub-calls.log"))
+	if !strings.Contains(log, "bootstrap system "+servePlist) {
+		t.Errorf("serve LaunchDaemon was not bootstrapped; launchctl log:\n%s", log)
+	}
+	if strings.Contains(log, "org.burrowee.edge.updater") {
+		t.Errorf("updater LaunchDaemon must be left NOT bootstrapped; launchctl log:\n%s", log)
+	}
+}
+
 // TestEdgeRootUninstallRemovesUpdaterUnit verifies BURROWEE_UNINSTALL removes the
 // updater system unit alongside the serve unit on a root install.
 func TestEdgeRootUninstallRemovesUpdaterUnit(t *testing.T) {

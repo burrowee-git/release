@@ -188,15 +188,19 @@ else
         # shellcheck disable=SC2086  # intentional word-split of $CURL flags
         catalog_body="$($CURL "$catalog_url" 2>/dev/null)" || true
         # Resolve the tag the SAME hardened way as latest_tag(): prefer jq
-        # (structural — reads only the top-level "version" field), else a
-        # line-anchored grep/sed so a "version":"…" substring buried in notes or
-        # nested metadata can't spoof the tag. Then require it to look like a real
-        # @COMP@/v… tag. (Bytes are still minisign+sha256 verified downstream; this
-        # closes a downgrade / wrong-version vector at the resolution step.)
+        # (structural — reads only the top-level "version" field). Without jq,
+        # split the body on field boundaries FIRST (tr , and { → newlines): the
+        # console serves MINIFIED single-line JSON, so a line-anchored grep
+        # would never match it. The field-anchored grep plus the @COMP@/v… shape
+        # check below keep a "version":"…" substring buried in notes or nested
+        # metadata from spoofing the tag. (Bytes are still minisign+sha256
+        # verified downstream; this closes a downgrade / wrong-version vector
+        # at the resolution step.)
         if command -v jq >/dev/null 2>&1; then
             TAG="$(printf '%s' "$catalog_body" | jq -r '.version // empty' 2>/dev/null)" || true
         else
             TAG="$(printf '%s' "$catalog_body" \
+                | tr ',{' '\n\n' \
                 | grep -E '^[[:space:]]*"version"[[:space:]]*:' \
                 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
                 | head -n1)" || true
@@ -372,7 +376,9 @@ ok "verified — running inner installer"
 # — so write to both the interactive rc and the login file, else PATH is missing
 # over ssh. An unset/unknown $SHELL defaults to the bash files. Fault-tolerant:
 # an unwritable rc must never abort the script (the bins are already installed).
-if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ]; then
+# Skipped as root: a root install lands in /usr/local/bin (already on PATH), so
+# appending a $PREFIX/bin marker to root's rc would be wrong and useless.
+if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ] && [ "$(id -u)" != 0 ]; then
     BIN_DIR="$PREFIX/bin"
     case ":$PATH:" in
         *":$BIN_DIR:"*) : ;;   # already on PATH this shell
