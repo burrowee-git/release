@@ -38,9 +38,10 @@ cleanup() {
     [ -n "${SERVER_PID}"  ] && kill "${SERVER_PID}"  2>/dev/null || true
     [ -n "${CATALOG_PID}" ] && kill "${CATALOG_PID}" 2>/dev/null || true
     rm -rf "${W}"
-    # Restore any regenerated bootstraps so the worktree stays clean.
+    # Restore ALL regenerated bootstraps so the worktree stays clean —
+    # gen-bootstraps.sh also rewrites relay/install.sh with the ephemeral key.
     /usr/bin/git -C "${REPO_ROOT}" checkout -- \
-        cli/install.sh gateway/install.sh edge/install.sh \
+        cli/install.sh gateway/install.sh edge/install.sh relay/install.sh \
         2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
