@@ -21,7 +21,7 @@ Run `burrowee-agent version`. If it prints a version line, skip to §1. If the
 command is missing, install it (the binary lands on PATH as `burrowee-agent`):
 
 ```bash
-curl -fsSL https://release.burrowee.com/agent/install.sh | sh
+curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh
 burrowee-agent version
 ```
 
@@ -43,7 +43,7 @@ the only step the agent cannot complete alone:
 `bootstrap`/`bind`/`status`/`whoami` print plain human-readable lines (not the
 next-action JSON below) — relay them as-is. The control-plane URL has no
 compiled-in default — pass `--url` or set `BURROWEE_CONTROL_PLANE_URL` to the
-production console, `https://dash.burrowee.com`.
+production console, `https://console.burrowee.com`.
 
 ## 2. The next-action loop (use this for EVERY workflow verb)
 The workflow verbs — `gateway`, `cli`, `edge`, `domain`, `session`, `account`,
