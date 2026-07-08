@@ -5,13 +5,14 @@ component ships the `burrowee` universal dispatcher plus its own binaries, and
 every download is verified end-to-end (minisign signature → SHA-256 → unzip →
 exec a verified inner installer).
 
-Three components are published here:
+Four components are published here:
 
 | Component | Binaries | What it is |
 |---|---|---|
 | `cli` | `burrowee`, `burrowee-cli` | client CLI — connect, ssh, pair, relays |
 | `gateway` | `burrowee`, `burrowee-gateway`, `burrowee-register` | gateway daemon + registration tool |
 | `edge` | `burrowee`, `burrowee-edge` | self-hosted relay |
+| `agent` | `burrowee`, `burrowee-agent` | AI-agent identity client — key-signed control-plane access |
 
 ## Install
 
@@ -22,6 +23,8 @@ curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/install.s
 curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh | sh
 # Edge relay
 curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sh
+# Agent
+curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh
 ```
 
 Each installer detects your OS/arch, resolves the latest published release for
@@ -54,6 +57,7 @@ Each component reads a version-pin env var. The value is the release tag
 | `cli` | `BURROWEE_CLI_VERSION` |
 | `gateway` | `BURROWEE_GATEWAY_VERSION` |
 | `edge` | `BURROWEE_EDGE_VERSION` |
+| `agent` | `BURROWEE_AGENT_VERSION` |
 
 ```sh
 BURROWEE_CLI_VERSION=cli/v0.1.0.2026.06.08.7dbdd72 \
@@ -89,7 +93,7 @@ bootstrap scripts and skills are mirrored to `release.burrowee.com`
 (nginx + Cloudflare).
 
 ```
-cli/  gateway/  edge/      ← per-component outer bootstrap (install.sh, generated)
+cli/  gateway/  edge/  agent/  ← per-component outer bootstrap (install.sh, generated)
 inner/<comp>/install.sh    ← inner installer (ships inside each verified zip)
 versions/<comp>            ← per-component SemVer source of truth
 config/console-pub.hex     ← live console signing pubkey, baked into edge builds
