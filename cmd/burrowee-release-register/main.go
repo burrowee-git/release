@@ -6,9 +6,9 @@
 //
 //	burrowee-release-register keygen [--dir <d>]
 //	burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
-//	burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]
+//	burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
 //	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
-//	burrowee-release-register prune --comp <cli|gateway|edge|relay|all> [--dir <d>] [--execute]
+//	burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--dir <d>] [--execute]
 package main
 
 import (
@@ -63,9 +63,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   burrowee-release-register keygen [--dir <d>]
   burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
-  burrowee-release-register publish --comp <cli|gateway|edge|all> [--dir <d>] [--version <v>]
+  burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
   burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
-  burrowee-release-register prune --comp <cli|gateway|edge|relay|all> [--dir <d>] [--execute]`)
+  burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--dir <d>] [--execute]`)
 }
 
 func runKeygen(args []string) {
@@ -113,12 +113,12 @@ func runRegister(args []string) {
 func runPublish(args []string) {
 	fs := flag.NewFlagSet("publish", flag.ExitOnError)
 	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
-	comp := fs.String("comp", "", "component: cli|gateway|edge|all (required)")
+	comp := fs.String("comp", "", "component: cli|gateway|edge|agent|all (required)")
 	version := fs.String("version", "", "specific public version (default: current)")
 	fs.Parse(args) //nolint:errcheck
 
 	if *comp == "" {
-		fmt.Fprintln(os.Stderr, "publish: --comp is required (cli|gateway|edge|all)")
+		fmt.Fprintln(os.Stderr, "publish: --comp is required (cli|gateway|edge|agent|all)")
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -131,7 +131,7 @@ func runPublish(args []string) {
 
 	comps := []string{*comp}
 	if *comp == "all" {
-		comps = []string{"cli", "gateway", "edge"}
+		comps = []string{"cli", "gateway", "edge", "agent"}
 	}
 	for _, c := range comps {
 		if err := register.Publish(context.Background(), deps, c, *version); err != nil {
@@ -173,17 +173,17 @@ func runPublishRelay(args []string) {
 }
 
 // runPrune drops all but the newest N version prefixes for a component in R2
-// (relay keeps 3; cli/gateway/edge keep 10). Dry-run by default; --execute
+// (relay keeps 3; cli/gateway/edge/agent keep 10). Dry-run by default; --execute
 // performs the deletions. R2 credentials come from <dir>/config.toml + r2.key.
 func runPrune(args []string) {
 	fs := flag.NewFlagSet("prune", flag.ExitOnError)
 	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
-	comp := fs.String("comp", "", "component: cli|gateway|edge|relay|all (required)")
+	comp := fs.String("comp", "", "component: cli|gateway|edge|agent|relay|all (required)")
 	execute := fs.Bool("execute", false, "actually delete (default: dry-run)")
 	fs.Parse(args) //nolint:errcheck
 
 	if *comp == "" {
-		fmt.Fprintln(os.Stderr, "prune: --comp is required (cli|gateway|edge|relay|all)")
+		fmt.Fprintln(os.Stderr, "prune: --comp is required (cli|gateway|edge|agent|relay|all)")
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -195,7 +195,7 @@ func runPrune(args []string) {
 
 	comps := []string{*comp}
 	if *comp == "all" {
-		comps = []string{"cli", "gateway", "edge", "relay"}
+		comps = []string{"cli", "gateway", "edge", "agent", "relay"}
 	}
 	for _, c := range comps {
 		if _, err := register.Prune(context.Background(), client, c, *execute, os.Stdout); err != nil {

@@ -25,7 +25,7 @@ type PruneStore interface {
 }
 
 // keepFor reports the retention count for comp: relay keeps 3, every public
-// component (cli/gateway/edge) keeps 10. The locked operator policy.
+// component (cli/gateway/edge/agent) keeps 10. The locked operator policy.
 func keepFor(comp string) int {
 	if comp == "relay" {
 		return 3

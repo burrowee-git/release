@@ -8,7 +8,7 @@
 #
 # Env (optional):
 #   KEEP                   newest versions to retain per component (default 10)
-#   COMPONENTS             space-separated set (default "cli gateway edge";
+#   COMPONENTS             space-separated set (default "cli gateway edge agent";
 #                          relay is excluded — it has no GitHub release)
 #   BURROWEE_RELEASE_REPO  GitHub repo (default burrowee-git/release)
 #
@@ -23,7 +23,7 @@ export PATH="/usr/bin:/bin:/opt/homebrew/bin:${HOME}/.claude/bin:${PATH}"
 
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 KEEP="${KEEP:-10}"
-COMPONENTS="${COMPONENTS:-cli gateway edge}"
+COMPONENTS="${COMPONENTS:-cli gateway edge agent}"
 
 EXECUTE=0
 for a in "$@"; do
