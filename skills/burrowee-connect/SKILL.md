@@ -20,19 +20,27 @@ The cli pairing blob is minted by the **gateway's own loopback console**, not th
 cloud — it never leaves the gateway box. So obtain the blob first:
 
 > On the gateway machine, open its local console (loopback,
-> `http://127.0.0.1:16518` by default) and have it mint a cli pairing blob; paste
-> that blob here.
+> `http://127.0.0.1:16518` by default) and have it mint a cli pairing blob. Save
+> that blob to a local file readable only by you and tell me the file path — do
+> NOT paste the blob itself here. For example:
+>
+> ```bash
+> umask 077; printf %s '<the-blob>' > ~/.burrowee/cli-pair.blob
+> ```
 
-Then run, supplying the blob as the `pairing_blob` decision:
+The blob is a secret, so the agent never handles its value — it passes only the
+**path**. Then run, supplying the file as the `pairing_blob_file` decision:
 
 ```bash
-burrowee-agent cli pair --decision pairing_blob=<the-blob-from-the-gateway>
+burrowee-agent cli pair --decision pairing_blob_file=<path-to-the-blob-file>
 ```
 
+(`burrowee-agent` reads the blob from that file itself; you never open or echo it.)
 Apply the next-action loop. If you run `burrowee-agent cli pair` with no decision,
-it returns `need_decision` for `pairing_blob` — ask the user for the gateway's blob
-and re-run with it. On `done` the cli is paired (`summary: "cli paired"`, with the
-written path in `wrote` — mention it by path only).
+it returns `need_decision` for `pairing_blob_file` — ask the user for the path to
+the file holding the gateway's blob and re-run with it. On `done` the cli is paired
+(`summary: "cli paired"`, with the written path in `wrote` — mention it by path
+only).
 
 ## 2. Connect or SSH (run via the cli binary)
 `connect` and `ssh` are NOT `burrowee-agent` verbs — once paired, run the
@@ -60,9 +68,10 @@ branch:
 - `{"status":"done","summary":"…","wrote":["…"]}` → tell the user the `summary`.
   If `wrote` lists paths, mention them by PATH only — **never open or echo those
   files; they may be secrets.**
-- `{"status":"need_decision","decision":{"id":"pairing_blob","prompt":"…"}}` → ask
-  the user for the gateway's pairing blob, then re-run the verb adding
-  `--decision pairing_blob=<answer>`.
+- `{"status":"need_decision","decision":{"id":"pairing_blob_file","prompt":"…"}}` →
+  ask the user for the PATH to a local file holding the gateway's pairing blob (not
+  the blob itself), then re-run the verb adding
+  `--decision pairing_blob_file=<path>`.
 - `{"status":"need_human","reason":"…","message":"…","url":"…"}` → tell the user
   "this part needs you", show the `url`, and stop.
 - `{"status":"error","code":"…","message":"…"}` → surface `message`; suggest

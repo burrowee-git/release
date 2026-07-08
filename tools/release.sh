@@ -805,15 +805,27 @@ NOTES
 
     # (7) regenerate bootstraps + refresh edge skills + scp the static surface.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
-    # Edge skills are OWNED by the edge repo; mirror them in from its worktree on
-    # every release so the served copy can never drift from source. (The cli +
-    # gateway skills are authored in THIS repo and are left untouched.) Fail loudly
+    # Edge operator skills are OWNED by the edge repo; mirror them in from its
+    # worktree on every release so the served copy can never drift from source.
+    # (The cli + gateway skills are authored in THIS repo and are left untouched.)
+    # EXCEPTION — burrowee-edge-{setup,install} are AGENT-flow skills authored in
+    # THIS repo (commit 0aae670 folded the edge operator flow into the
+    # `burrowee-agent edge …` next-action loop the entry skill / llms.txt /
+    # burrowee.json route agents to). They intentionally supersede the edge repo's
+    # operator copies, so the mirror must NEVER overwrite them — doing so silently
+    # reverts the agent flow (as the 07-08 cut did in 1a6c716). Any OTHER
+    # burrowee-edge-* skill the edge repo owns is still mirrored here. Fail loudly
     # if the edge source is gone — a stale snapshot must not ship silently.
     [ -d "${EDGE_SKILLS_SRC}" ] \
         || { echo "✗ edge skills source missing: ${EDGE_SKILLS_SRC} (set BURROWEE_SRC_EDGE)" >&2; exit 1; }
     mkdir -p "${REPO_ROOT}/skills"
     for d in "${EDGE_SKILLS_SRC}"/burrowee-edge-*; do
         [ -d "${d}" ] || continue
+        case "$(basename "${d}")" in
+            burrowee-edge-setup|burrowee-edge-install)
+                echo "→ skip edge skill $(basename "${d}") — agent-flow copy owned by release repo (see 0aae670)" >&2
+                continue ;;
+        esac
         mkdir -p "${REPO_ROOT}/skills/$(basename "${d}")"
         cp "${d}/SKILL.md" "${REPO_ROOT}/skills/$(basename "${d}")/SKILL.md"
         echo "→ synced edge skill $(basename "${d}") from ${EDGE_SKILLS_SRC}" >&2
