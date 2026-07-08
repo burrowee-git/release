@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# release.sh — cut a signed Burrowee component release (cli | gateway | edge).
+# release.sh — cut a signed Burrowee component release (cli | gateway | edge | agent).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]
 #
 # --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
 #   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
@@ -44,6 +44,7 @@
 #   BURROWEE_SRC_CLI        cli component source worktree (default: cli main worktree)
 #   BURROWEE_SRC_GATEWAY    gateway component source worktree
 #   BURROWEE_SRC_EDGE       edge component source worktree
+#   BURROWEE_SRC_AGENT      agent component source worktree
 #   BURROWEE_SRC_DISPATCHER burrowee dispatcher source worktree
 #   BURROWEE_SRC_RELAY      relay component source worktree (default: relay main worktree)
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
@@ -79,7 +80,7 @@ build_register_helper() {
 if [ "${1:-}" = "publish" ]; then
     shift
     comp="${1:-}"
-    [ -n "${comp}" ] || { echo "usage: release.sh publish <cli|gateway|edge|all> [--version <v>]" >&2; exit 1; }
+    [ -n "${comp}" ] || { echo "usage: release.sh publish <cli|gateway|edge|agent|all> [--version <v>]" >&2; exit 1; }
     shift || true
     build_register_helper
     "${REGISTER_BIN}" publish --comp "${comp}" "$@"
@@ -88,7 +89,7 @@ if [ "${1:-}" = "publish" ]; then
     "${REGISTER_BIN}" prune --comp "${comp}" || true
     # GitHub prune scope is cli/gateway/edge only (relay has no GitHub release).
     gh_comps="${comp}"
-    [ "${comp}" = all ] && gh_comps="cli gateway edge"
+    [ "${comp}" = all ] && gh_comps="cli gateway edge agent"
     COMPONENTS="${gh_comps}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
     exit 0
 fi
@@ -100,7 +101,7 @@ BUMP_KIND="patch"
 APPLE_SIGN=""
 for arg in "$@"; do
     case "${arg}" in
-        cli|gateway|edge|relay|all) WHAT="${arg}" ;;
+        cli|gateway|edge|agent|relay|all) WHAT="${arg}" ;;
         --apple)              APPLE_SIGN=1 ;;
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
@@ -109,7 +110,7 @@ for arg in "$@"; do
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
-[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
 export APPLE_SIGN
 
 # ---- config / defaults ------------------------------------------------------
@@ -125,6 +126,7 @@ BB="/Volumes/MacintoshED/Workstation/Coding/Burrowee"
 SRC_CLI="${BURROWEE_SRC_CLI:-${BB}/cli/code/cli}"
 SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/gateway}"
 SRC_EDGE="${BURROWEE_SRC_EDGE:-${BB}/edge/code/edge}"
+SRC_AGENT="${BURROWEE_SRC_AGENT:-${BB}/agent/code/agent}"
 SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}"
 SRC_RELAY="${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}"
 
@@ -143,6 +145,7 @@ src_for() {
         cli)     printf '%s' "${SRC_CLI}" ;;
         gateway) printf '%s' "${SRC_GATEWAY}" ;;
         edge)    printf '%s' "${SRC_EDGE}" ;;
+        agent)   printf '%s' "${SRC_AGENT}" ;;
         relay)   printf '%s' "${SRC_RELAY}" ;;
     esac
 }
@@ -153,6 +156,7 @@ bins_for() {
         cli)     printf '%s' "burrowee-cli burrowee-cli-updater" ;;
         gateway) printf '%s' "burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater" ;;
         edge)    printf '%s' "burrowee-edge burrowee-edge-cli burrowee-edge-updater" ;;
+        agent)   printf '%s' "burrowee-agent" ;;
         relay)   printf '%s' "burrowee-relay burrowee-relay-cli burrowee-relay-updater" ;;
     esac
 }
@@ -342,7 +346,7 @@ if [ "${DRY_RUN}" != 1 ]; then
 fi
 
 # components to cut
-if [ "${WHAT}" = all ]; then COMPONENTS=(cli gateway edge); else COMPONENTS=("${WHAT}"); fi
+if [ "${WHAT}" = all ]; then COMPONENTS=(cli gateway edge agent); else COMPONENTS=("${WHAT}"); fi
 
 # per-component source-worktree cleanliness + branch (real releases must come
 # from a clean `main`; dry-runs are lenient so they can run off a prep worktree).

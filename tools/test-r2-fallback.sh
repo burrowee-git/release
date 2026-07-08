@@ -41,7 +41,7 @@ cleanup() {
     # Restore ALL regenerated bootstraps so the worktree stays clean —
     # gen-bootstraps.sh also rewrites relay/install.sh with the ephemeral key.
     /usr/bin/git -C "${REPO_ROOT}" checkout -- \
-        cli/install.sh gateway/install.sh edge/install.sh relay/install.sh \
+        cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh \
         2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -237,10 +237,11 @@ esac
 say "SCHEME-GUARD: verified by code inspection (dl() function requires https:// or http://+DL_BASE)"
 
 # ---- (9) bash -n syntax checks on generated scripts ---------------------------
-say "bash -n syntax check: cli/install.sh gateway/install.sh edge/install.sh"
+say "bash -n syntax check: cli/install.sh gateway/install.sh edge/install.sh agent/install.sh"
 bash -n "${REPO_ROOT}/cli/install.sh"     || die "bash -n FAILED: cli/install.sh"
 bash -n "${REPO_ROOT}/gateway/install.sh" || die "bash -n FAILED: gateway/install.sh"
 bash -n "${REPO_ROOT}/edge/install.sh"    || die "bash -n FAILED: edge/install.sh"
-printf '  OK: all three scripts pass bash -n\n'
+bash -n "${REPO_ROOT}/agent/install.sh"   || die "bash -n FAILED: agent/install.sh"
+printf '  OK: all four scripts pass bash -n\n'
 
 printf '\n  R2-FALLBACK TEST PASSED (fallback + no-burrowee + syntax)\n'

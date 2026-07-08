@@ -24,15 +24,16 @@ sha256_of() {
 say "gen-bootstraps.sh (TEST pubkey)"
 BURROWEE_PUBKEY_FILE="${REPO_ROOT}/tools/testkeys/test.pub" sh tools/gen-bootstraps.sh
 
-for f in cli/preflight.sh gateway/preflight.sh edge/preflight.sh; do
+for f in cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh; do
     [ -f "${f}" ] || die "expected generated ${f}"
 done
 
 # ---- (2) per-comp nginx gate ------------------------------------------------
-say "nginx gate: edge=1, cli/gateway=0"
+say "nginx gate: edge=1, cli/gateway/agent=0"
 grep -q 'NGINX="1"' edge/preflight.sh    || die "edge/preflight.sh should bake NGINX=\"1\""
 grep -q 'NGINX="0"' cli/preflight.sh     || die "cli/preflight.sh should bake NGINX=\"0\""
 grep -q 'NGINX="0"' gateway/preflight.sh || die "gateway/preflight.sh should bake NGINX=\"0\""
+grep -q 'NGINX="0"' agent/preflight.sh   || die "agent/preflight.sh should bake NGINX=\"0\""
 
 # ---- (3) dry-run structure under a faked apt-get ----------------------------
 say "dry-run edge preflight with a faked apt-get"

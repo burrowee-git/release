@@ -148,11 +148,12 @@ fi
 
 # ---- version resolution -------------------------------------------------
 # Read the per-component pin env var by name (no eval). $COMP is a baked
-# literal, so a direct case over the three known components is exhaustive.
+# literal, so a direct case over the four known components is exhaustive.
 case "$COMP" in
     cli)     PIN="${BURROWEE_CLI_VERSION:-}" ;;
     gateway) PIN="${BURROWEE_GATEWAY_VERSION:-}" ;;
     edge)    PIN="${BURROWEE_EDGE_VERSION:-}" ;;
+    agent)   PIN="${BURROWEE_AGENT_VERSION:-}" ;;
     *)       fail "unknown component '$COMP' — cannot resolve its version pin" ;;
 esac
 if [ -n "$PIN" ]; then

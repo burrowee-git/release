@@ -1,20 +1,20 @@
 #!/bin/sh
 # Burrowee outer bootstrap — THE TRUST ANCHOR (POSIX sh, macOS + Linux).
 #
-#   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sh
+#   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh
 #
-# This is the stable, curl'd-alone entry point for the `edge` component
+# This is the stable, curl'd-alone entry point for the `agent` component
 # (which bundles the `burrowee` dispatcher). It NEVER runs an unverified byte:
 # it downloads the release zip + SHA256SUMS.txt + its minisig, verifies the
 # minisign signature with a baked-in PUBLIC key, verifies the zip's sha256
 # against the now-trusted sums file, and ONLY THEN unzips and execs the inner
 # per-release install.sh. Any failure aborts before anything is installed.
 #
-# DO NOT EDIT generated copies (edge/install.sh) by hand — they are produced
+# DO NOT EDIT generated copies (agent/install.sh) by hand — they are produced
 # from tools/bootstrap.template.sh by tools/gen-bootstraps.sh.
 #
 # Env vars:
-#   BURROWEE_<COMP>_VERSION      pin a release tag (e.g. edge/v0.1.0.…); default: latest
+#   BURROWEE_<COMP>_VERSION      pin a release tag (e.g. agent/v0.1.0.…); default: latest
 #                                (<COMP> = the component name upper-cased, e.g. BURROWEE_CLI_VERSION)
 #   PREFIX                       install root (default $HOME/.local; bins at PREFIX/bin)
 #   BURROWEE_UNINSTALL=1         pass through to the inner installer to remove bins
@@ -35,9 +35,9 @@
 set -eu
 
 # ---- knobs --------------------------------------------------------------
-COMP="edge"
+COMP="agent"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
-PREFLIGHT_SHA256="20aff889401bbf192b378941923f58fd934f459b930436a3f225ba199b539e18"
+PREFLIGHT_SHA256="b8a384431b937e225d36448cf6db0bfe777409e1f027a2cd6efcfd84200b12c5"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
@@ -179,11 +179,11 @@ else
     fi
     if [ -z "$TAG" ]; then
         # GitHub unreachable or no releases published. Try the console catalog
-        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/edge/current.
+        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/agent/current.
         # This is the R2 fallback path — assets are served via `burrowee download-url`
         # (see the dl() function below), which requires a device grant.
-        info "GitHub unreachable — trying console catalog for latest edge version"
-        catalog_url="${CONSOLE_URL}/api/v1/releases/edge/current"
+        info "GitHub unreachable — trying console catalog for latest agent version"
+        catalog_url="${CONSOLE_URL}/api/v1/releases/agent/current"
         # Use plain curl (no TLS-only flags) when DL_BASE is set for tests, else
         # standard hardened curl.
         # shellcheck disable=SC2086  # intentional word-split of $CURL flags
@@ -192,7 +192,7 @@ else
         # (structural — reads only the top-level "version" field). Without jq,
         # split the body on field boundaries FIRST (tr , and { → newlines): the
         # console serves MINIFIED single-line JSON, so a line-anchored grep
-        # would never match it. The field-anchored grep plus the edge/v… shape
+        # would never match it. The field-anchored grep plus the agent/v… shape
         # check below keep a "version":"…" substring buried in notes or nested
         # metadata from spoofing the tag. (Bytes are still minisign+sha256
         # verified downstream; this closes a downgrade / wrong-version vector
@@ -211,7 +211,7 @@ else
             *) TAG="" ;;
         esac
         [ -n "$TAG" ] \
-            || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest edge version; retry when either is available"
+            || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest agent version; retry when either is available"
         info "console catalog: $TAG"
     fi
     info "latest: $TAG"
@@ -276,7 +276,7 @@ dl() {
     # Primary + mirrors failed. Attempt R2 fallback only when `burrowee` is on PATH.
     if command -v burrowee >/dev/null 2>&1; then
         info "primary download failed for $_asset; trying R2 fallback via burrowee"
-        _r2url="$(burrowee download-url edge "$TAG" "$_asset" 2>/dev/null)" || true
+        _r2url="$(burrowee download-url agent "$TAG" "$_asset" 2>/dev/null)" || true
         if [ -n "$_r2url" ]; then
             # Scheme guard: the resolved URL MUST be https:// in production, or
             # https:// / http:// in test mode (BURROWEE_DL_BASE set). This prevents

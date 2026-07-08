@@ -21,7 +21,7 @@ set -eu
 
 # ---- knobs --------------------------------------------------------------
 COMP="edge"
-NGINX="1"               # 1 for edge, 0 for cli/gateway
+NGINX="1"               # 1 for edge, 0 for cli/gateway/agent
 DRY="${BURROWEE_PREFLIGHT_DRY:-}"
 
 # ---- helpers ------------------------------------------------------------
