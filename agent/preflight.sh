@@ -10,7 +10,7 @@
 # themselves signed, so minisign still arrives from a trusted channel. This file's
 # own sha256 is baked into install.sh and verified before it is run.
 #
-# DO NOT EDIT generated copies (@COMP@/preflight.sh) by hand — they are produced
+# DO NOT EDIT generated copies (agent/preflight.sh) by hand — they are produced
 # from tools/preflight.template.sh by tools/gen-bootstraps.sh.
 #
 # Env vars:
@@ -20,8 +20,8 @@
 set -eu
 
 # ---- knobs --------------------------------------------------------------
-COMP="@COMP@"
-NGINX="@NGINX@"               # 1 for edge, 0 for cli/gateway/agent
+COMP="agent"
+NGINX="0"               # 1 for edge, 0 for cli/gateway/agent
 DRY="${BURROWEE_PREFLIGHT_DRY:-}"
 
 # ---- helpers ------------------------------------------------------------

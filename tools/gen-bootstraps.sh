@@ -1,10 +1,11 @@
 #!/bin/sh
-# gen-bootstraps.sh — generate the four self-contained outer bootstraps
-# (cli/install.sh, gateway/install.sh, edge/install.sh, relay/install.sh)
-# from their respective templates, plus the per-component OS-dependency
-# preflight (cli/preflight.sh, gateway/preflight.sh, edge/preflight.sh).
+# gen-bootstraps.sh — generate the five self-contained outer bootstraps
+# (cli/install.sh, gateway/install.sh, edge/install.sh, agent/install.sh,
+# relay/install.sh) from their respective templates, plus the per-component
+# OS-dependency preflight (cli/preflight.sh, gateway/preflight.sh,
+# edge/preflight.sh, agent/preflight.sh).
 #
-# cli/gateway/edge use tools/bootstrap.template.sh (public GitHub-release
+# cli/gateway/edge/agent use tools/bootstrap.template.sh (public GitHub-release
 # channel) + tools/preflight.template.sh (OS-dep installer). relay uses
 # tools/relay-bootstrap.template.sh (private gated channel: challenge-response
 # ed25519 signing + gated downloads) and has no preflight.
@@ -64,11 +65,11 @@ else
     echo "! create the key (Phase 5a: minisign -G ... or Phase A2) and re-run." >&2
 fi
 
-# ---- generate cli/gateway/edge (public GitHub-release channel) ----------
+# ---- generate cli/gateway/edge/agent (public GitHub-release channel) ----
 # ORDER per comp: render <comp>/preflight.sh FIRST (so we can sha256 it), then
 # render <comp>/install.sh baking that hash as @PREFLIGHT_SHA256@. @NGINX@ is 1
-# for edge (installs nginx + stream module), 0 for cli/gateway.
-for comp in cli gateway edge; do
+# for edge (installs nginx + stream module), 0 for cli/gateway/agent.
+for comp in cli gateway edge agent; do
     mkdir -p "$ROOT/$comp"
     case "$comp" in
         edge) nginx=1 ;;

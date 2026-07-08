@@ -37,7 +37,7 @@ set -eu
 # ---- knobs --------------------------------------------------------------
 COMP="cli"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
-PREFLIGHT_SHA256="ebaef1bddbf43566efbc9a4e664cc72bd2aebf7312890e08ce04e7263b1085af"
+PREFLIGHT_SHA256="cfb56c19a3e2eb756ec56147de4fff421675376a5e30e1b7e8367a1205f845a9"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
@@ -148,11 +148,12 @@ fi
 
 # ---- version resolution -------------------------------------------------
 # Read the per-component pin env var by name (no eval). $COMP is a baked
-# literal, so a direct case over the three known components is exhaustive.
+# literal, so a direct case over the four known components is exhaustive.
 case "$COMP" in
     cli)     PIN="${BURROWEE_CLI_VERSION:-}" ;;
     gateway) PIN="${BURROWEE_GATEWAY_VERSION:-}" ;;
     edge)    PIN="${BURROWEE_EDGE_VERSION:-}" ;;
+    agent)   PIN="${BURROWEE_AGENT_VERSION:-}" ;;
     *)       fail "unknown component '$COMP' — cannot resolve its version pin" ;;
 esac
 if [ -n "$PIN" ]; then
