@@ -6,7 +6,7 @@
 # binary→package map is fixed below. CGO is always off (pure-Go, portable).
 #
 # Env in (all required unless noted):
-#   COMP          cli | gateway | edge | relay | burrowee
+#   COMP          cli | gateway | edge | agent | relay | burrowee
 #   SRC_DIR       the component's source worktree (cd target)
 #   TARGETOS      GOOS  (darwin | linux)
 #   TARGETARCH    GOARCH (arm64 | amd64)
@@ -37,7 +37,7 @@
 #   MODERNECH_SIGN path to the modernech-sign tool (default: PATH, then ~/bin)
 set -euo pipefail
 
-: "${COMP:?COMP is required (cli|gateway|edge|relay|burrowee)}"
+: "${COMP:?COMP is required (cli|gateway|edge|agent|relay|burrowee)}"
 : "${SRC_DIR:?SRC_DIR is required (component source worktree)}"
 : "${TARGETOS:?TARGETOS is required (darwin|linux)}"
 : "${TARGETARCH:?TARGETARCH is required (arm64|amd64)}"
@@ -76,6 +76,7 @@ case "${COMP}" in
     cli)      MAP="burrowee-cli:./cmd/burrowee-cli burrowee-cli-updater:./cmd/burrowee-cli-updater" ;;
     gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register burrowee-gateway-updater:./cmd/burrowee-gateway-updater" ;;
     edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:./cmd/burrowee-edge-cli burrowee-edge-updater:./cmd/burrowee-edge-updater" ;;
+    agent)    MAP="burrowee-agent:./cmd/burrowee-agent" ;;
     relay)    MAP="burrowee-relay:./cmd/burrowee-relay burrowee-relay-cli:./cli burrowee-relay-updater:./cli/cmd/burrowee-relay-updater" ;;
     burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
     *)        echo "✗ unknown COMP: ${COMP}" >&2; exit 2 ;;
@@ -83,6 +84,12 @@ esac
 
 # ldflags
 LDFLAGS="-X main.version=${STAMP}"
+if [ "${COMP}" = "agent" ]; then
+    # agent keeps its version var in internal/agent/command (the dispatch table
+    # prints it), not package main — stamp that symbol; the main.version -X is a
+    # silent no-op there.
+    LDFLAGS="${LDFLAGS} -X github.com/burrowee-git/agent/internal/agent/command.version=${STAMP}"
+fi
 if [ "${COMP}" = "edge" ]; then
     # Resolve the console signing pubkey: prefer CONSOLE_PUB_HEX (passed by
     # release.sh from config/console-pub.hex), then the legacy CLOUD_PUB_HEX, then
