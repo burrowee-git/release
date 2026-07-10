@@ -11,9 +11,15 @@ starts the gateway, and waits for the carrier to come up — all inside the CLI.
 NEVER handle keys, signatures, tokens, or raw API calls; you only run
 `burrowee-agent …` and relay its result.
 
-## 0. Preflight — bound?
+## 0. Preflight — bound? on the gateway box?
 Run `burrowee-agent status`. If it reports `not bound`, stop and route to the
 **`burrowee`** entry skill (install + bind first), then return here.
+
+This verb runs **on the gateway box** — the machine whose service you're exposing.
+If your agent isn't on it, apply the entry skill's topology rule first: `ssh` in and
+run the flow there (install + bind `burrowee-agent` on that box first), or, if you
+can't reach it, hand the steps off interactively. Everything below then runs on the
+gateway box — locally or over SSH, the flow is identical.
 
 ## 1. Run the spine verb + apply the next-action loop
 Run:

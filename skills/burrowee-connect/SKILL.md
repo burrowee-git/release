@@ -22,21 +22,33 @@ shell or browser access to that machine, or someone on it, to produce the blob. 
 local machine). If you have no path to the gateway's loopback console, say so up
 front — the agent cannot reach it remotely.
 
-## 1. Pair the cli (local plane)
-The cli pairing blob is minted by the **gateway's own loopback console**, not the
-cloud — it never leaves the gateway box. So obtain the blob first:
+## 1. Pair the cli (blob comes from the gateway box)
+The cli pairing blob is minted by the **gateway's own loopback console**
+(`http://127.0.0.1:16518`), not the cloud. It pins the gateway (pubkey + relay
+endpoint) and carries a one-time bootstrap secret; the client mints its own key when
+it redeems the blob, so the blob is **not tied to any one client machine** — but it
+**expires 10 minutes after minting**. Mint it right before you pair, and re-mint if
+it lapses.
 
-> On the gateway machine, open its local console (loopback,
-> `http://127.0.0.1:16518` by default) and have it mint a cli pairing blob. Save
-> that blob to a local file readable only by you and tell me the file path — do
-> NOT paste the blob itself here. For example:
->
-> ```bash
-> umask 077; printf %s '<the-blob>' > ~/.burrowee/cli-pair.blob
-> ```
+`cli pair` runs on the **client box**. Get the blob file onto that box first, by the
+plane you're on (entry skill §3):
 
-The blob is a secret, so the agent never handles its value — it passes only the
-**path**. Then run, supplying the file as the `pairing_blob_file` decision:
+- **On the client, with SSH to the gateway** → mint the blob over SSH on the
+  gateway, `scp` the file back here — file-to-file, never printed.
+- **On the gateway box (client is elsewhere)** → mint it here, then `scp` the file
+  to the client if you can reach it, otherwise hand the client-side steps off.
+- **Can't reach the gateway** → hand it off, one step at a time:
+  > On the gateway machine, open its local console (loopback,
+  > `http://127.0.0.1:16518` by default) and have it mint a cli pairing blob. Save
+  > it to a file only you can read, transfer it to the client box, and tell me the
+  > path there — do NOT paste the blob itself here. For example:
+  >
+  > ```bash
+  > umask 077; printf %s '<the-blob>' > ~/.burrowee/cli-pair.blob
+  > ```
+
+However the file reaches the client, the agent never handles its value — it passes
+only the **path**. Run, supplying the file as the `pairing_blob_file` decision:
 
 ```bash
 burrowee-agent cli pair --decision pairing_blob_file=<path-to-the-blob-file>

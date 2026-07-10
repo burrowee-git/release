@@ -30,6 +30,11 @@ hostname base for it to serve on (the `hostname_base` decision, §2) and — on 
 **root** for the nginx front the setup stands up (the `sudo … --fix` in §5). If the
 user has no such host, or no root on it, surface that before starting.
 
+If your agent isn't on that host but can `ssh` to it, do the whole setup there the
+entry skill's way — install + bind `burrowee-agent` on it, then run `edge setup`
+over SSH (the flow is identical to local); if you can't reach it, hand the steps off
+interactively.
+
 ## 1. (Optional) Ensure the edge binaries are installed
 `burrowee-agent edge setup` auto-ensures the install as its first step, so you can
 skip straight to §2. Run a standalone install only if the user asked to install
