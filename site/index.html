@@ -5,22 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>burrowee — install channel</title>
 <meta name="description" content="Public, signed, self-service install channel for the Burrowee platform: CLI, gateway, and self-hosted edge relay. Every download is verified end-to-end.">
+<meta name="color-scheme" content="dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <style>
   :root {
-    --soil:   #271D14; /* page canvas */
-    --den:    #1B130C; /* recessed: code blocks, wells */
-    --cream:  #E9DCC6; /* primary text — the ceiling, never #fff */
-    --lamp:   #F8BE2C; /* MARK ONLY — wordmark eɘ */
+    --soil:   #0A0C11; /* page canvas — burrowee.com near-black */
+    --den:    #12151C; /* recessed: code blocks, wells */
+    --cream:  #DBE2EC; /* primary text — cool off-white, never #fff */
+    --lamp:   #D29922; /* MARK ONLY — wordmark eɘ */
     --accent: #C99A38; /* UI accent — links, buttons, focus */
 
     --text:        var(--cream);
-    --text-muted:  rgba(233, 220, 198, 0.55);
-    --text-faint:  rgba(233, 220, 198, 0.30);
-    --line:        rgba(233, 220, 198, 0.10);
-    --card:        rgba(233, 220, 198, 0.03);
-    --glow:        rgba(248, 190, 44, 0.20);
+    --text-muted:  rgba(219, 226, 236, 0.55);
+    --text-faint:  rgba(219, 226, 236, 0.30);
+    --line:        rgba(219, 226, 236, 0.10);
+    --card:        rgba(219, 226, 236, 0.03);
+    --glow:        rgba(210, 153, 34, 0.20);
     --accent-glow: rgba(201, 154, 56, 0.18);
-    --on-accent:   #1B130C; /* den, never white */
+    --on-accent:   #0A0C11; /* canvas, never white */
   }
 
   * { box-sizing: border-box; }
@@ -31,8 +35,10 @@
     margin: 0;
     background: var(--soil);
     color: var(--text);
-    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font: 16px/1.6 "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-feature-settings: "ss01", "cv11";
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   a { color: var(--accent); text-decoration: none; }
@@ -51,7 +57,7 @@
     color: var(--cream);
     margin: 0;
   }
-  .brand .ee   { color: var(--lamp); text-shadow: 0 0 24px rgba(248, 190, 44, 0.38); }
+  .brand .ee   { color: var(--lamp); text-shadow: 0 0 24px rgba(210, 153, 34, 0.38); }
   .brand .flip { display: inline-block; transform: scaleX(-1); margin-left: -0.08em; }
 
   .tagline {
@@ -86,13 +92,13 @@
   .install .label {
     display: block;
     color: var(--accent);
-    font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font: 600 12px/1 "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     margin-bottom: 8px;
   }
   code, pre, kbd {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-family: "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     font-size: 14px;
   }
   .install code { color: var(--cream); white-space: pre; }
