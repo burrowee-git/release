@@ -235,6 +235,17 @@ EOF
         launchctl enable "system/$LAUNCHD_LABEL"
         launchctl kickstart -k "system/$LAUNCHD_LABEL" 2>/dev/null || true
         echo "launchd service $LAUNCHD_LABEL enabled + started"
+
+        # If the owner opted the auto-updater in (its LaunchDaemon is already
+        # loaded), a reinstall must advance THAT daemon too — otherwise a stale
+        # updater keeps running old code and future pushes deadlock. Restart it
+        # ONLY when already loaded; never bootstrap a not-loaded updater here (it
+        # stays owner opt-in). The updater's own push path runs update.sh, not this
+        # installer, so this can never self-kill.
+        if launchctl print "system/$LAUNCHD_UPDATER_LABEL" >/dev/null 2>&1; then
+            launchctl kickstart -k "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+            echo "restarted $LAUNCHD_UPDATER_LABEL (opted in) to pick up new binary"
+        fi
     else
         # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
         # HOME=/root so the daemon's os.UserHomeDir() resolves /root/.burrowee/edge
@@ -288,6 +299,17 @@ EOF
         systemctl enable --now burrowee-edge
         systemctl restart burrowee-edge
         echo "systemd service burrowee-edge enabled + (re)started"
+
+        # If the owner opted the auto-updater in, a reinstall must advance THAT
+        # daemon too — otherwise a stale updater keeps running old code and future
+        # pushes deadlock. Restart it ONLY when already enabled/active; never enable
+        # a disabled updater here (it stays owner opt-in). The updater's own push
+        # path runs update.sh, not this installer, so this can never self-kill.
+        if systemctl is-enabled burrowee-edge-updater >/dev/null 2>&1 \
+            || systemctl is-active burrowee-edge-updater >/dev/null 2>&1; then
+            systemctl restart burrowee-edge-updater 2>/dev/null || true
+            echo "restarted burrowee-edge-updater (opted in) to pick up new binary"
+        fi
     fi
     "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
     echo "edge system install complete."
