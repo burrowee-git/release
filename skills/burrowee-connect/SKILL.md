@@ -11,9 +11,16 @@ material to a local 0600 file and drives `burrowee-cli`); the connection itself 
 run directly by the `burrowee-cli` binary. You NEVER handle keys, blobs, or raw API
 calls — `burrowee-agent` does all crypto + IO internally.
 
-## 0. Preflight — bound?
+## 0. Preflight — bound? on the right box?
 Run `burrowee-agent status`. If `not bound`, route to the **`burrowee`** entry skill
 (install + bind first), then return.
+
+Two machines are involved. The **pairing blob** (§1) can only be minted on the
+**gateway box**, from its loopback console (`http://127.0.0.1:16518`) — you need
+shell or browser access to that machine, or someone on it, to produce the blob. The
+**connection** (§2) runs wherever `burrowee-cli` is installed (usually the user's
+local machine). If you have no path to the gateway's loopback console, say so up
+front — the agent cannot reach it remotely.
 
 ## 1. Pair the cli (local plane)
 The cli pairing blob is minted by the **gateway's own loopback console**, not the

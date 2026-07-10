@@ -9,9 +9,14 @@ You are managing the user's Burrowee sessions through the `burrowee-agent` CLI. 
 NEVER handle keys, tokens, or raw API calls; you only run `burrowee-agent …` and
 relay its result.
 
-## 0. Preflight — bound?
+## 0. Preflight — bound? where are you?
 Run `burrowee-agent status`. If `not bound`, route to the **`burrowee`** entry skill
 (install + bind first), then return here.
+
+`list` and `share` work from anywhere you are bound. `create` and `revoke` (§3) run
+against the gateway's own local console, so they only work **on the gateway
+machine** — off-box they return `error/not_on_gateway`. If the user wants to create
+or revoke and you are not on that box, tell them up front they must run it there.
 
 ## 1. List sessions
 ```bash
