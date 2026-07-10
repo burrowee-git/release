@@ -66,7 +66,37 @@ After running any such `burrowee-agent <verb>`, read that line and branch:
 **Secret discipline (restate to yourself every time):** never open or echo files
 the agent wrote — they may be secrets. Refer to any `wrote` path by path only.
 
-## 3. Route to what the user wants
+## 3. Where is your agent (you) running? — decide the plane before routing
+Burrowee spans up to three machines, each running its own bound `burrowee-agent`:
+the **gateway box** (the machine whose service you expose; it also mints cli pairing
+blobs), an optional **edge host** (a self-hosted relay), and the **client box**
+(where `burrowee-cli` connects from). Each task runs on its own box — `gateway
+setup` on the gateway, `edge setup` on the edge host, `cli pair` on the client — so
+before routing, ask the user plainly:
+
+> "Is this agent running on the machine you want to expose (the gateway), on the
+> client you'll connect from, or a third box?"
+
+Then, for each box a task needs, apply ONE rule:
+
+- **It's the box you're on** → run the verb locally, the normal way.
+- **You can SSH to it** → do the work THERE as if local: `ssh` in, install
+  `burrowee-agent` (§0 one-liner) and bind it on that box (the user approves that
+  box's key in the browser — one human touch per box), then run the same setup verb
+  over `ssh user@host '…'`. The §2 next-action loop is identical — the CLI does all
+  crypto on that box. Keep secret files on that box, or move them **file-to-file
+  with `scp`**, never through this conversation.
+- **You cannot reach it** → hand it off with the interactive loop below. Never run
+  what you can't run, and never ask the user to paste a secret to you.
+
+### Interactive hand-off loop (for any step on a box you can't reach)
+Give the user **exactly one** command or action, and say what success looks like.
+Then STOP and wait — let them run it and report back (paste output, or say "done").
+Read the result: on success, give the next step; on error, diagnose and hand back a
+corrected one. Repeat until the task reaches its `done`. Never dump the whole
+sequence at once — one step, confirm, next.
+
+## 4. Route to what the user wants
 - stand up a gateway / expose a service → `burrowee-gateway-setup` skill
 - pair the cli / SSH or connect to a gateway → `burrowee-connect` skill
 - self-hosted edge relay → `burrowee-edge-setup` skill

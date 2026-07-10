@@ -20,9 +20,20 @@ This skill is the **agent** path. The raw operator commands (`burrowee edge cli
 bootstrap …`, hand-pasting a blob + PIN from the console portal) are the manual
 fallback the agent verb automates — do NOT drive those here; drive `burrowee-agent`.
 
-## 0. Preflight — bound?
+## 0. Preflight — bound? right host? root?
 Run `burrowee-agent status`. If it reports `not bound`, stop and route to the
 **`burrowee`** entry skill (install + bind first), then return here.
+
+Run this **on the machine that will be the edge relay** — normally an always-on host
+or VPS (a `managed` service only survives reboot there). You will need a public
+hostname base for it to serve on (the `hostname_base` decision, §2) and — on Linux —
+**root** for the nginx front the setup stands up (the `sudo … --fix` in §5). If the
+user has no such host, or no root on it, surface that before starting.
+
+If your agent isn't on that host but can `ssh` to it, do the whole setup there the
+entry skill's way — install + bind `burrowee-agent` on it, then run `edge setup`
+over SSH (the flow is identical to local); if you can't reach it, hand the steps off
+interactively.
 
 ## 1. (Optional) Ensure the edge binaries are installed
 `burrowee-agent edge setup` auto-ensures the install as its first step, so you can
