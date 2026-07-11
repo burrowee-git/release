@@ -131,6 +131,14 @@ load_units() {
         systemctl --user daemon-reload 2>/dev/null || true
         systemctl --user enable --now burrowee-gateway.service         2>/dev/null || true
         systemctl --user enable --now burrowee-gateway-updater.service 2>/dev/null || true
+        # A reinstall over an already-running (possibly stale) updater must advance
+        # it to the freshly-installed binary — `enable --now` no-ops a running unit,
+        # so restart it explicitly. Otherwise the stale updater keeps running old
+        # code and future pushes deadlock. (load_units is never called on the
+        # updater's own push path — BURROWEE_UPDATE renders units without loading
+        # them — so this can never self-kill. The Darwin branch above already
+        # advances the updater via its bootout+bootstrap.)
+        systemctl --user restart burrowee-gateway-updater.service 2>/dev/null || true
         ;;
     esac
 }

@@ -48,13 +48,16 @@ func stubBin(t *testing.T, dir, name, body string) {
 // a sandbox: id → uid 0 (is_root true), uname -s → Linux (the production edge
 // topology; pins the test to the systemd branch regardless of the test host OS),
 // and systemctl as a call recorder. install + chmod are real (the sandbox paths
-// are writable), so the rendered unit files are inspectable.
+// are writable), so the rendered unit files are inspectable. The systemctl stub
+// models `is-enabled`/`is-active` as non-zero (unit not opted in) unless
+// STUB_UPDATER_OPTED_IN=1 — so the installer's updater-restart guard only fires
+// when the owner previously enabled the auto-updater, matching production.
 func stubRootEnv(t *testing.T) string {
 	t.Helper()
 	stub := t.TempDir()
 	stubBin(t, stub, "id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo 0; else echo \"id $*\" >> \"$STUB_LOG\"; fi\n")
 	stubBin(t, stub, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo Linux; else /usr/bin/uname \"$@\"; fi\n")
-	stubBin(t, stub, "systemctl", "#!/bin/sh\necho \"systemctl $*\" >> \"$STUB_LOG\"\nexit 0\n")
+	stubBin(t, stub, "systemctl", "#!/bin/sh\necho \"systemctl $*\" >> \"$STUB_LOG\"\ncase \"$1\" in is-enabled|is-active) [ \"${STUB_UPDATER_OPTED_IN:-}\" = 1 ] || exit 1 ;; esac\nexit 0\n")
 	return stub
 }
 
@@ -181,7 +184,7 @@ func stubDarwinRootEnv(t *testing.T) string {
 	stub := t.TempDir()
 	stubBin(t, stub, "id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo 0; else echo \"id $*\" >> \"$STUB_LOG\"; fi\n")
 	stubBin(t, stub, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo Darwin; else /usr/bin/uname \"$@\"; fi\n")
-	stubBin(t, stub, "launchctl", "#!/bin/sh\necho \"launchctl $*\" >> \"$STUB_LOG\"\nexit 0\n")
+	stubBin(t, stub, "launchctl", "#!/bin/sh\necho \"launchctl $*\" >> \"$STUB_LOG\"\ncase \"$1\" in print) [ \"${STUB_UPDATER_OPTED_IN:-}\" = 1 ] || exit 1 ;; esac\nexit 0\n")
 	stubBin(t, stub, "xattr", "#!/bin/sh\nexit 0\n")
 	return stub
 }
@@ -262,13 +265,22 @@ func TestEdgeRootInstallDarwin(t *testing.T) {
 		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>"+rootHome+"</string></dict>",
 	)
 
-	// …but never bootstrapped/enabled (owner opt-in); the SERVE daemon is.
+	// …but never bootstrapped/started (owner opt-in); the SERVE daemon is. The
+	// installer may READ the updater's load state (`launchctl print`) to decide
+	// whether a reinstall should advance an already-opted-in updater — that
+	// read-only probe is fine; what must NOT happen is bootstrap/enable/kickstart.
 	log := readFile(t, filepath.Join(home, "stub-calls.log"))
 	if !strings.Contains(log, "bootstrap system "+servePlist) {
 		t.Errorf("serve LaunchDaemon was not bootstrapped; launchctl log:\n%s", log)
 	}
-	if strings.Contains(log, "org.burrowee.edge.updater") {
-		t.Errorf("updater LaunchDaemon must be left NOT bootstrapped; launchctl log:\n%s", log)
+	for _, forbidden := range []string{
+		"bootstrap system " + filepath.Join(launchdDir, "org.burrowee.edge.updater.plist"),
+		"enable system/org.burrowee.edge.updater",
+		"kickstart -k system/org.burrowee.edge.updater",
+	} {
+		if strings.Contains(log, forbidden) {
+			t.Errorf("updater LaunchDaemon must be left NOT bootstrapped; found %q in launchctl log:\n%s", forbidden, log)
+		}
 	}
 }
 
@@ -310,5 +322,72 @@ func TestEdgeRootUninstallRemovesUpdaterUnit(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(sysBinDir, b)); err == nil {
 			t.Errorf("binary still present after uninstall: %s", b)
 		}
+	}
+}
+
+// TestEdgeRootInstallRestartsOptedInUpdater is the regression guard for the
+// stale-updater deadlock: when the owner has ALREADY opted the auto-updater in,
+// a reinstall must restart the updater unit so the daemon advances to the freshly
+// installed binary (a stale updater running old code deadlocks future pushes).
+// Modeled by STUB_UPDATER_OPTED_IN=1, which makes the systemctl stub report the
+// updater enabled/active.
+func TestEdgeRootInstallRestartsOptedInUpdater(t *testing.T) {
+	home := t.TempDir()
+	staging := t.TempDir()
+	seedEdgeBins(t, staging)
+
+	_, _, _ = runRootInstall(t, home, staging, "STUB_UPDATER_OPTED_IN=1")
+
+	log := readFile(t, filepath.Join(home, "stub-calls.log"))
+	if !strings.Contains(log, "restart burrowee-edge-updater") {
+		t.Errorf("opted-in updater must be restarted on reinstall; systemctl log:\n%s", log)
+	}
+}
+
+// TestEdgeRootInstallDarwinRestartsOptedInUpdater is the macOS counterpart:
+// with the updater LaunchDaemon already loaded (owner opt-in, modeled by
+// STUB_UPDATER_OPTED_IN=1 so `launchctl print` succeeds), a reinstall must
+// kickstart it so the daemon picks up the new binary.
+func TestEdgeRootInstallDarwinRestartsOptedInUpdater(t *testing.T) {
+	home := t.TempDir()
+	rootHome := filepath.Join(home, "var-root")
+	staging := t.TempDir()
+	seedEdgeBins(t, staging)
+	if err := os.MkdirAll(filepath.Join(staging, "covers"), 0o755); err != nil {
+		t.Fatalf("mkdir covers: %v", err)
+	}
+	for _, cf := range []string{"admin.html", "default.html"} {
+		if err := os.WriteFile(filepath.Join(staging, "covers", cf), []byte("<html></html>"), 0o644); err != nil {
+			t.Fatalf("seed cover %s: %v", cf, err)
+		}
+	}
+
+	stub := stubDarwinRootEnv(t)
+	sysBinDir := filepath.Join(home, "sysbin")
+	launchdDir := filepath.Join(home, "launch-daemons")
+	if err := os.MkdirAll(launchdDir, 0o755); err != nil {
+		t.Fatalf("mkdir launchdDir: %v", err)
+	}
+
+	cmd := exec.Command("sh", installShPath(t))
+	cmd.Dir = staging
+	cmd.Env = []string{
+		"HOME=" + home,
+		"PATH=" + stub + ":/usr/bin:/bin",
+		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
+		"SYS_BIN_DIR=" + sysBinDir,
+		"LAUNCHD_PLIST_DIR=" + launchdDir,
+		"ROOT_HOME=" + rootHome,
+		"STUB_UPDATER_OPTED_IN=1",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("install.sh output:\n%s", out)
+		t.Fatalf("install.sh (darwin root branch) failed: %v", err)
+	}
+
+	log := readFile(t, filepath.Join(home, "stub-calls.log"))
+	if !strings.Contains(log, "kickstart -k system/org.burrowee.edge.updater") {
+		t.Errorf("opted-in updater LaunchDaemon must be kickstarted on reinstall; launchctl log:\n%s", log)
 	}
 }
