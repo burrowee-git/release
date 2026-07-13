@@ -115,18 +115,30 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 		return nil, fmt.Errorf("compile dispatcher: %w", err)
 	}
 
-	// 5. install.sh is a static, verbatim per-component file (inner/<comp>/install.sh)
-	//    — NOT rendered/templated. Copy it out with the exec bit set, since the
-	//    checked-in file isn't executable (tools/release.sh does the same
-	//    `cp ... && chmod 0755` before zipping).
+	// 5. install.sh is a static, verbatim per-component file — NOT
+	//    rendered/templated. For cli/gateway/edge/agent it's inner/<comp>/install.sh
+	//    (release.sh line 719); relay has NO inner/ entry — its install.sh is copied
+	//    from the RELAY SOURCE worktree instead (release.sh line 558-560). Copy it
+	//    out with the exec bit set, since the checked-in file isn't executable
+	//    (tools/release.sh does the same `cp ... && chmod 0755` before zipping).
 	installSrc := filepath.Join(o.RepoDir, "inner", o.Component, "install.sh")
+	if o.Component == "relay" {
+		installSrc = filepath.Join(o.SrcDir, "install.sh")
+	}
 	installSh := filepath.Join(o.OutDir, stamp, "install.sh")
 	if err := copyExecutable(installSrc, installSh); err != nil {
 		return nil, fmt.Errorf("install.sh: %w", err)
 	}
 
-	// 6. Assemble one flat zip per target: component bins + dispatcher + install.sh.
-	zips, err := assemble(o.Component, stamp, o.OutDir, installSh, arts, dispArts)
+	// 5b. Component-specific extra payload files beyond bins+dispatcher+install.sh.
+	extras, err := extraPayload(o.Component, o.SrcDir)
+	if err != nil {
+		return nil, fmt.Errorf("extra payload: %w", err)
+	}
+
+	// 6. Assemble one flat zip per target: component bins + dispatcher + install.sh
+	//    + any component extras (update scripts, edge covers).
+	zips, err := assemble(o.Component, stamp, o.OutDir, installSh, extras, arts, dispArts)
 	if err != nil {
 		return nil, fmt.Errorf("assemble: %w", err)
 	}

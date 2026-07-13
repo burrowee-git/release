@@ -17,10 +17,15 @@ import (
 // dispatcher SRC_DISPATCHER=${BURROWEE_SRC_DISPATCHER:-$BB/burrowee/code/burrowee}.
 // release.sh hardcodes BB; the harness additionally honors a BB env override
 // (harness-only — for test isolation, not a release.sh behavior change).
+// defaultBB is the burrowee product-root the harness (and edge.web cover
+// resolution) fall back to when $BB is unset — matching tools/release.sh's
+// hardcoded BB.
+const defaultBB = "/Volumes/MacintoshED/Workstation/Coding/Burrowee"
+
 func srcDirsForRepo() (srcs map[string]string, dispatcherDir string) {
 	bb := os.Getenv("BB")
 	if bb == "" {
-		bb = "/Volumes/MacintoshED/Workstation/Coding/Burrowee"
+		bb = defaultBB
 	}
 	env := func(name, def string) string {
 		if v := os.Getenv(name); v != "" {

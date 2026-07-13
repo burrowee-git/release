@@ -13,6 +13,12 @@ type Component struct {
 	Bins      []build.BinSpec
 }
 
+// Components lists every target relconfig.Bins can build. "burrowee" is the
+// universal-dispatcher binary — buildable here (it's bundled into every
+// component zip), but NOT a standalone release component: tools/release.sh only
+// accepts cli|gateway|edge|agent|relay, and the harness excludes burrowee from
+// its oracle set (the dispatcher is validated via the bundled `burrowee` entry
+// each component zip carries). See runHarness's srcDirsForRepo map.
 var Components = []string{"cli", "gateway", "edge", "agent", "relay", "burrowee"}
 
 func Targets() []build.Target {
