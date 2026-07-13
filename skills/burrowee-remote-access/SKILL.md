@@ -8,7 +8,7 @@ description: Set up SSH and VNC remote access to a Burrowee gateway from a paire
 You are an LLM coding agent standing up SSH/VNC remote access over a paired
 **burrowee cli**: write the two alias config files, install the `bssh`/`bvnc`
 shell helpers, then connect. This requires an already-paired cli and an
-enrolled gateway with an exposed `ssh` and/or `vnc` target — if `burrowee cli
+enrolled gateway with an exposed `ssh` and/or `vnc` target — if `burrowee
 version` fails or the client isn't paired yet, route to `burrowee-cli-install`
 / `burrowee-cli-setup` and stop.
 
