@@ -2,13 +2,18 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge | agent).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public-release] [--dry-run] [--bump-minor|--bump-major]
 #
 # --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
 #   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
 #   ad-hoc signed (the default) — fine for curl-install (no quarantine xattr);
 #   use --apple for release versions that may be browser-downloaded. Guideline:
 #   ~/.claude/guidelines/APPLE-SIGNING.md.
+#
+# --vulncheck: hard-gate the cut on govulncheck — scans every shipped module
+#   and aborts on any finding. --public-release is shorthand for --apple
+#   --vulncheck. Neither flag + an interactive TTY prompts to cut a public
+#   release (both); a non-interactive run or a "no" answer skips both.
 #
 # For each requested component this:
 #   1. Stamps the version (bump unless --dry-run) via tools/version.sh.
@@ -53,6 +58,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
+
+# shellcheck source=tools/vulncheck.sh
+source "${REPO_ROOT}/tools/vulncheck.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -99,19 +107,32 @@ WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
 APPLE_SIGN=""
+VULNCHECK=""
 for arg in "$@"; do
     case "${arg}" in
         cli|gateway|edge|agent|relay|all) WHAT="${arg}" ;;
         --apple)              APPLE_SIGN=1 ;;
+        --vulncheck)          VULNCHECK=1 ;;
+        --public-release)     APPLE_SIGN=1; VULNCHECK=1 ;;
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
-        -h|--help)            sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)            sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
-[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
-export APPLE_SIGN
+[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public-release] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+
+# When neither signing nor the CVE gate was requested and we're interactive,
+# offer the public-release path (both). Non-TTY or no answer → dev/testing.
+PROMPT_ANS=""
+if [ -z "${APPLE_SIGN}" ] && [ -z "${VULNCHECK}" ] && [ -t 0 ]; then
+    printf 'Cut a PUBLIC release? — Developer-ID signing + CVE gate  [y/N] ' >&2
+    read -r PROMPT_ANS || PROMPT_ANS=""
+fi
+_mode="$(resolve_release_mode "${APPLE_SIGN}" "${VULNCHECK}" "${PROMPT_ANS}")"
+APPLE_SIGN="${_mode%%|*}"; VULNCHECK="${_mode#*|}"
+export APPLE_SIGN VULNCHECK
 
 # ---- config / defaults ------------------------------------------------------
 RELEASE_HOST="${RELEASE_HOST:-nsm.renative.com}"
@@ -365,6 +386,10 @@ done
 # Every component bundles the `burrowee` dispatcher (relay included), so its source
 # worktree is required for all release paths.
 [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
+
+# CVE hard gate (public releases only): scan every module we're about to build.
+# Runs before the first build so a vulnerable cut never produces a binary.
+vulncheck_gate
 
 # ---- resolve the signing key ------------------------------------------------
 # Sets SIGN_KEY. For the real key we age-decrypt into a chmod-600 tmpfile and
