@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/burrowee-git/release/internal/relconfig"
 )
 
 // srcDirsForRepo resolves each component's source worktree exactly like
@@ -140,6 +142,19 @@ func runHarness(args []string) error {
 	report, err := comparePayloads(oracleZipDir, candZipDir)
 	if err != nil {
 		return fmt.Errorf("comparePayloads: %w", err)
+	}
+
+	// Guard against a vacuous PASS: comparePayloads only reports on targets it
+	// actually found zips for on at least one side, so a broken build (e.g. an
+	// empty dist dir) would otherwise compare zero targets and fall through to
+	// printReport's default "no FAILs" PASS. Require the full expected target
+	// set before trusting the report at all.
+	wantTargets := len(relconfig.Targets())
+	if len(report.Targets) == 0 {
+		return fmt.Errorf("harness compared zero targets for %s (stamp %s) — refusing to report PASS", comp, res.Stamp)
+	}
+	if len(report.Targets) != wantTargets {
+		return fmt.Errorf("harness compared %d targets, expected %d — refusing to report PASS on a partial comparison", len(report.Targets), wantTargets)
 	}
 
 	if printReport(report) {

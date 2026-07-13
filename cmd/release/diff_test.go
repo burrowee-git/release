@@ -181,6 +181,49 @@ func TestComparePayloadsFileSetMismatch(t *testing.T) {
 	}
 }
 
+func TestComparePayloadsOneSidedTargetFailsClosed(t *testing.T) {
+	refDir, candDir := t.TempDir(), t.TempDir()
+	payload := samplePayload()
+
+	// Present on the ref side only — no candidate zip for this target at all.
+	writeZip(t, filepath.Join(refDir, "burrowee-cli-linux-amd64.zip"), payload, time.Unix(1000, 0))
+
+	report, err := comparePayloads(refDir, candDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Targets) != 1 {
+		t.Fatalf("got %d targets, want 1: %+v", len(report.Targets), report.Targets)
+	}
+	tr := report.Targets[0]
+	if tr.Target != "burrowee-cli-linux-amd64.zip" {
+		t.Errorf("Target = %q", tr.Target)
+	}
+	if tr.OK {
+		t.Error("OK = true, want false (target present on only one side must fail closed)")
+	}
+}
+
+func TestComparePayloadsOneSidedTargetCandOnlyFailsClosed(t *testing.T) {
+	refDir, candDir := t.TempDir(), t.TempDir()
+	payload := samplePayload()
+
+	// Present on the candidate side only — no ref (oracle) zip for this target.
+	writeZip(t, filepath.Join(candDir, "burrowee-cli-linux-amd64.zip"), payload, time.Unix(1000, 0))
+
+	report, err := comparePayloads(refDir, candDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Targets) != 1 {
+		t.Fatalf("got %d targets, want 1: %+v", len(report.Targets), report.Targets)
+	}
+	tr := report.Targets[0]
+	if tr.OK {
+		t.Error("OK = true, want false (target present on only one side must fail closed)")
+	}
+}
+
 func TestComparePayloadsMultipleTargetsSortedByName(t *testing.T) {
 	refDir, candDir := t.TempDir(), t.TempDir()
 	payload := samplePayload()
