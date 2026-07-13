@@ -6,8 +6,10 @@
 #
 # --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
 #   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
-#   ad-hoc signed (the default) — fine for curl-install (no quarantine xattr);
-#   use --apple for release versions that may be browser-downloaded. Guideline:
+#   ad-hoc signed (the default) — fine for curl-install (no quarantine xattr).
+#   NOTE: --apple ALONE signs+notarizes but SKIPS the CVE gate; for a public,
+#   browser-downloadable release use --public-release (signing + govulncheck).
+#   --apple on its own is the conscious sign-only exception. Guideline:
 #   ~/.claude/guidelines/APPLE-SIGNING.md.
 #
 # --vulncheck: hard-gate the cut on govulncheck — scans every shipped module
