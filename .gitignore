@@ -9,3 +9,4 @@
 # TEST signing key (the .pub is committed; the secret key never is)
 tools/testkeys/test.key
 dist/vulncheck/
+/release
