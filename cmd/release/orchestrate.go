@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/burrowee-git/release-kit/build"
@@ -76,19 +75,48 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 		return nil, fmt.Errorf("compile %s: %w", o.Component, err)
 	}
 	res := &Result{Stamp: stamp}
-	// 4. Assemble per-target zips (Task 4) → res.Zips, then:
-	//    checksum.WriteSums(res.Zips, sums) + minisign.Sign(ctx, sums, key).
-	//    Until Task 4, sum over the raw artifacts so the flow is exercised end-to-end.
-	//    build.Paths(arts) alone can't feed checksum.WriteSums directly: every
-	//    target shares the same bin basenames (e.g. "burrowee-cli" appears once
-	//    per OS/Arch), and WriteSums rejects duplicate basenames as an ambiguous
-	//    SHA256SUMS. Per-target zip names are unique, so that collision goes away
-	//    after Task 4; until then, checksum only the host-target artifacts (the
-	//    one target directory whose bin names are guaranteed distinct from each
-	//    other) as the interim smoke check that checksum+minisign run correctly.
-	// TODO(task4): replace this host-target subset with res.Zips once assembly lands.
+
+	// 4. Build the dispatcher matrix — bundled into every component zip, stamped
+	//    independently of the component (mirrors tools/release.sh's DISP_STAMP:
+	//    versions/burrowee + the dispatcher source worktree).
+	dispStamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", "burrowee"), o.DispatcherDir)
+	if err != nil {
+		return nil, fmt.Errorf("dispatcher stamp: %w", err)
+	}
+	dispBins, err := relconfig.Bins("burrowee", dispStamp, "", "")
+	if err != nil {
+		return nil, fmt.Errorf("dispatcher bins: %w", err)
+	}
+	dispArts, err := build.Compile(ctx, build.Spec{
+		SrcDir: o.DispatcherDir, OutDir: filepath.Join(o.OutDir, ".dispatcher", dispStamp),
+		Targets: relconfig.Targets(), Bins: dispBins, Signer: sign.AdHocSigner{},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compile dispatcher: %w", err)
+	}
+
+	// 5. install.sh is a static, verbatim per-component file (inner/<comp>/install.sh)
+	//    — NOT rendered/templated. Copy it out with the exec bit set, since the
+	//    checked-in file isn't executable (tools/release.sh does the same
+	//    `cp ... && chmod 0755` before zipping).
+	installSrc := filepath.Join(o.RepoDir, "inner", o.Component, "install.sh")
+	installSh := filepath.Join(o.OutDir, stamp, "install.sh")
+	if err := copyExecutable(installSrc, installSh); err != nil {
+		return nil, fmt.Errorf("install.sh: %w", err)
+	}
+
+	// 6. Assemble one flat zip per target: component bins + dispatcher + install.sh.
+	zips, err := assemble(o.Component, stamp, o.OutDir, installSh, arts, dispArts)
+	if err != nil {
+		return nil, fmt.Errorf("assemble: %w", err)
+	}
+	res.Zips = zips
+
+	// 7. Checksum + sign the assembled zips. Per-target zip names are unique
+	//    (unlike the raw artifacts, where every target ships the same bin
+	//    basenames), so WriteSums's duplicate-basename guard never trips here.
 	sums := filepath.Join(o.OutDir, stamp, "SHA256SUMS.txt")
-	if err := checksum.WriteSums(build.Paths(hostTargetArtifacts(arts)), sums); err != nil {
+	if err := checksum.WriteSums(res.Zips, sums); err != nil {
 		return nil, fmt.Errorf("checksum: %w", err)
 	}
 	key := o.MinisignKey
@@ -105,22 +133,18 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	return res, nil
 }
 
-// hostTargetArtifacts filters arts down to the build host's own OS/Arch, whose
-// bin basenames are guaranteed distinct from each other (unlike the full
-// cross-target set, where every target ships a same-named binary). Falls back
-// to the full set if the host target wasn't built (shouldn't happen given
-// relconfig.Targets(), but fail open rather than produce an empty manifest).
-func hostTargetArtifacts(arts []build.Artifact) []build.Artifact {
-	var host []build.Artifact
-	for _, a := range arts {
-		if a.OS == runtime.GOOS && a.Arch == runtime.GOARCH {
-			host = append(host, a)
-		}
+// copyExecutable copies src to dst with mode 0755. install.sh ships in the
+// repo without its exec bit set (git doesn't track it); the assembled zip
+// needs it — tools/release.sh does the same `cp` + `chmod 0755`.
+func copyExecutable(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
 	}
-	if len(host) == 0 {
-		return arts
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
 	}
-	return host
+	return os.WriteFile(dst, data, 0o755)
 }
 
 // placeholderConsolePubHex is the dead-key placeholder shipped in

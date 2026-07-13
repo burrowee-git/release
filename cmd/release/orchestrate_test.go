@@ -1,12 +1,17 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/burrowee-git/release/internal/relconfig"
 )
 
 func TestOrchestrateBuildsMatrixIntoScratch(t *testing.T) {
@@ -26,11 +31,35 @@ func TestOrchestrateBuildsMatrixIntoScratch(t *testing.T) {
 	if res.Stamp == "" {
 		t.Fatal("empty stamp")
 	}
-	// linux/amd64 binaries must exist
-	for _, b := range []string{"burrowee-cli", "burrowee-cli-updater"} {
-		p := filepath.Join(out, res.Stamp, "linux-amd64", b)
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("missing %s: %v", p, err)
+	// binaries for every target must exist.
+	for _, tgt := range relconfig.Targets() {
+		for _, b := range []string{"burrowee-cli", "burrowee-cli-updater"} {
+			p := filepath.Join(out, res.Stamp, tgt.OS+"-"+tgt.Arch, b)
+			if _, err := os.Stat(p); err != nil {
+				t.Errorf("missing %s: %v", p, err)
+			}
+		}
+	}
+	// one assembled zip per target, containing exactly the component bins,
+	// the burrowee dispatcher, and install.sh — nothing else.
+	if len(res.Zips) != len(relconfig.Targets()) {
+		t.Fatalf("got %d zips, want %d: %v", len(res.Zips), len(relconfig.Targets()), res.Zips)
+	}
+	wantEntries := []string{"burrowee", "burrowee-cli", "burrowee-cli-updater", "install.sh"}
+	sort.Strings(wantEntries)
+	for _, zp := range res.Zips {
+		r, err := zip.OpenReader(zp)
+		if err != nil {
+			t.Fatalf("open %s: %v", zp, err)
+		}
+		var got []string
+		for _, f := range r.File {
+			got = append(got, f.Name)
+		}
+		r.Close()
+		sort.Strings(got)
+		if !reflect.DeepEqual(got, wantEntries) {
+			t.Errorf("%s entries = %v, want %v", zp, got, wantEntries)
 		}
 	}
 	if _, err := os.Stat(res.Sums); err != nil {
@@ -62,7 +91,10 @@ func writeFixtureModule(t *testing.T, repo string) {
 	mainSrc := "package main\n\nimport \"fmt\"\n\nvar version string\n\nfunc main() { fmt.Println(version) }\n"
 	write("cmd/burrowee-cli/main.go", mainSrc)
 	write("cmd/burrowee-cli-updater/main.go", mainSrc)
+	write("main.go", mainSrc) // root package "." — doubles as the dispatcher source
 	write("versions/cli", "0.1.0\n")
+	write("versions/burrowee", "0.1.0\n")
+	write("inner/cli/install.sh", "#!/bin/sh\necho fixture-install\n")
 
 	git := func(args ...string) {
 		t.Helper()
