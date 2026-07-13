@@ -120,6 +120,9 @@ func runHarness(args []string) error {
 	res, err := orchestrate(ctx, Options{
 		Component: comp, OutDir: candOut, RepoDir: repoAbs,
 		SrcDir: srcDir, DispatcherDir: dispatcherDir,
+		// harness parity — release.sh --dry-run does not gate; the CVE gate is
+		// validated separately (Task 3 fixture) and stays mandatory for real cuts.
+		SkipGate: true,
 	})
 	if err != nil {
 		return fmt.Errorf("orchestrate %s: %w", comp, err)

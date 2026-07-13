@@ -26,6 +26,13 @@ type Options struct {
 	// unchanged.
 	SrcDir                                 string
 	ConsolePubHex, ConsoleURL, MinisignKey string
+	// SkipGate bypasses the mandatory vulncheck.Gate. Set ONLY by the harness
+	// (runHarness): release.sh --dry-run does not run the CVE gate, so gating on
+	// one side of the payload diff would abort orchestrate before it builds and
+	// make an apples-to-apples comparison impossible. The CVE gate is validated
+	// separately (Task 3 fixture) and stays mandatory for real cuts — the zero
+	// value (false) keeps `run` fail-closed.
+	SkipGate bool
 }
 
 type Result struct {
@@ -57,10 +64,14 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	if o.SrcDir == "" {
 		o.SrcDir = o.RepoDir
 	}
-	// 1. CVE gate (fail-closed) — scan the component module.
-	if err := vulncheck.Gate(ctx, []vulncheck.Module{{Name: o.Component, Dir: o.SrcDir}},
-		vulncheck.GateOpts{ReportDir: filepath.Join(o.OutDir, "vulncheck")}); err != nil {
-		return nil, fmt.Errorf("cve gate: %w", err)
+	// 1. CVE gate (fail-closed) — scan the component module. Skipped only under
+	//    harness parity (o.SkipGate): release.sh --dry-run does not gate, so the
+	//    CVE gate is validated separately and stays mandatory for real cuts.
+	if !o.SkipGate {
+		if err := vulncheck.Gate(ctx, []vulncheck.Module{{Name: o.Component, Dir: o.SrcDir}},
+			vulncheck.GateOpts{ReportDir: filepath.Join(o.OutDir, "vulncheck")}); err != nil {
+			return nil, fmt.Errorf("cve gate: %w", err)
+		}
 	}
 	// 2. Stamp (read-only, no bump).
 	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir)

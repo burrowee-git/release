@@ -130,6 +130,37 @@ func testMinisignKey(t *testing.T) string {
 	return sec
 }
 
+// TestOrchestrateSkipGateBypassesCVEGate proves Options.SkipGate short-circuits
+// the mandatory vulncheck.Gate. To make a real gate call deterministically fail
+// regardless of host state, GOPATH is repointed at an empty dir: govulncheck is
+// installed under the real GOPATH/bin (and is NOT on PATH), so
+// resolveGovulncheck can't find it and Gate returns "govulncheck not found".
+// The fixture module is stdlib-only, so the empty GOPATH doesn't affect the
+// build itself.
+func TestOrchestrateSkipGateBypassesCVEGate(t *testing.T) {
+	t.Setenv("GOPATH", t.TempDir())
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	ctx := context.Background()
+	key := testMinisignKey(t)
+
+	// Gate ON (SkipGate zero value): orchestrate must abort at the CVE gate.
+	if _, err := orchestrate(ctx, Options{
+		Component: "cli", OutDir: t.TempDir(), RepoDir: repo,
+		DispatcherDir: repo, MinisignKey: key,
+	}); err == nil || !strings.Contains(err.Error(), "cve gate") {
+		t.Fatalf("gate ON: want a cve gate error, got %v", err)
+	}
+
+	// Gate SKIPPED: the same build now succeeds past the gate.
+	if _, err := orchestrate(ctx, Options{
+		Component: "cli", OutDir: t.TempDir(), RepoDir: repo,
+		DispatcherDir: repo, MinisignKey: key, SkipGate: true,
+	}); err != nil {
+		t.Fatalf("gate SKIPPED: orchestrate should bypass the gate and succeed, got %v", err)
+	}
+}
+
 func TestOrchestrateRejectsPlaceholderConsolePubHex(t *testing.T) {
 	placeholder := strings.Repeat("0", 64)
 
