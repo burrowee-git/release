@@ -19,7 +19,13 @@ import (
 
 type Options struct {
 	Component, OutDir, RepoDir, DispatcherDir string
-	ConsolePubHex, ConsoleURL, MinisignKey    string
+	// SrcDir is the COMPONENT source worktree (e.g. cli/code/cli) — distinct
+	// from RepoDir, which is the release repo holding versions/, inner/, and
+	// tools/. Defaults to RepoDir when empty, so the fixture-based
+	// orchestrate tests (which double one dir as both) keep working
+	// unchanged.
+	SrcDir                                 string
+	ConsolePubHex, ConsoleURL, MinisignKey string
 }
 
 type Result struct {
@@ -48,13 +54,16 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	if o.DispatcherDir == "" {
 		o.DispatcherDir = o.RepoDir
 	}
+	if o.SrcDir == "" {
+		o.SrcDir = o.RepoDir
+	}
 	// 1. CVE gate (fail-closed) — scan the component module.
-	if err := vulncheck.Gate(ctx, []vulncheck.Module{{Name: o.Component, Dir: o.RepoDir}},
+	if err := vulncheck.Gate(ctx, []vulncheck.Module{{Name: o.Component, Dir: o.SrcDir}},
 		vulncheck.GateOpts{ReportDir: filepath.Join(o.OutDir, "vulncheck")}); err != nil {
 		return nil, fmt.Errorf("cve gate: %w", err)
 	}
 	// 2. Stamp (read-only, no bump).
-	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.RepoDir)
+	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +77,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	arts, err := build.Compile(ctx, build.Spec{
-		SrcDir: o.RepoDir, OutDir: filepath.Join(o.OutDir, stamp),
+		SrcDir: o.SrcDir, OutDir: filepath.Join(o.OutDir, stamp),
 		Targets: relconfig.Targets(), Bins: bins, Signer: sign.AdHocSigner{},
 	})
 	if err != nil {
