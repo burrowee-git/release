@@ -39,15 +39,49 @@ func TestBinsEdgeBakesConsolePubHex(t *testing.T) {
 	}
 }
 
+func TestBinsGateway(t *testing.T) {
+	got, err := Bins("gateway", "vSTAMP", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []build.BinSpec{
+		{Name: "burrowee-gateway", Package: "./cmd/burrowee-gateway", Ldflags: "-X main.version=vSTAMP"},
+		{Name: "burrowee-gateway-cli", Package: "./cmd/burrowee-gateway-cli", Ldflags: "-X main.version=vSTAMP"},
+		{Name: "burrowee-gateway-console", Package: "./cmd/burrowee-gateway-console", Ldflags: "-X main.version=vSTAMP"},
+		{Name: "burrowee-register", Package: "./cmd/burrowee-register", Ldflags: "-X main.version=vSTAMP"},
+		{Name: "burrowee-gateway-updater", Package: "./cmd/burrowee-gateway-updater", Ldflags: "-X main.version=vSTAMP"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Bins(gateway)=\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+func TestBinsBurrowee(t *testing.T) {
+	got, err := Bins("burrowee", "vSTAMP", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []build.BinSpec{
+		{Name: "burrowee", Package: ".", Ldflags: "-X main.version=vSTAMP"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Bins(burrowee)=\n%+v\nwant\n%+v", got, want)
+	}
+}
+
 func TestBinsRelayConsoleIdentityOnCliAndUpdaterOnly(t *testing.T) {
 	got, _ := Bins("relay", "vSTAMP", "abc123", "wss://relay-api.burrowee.com")
 	byName := map[string]build.BinSpec{}
 	for _, b := range got {
 		byName[b.Name] = b
 	}
-	// serve binary: version only, no console identity
-	if byName["burrowee-relay"].Ldflags != "-X main.version=vSTAMP" {
-		t.Fatalf("relay serve ldflags=%q", byName["burrowee-relay"].Ldflags)
+	// serve binary: version only, no console identity, no nested-module fields
+	relaySrv := byName["burrowee-relay"]
+	if relaySrv.Ldflags != "-X main.version=vSTAMP" {
+		t.Fatalf("relay serve ldflags=%q", relaySrv.Ldflags)
+	}
+	if relaySrv.SubDir != "" || relaySrv.GoWork != "" {
+		t.Fatalf("relay serve spec wrong: %+v", relaySrv)
 	}
 	// cli: nested module + gowork off + console identity
 	cli := byName["burrowee-relay-cli"]
