@@ -1,6 +1,6 @@
 ---
 name: burrowee-remote-access
-description: Set up SSH and VNC remote access to a Burrowee gateway from a paired client — write ssh_config/vnc_config, install the bssh/bvnc shell helpers, and connect. Use when the operator says "set up ssh/vnc access", "remote desktop into my machine", "bvnc", or pastes release.burrowee.com/skills/burrowee-remote-access/SKILL.md.
+description: Set up SSH and VNC remote access to a Burrowee gateway from a paired client — write ssh_config/vnc_config, install the bssh/bvnc shell helpers, and connect. Use when the operator says "set up ssh/vnc access", "remote desktop into my machine", "bvnc", "burrowee vnc", or pastes release.burrowee.com/skills/burrowee-remote-access/SKILL.md.
 ---
 
 # burrowee-remote-access
@@ -17,13 +17,13 @@ version` fails or the client isn't paired yet, route to `burrowee-cli-install`
 ## 0. Pre-flight
 
 ```bash
-burrowee cli version
+burrowee version
 ls ~/.burrowee/cli/config.json 2>/dev/null || echo "not paired yet"
 ```
 
-`burrowee cli version` must print a real version line, and `config.json` must
-exist (written by `burrowee cli pair` — see `burrowee-cli-setup`) before
-continuing.
+`burrowee version` must print a real version line, and `config.json` must
+exist (written by `burrowee bootstrap <blob> <pin>` — see `burrowee-cli-setup`)
+before continuing.
 
 ---
 
@@ -137,7 +137,9 @@ and blocks until SIGINT/SIGTERM, then tears the forward down.
 - **Wrong relay picked.** `#@relay` in `ssh_config`/`vnc_config` pins the
   route for that `Host` alias; omit it to fall back to the client's default
   relay, or add/correct the line if a gateway is reachable through more than
-  one relay and the wrong one gets picked.
+  one relay and the wrong one gets picked. `burrowee ssh` also accepts a
+  `<host>@<relay>` override to force a specific relay for a one-off connection,
+  and `#@relay` in the config records the preferred one.
 - **macOS: Screen Sharing seems to "close" right away.** It didn't — `open
   vnc://…` just returns immediately to the shell. The forward is still up in
   the terminal running `bvnc`; leave it running and Ctrl-C there when done.
