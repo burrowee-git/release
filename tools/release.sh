@@ -502,6 +502,9 @@ distribute_relay() {
     git add "versions/${comp}"
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
     # (5) console catalog row (LAST) — relay uses R2 keys, not GitHub URLs.
+    # register_staged records the dispatcher stamp bundled into the zip; resolve
+    # it here (the public distribute_only sets DISP_STAMP the same way).
+    DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
     register_staged "${comp}" "${stamp}" "${semver}" "${latest_stage}" "${src}"
     echo "✓ distributed relay ${stamp} (private, R2 relay/${stamp}/)"
 }
