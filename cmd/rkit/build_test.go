@@ -181,6 +181,34 @@ func TestBuildWritesToDistStamp(t *testing.T) {
 	}
 }
 
+// TestBuildRunFailsFastOnMissingSignKeyFile proves a real cut (DryRun:false)
+// with a --sign-key path that doesn't exist on disk fails IMMEDIATELY, before
+// any build work runs — never silently skipping the sign step and reporting
+// success. Pre-fix, buildRun only checked SignKey=="" and let a bad path
+// reach orchestrate's `os.Stat(key)==nil` guard around minisign.Sign, which
+// just skips signing and returns nil: this test is RED against that code and
+// GREEN once buildRun stats the key file up front.
+func TestBuildRunFailsFastOnMissingSignKeyFile(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	stamp := mustStamp(t, repo, "cli")
+
+	err := buildRun(buildOpts{
+		Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		DryRun: false, SignKey: "/nonexistent/path/key.key", NoVulncheck: true,
+	})
+	if err == nil {
+		t.Fatal("expected error for missing --sign-key file, got nil")
+	}
+	if !strings.Contains(err.Error(), "sign-key") || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("error = %q, want it to mention sign-key and no such file", err.Error())
+	}
+	// Fail-fast means no build work happened: no dist/<stamp> zips.
+	if _, statErr := os.Stat(filepath.Join(repo, "dist", stamp)); !os.IsNotExist(statErr) {
+		t.Fatalf("dist/%s should not exist (fail-fast before build), stat err = %v", stamp, statErr)
+	}
+}
+
 // TestBuildRunBumpDryRunReverts exercises the bump+revert path end-to-end: a
 // --bump-patch --dry-run build must run the revert (registered before the
 // bump block, per the FIX 1 reorder) and leave versions/<comp> exactly as it

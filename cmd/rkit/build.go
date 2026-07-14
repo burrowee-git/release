@@ -111,6 +111,11 @@ func buildRun(o buildOpts) (err error) {
 	if !o.DryRun && o.SignKey == "" {
 		return fmt.Errorf("--sign-key is required for a real build (only --dry-run defaults to the test key)")
 	}
+	if !o.DryRun {
+		if _, err := os.Stat(o.SignKey); err != nil {
+			return fmt.Errorf("--sign-key %s: %w", o.SignKey, err)
+		}
+	}
 
 	// Revert the version bump if the build fails, or unconditionally on
 	// --dry-run — a dry run must never leave a bumped versions/<comp> behind.
@@ -300,7 +305,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	key := o.MinisignKey
 	if key == "" {
-		key = filepath.Join(o.RepoDir, "tools", "testkeys", "burrowee-release-test.key")
+		key = filepath.Join(o.RepoDir, "tools", "testkeys", "test.key")
 	}
 	if _, statErr := os.Stat(key); statErr == nil {
 		if err := minisign.Sign(ctx, sums, key); err != nil {
