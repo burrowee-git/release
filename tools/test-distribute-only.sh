@@ -157,4 +157,37 @@ set -e
 [ "${rc2}" -eq 0 ] || die "dry-run on a system-only PATH exited ${rc2} (expected 0 — proves a real ghp/tooling dependency leaked into the dry-run branch). Output:\n${out2}"
 printf '  OK: dry-run succeeds on a system-only PATH (no ghp wrapper reachable)\n'
 
-printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + dry-run stub + no-side-effects + no-tool-dependency)\n'
+# ---- (relay) private R2 distribute dry-run ----------------------------------
+# relay takes the private path (distribute_relay): re-stage rkit's
+# burrowee-relay-*.zip under latest.* names, re-sign, and (real) publish to R2 —
+# no GitHub Release, no self-hosting scp. Dry-run must re-stage + log R2 intent
+# with zero real writes.
+say "relay private distribute --dry-run (R2 flow, no GitHub Release)"
+RELAY_STAMP="v0.1.18.2026.07.14.deadbeef"
+RELAY_STAGE="${REPO_ROOT}/dist/${RELAY_STAMP}"
+cleanup_relay() { rm -rf "${RELAY_STAGE}"; }
+trap 'cleanup_relay; cleanup_stage; cleanup' EXIT INT TERM
+rm -rf "${RELAY_STAGE}"; mkdir -p "${RELAY_STAGE}"
+for plat in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+    printf 'dummy relay zip\n' > "${RELAY_STAGE}/burrowee-relay-${plat}.zip"
+done
+# ephemeral password-less minisign key (test.key is gitignored; pass via SIGN_KEY).
+RELAY_KEY="${W}/relay-test.key"
+minisign -W -G -f -p "${W}/relay-test.pub" -s "${RELAY_KEY}" >/dev/null 2>&1 || die "minisign keygen failed"
+RELAY_BEFORE_HEAD="$(/usr/bin/git -C "${REPO_ROOT}" rev-parse HEAD)"
+set +e
+rout="$(SIGN_KEY="${RELAY_KEY}" bash "${REPO_ROOT}/tools/release.sh" --distribute-only relay "${RELAY_STAMP}" --dry-run 2>&1)"
+rrc=$?
+set -e
+[ "${rrc}" -eq 0 ] || die "relay dry-run exited ${rrc}. Output:\n${rout}"
+case "${rout}" in *"latest.darwin-arm64.zip"*) ;; *) die "relay dry-run missing latest.* rename" ;; esac
+case "${rout}" in *"would: publish-relay to R2 under relay/${RELAY_STAMP}/"*) ;; *) die "relay dry-run missing R2 publish intent" ;; esac
+case "${rout}" in *"(private)"*) ;; *) die "relay dry-run missing (private) marker intent" ;; esac
+case "${rout}" in *"no real writes"*) ;; *) die "relay dry-run missing no-writes confirmation" ;; esac
+case "${rout}" in *"publish-relay --stamp"*) die "relay dry-run text suggests a real publish-relay ran" ;; esac
+RELAY_AFTER_HEAD="$(/usr/bin/git -C "${REPO_ROOT}" rev-parse HEAD)"
+[ "${RELAY_BEFORE_HEAD}" = "${RELAY_AFTER_HEAD}" ] || die "relay dry-run moved HEAD"
+cleanup_relay
+printf '  OK: relay dry-run — latest.* rename + R2 publish intent + (private) marker + no real writes\n'
+
+printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + dry-run stub + no-side-effects + no-tool-dependency + relay-private)\n'
