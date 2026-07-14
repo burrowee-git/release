@@ -331,3 +331,33 @@ func TestOrchestrateRejectsPlaceholderConsolePubHex(t *testing.T) {
 		t.Fatalf("resolveConsolePubHex(no config file) = %q, want empty", got)
 	}
 }
+
+func TestResolveComponentDirs(t *testing.T) {
+	// --src/--dispatcher already set → left untouched.
+	o := buildOpts{Component: "cli", SrcDir: "/explicit/src", DispatcherDir: "/explicit/disp"}
+	resolveComponentDirs(&o)
+	if o.SrcDir != "/explicit/src" || o.DispatcherDir != "/explicit/disp" {
+		t.Fatalf("explicit dirs overridden: %+v", o)
+	}
+
+	// Unset → resolved from BURROWEE_SRC_<COMP>/BURROWEE_SRC_DISPATCHER.
+	t.Setenv("BURROWEE_SRC_CLI", "/env/cli/src")
+	t.Setenv("BURROWEE_SRC_DISPATCHER", "/env/dispatcher")
+	o2 := buildOpts{Component: "cli"}
+	resolveComponentDirs(&o2)
+	if o2.SrcDir != "/env/cli/src" {
+		t.Fatalf("SrcDir = %q, want /env/cli/src", o2.SrcDir)
+	}
+	if o2.DispatcherDir != "/env/dispatcher" {
+		t.Fatalf("DispatcherDir = %q, want /env/dispatcher", o2.DispatcherDir)
+	}
+
+	// The bug this fixes: a real component must resolve to its OWN source, never
+	// fall back to the release repo (RepoDir).
+	t.Setenv("BURROWEE_SRC_GATEWAY", "/env/gateway/src")
+	o3 := buildOpts{Component: "gateway", RepoDir: "/release/repo"}
+	resolveComponentDirs(&o3)
+	if o3.SrcDir == "" || o3.SrcDir == o3.RepoDir {
+		t.Fatalf("gateway SrcDir wrongly empty/==repo: %q", o3.SrcDir)
+	}
+}

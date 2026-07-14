@@ -68,7 +68,8 @@ func runBuild(args []string) error {
 	var o buildOpts
 	fs.StringVar(&o.Component, "component", "", "cli|gateway|edge|agent")
 	fs.StringVar(&o.RepoDir, "repo", ".", "release repo worktree")
-	fs.StringVar(&o.DispatcherDir, "dispatcher", "", "dispatcher source worktree (defaults to repo)")
+	fs.StringVar(&o.SrcDir, "src", "", "component source worktree (default: resolved from BURROWEE_SRC_<COMP>/BB)")
+	fs.StringVar(&o.DispatcherDir, "dispatcher", "", "dispatcher source worktree (default: resolved from BURROWEE_SRC_DISPATCHER/BB)")
 	fs.StringVar(&o.SignKey, "sign-key", "", "minisign secret key (required for a real cut; --dry-run defaults to the TEST key)")
 	fs.BoolVar(&o.Apple, "apple", false, "notarize macOS binaries")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "build without bumping the version or requiring a real sign key")
@@ -90,7 +91,28 @@ func runBuild(args []string) error {
 	case *bumpMajor:
 		o.Bump = "major"
 	}
+	resolveComponentDirs(&o)
 	return buildRun(o)
+}
+
+// resolveComponentDirs fills SrcDir/DispatcherDir from the standard
+// BURROWEE_SRC_<COMP>/BB locations (the same resolver the harness uses) unless
+// --src/--dispatcher already set them. A real component's source lives in its
+// OWN repo worktree (e.g. cli/code/cli), distinct from --repo (the release repo
+// that holds versions/ + inner/ + tools/); without this, SrcDir would fall back
+// to --repo in buildRun and rkit would try to build the component from the
+// release repo.
+func resolveComponentDirs(o *buildOpts) {
+	if o.SrcDir != "" && o.DispatcherDir != "" {
+		return
+	}
+	srcs, dispatcherDir := srcDirsForRepo()
+	if o.SrcDir == "" {
+		o.SrcDir = srcs[o.Component]
+	}
+	if o.DispatcherDir == "" {
+		o.DispatcherDir = dispatcherDir
+	}
 }
 
 // buildRun is the testable seam behind runBuild. It resolves dirs, optionally
