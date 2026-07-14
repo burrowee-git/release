@@ -41,8 +41,8 @@ type Result struct {
 	Sums, Minisig string
 }
 
-func runOrchestrate(args []string) error {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+func runBuild(args []string) error {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	var o Options
 	fs.StringVar(&o.Component, "component", "", "cli|gateway|edge|agent|relay|burrowee")
 	fs.StringVar(&o.OutDir, "out", "", "scratch output dir")

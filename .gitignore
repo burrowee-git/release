@@ -10,3 +10,5 @@
 tools/testkeys/test.key
 dist/vulncheck/
 /release
+go.work
+go.work.sum
