@@ -111,10 +111,14 @@ case "${out}" in
     *) die "missing would: gen-bootstraps line. Output:\n${out}" ;;
 esac
 case "${out}" in
+    *"would:"*"scp"*"install.sh"*) : ;;
+    *) die "missing would: self-hosting scp line. Output:\n${out}" ;;
+esac
+case "${out}" in
     *"would:"*"marker commit"*)     : ;;
     *) die "missing would: marker commit line. Output:\n${out}" ;;
 esac
-printf '  OK: github/bootstrap/marker actions all logged as intent\n'
+printf '  OK: github/bootstrap/self-hosting-scp/marker actions all logged as intent\n'
 
 # (b) NO real side effects.
 case "${out}" in

@@ -405,14 +405,17 @@ NOTES
 
 # ---- distribute_only: distribution-only mode over an already-staged dist/<stamp>/
 # (produced by `rkit build` — the produce half lives there now). Runs ONLY:
-# register_staged -> GitHub Release (gh_release_publish) -> gen-bootstraps.sh ->
-# [RELEASED] marker commit -> GitHub retention report. No build, no sign, no
-# notarize, no CVE gate, no version bump — all of that already happened upstream.
+# GitHub Release (gh_release_publish) -> gen-bootstraps.sh -> self-hosting
+# upload (scp install.sh/preflight.sh/pubkey/site/skills to the release host,
+# mirrored from do_release()) -> [RELEASED] marker commit -> register_staged
+# (console catalog, LAST — only after everything above is actually live) ->
+# GitHub retention report. No build, no sign, no notarize, no CVE gate, no
+# version bump — all of that already happened upstream.
 # relay is out of scope (private R2-only publish, no GitHub Release — see
 # do_release_relay).
 # On --dry-run: validates the staged dir + component, then STUBS every publish
 # action (prints "would: ..." lines) and returns — no register_staged call, no
-# ghp/git/gen-bootstraps invocation, no writes of any kind.
+# ghp/git/gen-bootstraps/ssh/scp invocation, no writes of any kind.
 distribute_only() {
     local comp="$1" stamp="$2"
     case "${comp}" in
@@ -433,14 +436,23 @@ distribute_only() {
     semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
 
     if [ "${DRY_RUN}" = 1 ]; then
-        echo "→ would: register_staged ${comp} ${stamp} (console catalog)"
         echo "→ would: gh release create ${comp}/${stamp} (GitHub Release, public) via ghp"
         echo "→ would: gen-bootstraps.sh (regenerate ${comp}/install.sh + ${comp}/preflight.sh)"
+        echo "→ would: scp install.sh/preflight.sh/burrowee-release.pub/site/index.html/skills to ${RELEASE_HOST}:${STATIC_DIR}/${comp}/ (self-hosting upload)"
         echo "→ would: marker commit [RELEASED: ${comp}] ${stamp}"
+        echo "→ would: register_staged ${comp} ${stamp} (console catalog)"
         echo "→ would: GitHub release retention report (prune-releases.sh, dry-run)"
         echo "✓ dry-run distribute-only: no real writes"
         return 0
     fi
+
+    # jq preflight: register_staged's json_escape shells out to `jq -Rs`; fail
+    # friendly here rather than mid-register_staged. Inlined (same check/message
+    # as the shared need() helper, not a call to it) — need() is defined further
+    # down the script, past this DISTRIBUTE_ONLY dispatch branch, which already
+    # returns (see the `if [ "${DISTRIBUTE_ONLY}" = 1 ]` block below) before
+    # execution ever reaches need()'s definition.
+    command -v jq >/dev/null 2>&1 || { echo "✗ required tool not found: jq" >&2; exit 1; }
 
     [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
     DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
@@ -449,13 +461,71 @@ distribute_only() {
     else echo "✗ neither shasum nor sha256sum found" >&2; exit 1; fi
     build_register_helper
 
-    register_staged "${comp}" "${stamp}" "${semver}" "${stage}" "${src}" "${comp}/${stamp}"
+    # (1) tag + GitHub Release.
     gh_release_publish "${comp}" "${stamp}" "${stage}"
-    bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
 
+    # (2) regenerate bootstraps + refresh edge skills + scp the static surface —
+    # mirrors do_release()'s self-hosting block verbatim so a distribute-only
+    # cut actually updates release.burrowee.com, not just the GitHub Release.
+    bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+    # Edge operator skills are OWNED by the edge repo; mirror them in from its
+    # worktree on every release so the served copy can never drift from source.
+    # (The cli + gateway skills are authored in THIS repo and are left untouched.)
+    # EXCEPTION — burrowee-edge-{setup,install} are AGENT-flow skills authored in
+    # THIS repo (commit 0aae670 folded the edge operator flow into the
+    # `burrowee-agent edge …` next-action loop the entry skill / llms.txt /
+    # burrowee.json route agents to). They intentionally supersede the edge repo's
+    # operator copies, so the mirror must NEVER overwrite them — doing so silently
+    # reverts the agent flow (as the 07-08 cut did in 1a6c716). Any OTHER
+    # burrowee-edge-* skill the edge repo owns is still mirrored here. Fail loudly
+    # if the edge source is gone — a stale snapshot must not ship silently.
+    [ -d "${EDGE_SKILLS_SRC}" ] \
+        || { echo "✗ edge skills source missing: ${EDGE_SKILLS_SRC} (set BURROWEE_SRC_EDGE)" >&2; exit 1; }
+    mkdir -p "${REPO_ROOT}/skills"
+    for d in "${EDGE_SKILLS_SRC}"/burrowee-edge-*; do
+        [ -d "${d}" ] || continue
+        case "$(basename "${d}")" in
+            burrowee-edge-setup|burrowee-edge-install)
+                echo "→ skip edge skill $(basename "${d}") — agent-flow copy owned by release repo (see 0aae670)" >&2
+                continue ;;
+        esac
+        mkdir -p "${REPO_ROOT}/skills/$(basename "${d}")"
+        cp "${d}/SKILL.md" "${REPO_ROOT}/skills/$(basename "${d}")/SKILL.md"
+        echo "→ synced edge skill $(basename "${d}") from ${EDGE_SKILLS_SRC}" >&2
+    done
+
+    # shellcheck disable=SC2029  # ${STATIC_DIR}/${comp} are local, controlled values — expanding client-side into the remote command is intended.
+    ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
+    scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
+    # preflight.sh is a sibling static file the installer fetches before the trust
+    # gate (sha256-pinned in install.sh). Ship it alongside install.sh.
+    if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/preflight.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/preflight.sh"
+    fi
+    if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
+        scp -q "${REPO_ROOT}/burrowee-release.pub" "${RELEASE_HOST}:${STATIC_DIR}/burrowee-release.pub"
+    fi
+    if [ -f "${REPO_ROOT}/site/index.html" ]; then
+        scp -q "${REPO_ROOT}/site/index.html" "${RELEASE_HOST}:${STATIC_DIR}/index.html"
+    fi
+    for d in "${REPO_ROOT}/skills"/*/; do
+        [ -d "${d}" ] || continue
+        [ -f "${d}SKILL.md" ] || continue
+        sk="$(basename "${d}")"
+        # shellcheck disable=SC2029  # ${STATIC_DIR}/skills/${sk} are local, controlled values — expanding client-side into the remote command is intended.
+        ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/skills/${sk}'"
+        scp -q "${d}SKILL.md" "${RELEASE_HOST}:${STATIC_DIR}/skills/${sk}/SKILL.md"
+    done
+
+    # (3) marker commit.
     git add "versions/${comp}" "${comp}/install.sh" "${comp}/preflight.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
+
+    # (4) register staged row in the console catalog — LAST, only after the
+    # GitHub Release + self-hosting upload + marker commit all succeeded, so
+    # the catalog never advertises artifacts that aren't actually live.
+    register_staged "${comp}" "${stamp}" "${semver}" "${stage}" "${src}" "${comp}/${stamp}"
 
     echo
     echo "→ GitHub release retention (dry-run — run prune-releases.sh --execute in the deploy phase to apply):"
