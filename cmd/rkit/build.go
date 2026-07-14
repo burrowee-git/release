@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -33,6 +34,14 @@ type Options struct {
 	// separately (Task 3 fixture) and stays mandatory for real cuts — the zero
 	// value (false) keeps `run` fail-closed.
 	SkipGate bool
+	// Apple selects the Developer-ID signer (selectSigner) for build.Compile and
+	// gates darwin zips through Notarizer.Notarize after assembly. Zero value
+	// (false) keeps the existing ad-hoc, non-notarized behavior.
+	Apple bool
+	// DryRun, when Apple is set, skips the real notarize submission (logs intent
+	// instead) — a dry run's artifacts are throwaway and notarization is a real
+	// Apple API call.
+	DryRun bool
 }
 
 type Result struct {
@@ -41,20 +50,142 @@ type Result struct {
 	Sums, Minisig string
 }
 
-func runOrchestrate(args []string) error {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	var o Options
-	fs.StringVar(&o.Component, "component", "", "cli|gateway|edge|agent|relay|burrowee")
-	fs.StringVar(&o.OutDir, "out", "", "scratch output dir")
+// buildOpts configures `rkit build` — the real release-cut entry point:
+// output lands at <RepoDir>/dist/<stamp>/ (never an arbitrary --out), an
+// optional version bump shells the proven tools/version.sh with a
+// revert-on-failure/dry-run trap, and the CVE gate runs by DEFAULT (the
+// opposite of harness's SkipGate, which exists only for release.sh parity).
+type buildOpts struct {
+	Component, RepoDir, SrcDir, DispatcherDir, SignKey string
+	Apple, DryRun, NoVulncheck                         bool
+	// Bump is "", "patch", "minor", or "major" — the tools/version.sh
+	// --bump-<kind> action to run before stamping. Empty means no bump.
+	Bump string
+}
+
+func runBuild(args []string) error {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
+	var o buildOpts
+	fs.StringVar(&o.Component, "component", "", "cli|gateway|edge|agent")
 	fs.StringVar(&o.RepoDir, "repo", ".", "release repo worktree")
 	fs.StringVar(&o.DispatcherDir, "dispatcher", "", "dispatcher source worktree (defaults to repo)")
-	fs.StringVar(&o.MinisignKey, "key", "", "minisign secret key (defaults to TEST key)")
+	fs.StringVar(&o.SignKey, "sign-key", "", "minisign secret key (required for a real cut; --dry-run defaults to the TEST key)")
+	fs.BoolVar(&o.Apple, "apple", false, "notarize macOS binaries")
+	fs.BoolVar(&o.DryRun, "dry-run", false, "build without bumping the version or requiring a real sign key")
+	fs.BoolVar(&o.NoVulncheck, "no-vulncheck", false, "skip the CVE gate (default: the gate runs)")
+	bumpPatch := fs.Bool("bump-patch", false, "bump the component's patch version before building")
+	bumpMinor := fs.Bool("bump-minor", false, "bump the component's minor version before building (prompts unless BURROWEE_RELEASE_YES=1)")
+	bumpMajor := fs.Bool("bump-major", false, "bump the component's major version before building (prompts unless BURROWEE_RELEASE_YES=1)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	// defaults resolved in orchestrate(): console keys from config/console-pub.hex, key from tools/testkeys.
-	_, err := orchestrate(context.Background(), o)
+	if (*bumpPatch && *bumpMinor) || (*bumpPatch && *bumpMajor) || (*bumpMinor && *bumpMajor) {
+		return fmt.Errorf("only one of --bump-patch|--bump-minor|--bump-major may be set")
+	}
+	switch {
+	case *bumpPatch:
+		o.Bump = "patch"
+	case *bumpMinor:
+		o.Bump = "minor"
+	case *bumpMajor:
+		o.Bump = "major"
+	}
+	return buildRun(o)
+}
+
+// buildRun is the testable seam behind runBuild. It resolves dirs, optionally
+// bumps the component's version (registering a revert that fires on error or
+// --dry-run), runs the CVE gate unless NoVulncheck, then reuses orchestrate to
+// build+assemble+checksum+sign into <RepoDir>/dist/<stamp>/.
+func buildRun(o buildOpts) (err error) {
+	if o.DispatcherDir == "" {
+		o.DispatcherDir = o.RepoDir
+	}
+	if o.SrcDir == "" {
+		o.SrcDir = o.RepoDir
+	}
+
+	// Fail fast: a real cut requires a real sign key. Check this before the
+	// bump + CVE gate so a doomed real cut doesn't waste either of them.
+	// --dry-run defaults to the TEST key further down, where it's used.
+	if !o.DryRun && o.SignKey == "" {
+		return fmt.Errorf("--sign-key is required for a real build (only --dry-run defaults to the test key)")
+	}
+	if !o.DryRun {
+		if _, err := os.Stat(o.SignKey); err != nil {
+			return fmt.Errorf("--sign-key %s: %w", o.SignKey, err)
+		}
+	}
+
+	// Revert the version bump if the build fails, or unconditionally on
+	// --dry-run — a dry run must never leave a bumped versions/<comp> behind.
+	// Registered BEFORE the bump step below so it also covers the bump
+	// step's own failure (version.sh writes the file then `git add` fails).
+	defer func() {
+		if err != nil || o.DryRun {
+			exec.Command("git", "-C", o.RepoDir, "restore", "--staged", "--worktree", "versions/"+o.Component).Run()
+		}
+	}()
+
+	if !o.DryRun && o.Bump != "" {
+		cmd := exec.Command("bash", filepath.Join(o.RepoDir, "tools", "version.sh"), o.Component, "--bump-"+o.Bump)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("version bump: %w", err)
+		}
+	}
+
+	ctx := context.Background()
+	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir)
+	if err != nil {
+		return err
+	}
+	distDir := filepath.Join(o.RepoDir, "dist", stamp)
+
+	// CVE gate — ON BY DEFAULT for a real build (unlike harness, which
+	// SkipGates for release.sh --dry-run parity). --no-vulncheck bypasses it.
+	if !o.NoVulncheck {
+		if err = vulncheck.Gate(ctx, []vulncheck.Module{{Name: o.Component, Dir: o.SrcDir}},
+			vulncheck.GateOpts{ReportDir: filepath.Join(distDir, "vulncheck")}); err != nil {
+			return fmt.Errorf("cve gate: %w", err)
+		}
+	}
+
+	key := o.SignKey
+	if key == "" {
+		// Reached only when o.DryRun (the real-cut case already returned above).
+		key = filepath.Join(o.RepoDir, "tools", "testkeys", "test.key")
+	}
+
+	_, err = orchestrate(ctx, Options{
+		Component: o.Component, OutDir: filepath.Join(o.RepoDir, "dist"),
+		RepoDir: o.RepoDir, SrcDir: o.SrcDir, DispatcherDir: o.DispatcherDir,
+		MinisignKey: key,
+		SkipGate:    true, // the gate above already ran (or was explicitly bypassed)
+		Apple:       o.Apple, DryRun: o.DryRun,
+	})
 	return err
+}
+
+// selectSigner picks build.Compile's Signer: a real Developer-ID signature via
+// the product's modernech-sign helper when --apple is set, otherwise the
+// existing ad-hoc codesign (macOS needs any signature to run, unsigned or
+// ad-hoc, on non-apple/non-darwin cuts).
+func selectSigner(apple bool) sign.Signer {
+	if apple {
+		return sign.AppleSigner{ToolPath: "modernech-sign"}
+	}
+	return sign.AdHocSigner{}
+}
+
+// notarizerFor returns the Notarizer to submit darwin zips to Apple when
+// --apple is set, and whether notarization should run at all. Non-apple cuts
+// never notarize.
+func notarizerFor(apple bool) (sign.Notarizer, bool) {
+	if apple {
+		return sign.Notarizer{ToolPath: "modernech-sign"}, true
+	}
+	return sign.Notarizer{}, false
 }
 
 func orchestrate(ctx context.Context, o Options) (*Result, error) {
@@ -89,7 +220,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	arts, err := build.Compile(ctx, build.Spec{
 		SrcDir: o.SrcDir, OutDir: filepath.Join(o.OutDir, stamp),
-		Targets: relconfig.Targets(), Bins: bins, Signer: sign.AdHocSigner{},
+		Targets: relconfig.Targets(), Bins: bins, Signer: selectSigner(o.Apple),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile %s: %w", o.Component, err)
@@ -109,7 +240,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	dispArts, err := build.Compile(ctx, build.Spec{
 		SrcDir: o.DispatcherDir, OutDir: filepath.Join(o.OutDir, ".dispatcher", dispStamp),
-		Targets: relconfig.Targets(), Bins: dispBins, Signer: sign.AdHocSigner{},
+		Targets: relconfig.Targets(), Bins: dispBins, Signer: selectSigner(o.Apple),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile dispatcher: %w", err)
@@ -144,6 +275,27 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	res.Zips = zips
 
+	// 6b. Notarize darwin zips when --apple is set. Notarization submits the
+	//     zip to Apple for review; it does NOT alter zip bytes (bare-binary
+	//     zips aren't stapled — the ticket lives in Apple's online DB, checked
+	//     at gatekeeper-assess time). --dry-run skips the real submission
+	//     (logs intent) since dry-run artifacts are throwaway and notarizing
+	//     is a real, rate-limited Apple API call.
+	if n, do := notarizerFor(o.Apple); do {
+		for _, zp := range res.Zips {
+			if !strings.Contains(filepath.Base(zp), "-darwin-") {
+				continue
+			}
+			if o.DryRun {
+				fmt.Fprintf(os.Stderr, "dry-run: skipping notarize of %s\n", zp)
+				continue
+			}
+			if err := n.Notarize(ctx, zp); err != nil {
+				return nil, fmt.Errorf("notarize %s: %w", zp, err)
+			}
+		}
+	}
+
 	// 7. Checksum + sign the assembled zips. Per-target zip names are unique
 	//    (unlike the raw artifacts, where every target ships the same bin
 	//    basenames), so WriteSums's duplicate-basename guard never trips here.
@@ -153,7 +305,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	key := o.MinisignKey
 	if key == "" {
-		key = filepath.Join(o.RepoDir, "tools", "testkeys", "burrowee-release-test.key")
+		key = filepath.Join(o.RepoDir, "tools", "testkeys", "test.key")
 	}
 	if _, statErr := os.Stat(key); statErr == nil {
 		if err := minisign.Sign(ctx, sums, key); err != nil {

@@ -110,6 +110,21 @@ DRY_RUN=0
 BUMP_KIND="patch"
 APPLE_SIGN=""
 VULNCHECK=""
+DISTRIBUTE_ONLY=0
+DIST_COMP=""
+DIST_STAMP=""
+# --distribute-only <comp> <stamp> [--dry-run]: takes its component + stamp as
+# positional args right after the flag (not from the general WHAT/comp case
+# below), so it's consumed here before the normal arg loop runs.
+if [ "${1:-}" = "--distribute-only" ]; then
+    DISTRIBUTE_ONLY=1
+    shift
+    DIST_COMP="${1:-}"
+    DIST_STAMP="${2:-}"
+    [ -n "${DIST_COMP}" ] && [ -n "${DIST_STAMP}" ] \
+        || { echo "✗ usage: release.sh --distribute-only <cli|gateway|edge|agent> <stamp> [--dry-run]" >&2; exit 2; }
+    shift 2
+fi
 for arg in "$@"; do
     case "${arg}" in
         cli|gateway|edge|agent|relay|all) WHAT="${arg}" ;;
@@ -123,18 +138,26 @@ for arg in "$@"; do
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
-[ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public-release] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
+    [ -z "${WHAT}" ] || { echo "✗ --distribute-only takes <comp> <stamp> as its own args — drop the trailing '${WHAT}'" >&2; exit 2; }
+else
+    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public-release] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+fi
 
 # When neither signing nor the CVE gate was requested and we're interactive,
 # offer the public-release path (both). Non-TTY or no answer → dev/testing.
-PROMPT_ANS=""
-if [ -z "${APPLE_SIGN}" ] && [ -z "${VULNCHECK}" ] && [ -t 0 ]; then
-    printf 'Cut a PUBLIC release? — Developer-ID signing + CVE gate  [y/N] ' >&2
-    read -r PROMPT_ANS || PROMPT_ANS=""
+# --distribute-only never signs or CVE-gates (that already happened upstream in
+# `rkit build`), so it skips this prompt entirely.
+if [ "${DISTRIBUTE_ONLY}" != 1 ]; then
+    PROMPT_ANS=""
+    if [ -z "${APPLE_SIGN}" ] && [ -z "${VULNCHECK}" ] && [ -t 0 ]; then
+        printf 'Cut a PUBLIC release? — Developer-ID signing + CVE gate  [y/N] ' >&2
+        read -r PROMPT_ANS || PROMPT_ANS=""
+    fi
+    _mode="$(resolve_release_mode "${APPLE_SIGN}" "${VULNCHECK}" "${PROMPT_ANS}")"
+    APPLE_SIGN="${_mode%%|*}"; VULNCHECK="${_mode#*|}"
+    export APPLE_SIGN VULNCHECK
 fi
-_mode="$(resolve_release_mode "${APPLE_SIGN}" "${VULNCHECK}" "${PROMPT_ANS}")"
-APPLE_SIGN="${_mode%%|*}"; VULNCHECK="${_mode#*|}"
-export APPLE_SIGN VULNCHECK
 
 # ---- config / defaults ------------------------------------------------------
 RELEASE_HOST="${RELEASE_HOST:-nsm.renative.com}"
@@ -320,6 +343,202 @@ register_staged() {
     fi
     return 0
 }
+
+# ---- gh_release_publish: tag + GitHub Release for a staged component --------
+# gh_release_publish <comp> <stamp> <stage_dir>
+#
+# Shared by the full-cut path (do_release, below) and --distribute-only (one
+# publish implementation, DRY). Resolves the component source worktree itself
+# (src_for) for the change-summary git log, so both callers get identical
+# behavior regardless of which entry point invoked it.
+gh_release_publish() {
+    local comp="$1" stamp="$2" stage="$3"
+    local src; src="$(src_for "${comp}")"
+
+    command -v ghp >/dev/null 2>&1 || { echo "✗ required tool not found: ghp" >&2; exit 1; }
+    [ -x "${GHP}" ] || { echo "✗ ghp wrapper not found at ${GHP}" >&2; exit 1; }
+    "${GHP}" repo view "${RELEASE_REPO}" --json name >/dev/null 2>&1 \
+        || { echo "✗ ghp cannot access ${RELEASE_REPO} — check gh.account + auth" >&2; exit 1; }
+
+    # Change summary: component commits since the previous release's source sha.
+    # The stamp's trailing field IS the 8-char source sha, so the previous
+    # release's sha is the suffix of the highest existing <comp>/v… tag.
+    local prev_tag prev_sha changes
+    prev_tag="$(/usr/bin/git tag -l "${comp}/v*" --sort=version:refname | tail -n1)"
+    prev_sha="${prev_tag##*.}"
+    if [ -n "${prev_sha}" ] && git -C "${src}" cat-file -e "${prev_sha}^{commit}" 2>/dev/null; then
+        changes="$(git -C "${src}" log --oneline --no-merges "${prev_sha}..HEAD" 2>/dev/null)"
+        [ -n "${changes}" ] || changes="No code changes since ${prev_tag} (re-release)."
+    else
+        changes="Initial release."
+    fi
+
+    local tag="${comp}/${stamp}"
+    if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+        echo "✗ tag ${tag} already exists locally — reverting version" >&2; exit 1
+    fi
+    git tag -a "${tag}" -m "burrowee ${comp} ${stamp}"
+
+    local notes; notes="${stage}/release-notes.md"
+    cat > "${notes}" <<NOTES
+burrowee ${comp} ${stamp} — $(date -u +%Y-%m-%d)
+
+## Changes
+${changes}
+
+Install:
+  curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/${comp}/install.sh | sh
+
+Pin this version:
+  BURROWEE_$(printf '%s' "${comp}" | tr '[:lower:]' '[:upper:]')_VERSION=${tag} \\
+    curl -fsSL https://release.burrowee.com/${comp}/install.sh | sh
+
+Verify by hand:
+  minisign -Vm SHA256SUMS.txt -P "\$(cat burrowee-release.pub | tail -n1)"
+  shasum -a 256 -c SHA256SUMS.txt
+NOTES
+
+    ( cd "${stage}" && "${GHP}" -R "${RELEASE_REPO}" release create "${tag}" \
+        --title "${comp} ${stamp}" --notes-file "${notes}" \
+        burrowee-"${comp}"-*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig )
+}
+
+# ---- distribute_only: distribution-only mode over an already-staged dist/<stamp>/
+# (produced by `rkit build` — the produce half lives there now). Runs ONLY:
+# GitHub Release (gh_release_publish) -> gen-bootstraps.sh -> self-hosting
+# upload (scp install.sh/preflight.sh/pubkey/site/skills to the release host,
+# mirrored from do_release()) -> [RELEASED] marker commit -> register_staged
+# (console catalog, LAST — only after everything above is actually live) ->
+# GitHub retention report. No build, no sign, no notarize, no CVE gate, no
+# version bump — all of that already happened upstream.
+# relay is out of scope (private R2-only publish, no GitHub Release — see
+# do_release_relay).
+# On --dry-run: validates the staged dir + component, then STUBS every publish
+# action (prints "would: ..." lines) and returns — no register_staged call, no
+# ghp/git/gen-bootstraps/ssh/scp invocation, no writes of any kind.
+distribute_only() {
+    local comp="$1" stamp="$2"
+    case "${comp}" in
+        cli|gateway|edge|agent) ;;
+        relay) echo "✗ --distribute-only relay not supported — relay uses the private R2 flow (do_release_relay)" >&2; exit 1 ;;
+        *) echo "✗ unknown component: ${comp}" >&2; exit 1 ;;
+    esac
+
+    local stage="${REPO_ROOT}/dist/${stamp}"
+    [ -d "${stage}" ] || { echo "✗ staged dir missing: ${stage} (run rkit build first)" >&2; exit 1; }
+    for f in SHA256SUMS.txt SHA256SUMS.txt.minisig; do
+        [ -f "${stage}/${f}" ] || { echo "✗ missing ${f} in ${stage} (rkit build must produce it)" >&2; exit 1; }
+    done
+
+    local src semver
+    src="$(src_for "${comp}")"                    # reuse SRC_<comp> resolution
+    [ -d "${src}" ] || { echo "✗ ${comp} source worktree missing: ${src}" >&2; exit 1; }
+    semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+
+    if [ "${DRY_RUN}" = 1 ]; then
+        echo "→ would: gh release create ${comp}/${stamp} (GitHub Release, public) via ghp"
+        echo "→ would: gen-bootstraps.sh (regenerate ${comp}/install.sh + ${comp}/preflight.sh)"
+        echo "→ would: scp install.sh/preflight.sh/burrowee-release.pub/site/index.html/skills to ${RELEASE_HOST}:${STATIC_DIR}/${comp}/ (self-hosting upload)"
+        echo "→ would: marker commit [RELEASED: ${comp}] ${stamp}"
+        echo "→ would: register_staged ${comp} ${stamp} (console catalog)"
+        echo "→ would: GitHub release retention report (prune-releases.sh, dry-run)"
+        echo "✓ dry-run distribute-only: no real writes"
+        return 0
+    fi
+
+    # jq preflight: register_staged's json_escape shells out to `jq -Rs`; fail
+    # friendly here rather than mid-register_staged. Inlined (same check/message
+    # as the shared need() helper, not a call to it) — need() is defined further
+    # down the script, past this DISTRIBUTE_ONLY dispatch branch, which already
+    # returns (see the `if [ "${DISTRIBUTE_ONLY}" = 1 ]` block below) before
+    # execution ever reaches need()'s definition.
+    command -v jq >/dev/null 2>&1 || { echo "✗ required tool not found: jq" >&2; exit 1; }
+
+    [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
+    DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
+    if command -v shasum >/dev/null 2>&1; then SHA256="shasum -a 256"
+    elif command -v sha256sum >/dev/null 2>&1; then SHA256="sha256sum"
+    else echo "✗ neither shasum nor sha256sum found" >&2; exit 1; fi
+    build_register_helper
+
+    # (1) tag + GitHub Release.
+    gh_release_publish "${comp}" "${stamp}" "${stage}"
+
+    # (2) regenerate bootstraps + refresh edge skills + scp the static surface —
+    # mirrors do_release()'s self-hosting block verbatim so a distribute-only
+    # cut actually updates release.burrowee.com, not just the GitHub Release.
+    bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+    # Edge operator skills are OWNED by the edge repo; mirror them in from its
+    # worktree on every release so the served copy can never drift from source.
+    # (The cli + gateway skills are authored in THIS repo and are left untouched.)
+    # EXCEPTION — burrowee-edge-{setup,install} are AGENT-flow skills authored in
+    # THIS repo (commit 0aae670 folded the edge operator flow into the
+    # `burrowee-agent edge …` next-action loop the entry skill / llms.txt /
+    # burrowee.json route agents to). They intentionally supersede the edge repo's
+    # operator copies, so the mirror must NEVER overwrite them — doing so silently
+    # reverts the agent flow (as the 07-08 cut did in 1a6c716). Any OTHER
+    # burrowee-edge-* skill the edge repo owns is still mirrored here. Fail loudly
+    # if the edge source is gone — a stale snapshot must not ship silently.
+    [ -d "${EDGE_SKILLS_SRC}" ] \
+        || { echo "✗ edge skills source missing: ${EDGE_SKILLS_SRC} (set BURROWEE_SRC_EDGE)" >&2; exit 1; }
+    mkdir -p "${REPO_ROOT}/skills"
+    for d in "${EDGE_SKILLS_SRC}"/burrowee-edge-*; do
+        [ -d "${d}" ] || continue
+        case "$(basename "${d}")" in
+            burrowee-edge-setup|burrowee-edge-install)
+                echo "→ skip edge skill $(basename "${d}") — agent-flow copy owned by release repo (see 0aae670)" >&2
+                continue ;;
+        esac
+        mkdir -p "${REPO_ROOT}/skills/$(basename "${d}")"
+        cp "${d}/SKILL.md" "${REPO_ROOT}/skills/$(basename "${d}")/SKILL.md"
+        echo "→ synced edge skill $(basename "${d}") from ${EDGE_SKILLS_SRC}" >&2
+    done
+
+    # shellcheck disable=SC2029  # ${STATIC_DIR}/${comp} are local, controlled values — expanding client-side into the remote command is intended.
+    ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
+    scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
+    # preflight.sh is a sibling static file the installer fetches before the trust
+    # gate (sha256-pinned in install.sh). Ship it alongside install.sh.
+    if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/preflight.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/preflight.sh"
+    fi
+    if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
+        scp -q "${REPO_ROOT}/burrowee-release.pub" "${RELEASE_HOST}:${STATIC_DIR}/burrowee-release.pub"
+    fi
+    if [ -f "${REPO_ROOT}/site/index.html" ]; then
+        scp -q "${REPO_ROOT}/site/index.html" "${RELEASE_HOST}:${STATIC_DIR}/index.html"
+    fi
+    for d in "${REPO_ROOT}/skills"/*/; do
+        [ -d "${d}" ] || continue
+        [ -f "${d}SKILL.md" ] || continue
+        sk="$(basename "${d}")"
+        # shellcheck disable=SC2029  # ${STATIC_DIR}/skills/${sk} are local, controlled values — expanding client-side into the remote command is intended.
+        ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/skills/${sk}'"
+        scp -q "${d}SKILL.md" "${RELEASE_HOST}:${STATIC_DIR}/skills/${sk}/SKILL.md"
+    done
+
+    # (3) marker commit.
+    git add "versions/${comp}" "${comp}/install.sh" "${comp}/preflight.sh"
+    [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
+    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
+
+    # (4) register staged row in the console catalog — LAST, only after the
+    # GitHub Release + self-hosting upload + marker commit all succeeded, so
+    # the catalog never advertises artifacts that aren't actually live.
+    register_staged "${comp}" "${stamp}" "${semver}" "${stage}" "${src}" "${comp}/${stamp}"
+
+    echo
+    echo "→ GitHub release retention (dry-run — run prune-releases.sh --execute in the deploy phase to apply):"
+    COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
+
+    echo "✓ distributed ${comp}/${stamp}"
+    echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${comp}/${stamp}"
+}
+
+if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
+    distribute_only "${DIST_COMP}" "${DIST_STAMP}"
+    exit 0
+fi
 
 # ---- pre-flight -------------------------------------------------------------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "✗ required tool not found: $1" >&2; exit 1; }; }
@@ -785,47 +1004,8 @@ do_release() {
     fi
 
     # (6) tag + GitHub Release.
-    # Change summary: component commits since the previous release's source sha.
-    # The stamp's trailing field IS the 8-char source sha, so the previous
-    # release's sha is the suffix of the highest existing <comp>/v… tag.
-    local prev_tag prev_sha changes
-    prev_tag="$(/usr/bin/git tag -l "${comp}/v*" --sort=version:refname | tail -n1)"
-    prev_sha="${prev_tag##*.}"
-    if [ -n "${prev_sha}" ] && git -C "${src}" cat-file -e "${prev_sha}^{commit}" 2>/dev/null; then
-        changes="$(git -C "${src}" log --oneline --no-merges "${prev_sha}..HEAD" 2>/dev/null)"
-        [ -n "${changes}" ] || changes="No code changes since ${prev_tag} (re-release)."
-    else
-        changes="Initial release."
-    fi
-
     local tag="${comp}/${stamp}"
-    if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
-        echo "✗ tag ${tag} already exists locally — reverting version" >&2; exit 1
-    fi
-    git tag -a "${tag}" -m "burrowee ${comp} ${stamp}"
-
-    local notes; notes="${stage}/release-notes.md"
-    cat > "${notes}" <<NOTES
-burrowee ${comp} ${stamp} — $(date -u +%Y-%m-%d)
-
-## Changes
-${changes}
-
-Install:
-  curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/${comp}/install.sh | sh
-
-Pin this version:
-  BURROWEE_$(printf '%s' "${comp}" | tr '[:lower:]' '[:upper:]')_VERSION=${tag} \\
-    curl -fsSL https://release.burrowee.com/${comp}/install.sh | sh
-
-Verify by hand:
-  minisign -Vm SHA256SUMS.txt -P "\$(cat burrowee-release.pub | tail -n1)"
-  shasum -a 256 -c SHA256SUMS.txt
-NOTES
-
-    ( cd "${stage}" && "${GHP}" -R "${RELEASE_REPO}" release create "${tag}" \
-        --title "${comp} ${stamp}" --notes-file "${notes}" \
-        burrowee-"${comp}"-*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig )
+    gh_release_publish "${comp}" "${stamp}" "${stage}"
 
     # Past the tag/release — clear the version-revert trap.
     trap shred_key ERR

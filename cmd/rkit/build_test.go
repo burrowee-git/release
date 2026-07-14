@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/burrowee-git/release-kit/sign"
 	"github.com/burrowee-git/release/internal/relconfig"
 )
 
@@ -158,6 +159,136 @@ func TestOrchestrateSkipGateBypassesCVEGate(t *testing.T) {
 		DispatcherDir: repo, MinisignKey: key, SkipGate: true,
 	}); err != nil {
 		t.Fatalf("gate SKIPPED: orchestrate should bypass the gate and succeed, got %v", err)
+	}
+}
+
+func TestBuildWritesToDistStamp(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	// build with default gate SKIPPED for the fixture host (go1.26.0): pass --no-vulncheck.
+	err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		NoVulncheck: true, SignKey: testMinisignKey(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// artifacts land under repo/dist/<stamp>/, NOT an arbitrary --out.
+	stamp := mustStamp(t, repo, "cli")
+	if _, err := os.Stat(filepath.Join(repo, "dist", stamp, "burrowee-cli-linux-amd64.zip")); err != nil {
+		t.Errorf("missing zip under dist/<stamp>: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "dist", stamp, "SHA256SUMS.txt")); err != nil {
+		t.Errorf("missing SHA256SUMS: %v", err)
+	}
+}
+
+// TestBuildRunFailsFastOnMissingSignKeyFile proves a real cut (DryRun:false)
+// with a --sign-key path that doesn't exist on disk fails IMMEDIATELY, before
+// any build work runs — never silently skipping the sign step and reporting
+// success. Pre-fix, buildRun only checked SignKey=="" and let a bad path
+// reach orchestrate's `os.Stat(key)==nil` guard around minisign.Sign, which
+// just skips signing and returns nil: this test is RED against that code and
+// GREEN once buildRun stats the key file up front.
+func TestBuildRunFailsFastOnMissingSignKeyFile(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	stamp := mustStamp(t, repo, "cli")
+
+	err := buildRun(buildOpts{
+		Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		DryRun: false, SignKey: "/nonexistent/path/key.key", NoVulncheck: true,
+	})
+	if err == nil {
+		t.Fatal("expected error for missing --sign-key file, got nil")
+	}
+	if !strings.Contains(err.Error(), "sign-key") || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("error = %q, want it to mention sign-key and no such file", err.Error())
+	}
+	// Fail-fast means no build work happened: no dist/<stamp> zips.
+	if _, statErr := os.Stat(filepath.Join(repo, "dist", stamp)); !os.IsNotExist(statErr) {
+		t.Fatalf("dist/%s should not exist (fail-fast before build), stat err = %v", stamp, statErr)
+	}
+}
+
+// TestBuildRunBumpDryRunReverts exercises the bump+revert path end-to-end: a
+// --bump-patch --dry-run build must run the revert (registered before the
+// bump block, per the FIX 1 reorder) and leave versions/<comp> exactly as it
+// was committed, with no staged or worktree diff left behind.
+func TestBuildRunBumpDryRunReverts(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo) // versions/cli = "0.1.0\n", committed
+	if err := buildRun(buildOpts{
+		Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		Bump: "patch", DryRun: true, NoVulncheck: true, SignKey: testMinisignKey(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(repo, "versions", "cli"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "0.1.0\n" {
+		t.Fatalf("versions/cli = %q, want unchanged %q (revert did not fire)", got, "0.1.0\n")
+	}
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain", "versions/cli").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("git status --porcelain versions/cli = %q, want clean", out)
+	}
+}
+
+func TestBuildGateOnByDefaultCanBeSkipped(t *testing.T) {
+	// With NoVulncheck=false and no govulncheck resolvable, the gate must RUN
+	// (and here fail) — proving default-on. Then NoVulncheck=true bypasses.
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	t.Setenv("GOPATH", t.TempDir()) // make govulncheck unresolvable → gate errors
+	if err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		NoVulncheck: false, SignKey: testMinisignKey(t)}); err == nil {
+		t.Fatal("expected default-on gate to run and fail")
+	}
+	if err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		NoVulncheck: true, SignKey: testMinisignKey(t)}); err != nil {
+		t.Fatalf("--no-vulncheck should bypass: %v", err)
+	}
+}
+
+// mustStamp computes the expected dist/<stamp> directory name the same way
+// buildRun/orchestrate do, so tests can assert on artifact paths without
+// duplicating the stamp scheme.
+func mustStamp(t *testing.T, repo, comp string) string {
+	t.Helper()
+	stamp, err := relconfig.Stamp(context.Background(), filepath.Join(repo, "versions", comp), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stamp
+}
+
+func TestBuildAppleSelectsDevIDSignerAndNotarizes(t *testing.T) {
+	// Unit-level: assert selectSigner(apple=true) returns AppleSigner{ToolPath:"modernech-sign"}
+	// and notarizerFor(apple=true) returns Notarizer{ToolPath:"modernech-sign"};
+	// apple=false returns AdHocSigner and a nil/skip notarizer.
+	s := selectSigner(true)
+	if _, ok := s.(sign.AppleSigner); !ok {
+		t.Fatalf("apple signer type = %T", s)
+	}
+	if got := s.(sign.AppleSigner).ToolPath; got != "modernech-sign" {
+		t.Fatalf("toolpath %q", got)
+	}
+	if selectSigner(false) == nil {
+		t.Fatal("adhoc signer nil")
+	}
+	if _, ok := selectSigner(false).(sign.AdHocSigner); !ok {
+		t.Fatal("non-apple must be adhoc")
+	}
+	n, do := notarizerFor(true)
+	if !do || n.ToolPath != "modernech-sign" {
+		t.Fatalf("notarizer %+v do=%v", n, do)
+	}
+	if _, do2 := notarizerFor(false); do2 {
+		t.Fatal("non-apple must not notarize")
 	}
 }
 

@@ -3,7 +3,7 @@ module github.com/burrowee-git/release
 go 1.25.0
 
 require (
-	github.com/burrowee-git/release-kit v0.1.0
+	github.com/burrowee-git/release-kit v0.1.1
 	modernc.org/sqlite v1.52.0
 )
 
