@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -41,19 +42,103 @@ type Result struct {
 	Sums, Minisig string
 }
 
+// buildOpts configures `rkit build` — the real release-cut entry point:
+// output lands at <RepoDir>/dist/<stamp>/ (never an arbitrary --out), an
+// optional version bump shells the proven tools/version.sh with a
+// revert-on-failure/dry-run trap, and the CVE gate runs by DEFAULT (the
+// opposite of harness's SkipGate, which exists only for release.sh parity).
+type buildOpts struct {
+	Component, RepoDir, SrcDir, DispatcherDir, SignKey string
+	Apple, DryRun, NoVulncheck                         bool
+	// Bump is "", "patch", "minor", or "major" — the tools/version.sh
+	// --bump-<kind> action to run before stamping. Empty means no bump.
+	Bump string
+}
+
 func runBuild(args []string) error {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
-	var o Options
-	fs.StringVar(&o.Component, "component", "", "cli|gateway|edge|agent|relay|burrowee")
-	fs.StringVar(&o.OutDir, "out", "", "scratch output dir")
+	var o buildOpts
+	fs.StringVar(&o.Component, "component", "", "cli|gateway|edge|agent")
 	fs.StringVar(&o.RepoDir, "repo", ".", "release repo worktree")
 	fs.StringVar(&o.DispatcherDir, "dispatcher", "", "dispatcher source worktree (defaults to repo)")
-	fs.StringVar(&o.MinisignKey, "key", "", "minisign secret key (defaults to TEST key)")
+	fs.StringVar(&o.SignKey, "sign-key", "", "minisign secret key (required for a real cut; --dry-run defaults to the TEST key)")
+	fs.BoolVar(&o.Apple, "apple", false, "notarize macOS binaries")
+	fs.BoolVar(&o.DryRun, "dry-run", false, "build without bumping the version or requiring a real sign key")
+	fs.BoolVar(&o.NoVulncheck, "no-vulncheck", false, "skip the CVE gate (default: the gate runs)")
+	bumpPatch := fs.Bool("bump-patch", false, "bump the component's patch version before building")
+	bumpMinor := fs.Bool("bump-minor", false, "bump the component's minor version before building (prompts unless BURROWEE_RELEASE_YES=1)")
+	bumpMajor := fs.Bool("bump-major", false, "bump the component's major version before building (prompts unless BURROWEE_RELEASE_YES=1)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	// defaults resolved in orchestrate(): console keys from config/console-pub.hex, key from tools/testkeys.
-	_, err := orchestrate(context.Background(), o)
+	switch {
+	case *bumpPatch:
+		o.Bump = "patch"
+	case *bumpMinor:
+		o.Bump = "minor"
+	case *bumpMajor:
+		o.Bump = "major"
+	}
+	return buildRun(o)
+}
+
+// buildRun is the testable seam behind runBuild. It resolves dirs, optionally
+// bumps the component's version (registering a revert that fires on error or
+// --dry-run), runs the CVE gate unless NoVulncheck, then reuses orchestrate to
+// build+assemble+checksum+sign into <RepoDir>/dist/<stamp>/.
+func buildRun(o buildOpts) (err error) {
+	if o.DispatcherDir == "" {
+		o.DispatcherDir = o.RepoDir
+	}
+	if o.SrcDir == "" {
+		o.SrcDir = o.RepoDir
+	}
+
+	if !o.DryRun && o.Bump != "" {
+		cmd := exec.Command("bash", filepath.Join(o.RepoDir, "tools", "version.sh"), o.Component, "--bump-"+o.Bump)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("version bump: %w", err)
+		}
+	}
+	// Revert the version bump if the build fails, or unconditionally on
+	// --dry-run — a dry run must never leave a bumped versions/<comp> behind.
+	defer func() {
+		if err != nil || o.DryRun {
+			exec.Command("git", "-C", o.RepoDir, "restore", "--staged", "--worktree", "versions/"+o.Component).Run()
+		}
+	}()
+
+	ctx := context.Background()
+	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir)
+	if err != nil {
+		return err
+	}
+	distDir := filepath.Join(o.RepoDir, "dist", stamp)
+
+	// CVE gate — ON BY DEFAULT for a real build (unlike harness, which
+	// SkipGates for release.sh --dry-run parity). --no-vulncheck bypasses it.
+	if !o.NoVulncheck {
+		if err = vulncheck.Gate(ctx, []vulncheck.Module{{Name: o.Component, Dir: o.SrcDir}},
+			vulncheck.GateOpts{ReportDir: filepath.Join(distDir, "vulncheck")}); err != nil {
+			return fmt.Errorf("cve gate: %w", err)
+		}
+	}
+
+	key := o.SignKey
+	if key == "" {
+		if !o.DryRun {
+			return fmt.Errorf("--sign-key is required for a real build (only --dry-run defaults to the test key)")
+		}
+		key = filepath.Join(o.RepoDir, "tools", "testkeys", "test.key")
+	}
+
+	_, err = orchestrate(ctx, Options{
+		Component: o.Component, OutDir: filepath.Join(o.RepoDir, "dist"),
+		RepoDir: o.RepoDir, SrcDir: o.SrcDir, DispatcherDir: o.DispatcherDir,
+		MinisignKey: key,
+		SkipGate:    true, // the gate above already ran (or was explicitly bypassed)
+	})
 	return err
 }
 

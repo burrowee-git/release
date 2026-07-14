@@ -161,6 +161,53 @@ func TestOrchestrateSkipGateBypassesCVEGate(t *testing.T) {
 	}
 }
 
+func TestBuildWritesToDistStamp(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	// build with default gate SKIPPED for the fixture host (go1.26.0): pass --no-vulncheck.
+	err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		NoVulncheck: true, SignKey: testMinisignKey(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// artifacts land under repo/dist/<stamp>/, NOT an arbitrary --out.
+	stamp := mustStamp(t, repo, "cli")
+	if _, err := os.Stat(filepath.Join(repo, "dist", stamp, "burrowee-cli-linux-amd64.zip")); err != nil {
+		t.Errorf("missing zip under dist/<stamp>: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "dist", stamp, "SHA256SUMS.txt")); err != nil {
+		t.Errorf("missing SHA256SUMS: %v", err)
+	}
+}
+
+func TestBuildGateOnByDefaultCanBeSkipped(t *testing.T) {
+	// With NoVulncheck=false and no govulncheck resolvable, the gate must RUN
+	// (and here fail) — proving default-on. Then NoVulncheck=true bypasses.
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	t.Setenv("GOPATH", t.TempDir()) // make govulncheck unresolvable → gate errors
+	if err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		NoVulncheck: false, SignKey: testMinisignKey(t)}); err == nil {
+		t.Fatal("expected default-on gate to run and fail")
+	}
+	if err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		NoVulncheck: true, SignKey: testMinisignKey(t)}); err != nil {
+		t.Fatalf("--no-vulncheck should bypass: %v", err)
+	}
+}
+
+// mustStamp computes the expected dist/<stamp> directory name the same way
+// buildRun/orchestrate do, so tests can assert on artifact paths without
+// duplicating the stamp scheme.
+func mustStamp(t *testing.T, repo, comp string) string {
+	t.Helper()
+	stamp, err := relconfig.Stamp(context.Background(), filepath.Join(repo, "versions", comp), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stamp
+}
+
 func TestOrchestrateRejectsPlaceholderConsolePubHex(t *testing.T) {
 	placeholder := strings.Repeat("0", 64)
 
