@@ -180,6 +180,35 @@ func TestBuildWritesToDistStamp(t *testing.T) {
 	}
 }
 
+// TestBuildRunBumpDryRunReverts exercises the bump+revert path end-to-end: a
+// --bump-patch --dry-run build must run the revert (registered before the
+// bump block, per the FIX 1 reorder) and leave versions/<comp> exactly as it
+// was committed, with no staged or worktree diff left behind.
+func TestBuildRunBumpDryRunReverts(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo) // versions/cli = "0.1.0\n", committed
+	if err := buildRun(buildOpts{
+		Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		Bump: "patch", DryRun: true, NoVulncheck: true, SignKey: testMinisignKey(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(repo, "versions", "cli"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "0.1.0\n" {
+		t.Fatalf("versions/cli = %q, want unchanged %q (revert did not fire)", got, "0.1.0\n")
+	}
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain", "versions/cli").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("git status --porcelain versions/cli = %q, want clean", out)
+	}
+}
+
 func TestBuildGateOnByDefaultCanBeSkipped(t *testing.T) {
 	// With NoVulncheck=false and no govulncheck resolvable, the gate must RUN
 	// (and here fail) — proving default-on. Then NoVulncheck=true bypasses.

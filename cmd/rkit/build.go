@@ -71,6 +71,9 @@ func runBuild(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if (*bumpPatch && *bumpMinor) || (*bumpPatch && *bumpMajor) || (*bumpMinor && *bumpMajor) {
+		return fmt.Errorf("only one of --bump-patch|--bump-minor|--bump-major may be set")
+	}
 	switch {
 	case *bumpPatch:
 		o.Bump = "patch"
@@ -94,6 +97,23 @@ func buildRun(o buildOpts) (err error) {
 		o.SrcDir = o.RepoDir
 	}
 
+	// Fail fast: a real cut requires a real sign key. Check this before the
+	// bump + CVE gate so a doomed real cut doesn't waste either of them.
+	// --dry-run defaults to the TEST key further down, where it's used.
+	if !o.DryRun && o.SignKey == "" {
+		return fmt.Errorf("--sign-key is required for a real build (only --dry-run defaults to the test key)")
+	}
+
+	// Revert the version bump if the build fails, or unconditionally on
+	// --dry-run — a dry run must never leave a bumped versions/<comp> behind.
+	// Registered BEFORE the bump step below so it also covers the bump
+	// step's own failure (version.sh writes the file then `git add` fails).
+	defer func() {
+		if err != nil || o.DryRun {
+			exec.Command("git", "-C", o.RepoDir, "restore", "--staged", "--worktree", "versions/"+o.Component).Run()
+		}
+	}()
+
 	if !o.DryRun && o.Bump != "" {
 		cmd := exec.Command("bash", filepath.Join(o.RepoDir, "tools", "version.sh"), o.Component, "--bump-"+o.Bump)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -101,13 +121,6 @@ func buildRun(o buildOpts) (err error) {
 			return fmt.Errorf("version bump: %w", err)
 		}
 	}
-	// Revert the version bump if the build fails, or unconditionally on
-	// --dry-run — a dry run must never leave a bumped versions/<comp> behind.
-	defer func() {
-		if err != nil || o.DryRun {
-			exec.Command("git", "-C", o.RepoDir, "restore", "--staged", "--worktree", "versions/"+o.Component).Run()
-		}
-	}()
 
 	ctx := context.Background()
 	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir)
@@ -127,9 +140,7 @@ func buildRun(o buildOpts) (err error) {
 
 	key := o.SignKey
 	if key == "" {
-		if !o.DryRun {
-			return fmt.Errorf("--sign-key is required for a real build (only --dry-run defaults to the test key)")
-		}
+		// Reached only when o.DryRun (the real-cut case already returned above).
 		key = filepath.Join(o.RepoDir, "tools", "testkeys", "test.key")
 	}
 
