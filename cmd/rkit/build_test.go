@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/burrowee-git/release-kit/sign"
 	"github.com/burrowee-git/release/internal/relconfig"
 )
 
@@ -235,6 +236,32 @@ func mustStamp(t *testing.T, repo, comp string) string {
 		t.Fatal(err)
 	}
 	return stamp
+}
+
+func TestBuildAppleSelectsDevIDSignerAndNotarizes(t *testing.T) {
+	// Unit-level: assert selectSigner(apple=true) returns AppleSigner{ToolPath:"modernech-sign"}
+	// and notarizerFor(apple=true) returns Notarizer{ToolPath:"modernech-sign"};
+	// apple=false returns AdHocSigner and a nil/skip notarizer.
+	s := selectSigner(true)
+	if _, ok := s.(sign.AppleSigner); !ok {
+		t.Fatalf("apple signer type = %T", s)
+	}
+	if got := s.(sign.AppleSigner).ToolPath; got != "modernech-sign" {
+		t.Fatalf("toolpath %q", got)
+	}
+	if selectSigner(false) == nil {
+		t.Fatal("adhoc signer nil")
+	}
+	if _, ok := selectSigner(false).(sign.AdHocSigner); !ok {
+		t.Fatal("non-apple must be adhoc")
+	}
+	n, do := notarizerFor(true)
+	if !do || n.ToolPath != "modernech-sign" {
+		t.Fatalf("notarizer %+v do=%v", n, do)
+	}
+	if _, do2 := notarizerFor(false); do2 {
+		t.Fatal("non-apple must not notarize")
+	}
 }
 
 func TestOrchestrateRejectsPlaceholderConsolePubHex(t *testing.T) {

@@ -34,6 +34,14 @@ type Options struct {
 	// separately (Task 3 fixture) and stays mandatory for real cuts — the zero
 	// value (false) keeps `run` fail-closed.
 	SkipGate bool
+	// Apple selects the Developer-ID signer (selectSigner) for build.Compile and
+	// gates darwin zips through Notarizer.Notarize after assembly. Zero value
+	// (false) keeps the existing ad-hoc, non-notarized behavior.
+	Apple bool
+	// DryRun, when Apple is set, skips the real notarize submission (logs intent
+	// instead) — a dry run's artifacts are throwaway and notarization is a real
+	// Apple API call.
+	DryRun bool
 }
 
 type Result struct {
@@ -149,8 +157,30 @@ func buildRun(o buildOpts) (err error) {
 		RepoDir: o.RepoDir, SrcDir: o.SrcDir, DispatcherDir: o.DispatcherDir,
 		MinisignKey: key,
 		SkipGate:    true, // the gate above already ran (or was explicitly bypassed)
+		Apple:       o.Apple, DryRun: o.DryRun,
 	})
 	return err
+}
+
+// selectSigner picks build.Compile's Signer: a real Developer-ID signature via
+// the product's modernech-sign helper when --apple is set, otherwise the
+// existing ad-hoc codesign (macOS needs any signature to run, unsigned or
+// ad-hoc, on non-apple/non-darwin cuts).
+func selectSigner(apple bool) sign.Signer {
+	if apple {
+		return sign.AppleSigner{ToolPath: "modernech-sign"}
+	}
+	return sign.AdHocSigner{}
+}
+
+// notarizerFor returns the Notarizer to submit darwin zips to Apple when
+// --apple is set, and whether notarization should run at all. Non-apple cuts
+// never notarize.
+func notarizerFor(apple bool) (sign.Notarizer, bool) {
+	if apple {
+		return sign.Notarizer{ToolPath: "modernech-sign"}, true
+	}
+	return sign.Notarizer{}, false
 }
 
 func orchestrate(ctx context.Context, o Options) (*Result, error) {
@@ -185,7 +215,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	arts, err := build.Compile(ctx, build.Spec{
 		SrcDir: o.SrcDir, OutDir: filepath.Join(o.OutDir, stamp),
-		Targets: relconfig.Targets(), Bins: bins, Signer: sign.AdHocSigner{},
+		Targets: relconfig.Targets(), Bins: bins, Signer: selectSigner(o.Apple),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile %s: %w", o.Component, err)
@@ -205,7 +235,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	dispArts, err := build.Compile(ctx, build.Spec{
 		SrcDir: o.DispatcherDir, OutDir: filepath.Join(o.OutDir, ".dispatcher", dispStamp),
-		Targets: relconfig.Targets(), Bins: dispBins, Signer: sign.AdHocSigner{},
+		Targets: relconfig.Targets(), Bins: dispBins, Signer: selectSigner(o.Apple),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile dispatcher: %w", err)
@@ -239,6 +269,27 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 		return nil, fmt.Errorf("assemble: %w", err)
 	}
 	res.Zips = zips
+
+	// 6b. Notarize darwin zips when --apple is set. Notarization submits the
+	//     zip to Apple for review; it does NOT alter zip bytes (bare-binary
+	//     zips aren't stapled — the ticket lives in Apple's online DB, checked
+	//     at gatekeeper-assess time). --dry-run skips the real submission
+	//     (logs intent) since dry-run artifacts are throwaway and notarizing
+	//     is a real, rate-limited Apple API call.
+	if n, do := notarizerFor(o.Apple); do {
+		for _, zp := range res.Zips {
+			if !strings.Contains(filepath.Base(zp), "-darwin-") {
+				continue
+			}
+			if o.DryRun {
+				fmt.Fprintf(os.Stderr, "dry-run: skipping notarize of %s\n", zp)
+				continue
+			}
+			if err := n.Notarize(ctx, zp); err != nil {
+				return nil, fmt.Errorf("notarize %s: %w", zp, err)
+			}
+		}
+	}
 
 	// 7. Checksum + sign the assembled zips. Per-target zip names are unique
 	//    (unlike the raw artifacts, where every target ships the same bin
