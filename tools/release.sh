@@ -416,11 +416,101 @@ NOTES
 # On --dry-run: validates the staged dir + component, then STUBS every publish
 # action (prints "would: ..." lines) and returns — no register_staged call, no
 # ghp/git/gen-bootstraps/ssh/scp invocation, no writes of any kind.
+#
+# relay is handled by distribute_relay() below: a PRIVATE R2-only publish (no
+# GitHub Release, no self-hosting scp), reusing do_release_relay's R2 steps over
+# rkit's already-built dist/<stamp>/ artifacts.
+
+# ---- distribute_relay: private R2 distribution over rkit's staged artifacts ---
+# rkit build --component relay produces dist/<stamp>/burrowee-relay-<os>-<arch>.zip
+# (+ SHA256SUMS/minisig over THOSE names). The R2 flow serves stable
+# latest.<os>-<arch>.zip filenames the installer hard-codes, so re-stage the zips
+# under those names and re-sign SHA256SUMS over the renamed set (identical bytes,
+# different filenames), then publish to R2. No GitHub Release, no scp.
+# On --dry-run: re-stage + re-sign with the TEST key and print the would-upload
+# R2 keys — no publish-relay, no register, no commit.
+distribute_relay() {
+    local stamp="$1" comp=relay
+    local stage="${REPO_ROOT}/dist/${stamp}"
+    [ -d "${stage}" ] || { echo "✗ staged dir missing: ${stage} (run rkit build --component relay first)" >&2; exit 1; }
+    local src semver
+    src="$(src_for "${comp}")"
+    [ -d "${src}" ] || { echo "✗ relay source worktree missing: ${src}" >&2; exit 1; }
+    semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+
+    if command -v shasum >/dev/null 2>&1; then SHA256="shasum -a 256"
+    elif command -v sha256sum >/dev/null 2>&1; then SHA256="sha256sum"
+    else echo "✗ neither shasum nor sha256sum found" >&2; exit 1; fi
+
+    # (1) re-stage rkit's burrowee-relay-<os>-<arch>.zip under latest.* names.
+    local latest_stage="${stage}/.latest"
+    rm -rf "${latest_stage}"; mkdir -p "${latest_stage}"
+    local pair os arch z
+    for pair in "${TARGETS[@]}"; do
+        read -r os arch <<<"${pair}"
+        z="${stage}/burrowee-${comp}-${os}-${arch}.zip"
+        [ -f "${z}" ] || { echo "✗ missing ${z} (run rkit build --component relay first)" >&2; exit 1; }
+        cp "${z}" "${latest_stage}/latest.${os}-${arch}.zip"
+    done
+    # shellcheck disable=SC2086
+    ( cd "${latest_stage}" && ${SHA256} latest.*.zip | sort > SHA256SUMS.txt )
+
+    # (2) resolve the signing key (inline — resolve_sign_key is defined past the
+    # DISTRIBUTE_ONLY dispatch) and re-sign SHA256SUMS over the latest.* names.
+    local sign_key shred_file=""
+    if [ -n "${SIGN_KEY:-}" ]; then
+        sign_key="${SIGN_KEY}"
+        [ -f "${sign_key}" ] || { echo "✗ SIGN_KEY not found: ${sign_key}" >&2; exit 1; }
+    elif [ "${DRY_RUN}" = 1 ]; then
+        sign_key="${REPO_ROOT}/tools/testkeys/test.key"
+        [ -f "${sign_key}" ] || { echo "✗ TEST key missing: ${sign_key}" >&2; exit 1; }
+    else
+        [ -f "${AGE_IDENTITY}" ] || { echo "✗ age identity not found: ${AGE_IDENTITY}" >&2; exit 1; }
+        [ -f "${AGE_KEY_AGE}" ] || { echo "✗ release.dp signing key not found: ${AGE_KEY_AGE}" >&2; exit 1; }
+        shred_file="$(mktemp "${TMPDIR:-/tmp}/burrowee-relay-key.XXXXXX")"
+        chmod 600 "${shred_file}"
+        age -d -i "${AGE_IDENTITY}" -o "${shred_file}" "${AGE_KEY_AGE}" \
+            || { echo "✗ failed to decrypt ${AGE_KEY_AGE}" >&2; exit 1; }
+        sign_key="${shred_file}"
+    fi
+    ( cd "${latest_stage}" && minisign -S -s "${sign_key}" -m SHA256SUMS.txt \
+        -t "burrowee relay ${stamp}" >/dev/null )
+    [ -n "${shred_file}" ] && rm -f "${shred_file}"
+
+    echo "Relay latest.* set + SHA256SUMS.txt + .minisig staged under ${latest_stage}:"
+    # shellcheck disable=SC2012
+    ( cd "${latest_stage}" && ls -1 latest.*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
+
+    if [ "${DRY_RUN}" = 1 ]; then
+        echo "→ would: publish-relay to R2 under relay/${stamp}/"
+        for pair in "${TARGETS[@]}"; do read -r os arch <<<"${pair}"; echo "    relay/${stamp}/latest.${os}-${arch}.zip"; done
+        echo "    relay/${stamp}/SHA256SUMS.txt"
+        echo "    relay/${stamp}/SHA256SUMS.txt.minisig"
+        echo "→ would: marker commit [RELEASED: relay] ${stamp} (private)"
+        echo "→ would: register_staged relay ${stamp} (console catalog, R2 keys)"
+        echo "✓ dry-run distribute-only relay: no real writes (R2/git)"
+        return 0
+    fi
+
+    command -v jq >/dev/null 2>&1 || { echo "✗ required tool not found: jq" >&2; exit 1; }
+    build_register_helper
+    # (3) upload latest.* + SHA256SUMS + minisig to R2 under relay/<stamp>/.
+    "${REGISTER_BIN}" publish-relay --stamp "${stamp}" --from-dir "${latest_stage}"
+    echo "→ relay R2 retention (report only — run prune --comp relay --execute to apply):"
+    "${REGISTER_BIN}" prune --comp relay || true
+    # (4) marker commit (private — no gh release / no git tag).
+    git add "versions/${comp}"
+    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+    # (5) console catalog row (LAST) — relay uses R2 keys, not GitHub URLs.
+    register_staged "${comp}" "${stamp}" "${semver}" "${latest_stage}" "${src}"
+    echo "✓ distributed relay ${stamp} (private, R2 relay/${stamp}/)"
+}
+
 distribute_only() {
     local comp="$1" stamp="$2"
     case "${comp}" in
         cli|gateway|edge|agent) ;;
-        relay) echo "✗ --distribute-only relay not supported — relay uses the private R2 flow (do_release_relay)" >&2; exit 1 ;;
+        relay) distribute_relay "${stamp}"; return $? ;;   # private R2 flow (no GitHub Release)
         *) echo "✗ unknown component: ${comp}" >&2; exit 1 ;;
     esac
 
