@@ -9,9 +9,9 @@ Four components are published here:
 
 | Component | Binaries | What it is |
 |---|---|---|
-| `cli` | `burrowee`, `burrowee-cli` | client CLI — connect, ssh, pair, relays |
-| `gateway` | `burrowee`, `burrowee-gateway`, `burrowee-register` | gateway daemon + registration tool |
-| `edge` | `burrowee`, `burrowee-edge` | self-hosted relay |
+| `cli` | `burrowee`, `burrowee-cli`, `burrowee-cli-updater` | client CLI — connect, ssh, pair, relays |
+| `gateway` | `burrowee`, `burrowee-gateway`, `burrowee-gateway-cli`, `burrowee-gateway-console`, `burrowee-register`, `burrowee-gateway-updater` | gateway daemon + registration tool |
+| `edge` | `burrowee`, `burrowee-edge`, `burrowee-edge-cli`, `burrowee-edge-updater` | self-hosted relay |
 | `agent` | `burrowee`, `burrowee-agent` | AI-agent identity client — key-signed control-plane access |
 
 ## Install
@@ -80,9 +80,11 @@ Windows is not supported.
 Skill packages for fresh-context agents are mirrored under
 `https://release.burrowee.com/skills/`:
 
+- `burrowee` (entry point)
 - `burrowee-cli-install` / `burrowee-cli-setup`
 - `burrowee-gateway-install` / `burrowee-gateway-setup`
 - `burrowee-edge-install` / `burrowee-edge-setup`
+- `burrowee-account`, `burrowee-connect`, `burrowee-domains`, `burrowee-remote-access`, `burrowee-sessions`
 
 ## How this repo is built
 
