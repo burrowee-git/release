@@ -36,6 +36,15 @@ cli/ gateway/ edge/ agent/      per-component outer bootstrap (install.sh, gener
 relay/install.sh                relay's (gated, non-public) install path
 config/console-pub.hex          console signing pubkey baked into edge builds
 site/index.html                 release.burrowee.com landing page
+skills/<name>/SKILL.md          12 self-contained AI-agent skills (burrowee,
+                                 burrowee-account, burrowee-cli-install,
+                                 burrowee-cli-setup, burrowee-connect,
+                                 burrowee-domains, burrowee-edge-install,
+                                 burrowee-edge-setup, burrowee-gateway-install,
+                                 burrowee-gateway-setup, burrowee-remote-access,
+                                 burrowee-sessions) — each served at
+                                 release.burrowee.com/skills/<name>/SKILL.md and
+                                 linked from the ai repo's skill index
 versions/                       per-component SemVer source of truth
 tools/                          build/version/bootstrap-generation scripts + the
                                  operator-run release.sh orchestrator (see Scope above)
