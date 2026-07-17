@@ -348,3 +348,46 @@ func TestUpdateRollsBackOnFailure(t *testing.T) {
 		t.Fatalf("BURROWEE_CHANGED line printed on failure: %q", line)
 	}
 }
+
+// TestUpdateUnitWriteFailurePrintsSudoAdvisory verifies that when the system
+// unit content changed but the privileged write fails (no usable sudo), update
+// mode prints the needs-sudo advisory instead of a false "service unit:"
+// success line, and the binary swap itself still succeeds.
+func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	stageDir := stageBundle(t, staged)
+
+	// No unit file exists in the sandboxed unit dir, so render_units must take
+	// the privileged write path — and this sudo always fails.
+	failing := "#!/bin/sh\necho \"sudo $*\" >> \"$STUB_LOG\"\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(stub, "sudo"), []byte(failing), 0o755); err != nil {
+		t.Fatalf("write failing sudo: %v", err)
+	}
+
+	out := runUpdate(t, stageDir, home, stub, []string{"BURROWEE_UPDATE=1"})
+
+	if !strings.Contains(out, "service units not refreshed (needs sudo)") {
+		t.Errorf("needs-sudo advisory not printed; output:\n%s", out)
+	}
+
+	unitPath := filepath.Join(launchdDir(home), "com.burrowee.gateway.plist")
+	if runtime.GOOS != "darwin" {
+		unitPath = filepath.Join(systemdDir(home), "burrowee-gateway.service")
+	}
+	if strings.Contains(out, "service unit: "+unitPath) {
+		t.Errorf("false unit success line printed despite failed write; output:\n%s", out)
+	}
+	if _, err := os.Stat(unitPath); err == nil {
+		t.Errorf("unit file written despite failing sudo")
+	}
+
+	if got := readInstalled(t, binDir, "burrowee-gateway"); got != "gw-v2-content" {
+		t.Errorf("binary swap should still succeed: got %q", got)
+	}
+}

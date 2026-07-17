@@ -133,8 +133,8 @@ place_unit() {
         echo "service unit: $2 (unchanged)"
         return 0
     fi
-    [ -d "$(dirname "$2")" ] || run_root mkdir -p "$(dirname "$2")"
-    run_root /usr/bin/install -m 0644 "$1" "$2"
+    [ -d "$(dirname "$2")" ] || run_root mkdir -p "$(dirname "$2")" || { rm -f "$1"; return 1; }
+    run_root /usr/bin/install -m 0644 "$1" "$2" || { rm -f "$1"; return 1; }
     rm -f "$1"
     echo "service unit: $2"
 }
