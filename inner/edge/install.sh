@@ -211,6 +211,10 @@ if is_root; then
         # HOME=$ROOT_HOME (/var/root) so the daemon's os.UserHomeDir() resolves
         # $ROOT_HOME/.burrowee/edge — launchd daemons get no HOME by default
         # (mirrors the systemd unit's Environment=HOME=/root).
+        # KeepAlive.PathState (matching core/setup's system units, which land on
+        # the SAME paths): the update-restart rung SIGTERMs the running daemon
+        # and relies on the supervisor respawning it after a CLEAN exit —
+        # SuccessfulExit=false would leave a cleanly-exited daemon down.
         cat > "$LAUNCHD_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -218,8 +222,8 @@ if is_root; then
   <key>Label</key><string>$LAUNCHD_LABEL</string>
   <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>2</integer>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge</key><true/></dict></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>$ROOT_HOME</string></dict>
 </dict></plist>
 EOF
@@ -236,8 +240,8 @@ EOF
   <key>Label</key><string>$LAUNCHD_UPDATER_LABEL</string>
   <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge-updater</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>2</integer>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge-updater</key><true/></dict></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>$ROOT_HOME</string></dict>
 </dict></plist>
 EOF
@@ -268,6 +272,10 @@ EOF
         # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
         # HOME=/root so the daemon's os.UserHomeDir() resolves /root/.burrowee/edge
         # (a root system service has no HOME otherwise).
+        # Restart=always (matching core/setup's system units, which land on the
+        # SAME paths): the update-restart rung SIGTERMs the running daemon and
+        # relies on systemd respawning it after a CLEAN exit — on-failure would
+        # leave a cleanly-exited daemon down.
         mkdir -p "$(dirname "$SYSTEMD_UNIT")"
         cat > "$SYSTEMD_UNIT" <<EOF
 [Unit]
@@ -279,7 +287,7 @@ Wants=network-online.target
 Type=simple
 Environment=HOME=/root
 ExecStart=$SYS_BIN_DIR/burrowee-edge run
-Restart=on-failure
+Restart=always
 RestartSec=2
 TimeoutStopSec=30
 
@@ -303,7 +311,7 @@ Wants=network-online.target
 Type=simple
 Environment=HOME=/root
 ExecStart=$SYS_BIN_DIR/burrowee-edge-updater run
-Restart=on-failure
+Restart=always
 RestartSec=2
 TimeoutStopSec=30
 

@@ -161,6 +161,18 @@ func TestEdgeRootInstallWritesUpdaterUnit(t *testing.T) {
 		"WantedBy=multi-user.target",
 	)
 
+	// Restart policy invariant (both units): the update-restart rung SIGTERMs
+	// the daemon and relies on systemd respawning it after a CLEAN exit —
+	// Restart=on-failure would leave a cleanly-exited daemon down.
+	for name, unit := range map[string]string{"serve": readFile(t, servePath), "updater": updater} {
+		if !strings.Contains(unit, "Restart=always\nRestartSec=2\n") {
+			t.Errorf("%s unit must carry Restart=always + RestartSec=2; got:\n%s", name, unit)
+		}
+		if strings.Contains(unit, "Restart=on-failure") {
+			t.Errorf("%s unit still carries Restart=on-failure:\n%s", name, unit)
+		}
+	}
+
 	// DISABLED: the install never enables/starts the updater unit (owner opt-in).
 	log := readFile(t, filepath.Join(home, "stub-calls.log"))
 	if strings.Contains(log, "enable --now burrowee-edge-updater") ||
@@ -248,22 +260,35 @@ func TestEdgeRootInstallDarwin(t *testing.T) {
 	}
 
 	// Serve plist: rendered with HOME pinned to root's home (mirrors the
-	// systemd unit's Environment=HOME=/root).
+	// systemd unit's Environment=HOME=/root). KeepAlive.PathState on the unit's
+	// binary + ThrottleInterval 10 (matching core/setup's system units): the
+	// update-restart rung SIGTERMs the daemon and relies on launchd respawning
+	// it after a CLEAN exit — SuccessfulExit=false would leave it down.
 	servePlist := filepath.Join(launchdDir, "com.burrowee.edge.plist")
 	serve := readFile(t, servePlist)
 	assertContains(t, serve,
 		"<key>Label</key><string>com.burrowee.edge</string>",
 		"<string>"+sysBinDir+"/burrowee-edge</string>",
 		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>"+rootHome+"</string></dict>",
+		"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+sysBinDir+"/burrowee-edge</key><true/></dict></dict>",
+		"<key>ThrottleInterval</key><integer>10</integer>",
 	)
 
-	// Updater plist: rendered (parity with the disabled systemd updater unit)…
+	// Updater plist: rendered (parity with the disabled systemd updater unit),
+	// with the same respawn-after-clean-exit policy keyed on ITS binary…
 	updater := readFile(t, filepath.Join(launchdDir, "com.burrowee.edge.updater.plist"))
 	assertContains(t, updater,
 		"<key>Label</key><string>com.burrowee.edge.updater</string>",
 		"<string>"+sysBinDir+"/burrowee-edge-updater</string>",
 		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>"+rootHome+"</string></dict>",
+		"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+sysBinDir+"/burrowee-edge-updater</key><true/></dict></dict>",
+		"<key>ThrottleInterval</key><integer>10</integer>",
 	)
+	for name, plist := range map[string]string{"serve": serve, "updater": updater} {
+		if strings.Contains(plist, "SuccessfulExit") {
+			t.Errorf("%s plist still carries KeepAlive.SuccessfulExit:\n%s", name, plist)
+		}
+	}
 
 	// …but never bootstrapped/started (owner opt-in); the SERVE daemon is. The
 	// installer may READ the updater's load state (`launchctl print`) to decide
