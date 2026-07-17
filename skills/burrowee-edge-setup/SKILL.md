@@ -69,10 +69,12 @@ Expect these decisions (gated one at a time):
 
 - `hostname_base` — the public hostname base this edge serves on (e.g. `edge-home`).
   Pass `--decision hostname_base=edge-home`.
-- `service_mode` — `managed` (a launchd/systemd unit that survives reboot, the
-  recommended choice for an always-on VPS) or `foreground` (recommended for
-  first-run / debugging — the bootstrap enrolls but installs no service). Default
-  `managed`. Pass `--decision service_mode=managed`.
+- `service_mode` — `managed` (a SYSTEM-level launchd/systemd unit —
+  /Library/LaunchDaemons on macOS, /etc/systemd/system on Linux — that survives
+  reboot AND SSH logout with no `loginctl enable-linger` needed; writing it
+  prompts for sudo. The recommended choice for an always-on VPS) or `foreground`
+  (recommended for first-run / debugging — the bootstrap enrolls but installs no
+  service). Default `managed`. Pass `--decision service_mode=managed`.
 
 Optional decisions the verb honors if supplied (no prompt is emitted for them):
 `lan_mode=true` (LAN-only relay — never dials the cloud carrier), `region=<id>`,

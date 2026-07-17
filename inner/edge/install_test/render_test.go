@@ -249,18 +249,18 @@ func TestEdgeRootInstallDarwin(t *testing.T) {
 
 	// Serve plist: rendered with HOME pinned to root's home (mirrors the
 	// systemd unit's Environment=HOME=/root).
-	servePlist := filepath.Join(launchdDir, "org.burrowee.edge.plist")
+	servePlist := filepath.Join(launchdDir, "com.burrowee.edge.plist")
 	serve := readFile(t, servePlist)
 	assertContains(t, serve,
-		"<key>Label</key><string>org.burrowee.edge</string>",
+		"<key>Label</key><string>com.burrowee.edge</string>",
 		"<string>"+sysBinDir+"/burrowee-edge</string>",
 		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>"+rootHome+"</string></dict>",
 	)
 
 	// Updater plist: rendered (parity with the disabled systemd updater unit)…
-	updater := readFile(t, filepath.Join(launchdDir, "org.burrowee.edge.updater.plist"))
+	updater := readFile(t, filepath.Join(launchdDir, "com.burrowee.edge.updater.plist"))
 	assertContains(t, updater,
-		"<key>Label</key><string>org.burrowee.edge.updater</string>",
+		"<key>Label</key><string>com.burrowee.edge.updater</string>",
 		"<string>"+sysBinDir+"/burrowee-edge-updater</string>",
 		"<key>EnvironmentVariables</key><dict><key>HOME</key><string>"+rootHome+"</string></dict>",
 	)
@@ -274,9 +274,9 @@ func TestEdgeRootInstallDarwin(t *testing.T) {
 		t.Errorf("serve LaunchDaemon was not bootstrapped; launchctl log:\n%s", log)
 	}
 	for _, forbidden := range []string{
-		"bootstrap system " + filepath.Join(launchdDir, "org.burrowee.edge.updater.plist"),
-		"enable system/org.burrowee.edge.updater",
-		"kickstart -k system/org.burrowee.edge.updater",
+		"bootstrap system " + filepath.Join(launchdDir, "com.burrowee.edge.updater.plist"),
+		"enable system/com.burrowee.edge.updater",
+		"kickstart -k system/com.burrowee.edge.updater",
 	} {
 		if strings.Contains(log, forbidden) {
 			t.Errorf("updater LaunchDaemon must be left NOT bootstrapped; found %q in launchctl log:\n%s", forbidden, log)
@@ -387,7 +387,7 @@ func TestEdgeRootInstallDarwinRestartsOptedInUpdater(t *testing.T) {
 	}
 
 	log := readFile(t, filepath.Join(home, "stub-calls.log"))
-	if !strings.Contains(log, "kickstart -k system/org.burrowee.edge.updater") {
+	if !strings.Contains(log, "kickstart -k system/com.burrowee.edge.updater") {
 		t.Errorf("opted-in updater LaunchDaemon must be kickstarted on reinstall; launchctl log:\n%s", log)
 	}
 }

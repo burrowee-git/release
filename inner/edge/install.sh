@@ -35,10 +35,23 @@ SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
 SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge-updater.service"
 LAUNCHD_PLIST_DIR="${LAUNCHD_PLIST_DIR:-/Library/LaunchDaemons}"
-LAUNCHD_PLIST="$LAUNCHD_PLIST_DIR/org.burrowee.edge.plist"
-LAUNCHD_LABEL="org.burrowee.edge"
-LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/org.burrowee.edge.updater.plist"
-LAUNCHD_UPDATER_LABEL="org.burrowee.edge.updater"
+LAUNCHD_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.edge.plist"
+LAUNCHD_LABEL="com.burrowee.edge"
+LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.edge.updater.plist"
+LAUNCHD_UPDATER_LABEL="com.burrowee.edge.updater"
+# Legacy pre-rename system labels/plists earlier installers wrote — migrated
+# away on install, removed on uninstall.
+LEGACY_LAUNCHD_LABEL="org.burrowee.edge"
+LEGACY_LAUNCHD_UPDATER_LABEL="org.burrowee.edge.updater"
+
+# remove_legacy_launchd_units — boot out + delete the org.burrowee.* system
+# LaunchDaemons a pre-rename root install wrote. Best-effort; root-only caller.
+remove_legacy_launchd_units() {
+    launchctl bootout "system/$LEGACY_LAUNCHD_LABEL" 2>/dev/null || true
+    launchctl bootout "system/$LEGACY_LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+    rm -f "$LAUNCHD_PLIST_DIR/$LEGACY_LAUNCHD_LABEL.plist" \
+          "$LAUNCHD_PLIST_DIR/$LEGACY_LAUNCHD_UPDATER_LABEL.plist"
+}
 
 is_root() { [ "$(id -u)" = 0 ]; }
 
@@ -113,6 +126,7 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
             launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
             launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
             rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
+            remove_legacy_launchd_units
         else
             systemctl disable --now burrowee-edge 2>/dev/null || true
             systemctl disable --now burrowee-edge-updater 2>/dev/null || true
@@ -229,6 +243,10 @@ EOF
 EOF
         chmod 0644 "$LAUNCHD_UPDATER_PLIST"
         echo "wrote LaunchDaemon → $LAUNCHD_UPDATER_PLIST (not bootstrapped — enable with: launchctl bootstrap system $LAUNCHD_UPDATER_PLIST)"
+
+        # Migrate away the pre-rename org.burrowee.* units before loading the
+        # com.burrowee.* ones — two labels must never run the same daemon.
+        remove_legacy_launchd_units
 
         launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
         launchctl bootstrap system "$LAUNCHD_PLIST"
