@@ -9,102 +9,240 @@
 # units without touching binaries or running bootstrap. Set BURROWEE_UPDATE=1
 # to run update mode: per-binary sha256 change detection, transactional swap,
 # and a final BURROWEE_CHANGED=<names> line.
+#
+# Service model: binaries and config stay per-user, but the service units are
+# always SYSTEM-level, running as the installing user, so the gateway starts at
+# boot without a GUI login: /Library/LaunchDaemons on macOS, /etc/systemd/system
+# on Linux. System steps run via sudo (prompting on the controlling tty; with
+# no tty and no cached credentials the unit step aborts with guidance). The
+# system slot is single: replacing a unit installed by a DIFFERENT user needs
+# consent — a /dev/tty prompt, or BURROWEE_FORCE_SERVICE_OVERRIDE=1 when
+# non-interactive. Same-user reinstalls replace silently.
 set -eu
 
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
+SERVICE_USER="$(id -un)"
+SERVICE_GROUP="$(id -gn)"
+# System unit locations. The BURROWEE_*_DIR overrides are test seams for the
+# sandboxed installer harness — never set them in production.
+LAUNCHD_DIR="${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}"
+SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 
 # ---------------------------------------------------------------------------
-# render_units — write both service unit FILES for the host init system.
-# Does NOT start, stop, or reload any live services. Call load_units after
-# render_units when a live reload is desired (fresh install / --force).
+# has_tty — whether a controlling terminal is available for prompts (stdin is
+# usually the curl pipe, so probe /dev/tty as well).
+# ---------------------------------------------------------------------------
+has_tty() {
+    [ -t 0 ] && return 0
+    ( exec </dev/tty ) 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# run_root — run a system-mutation command as root: directly when already
+# root, via sudo (which prompts on the controlling tty) when interactive, via
+# `sudo -n` otherwise. Returns non-zero with guidance when root cannot be
+# obtained; under `set -e` that aborts unless the caller opts out with `|| …`.
+# ---------------------------------------------------------------------------
+run_root() {
+    if [ "$(id -u)" = 0 ]; then "$@"; return; fi
+    if has_tty; then sudo "$@"; return; fi
+    if sudo -n "$@" 2>/dev/null; then return 0; fi
+    echo "error: 'sudo $*' failed — no tty for a password prompt and no cached sudo credentials." >&2
+    echo "hint: re-run from an interactive terminal, or pre-authorize with 'sudo -v', then retry ('burrowee gateway service install')." >&2
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Single system slot: unit ownership + cross-user override consent.
+# ---------------------------------------------------------------------------
+core_unit_path() {
+    case "$(uname -s)" in
+    Darwin) echo "$LAUNCHD_DIR/com.burrowee.gateway.plist" ;;
+    *)      echo "$SYSTEMD_DIR/burrowee-gateway.service" ;;
+    esac
+}
+
+# unit_owner <file> — the run-as user recorded in an existing unit file
+# (plist UserName / systemd User=). Empty when absent or unowned. Mirrors the
+# Go side's UnitOwner so both unit-writers agree on slot ownership.
+unit_owner() {
+    [ -f "$1" ] || { echo ""; return 0; }
+    case "$1" in
+    *.plist) sed -n 's|.*<key>UserName</key><string>\([^<]*\)</string>.*|\1|p' "$1" | head -n 1 ;;
+    *)       sed -n 's|^User=\(.*\)$|\1|p' "$1" | head -n 1 ;;
+    esac
+}
+
+# check_service_override — when the existing system unit belongs to a
+# DIFFERENT user, require consent before replacing it: the force env, or a
+# /dev/tty prompt defaulting to abort. Non-interactive without the env aborts.
+check_service_override() {
+    _owner="$(unit_owner "$(core_unit_path)")"
+    if [ -z "$_owner" ] || [ "$_owner" = "$SERVICE_USER" ]; then return 0; fi
+    if [ -n "${BURROWEE_FORCE_SERVICE_OVERRIDE:-}" ]; then
+        echo "overriding gateway service previously installed for user '$_owner' (BURROWEE_FORCE_SERVICE_OVERRIDE)"
+        return 0
+    fi
+    if has_tty; then
+        printf "gateway service is currently installed for user '%s'. Override it for '%s'? [y/N] " "$_owner" "$SERVICE_USER" >/dev/tty
+        _answer=''
+        IFS= read -r _answer </dev/tty || _answer=''
+        case "$_answer" in
+        y|Y|yes|YES) return 0 ;;
+        esac
+    fi
+    echo "error: the gateway system service belongs to user '$_owner' — aborting." >&2
+    echo "hint: re-run with BURROWEE_FORCE_SERVICE_OVERRIDE=1 (or 'burrowee gateway service install --force-service-override') to take it over." >&2
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# remove_legacy_user_units — tear down the per-user units this installer wrote
+# before the system-level model (launchd gui agents / systemd --user).
+# Migration is best-effort: every step tolerates "was never installed".
+# ---------------------------------------------------------------------------
+remove_legacy_user_units() {
+    case "$(uname -s)" in
+    Darwin)
+        for _label in com.burrowee.gateway com.burrowee.gateway.updater org.burrowee.gateway; do
+            launchctl bootout "gui/$(id -u)/$_label" 2>/dev/null || true
+            rm -f "$HOME/Library/LaunchAgents/$_label.plist"
+        done
+        ;;
+    Linux)
+        systemctl --user disable --now burrowee-gateway.service 2>/dev/null || true
+        systemctl --user disable --now burrowee-gateway-updater.service 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/burrowee-gateway.service" \
+              "$HOME/.config/systemd/user/burrowee-gateway-updater.service"
+        systemctl --user daemon-reload 2>/dev/null || true
+        ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# place_unit <rendered-temp-file> <dst> — install a rendered unit at its
+# system path as root, only when content differs (a no-op refresh never needs
+# sudo). Must stay content-identical with the Go side's unit writers.
+# ---------------------------------------------------------------------------
+place_unit() {
+    if [ -f "$2" ] && cmp -s "$1" "$2"; then
+        rm -f "$1"
+        echo "service unit: $2 (unchanged)"
+        return 0
+    fi
+    [ -d "$(dirname "$2")" ] || run_root mkdir -p "$(dirname "$2")"
+    run_root /usr/bin/install -m 0644 "$1" "$2"
+    rm -f "$1"
+    echo "service unit: $2"
+}
+
+# ---------------------------------------------------------------------------
+# render_units — write both SYSTEM service unit FILES for the host init
+# system (as root, via place_unit). Does NOT start, stop, or reload any live
+# services. Call load_units after render_units when a live reload is desired
+# (fresh install / units-only).
 # ---------------------------------------------------------------------------
 render_units() {
     case "$(uname -s)" in
     Darwin)
-        _la_dir="$HOME/Library/LaunchAgents"
-        _log_dir="$GW_HOME/logs"
-        mkdir -p "$_la_dir" "$_log_dir"
+        mkdir -p "$GW_HOME/logs"
 
-        # Migrate pre-rename installs: bootout the stale org.burrowee.gateway agent.
-        launchctl bootout "gui/$(id -u)/org.burrowee.gateway" 2>/dev/null || true
-        rm -f "$HOME/Library/LaunchAgents/org.burrowee.gateway.plist"
-
-        # Core unit.
-        _core_plist="$_la_dir/com.burrowee.gateway.plist"
-        cat > "$_core_plist" <<EOF
+        # Core unit. KeepAlive.PathState restarts the daemon after ANY exit
+        # while the binary exists (a graceful SIGTERM exit is the
+        # update-restart mechanism) and waits quietly when the volume holding
+        # the binary is not mounted yet. WorkingDirectory=/tmp keeps launchd
+        # out of possibly TCC-protected paths.
+        _tmp_unit="$(mktemp)"
+        cat > "$_tmp_unit" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway</string>
   <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway</string><string>--no-open</string></array>
+  <key>UserName</key><string>$SERVICE_USER</string>
+  <key>GroupName</key><string>$SERVICE_GROUP</string>
+  <key>InitGroups</key><true/>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>$HOME</string><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$BIN_DIR/burrowee-gateway</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>$GW_HOME/logs/gateway.log</string>
   <key>StandardErrorPath</key><string>$GW_HOME/logs/gateway.err.log</string>
 </dict></plist>
 EOF
-        echo "service unit: $_core_plist"
+        place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
 
         # Updater unit.
-        _upd_plist="$_la_dir/com.burrowee.gateway.updater.plist"
-        cat > "$_upd_plist" <<EOF
+        _tmp_unit="$(mktemp)"
+        cat > "$_tmp_unit" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway.updater</string>
   <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway-updater</string><string>run</string></array>
+  <key>UserName</key><string>$SERVICE_USER</string>
+  <key>GroupName</key><string>$SERVICE_GROUP</string>
+  <key>InitGroups</key><true/>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>$HOME</string><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$BIN_DIR/burrowee-gateway-updater</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>$GW_HOME/logs/updater.log</string>
   <key>StandardErrorPath</key><string>$GW_HOME/logs/updater.err.log</string>
 </dict></plist>
 EOF
-        echo "service unit: $_upd_plist"
+        place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist"
         ;;
 
     Linux)
-        _sd_dir="$HOME/.config/systemd/user"
-        mkdir -p "$_sd_dir" "$GW_HOME/logs"
+        mkdir -p "$GW_HOME/logs"
 
-        # Core unit.
-        _core_svc="$_sd_dir/burrowee-gateway.service"
-        cat > "$_core_svc" <<EOF
+        # Core unit. Restart=always (not on-failure): a graceful SIGTERM exit
+        # must still restart — that is the update-restart mechanism.
+        _tmp_unit="$(mktemp)"
+        cat > "$_tmp_unit" <<EOF
 [Unit]
 Description=burrowee-gateway
 After=network-online.target
 
 [Service]
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+Environment=HOME=$HOME
 ExecStart=$BIN_DIR/burrowee-gateway --no-open
-Restart=on-failure
+Restart=always
 RestartSec=2
 TimeoutStopSec=330
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
-        echo "service unit: $_core_svc"
+        place_unit "$_tmp_unit" "$SYSTEMD_DIR/burrowee-gateway.service"
 
         # Updater unit.
-        _upd_svc="$_sd_dir/burrowee-gateway-updater.service"
-        cat > "$_upd_svc" <<EOF
+        _tmp_unit="$(mktemp)"
+        cat > "$_tmp_unit" <<EOF
 [Unit]
-Description=burrowee-gateway updater
+Description=burrowee-gateway-updater
 After=network-online.target
 
 [Service]
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+Environment=HOME=$HOME
 ExecStart=$BIN_DIR/burrowee-gateway-updater run
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
-        echo "service unit: $_upd_svc"
+        place_unit "$_tmp_unit" "$SYSTEMD_DIR/burrowee-gateway-updater.service"
         ;;
 
     *)
@@ -114,23 +252,26 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# load_units — (re)load the rendered service units. Separated from render_units
-# so update mode can refresh the unit FILES without restarting services (the
-# updater restarts the kernel out-of-band; restarting the updater here would
-# bootout the very process running this script — see the design doc).
+# load_units — (re)load the rendered SYSTEM service units (root). Separated
+# from render_units so update mode can refresh the unit FILES without
+# restarting services (the updater restarts the kernel out-of-band; restarting
+# the updater here would bootout the very process running this script — see
+# the design doc). All steps are best-effort so a supervisor-less host (e.g. a
+# container) still completes the install; the unit files on disk are the
+# durable outcome.
 # ---------------------------------------------------------------------------
 load_units() {
     case "$(uname -s)" in
     Darwin)
-        launchctl bootout   "gui/$(id -u)/com.burrowee.gateway"          2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.burrowee.gateway.plist"         2>/dev/null || true
-        launchctl bootout   "gui/$(id -u)/com.burrowee.gateway.updater"  2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+        run_root launchctl bootout   "system/com.burrowee.gateway"          2>/dev/null || true
+        run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
+        run_root launchctl bootout   "system/com.burrowee.gateway.updater"  2>/dev/null || true
+        run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
         ;;
     Linux)
-        systemctl --user daemon-reload 2>/dev/null || true
-        systemctl --user enable --now burrowee-gateway.service         2>/dev/null || true
-        systemctl --user enable --now burrowee-gateway-updater.service 2>/dev/null || true
+        run_root systemctl daemon-reload 2>/dev/null || true
+        run_root systemctl enable --now burrowee-gateway.service         2>/dev/null || true
+        run_root systemctl enable --now burrowee-gateway-updater.service 2>/dev/null || true
         # A reinstall over an already-running (possibly stale) updater must advance
         # it to the freshly-installed binary — `enable --now` no-ops a running unit,
         # so restart it explicitly. Otherwise the stale updater keeps running old
@@ -138,7 +279,7 @@ load_units() {
         # updater's own push path — BURROWEE_UPDATE renders units without loading
         # them — so this can never self-kill. The Darwin branch above already
         # advances the updater via its bootout+bootstrap.)
-        systemctl --user restart burrowee-gateway-updater.service 2>/dev/null || true
+        run_root systemctl restart burrowee-gateway-updater.service 2>/dev/null || true
         ;;
     esac
 }
@@ -157,6 +298,8 @@ sha256_of() {
 # ---------------------------------------------------------------------------
 
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
+    check_service_override
+    remove_legacy_user_units
     render_units
     load_units
     exit 0
@@ -241,9 +384,17 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         printf '%s\n' "$_install_version" > "$GW_HOME/.installed-version"
     fi
 
-    # Render unit files only — do NOT load them (the updater restarts the kernel
-    # out-of-band; loading here would bootout the very process running this script).
-    render_units
+    # Refresh the system unit FILES only — never load/restart them here (the
+    # updater restarts the kernel out-of-band; loading would bootout the very
+    # process running this script), never touch another user's slot, and never
+    # fail the binary swap for lack of sudo: a unit refresh can always happen
+    # later via 'burrowee gateway service install'.
+    _slot_owner="$(unit_owner "$(core_unit_path)")"
+    if [ -z "$_slot_owner" ] || [ "$_slot_owner" = "$SERVICE_USER" ]; then
+        render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
+    else
+        echo "note: gateway system service belongs to user '$_slot_owner' — units not refreshed" >&2
+    fi
     mkdir -p "$GW_HOME"
     cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
 
@@ -256,21 +407,32 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     for b in $BINS; do rm -f "$BIN_DIR/$b"; done
     echo "removed from $BIN_DIR: $BINS"
 
-    # Remove service units.
+    # Remove the system service units (root) plus any legacy per-user units.
+    # All best-effort: a missing unit or unavailable sudo must not stop uninstall.
     case "$(uname -s)" in
     Darwin)
-        launchctl bootout "gui/$(id -u)/com.burrowee.gateway" 2>/dev/null || true
-        launchctl bootout "gui/$(id -u)/com.burrowee.gateway.updater" 2>/dev/null || true
-        rm -f "$HOME/Library/LaunchAgents/com.burrowee.gateway.plist"
-        rm -f "$HOME/Library/LaunchAgents/com.burrowee.gateway.updater.plist"
+        for _label in com.burrowee.gateway com.burrowee.gateway.updater; do
+            if [ -f "$LAUNCHD_DIR/$_label.plist" ]; then
+                run_root launchctl bootout "system/$_label" 2>/dev/null || true
+                run_root rm -f "$LAUNCHD_DIR/$_label.plist" || true
+            fi
+        done
         ;;
     Linux)
-        systemctl --user disable --now burrowee-gateway.service 2>/dev/null || true
-        systemctl --user disable --now burrowee-gateway-updater.service 2>/dev/null || true
-        rm -f "$HOME/.config/systemd/user/burrowee-gateway.service"
-        rm -f "$HOME/.config/systemd/user/burrowee-gateway-updater.service"
+        _removed=""
+        for _unit in burrowee-gateway.service burrowee-gateway-updater.service; do
+            if [ -f "$SYSTEMD_DIR/$_unit" ]; then
+                run_root systemctl disable --now "$_unit" 2>/dev/null || true
+                run_root rm -f "$SYSTEMD_DIR/$_unit" || true
+                _removed=1
+            fi
+        done
+        if [ -n "$_removed" ]; then
+            run_root systemctl daemon-reload 2>/dev/null || true
+        fi
         ;;
     esac
+    remove_legacy_user_units
 
     exit 0
 fi
@@ -300,7 +462,10 @@ esac
 mkdir -p "$GW_HOME"
 cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
 
-# Write and load both service units.
+# Write and load both SYSTEM service units (single-slot consent first, then
+# migrate any legacy per-user units out of the way).
+check_service_override
+remove_legacy_user_units
 render_units
 load_units
 

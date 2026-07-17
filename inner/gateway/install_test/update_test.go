@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -77,20 +78,10 @@ func lastLineWithPrefix(output, prefix string) string {
 // fails the test on non-zero exit.
 func runUpdate(t *testing.T, stageDir, home, stubDir string, env []string, scriptArgs ...string) string {
 	t.Helper()
-	script := installShPath(t)
-	logFile := filepath.Join(home, "stub-calls.log")
-	baseEnv := []string{
-		"HOME=" + home,
-		"PREFIX=" + home + "/.local",
-		"PATH=" + stubDir + ":/usr/bin:/bin",
-		"STUB_LOG=" + logFile,
-	}
-	baseEnv = append(baseEnv, env...)
-
-	args := append([]string{script}, scriptArgs...)
+	args := append([]string{installShPath(t)}, scriptArgs...)
 	cmd := exec.Command("sh", args...)
 	cmd.Dir = stageDir
-	cmd.Env = baseEnv
+	cmd.Env = installShEnv(home, stubDir, env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("install.sh output:\n%s", out)
@@ -103,20 +94,10 @@ func runUpdate(t *testing.T, stageDir, home, stubDir string, env []string, scrip
 // Returns combined output without failing the test.
 func runUpdateExpectFail(t *testing.T, stageDir, home, stubDir string, env []string, scriptArgs ...string) string {
 	t.Helper()
-	script := installShPath(t)
-	logFile := filepath.Join(home, "stub-calls.log")
-	baseEnv := []string{
-		"HOME=" + home,
-		"PREFIX=" + home + "/.local",
-		"PATH=" + stubDir + ":/usr/bin:/bin",
-		"STUB_LOG=" + logFile,
-	}
-	baseEnv = append(baseEnv, env...)
-
-	args := append([]string{script}, scriptArgs...)
+	args := append([]string{installShPath(t)}, scriptArgs...)
 	cmd := exec.Command("sh", args...)
 	cmd.Dir = stageDir
-	cmd.Env = baseEnv
+	cmd.Env = installShEnv(home, stubDir, env...)
 	out, _ := cmd.CombinedOutput()
 	return string(out)
 }
@@ -259,20 +240,23 @@ func TestUpdateModeExcludesUpdaterBinary(t *testing.T) {
 	}
 }
 
-// TestUpdateModeDoesNotRestartServices verifies that update mode renders unit
-// files but issues no launchctl bootout/bootstrap (the updater restarts the
-// kernel out-of-band; restarting it here would bootout the running process).
+// TestUpdateModeDoesNotRestartServices verifies that update mode refreshes
+// unit FILES but issues no launchctl/systemctl service operations at all —
+// no bootout/bootstrap/enable/restart, and no legacy-unit migration (the
+// updater restarts the kernel out-of-band; a reload here would bootout the
+// running process).
 func TestUpdateModeDoesNotRestartServices(t *testing.T) {
 	home := t.TempDir()
 
-	// Create a stub dir with a recording launchctl (and a pass-through systemctl).
+	// Create a stub dir with a recording launchctl, a recording systemctl,
+	// and the pass-through sudo the system unit writes go through.
 	stubDir := t.TempDir()
 	writeLaunchctlStub(t, stubDir)
-	// Also stub systemctl so the script doesn't fail on Linux.
-	sysctl := "#!/bin/sh\nexit 0\n"
+	sysctl := "#!/bin/sh\nprintf '%s\\n' \"systemctl $*\" >> \"" + filepath.Join(stubDir, "launchctl.calls") + "\"\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(stubDir, "systemctl"), []byte(sysctl), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeSudoStub(t, stubDir)
 
 	binDir := home + "/.local/bin"
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
@@ -288,23 +272,21 @@ func TestUpdateModeDoesNotRestartServices(t *testing.T) {
 
 	calls, _ := os.ReadFile(filepath.Join(stubDir, "launchctl.calls"))
 	callsStr := string(calls)
-	// The live labels (com.burrowee.gateway and com.burrowee.gateway.updater) must
-	// not be booted out or bootstrapped in update mode. The legacy org.burrowee.gateway
-	// bootout inside render_units is allowed (dead label, migration-only).
-	for _, verb := range []string{
-		"bootout gui/",
-		"bootstrap gui/",
-	} {
-		// Allow only the dead-label migration call; reject any live-label call.
+	for _, verb := range []string{"bootout", "bootstrap", "enable", "restart", "disable"} {
 		for _, line := range strings.Split(strings.TrimRight(callsStr, "\n"), "\n") {
-			if !strings.Contains(line, verb) {
-				continue
+			if strings.Contains(line, verb) {
+				t.Fatalf("update mode must not touch live services; got call: %q\nall calls:\n%s", line, callsStr)
 			}
-			if strings.Contains(line, "org.burrowee.gateway") {
-				continue // legacy migration — allowed
-			}
-			t.Fatalf("update mode must not reload live services; got call: %q\nall calls:\n%s", line, callsStr)
 		}
+	}
+
+	// The unit FILES must still have been refreshed.
+	unitPath := filepath.Join(launchdDir(home), "com.burrowee.gateway.plist")
+	if runtime.GOOS != "darwin" {
+		unitPath = filepath.Join(systemdDir(home), "burrowee-gateway.service")
+	}
+	if _, err := os.Stat(unitPath); err != nil {
+		t.Errorf("update mode did not render the system unit file: %v", err)
 	}
 }
 
