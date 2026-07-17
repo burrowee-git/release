@@ -35,10 +35,23 @@ SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
 SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge-updater.service"
 LAUNCHD_PLIST_DIR="${LAUNCHD_PLIST_DIR:-/Library/LaunchDaemons}"
-LAUNCHD_PLIST="$LAUNCHD_PLIST_DIR/org.burrowee.edge.plist"
-LAUNCHD_LABEL="org.burrowee.edge"
-LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/org.burrowee.edge.updater.plist"
-LAUNCHD_UPDATER_LABEL="org.burrowee.edge.updater"
+LAUNCHD_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.edge.plist"
+LAUNCHD_LABEL="com.burrowee.edge"
+LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.edge.updater.plist"
+LAUNCHD_UPDATER_LABEL="com.burrowee.edge.updater"
+# Legacy pre-rename system labels/plists earlier installers wrote — migrated
+# away on install, removed on uninstall.
+LEGACY_LAUNCHD_LABEL="org.burrowee.edge"
+LEGACY_LAUNCHD_UPDATER_LABEL="org.burrowee.edge.updater"
+
+# remove_legacy_launchd_units — boot out + delete the org.burrowee.* system
+# LaunchDaemons a pre-rename root install wrote. Best-effort; root-only caller.
+remove_legacy_launchd_units() {
+    launchctl bootout "system/$LEGACY_LAUNCHD_LABEL" 2>/dev/null || true
+    launchctl bootout "system/$LEGACY_LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+    rm -f "$LAUNCHD_PLIST_DIR/$LEGACY_LAUNCHD_LABEL.plist" \
+          "$LAUNCHD_PLIST_DIR/$LEGACY_LAUNCHD_UPDATER_LABEL.plist"
+}
 
 is_root() { [ "$(id -u)" = 0 ]; }
 
@@ -113,6 +126,7 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
             launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
             launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
             rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
+            remove_legacy_launchd_units
         else
             systemctl disable --now burrowee-edge 2>/dev/null || true
             systemctl disable --now burrowee-edge-updater 2>/dev/null || true
@@ -197,6 +211,10 @@ if is_root; then
         # HOME=$ROOT_HOME (/var/root) so the daemon's os.UserHomeDir() resolves
         # $ROOT_HOME/.burrowee/edge — launchd daemons get no HOME by default
         # (mirrors the systemd unit's Environment=HOME=/root).
+        # KeepAlive.PathState (matching core/setup's system units, which land on
+        # the SAME paths): the update-restart rung SIGTERMs the running daemon
+        # and relies on the supervisor respawning it after a CLEAN exit —
+        # SuccessfulExit=false would leave a cleanly-exited daemon down.
         cat > "$LAUNCHD_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -204,8 +222,8 @@ if is_root; then
   <key>Label</key><string>$LAUNCHD_LABEL</string>
   <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>2</integer>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge</key><true/></dict></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>$ROOT_HOME</string></dict>
 </dict></plist>
 EOF
@@ -222,13 +240,17 @@ EOF
   <key>Label</key><string>$LAUNCHD_UPDATER_LABEL</string>
   <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge-updater</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>2</integer>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge-updater</key><true/></dict></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>$ROOT_HOME</string></dict>
 </dict></plist>
 EOF
         chmod 0644 "$LAUNCHD_UPDATER_PLIST"
         echo "wrote LaunchDaemon → $LAUNCHD_UPDATER_PLIST (not bootstrapped — enable with: launchctl bootstrap system $LAUNCHD_UPDATER_PLIST)"
+
+        # Migrate away the pre-rename org.burrowee.* units before loading the
+        # com.burrowee.* ones — two labels must never run the same daemon.
+        remove_legacy_launchd_units
 
         launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
         launchctl bootstrap system "$LAUNCHD_PLIST"
@@ -250,6 +272,10 @@ EOF
         # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
         # HOME=/root so the daemon's os.UserHomeDir() resolves /root/.burrowee/edge
         # (a root system service has no HOME otherwise).
+        # Restart=always (matching core/setup's system units, which land on the
+        # SAME paths): the update-restart rung SIGTERMs the running daemon and
+        # relies on systemd respawning it after a CLEAN exit — on-failure would
+        # leave a cleanly-exited daemon down.
         mkdir -p "$(dirname "$SYSTEMD_UNIT")"
         cat > "$SYSTEMD_UNIT" <<EOF
 [Unit]
@@ -261,7 +287,7 @@ Wants=network-online.target
 Type=simple
 Environment=HOME=/root
 ExecStart=$SYS_BIN_DIR/burrowee-edge run
-Restart=on-failure
+Restart=always
 RestartSec=2
 TimeoutStopSec=30
 
@@ -285,7 +311,7 @@ Wants=network-online.target
 Type=simple
 Environment=HOME=/root
 ExecStart=$SYS_BIN_DIR/burrowee-edge-updater run
-Restart=on-failure
+Restart=always
 RestartSec=2
 TimeoutStopSec=30
 
