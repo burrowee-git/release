@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -41,6 +42,30 @@ func TestLimiterRefillAfterWindow(t *testing.T) {
 	fakeNow = fakeNow.Add(time.Minute)
 	if !l.Allow("k") {
 		t.Fatal("after window advance, first request must pass")
+	}
+}
+
+func TestLimiterSweepsStaleBuckets(t *testing.T) {
+	fakeNow := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	l := NewLimiter(60)
+	l.now = func() time.Time { return fakeNow }
+
+	// Allocate many buckets across distinct keys.
+	const n = 1000
+	for i := 0; i < n; i++ {
+		l.Allow(strconv.Itoa(i))
+	}
+	if got := len(l.buckets); got != n {
+		t.Fatalf("before sweep: want %d buckets, got %d", n, got)
+	}
+
+	// Advance the clock past staleTTL; the next Allow opportunistically sweeps
+	// every idle bucket, leaving only the one it just touched.
+	fakeNow = fakeNow.Add(staleTTL + time.Minute)
+	l.Allow("fresh")
+	if got := len(l.buckets); got != 1 {
+		t.Fatalf("after sweep: want only the fresh bucket, got %d", got)
 	}
 }
 

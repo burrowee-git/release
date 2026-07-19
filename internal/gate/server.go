@@ -36,6 +36,21 @@ func NewServer(reg *Registry, releasesDir string) *Server {
 	}
 }
 
+// NewHTTPServer wraps handler in an http.Server carrying conservative timeouts.
+// The explicit ReadHeaderTimeout/ReadTimeout bound how long a slow client may
+// hold a connection while dribbling its request (Slowloris); WriteTimeout and
+// IdleTimeout bound the response and keep-alive phases.
+func NewHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
 // Handler returns an http.Handler routing GET /relay/challenge and
 // GET /relay/release/ to the respective handlers.
 func (s *Server) Handler() http.Handler {
@@ -99,16 +114,21 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 2: Rate-limit by fingerprint → 429.
-	if !s.dlLimiter.Allow(fp) {
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
-
-	// Step 3: Resolve pubkey by fingerprint → miss → 401.
+	// Step 2: Resolve pubkey by fingerprint → miss → 401.
+	// This MUST precede the rate limiter: keying dlLimiter by an unvalidated
+	// header would let an unauthenticated client mint a fresh bucket per request
+	// with random fingerprints, growing the map unboundedly (memory-exhaustion
+	// DoS). By rejecting unknown fingerprints first, bucket cardinality is
+	// bounded by the real pubkey registry.
 	pub, ok, err := s.reg.Lookup(fp)
 	if err != nil || !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Step 3: Rate-limit by (now-validated) fingerprint → 429.
+	if !s.dlLimiter.Allow(fp) {
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 

@@ -414,6 +414,84 @@ func TestGateFileNotFound(t *testing.T) {
 	}
 }
 
+// TestGateUnknownFPDoesNotAllocateBucket is the H2 regression test: a flood of
+// requests bearing DISTINCT unregistered fingerprints must be rejected (401)
+// BEFORE any of them keys the download rate limiter, so bucket cardinality stays
+// bounded by the real registry and cannot be driven up by an unauthenticated
+// client. A registered fingerprint must still allocate exactly one bucket
+// (existing rate-limit behaviour preserved).
+func TestGateUnknownFPDoesNotAllocateBucket(t *testing.T) {
+	srv, _, pub, priv := newTestServerRaw(t)
+	path := "/relay/release/latest.txt"
+
+	// Flood with distinct unregistered fingerprints.
+	const flood = 500
+	for i := 0; i < flood; i++ {
+		otherPub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("generate key %d: %v", i, err)
+		}
+		req := httptest.NewRequest("GET", "http://localhost"+path, nil)
+		req.URL.Path = path
+		nonce := srv.nonces.Issue()
+		req.Header.Set("X-Burrowee-Key-FP", Fingerprint(otherPub))
+		req.Header.Set("X-Burrowee-Nonce", nonce)
+		req.Header.Set("X-Burrowee-Sig", sign(t, priv, nonce, path))
+
+		rec := httptest.NewRecorder()
+		srv.handleDownload(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("unknown fp req %d: want 401 got %d", i, rec.Code)
+		}
+	}
+	if got := len(srv.dlLimiter.buckets); got != 0 {
+		t.Fatalf("unknown fingerprints must not allocate rate-limit buckets, got %d", got)
+	}
+
+	// A registered fingerprint is still rate-limited: it allocates one bucket.
+	req := httptest.NewRequest("GET", "http://localhost"+path, nil)
+	req.URL.Path = path
+	nonce := srv.nonces.Issue()
+	req.Header.Set("X-Burrowee-Key-FP", Fingerprint(pub))
+	req.Header.Set("X-Burrowee-Nonce", nonce)
+	req.Header.Set("X-Burrowee-Sig", sign(t, priv, nonce, path))
+	rec := httptest.NewRecorder()
+	srv.handleDownload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("registered fp: want 200 got %d", rec.Code)
+	}
+	if got := len(srv.dlLimiter.buckets); got != 1 {
+		t.Fatalf("registered fp must allocate exactly one bucket, got %d", got)
+	}
+}
+
+// TestNewHTTPServerTimeouts is the M2 structural test: the HTTP server the
+// service runs must carry conservative timeouts so a Slowloris client cannot
+// hold connections open indefinitely.
+func TestNewHTTPServerTimeouts(t *testing.T) {
+	h := http.NewServeMux()
+	srv := NewHTTPServer("127.0.0.1:8077", h)
+
+	if srv.Addr != "127.0.0.1:8077" {
+		t.Errorf("Addr = %q, want 127.0.0.1:8077", srv.Addr)
+	}
+	if srv.Handler == nil {
+		t.Error("Handler must be set")
+	}
+	if srv.ReadHeaderTimeout == 0 {
+		t.Error("ReadHeaderTimeout must be non-zero")
+	}
+	if srv.ReadTimeout == 0 {
+		t.Error("ReadTimeout must be non-zero")
+	}
+	if srv.WriteTimeout == 0 {
+		t.Error("WriteTimeout must be non-zero")
+	}
+	if srv.IdleTimeout == 0 {
+		t.Error("IdleTimeout must be non-zero")
+	}
+}
+
 // newTestServerRaw returns a Server (not wrapped in httptest.Server) plus the
 // releases dir, pub, and priv so callers can call handler methods directly.
 func newTestServerRaw(t *testing.T) (*Server, string, ed25519.PublicKey, ed25519.PrivateKey) {

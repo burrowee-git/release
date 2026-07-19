@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"log"
-	"net/http"
 
 	"github.com/burrowee-git/release/internal/gate"
 )
@@ -22,7 +21,8 @@ func main() {
 
 	log.Printf("relay-gate: listening on %s (registry=%s releases=%s)", *listen, *registry, *releases)
 
-	if err := http.ListenAndServe(*listen, gate.NewServer(reg, *releases).Handler()); err != nil {
+	srv := gate.NewHTTPServer(*listen, gate.NewServer(reg, *releases).Handler())
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("relay-gate: %v", err)
 	}
 }
