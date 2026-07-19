@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+// staleTTL bounds bucket retention. A bucket refills fully in one minute, so a
+// bucket untouched for staleTTL is guaranteed full and carries no state a
+// freshly-created bucket wouldn't — evicting it is semantically free. Sweeping
+// on Allow caps map cardinality even under a large registry with high churn.
+const staleTTL = 5 * time.Minute
+
 // bucket holds the token state for a single rate-limit key.
 type bucket struct {
 	tokens   float64
@@ -37,6 +43,16 @@ func (l *Limiter) Allow(key string) bool {
 	defer l.mu.Unlock()
 
 	now := l.now()
+
+	// Opportunistic sweep of stale (idle, fully-refilled) buckets, mirroring
+	// NonceStore.Issue. Belt-and-suspenders on top of the caller only keying
+	// this limiter by registry-validated fingerprints.
+	for k, sb := range l.buckets {
+		if now.Sub(sb.lastSeen) > staleTTL {
+			delete(l.buckets, k)
+		}
+	}
+
 	b, ok := l.buckets[key]
 	if !ok {
 		b = &bucket{tokens: l.perMin, lastSeen: now}
