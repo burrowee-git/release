@@ -277,6 +277,42 @@ func TestInstallShFreshInstall(t *testing.T) {
 	}
 }
 
+// TestInstallShNoRestartStagesWithoutKicking verifies BURROWEE_NO_RESTART=1
+// (Task 8 — the local-stage counterpart to the gateway's `update`/`reinstall`
+// verbs without --auto) leaves the units installed/enabled but skips the
+// "kick a possibly-already-running instance" calls: on Darwin, no
+// bootout+re-bootstrap of an already-loaded label; on Linux, plain `enable`
+// (no `--now`) and no explicit updater restart.
+func TestInstallShNoRestartStagesWithoutKicking(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+
+	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1", "BURROWEE_NO_RESTART=1")
+	assertContains(t, out, "BURROWEE_NO_RESTART set — units staged (not restarted)")
+
+	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
+	if runtime.GOOS == "darwin" {
+		// "bootout system/..." is load_units' own kick of an already-loaded
+		// label; "bootout gui/..." is remove_legacy_user_units tearing down
+		// legacy per-user units (unrelated to this guard) and must still fire.
+		if strings.Contains(calls, "bootout system/com.burrowee.gateway") {
+			t.Errorf("BURROWEE_NO_RESTART=1: bootout called, want units staged without kicking a running instance:\n%s", calls)
+		}
+		assertContains(t, calls,
+			"launchctl bootstrap system "+launchdDir(home)+"/com.burrowee.gateway.plist",
+			"launchctl bootstrap system "+launchdDir(home)+"/com.burrowee.gateway.updater.plist",
+		)
+	} else {
+		if strings.Contains(calls, "enable --now") || strings.Contains(calls, "restart burrowee-gateway-updater.service") {
+			t.Errorf("BURROWEE_NO_RESTART=1: enable --now/restart called, want units staged without starting:\n%s", calls)
+		}
+		assertContains(t, calls,
+			"systemctl enable burrowee-gateway.service",
+			"systemctl enable burrowee-gateway-updater.service",
+		)
+	}
+}
+
 // TestInstallShUninstall verifies that BURROWEE_UNINSTALL=1 removes binaries
 // and both system unit files.
 func TestInstallShUninstall(t *testing.T) {
