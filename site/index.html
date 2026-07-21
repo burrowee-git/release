@@ -9,6 +9,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/copy-button.css">
+<script type="module" src="/copy-button.js"></script>
 <style>
   :root {
     --soil:   #0A0C11; /* page canvas — burrowee.com near-black */
@@ -148,6 +150,49 @@
     color: var(--text-faint);
     font-size: 13px;
   }
+
+  /* copy-button styling */
+  .copy-button__btn {
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font: 500 14px "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin-left: 8px;
+  }
+
+  .copy-button__btn:hover {
+    background: rgba(201, 154, 56, 0.1);
+  }
+
+  .install-line {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .install-line code {
+    flex: 1;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  .verify-block {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .verify-block pre {
+    flex: 1;
+  }
+
+  .verify-block copy-button {
+    align-self: flex-start;
+    margin-top: 2px;
+  }
 </style>
 </head>
 <body>
@@ -167,22 +212,34 @@
 
     <span class="install">
       <span class="label">CLI — connect, ssh, pair, relays</span>
-      <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/install.sh | sh</code>
+      <div class="install-line">
+        <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/install.sh | sh</code>
+        <copy-button value="curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/install.sh | sh">Copy</copy-button>
+      </div>
     </span>
 
     <span class="install">
       <span class="label">Gateway — expose a host's services</span>
-      <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh | sh</code>
+      <div class="install-line">
+        <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh | sh</code>
+        <copy-button value="curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh | sh">Copy</copy-button>
+      </div>
     </span>
 
     <span class="install">
       <span class="label">Edge — self-hosted relay</span>
-      <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sh</code>
+      <div class="install-line">
+        <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sh</code>
+        <copy-button value="curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sh">Copy</copy-button>
+      </div>
     </span>
 
     <span class="install">
       <span class="label">Agent — AI-agent identity client</span>
-      <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh</code>
+      <div class="install-line">
+        <code>curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh</code>
+        <copy-button value="curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh">Copy</copy-button>
+      </div>
     </span>
   </section>
 
@@ -193,8 +250,11 @@
       <a href="/burrowee-release.pub">/burrowee-release.pub</a> — it is also baked into the
       installer, which is the trust anchor that verifies each download automatically. To check
       a download yourself:</p>
-    <pre class="block">minisign -Vm SHA256SUMS.txt -p burrowee-release.pub
+    <div class="verify-block">
+      <pre class="block">minisign -Vm SHA256SUMS.txt -p burrowee-release.pub
 shasum -a 256 -c SHA256SUMS.txt   # or sha256sum on Linux</pre>
+      <copy-button value="minisign -Vm SHA256SUMS.txt -p burrowee-release.pub&#10;shasum -a 256 -c SHA256SUMS.txt   # or sha256sum on Linux">Copy</copy-button>
+    </div>
     <p class="faint">A failed signature check means the bytes are untrusted — do not install them.</p>
   </section>
 

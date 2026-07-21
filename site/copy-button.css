@@ -1,0 +1,19 @@
+/* <copy-button> — copied-state styling only; the inner button otherwise
+   inherits the host page's button look (base classes via btn-class).
+   CANONICAL SOURCE: burrowee-git/resources brand/copy-button/. */
+copy-button { display: inline-flex; }
+
+.copy-button__btn {
+  cursor: pointer;
+  transition: color .15s ease, background-color .15s ease, border-color .15s ease;
+}
+
+copy-button.copied .copy-button__btn {
+  color: var(--ok, #3FB950);
+  border-color: var(--ok, #3FB950);
+  background: var(--ok-bg, #0D2818);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copy-button__btn { transition: none; }
+}
