@@ -23,6 +23,9 @@ class CopyButton extends HTMLElement {
     btn.type = 'button';
     btn.className = ('copy-button__btn ' + (this.getAttribute('btn-class') || '')).trim();
     btn.textContent = this._icon ? '⧉' : this._idle;
+    // Icon-only buttons have no text to name them — give them an idle
+    // accessible name (from `label`, else "Copy") so they aren't nameless.
+    if (this._icon) btn.setAttribute('aria-label', this._idle || 'Copy');
     btn.addEventListener('click', () => this._copy());
 
     this.textContent = '';
@@ -58,7 +61,8 @@ class CopyButton extends HTMLElement {
     this._btn.textContent = this._icon ? '✓' : '✓ Copied';
     this._timer = setTimeout(() => {
       this.classList.remove('copied');
-      this._btn.removeAttribute('aria-label');
+      if (this._icon) this._btn.setAttribute('aria-label', this._idle || 'Copy');
+      else this._btn.removeAttribute('aria-label');
       this._btn.textContent = this._icon ? '⧉' : this._idle;
     }, COPIED_RESET_MS);
   }
