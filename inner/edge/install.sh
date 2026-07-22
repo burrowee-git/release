@@ -21,6 +21,10 @@
 #
 # Idempotent: re-running replaces the binaries + unit and restarts the service,
 # so the same one-liner serves both fresh installs and in-place updates.
+#
+# Set BURROWEE_UNITS_ONLY=1 to re-render + reload the managed service units
+# without touching binaries or the network — the offline reinstall entrypoint
+# run by the component's LocalReinstall.
 set -eu
 
 BINS="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater"
@@ -115,97 +119,12 @@ migrate_config() {
     fi
 }
 
-# Test seam: when sourced with this var set, stop here so a test harness can call
-# the functions above without any install side-effect (tools/test-config-migrate.sh).
-# shellcheck disable=SC2317  # the `|| exit 0` IS reached when this script is run (not sourced)
-if [ -n "${BURROWEE_INSTALLER_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
-
-if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
-    if is_root; then
-        if [ "$(uname -s)" = "Darwin" ]; then
-            launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
-            launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
-            rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
-            remove_legacy_launchd_units
-        else
-            systemctl disable --now burrowee-edge 2>/dev/null || true
-            systemctl disable --now burrowee-edge-updater 2>/dev/null || true
-            rm -f "$SYSTEMD_UNIT" "$SYSTEMD_UPDATER_UNIT"
-            systemctl daemon-reload 2>/dev/null || true
-        fi
-    fi
-    removed=""
-    for b in $BINS; do
-        case "$b" in burrowee) continue ;; esac
-        rm -f "$BIN_DIR/$b"
-        removed="$removed $b"
-    done
-    # The bare `burrowee` dispatcher is SHARED across co-installed components
-    # (e.g. a relay on the same host) — remove it only when no other
-    # burrowee-* binary remains in $BIN_DIR.
-    if ls "$BIN_DIR"/burrowee-* >/dev/null 2>&1; then
-        echo "kept $BIN_DIR/burrowee (dispatcher) — other burrowee components remain installed"
-    else
-        rm -f "$BIN_DIR/burrowee"
-        removed="$removed burrowee"
-    fi
-    echo "removed from $BIN_DIR:$removed"
-    exit 0
-fi
-
-mkdir -p "$BIN_DIR"
-for b in $BINS; do
-    [ -f "./$b" ] || { echo "missing $b in archive" >&2; exit 1; }
-    install -m 0755 "./$b" "$BIN_DIR/$b"
-    if [ "$(uname -s)" = "Darwin" ]; then
-        xattr -d com.apple.quarantine "$BIN_DIR/$b" 2>/dev/null || true
-    fi
-done
-echo "installed to $BIN_DIR: $BINS"
-
-# ---- cover assets (decoy pages for handleCover file mode) -------------------
-# Always refresh the two SHIPPED defaults (admin.html + default.html) on every
-# install/update: a stale hardcoded footer blows the decoy, so the shipped covers
-# must track the release. Operator-added per-host <host>.html covers are not
-# enumerated here, so they survive untouched (and still win in selectCover).
-if [ -d "./covers" ]; then
-    mkdir -p "$COMP_HOME/covers"
-    for cf in admin.html default.html; do
-        [ -f "./covers/$cf" ] || continue
-        install -m 0644 "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
-            || cp "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
-            || echo "warning: could not install cover $cf" >&2
-    done
-fi
-
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
-esac
-
-"$BIN_DIR/burrowee" --version 2>/dev/null || true
-
-# ---- version-gated config migration ---------------------------------------
-# Roll new default config onto existing installs (seed-if-absent), gated by the
-# prior installed version. Best-effort; never aborts the install/update.
-if [ -n "${BURROWEE_VERSION:-}" ]; then
-    OLD_VER=""
-    [ -f "$VERSION_MARKER" ] && OLD_VER="$(cat "$VERSION_MARKER" 2>/dev/null || true)"
-    migrate_config "$OLD_VER" || echo "warning: config migration step failed; continuing" >&2
-    mkdir -p "$COMP_HOME" 2>/dev/null || true
-    if printf '%s\n' "$BURROWEE_VERSION" > "$VERSION_MARKER.tmp" 2>/dev/null; then
-        mv -f "$VERSION_MARKER.tmp" "$VERSION_MARKER" 2>/dev/null || echo "warning: could not record installed version" >&2
-    else
-        echo "warning: could not write version marker" >&2
-    fi
-fi
-
-# ---- ROOT: managed system service ------------------------------------------
-# A root install sets up a managed root service running `burrowee-edge run` and
-# (re)starts it, so the same one-liner is a fresh install AND an in-place update.
-# Non-root installs skip this and fall through to the user-path note + first-run
-# bootstrap below.
-if is_root; then
+# setup_root_service — render BOTH managed SYSTEM service units for the host init
+# system and (re)load the serve unit (the updater unit is rendered but left
+# opt-in). Root-only caller. Renders unit FILES pointing at $SYS_BIN_DIR; it
+# never places binaries, so it is safe to call from the units-only reinstall
+# path as well as fresh install / update.
+setup_root_service() {
     if [ "$(uname -s)" = "Darwin" ]; then
         # ── macOS: root LaunchDaemon ──────────────────────────────────────────
         # HOME=$ROOT_HOME (/var/root) so the daemon's os.UserHomeDir() resolves
@@ -337,6 +256,123 @@ EOF
             echo "restarted burrowee-edge-updater (opted in) to pick up new binary"
         fi
     fi
+}
+
+# Test seam: when sourced with this var set, stop here so a test harness can call
+# the functions above without any install side-effect (tools/test-config-migrate.sh).
+# shellcheck disable=SC2317  # the `|| exit 0` IS reached when this script is run (not sourced)
+if [ -n "${BURROWEE_INSTALLER_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
+
+# ---------------------------------------------------------------------------
+# Units-only mode (BURROWEE_UNITS_ONLY=1): the offline reinstall entrypoint run
+# by edge's LocalReinstall. Re-render + reload the managed service units WITHOUT
+# placing binaries or touching the network. A root install has a managed system
+# service, so re-render it; an unprivileged install has no service, so this is a
+# successful no-op (mirrors cli).
+# ---------------------------------------------------------------------------
+if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
+    if is_root; then
+        setup_root_service
+        echo "edge units-only reinstall: service units re-rendered + reloaded."
+    else
+        echo "edge units-only reinstall: no user-level service (edge service is root-managed) — nothing to do."
+    fi
+    exit 0
+fi
+
+if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
+    if is_root; then
+        if [ "$(uname -s)" = "Darwin" ]; then
+            launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
+            launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+            rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
+            remove_legacy_launchd_units
+        else
+            systemctl disable --now burrowee-edge 2>/dev/null || true
+            systemctl disable --now burrowee-edge-updater 2>/dev/null || true
+            rm -f "$SYSTEMD_UNIT" "$SYSTEMD_UPDATER_UNIT"
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+    fi
+    removed=""
+    for b in $BINS; do
+        case "$b" in burrowee) continue ;; esac
+        rm -f "$BIN_DIR/$b"
+        removed="$removed $b"
+    done
+    # The bare `burrowee` dispatcher is SHARED across co-installed components
+    # (e.g. a relay on the same host) — remove it only when no other
+    # burrowee-* binary remains in $BIN_DIR.
+    if ls "$BIN_DIR"/burrowee-* >/dev/null 2>&1; then
+        echo "kept $BIN_DIR/burrowee (dispatcher) — other burrowee components remain installed"
+    else
+        rm -f "$BIN_DIR/burrowee"
+        removed="$removed burrowee"
+    fi
+    echo "removed from $BIN_DIR:$removed"
+    exit 0
+fi
+
+mkdir -p "$BIN_DIR"
+for b in $BINS; do
+    [ -f "./$b" ] || { echo "missing $b in archive" >&2; exit 1; }
+    install -m 0755 "./$b" "$BIN_DIR/$b"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        xattr -d com.apple.quarantine "$BIN_DIR/$b" 2>/dev/null || true
+    fi
+done
+echo "installed to $BIN_DIR: $BINS"
+
+# ---- cover assets (decoy pages for handleCover file mode) -------------------
+# Always refresh the two SHIPPED defaults (admin.html + default.html) on every
+# install/update: a stale hardcoded footer blows the decoy, so the shipped covers
+# must track the release. Operator-added per-host <host>.html covers are not
+# enumerated here, so they survive untouched (and still win in selectCover).
+if [ -d "./covers" ]; then
+    mkdir -p "$COMP_HOME/covers"
+    for cf in admin.html default.html; do
+        [ -f "./covers/$cf" ] || continue
+        install -m 0644 "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
+            || cp "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
+            || echo "warning: could not install cover $cf" >&2
+    done
+fi
+
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac
+
+"$BIN_DIR/burrowee" --version 2>/dev/null || true
+
+# ---- version-gated config migration ---------------------------------------
+# Roll new default config onto existing installs (seed-if-absent), gated by the
+# prior installed version. Best-effort; never aborts the install/update.
+if [ -n "${BURROWEE_VERSION:-}" ]; then
+    OLD_VER=""
+    [ -f "$VERSION_MARKER" ] && OLD_VER="$(cat "$VERSION_MARKER" 2>/dev/null || true)"
+    migrate_config "$OLD_VER" || echo "warning: config migration step failed; continuing" >&2
+    mkdir -p "$COMP_HOME" 2>/dev/null || true
+    if printf '%s\n' "$BURROWEE_VERSION" > "$VERSION_MARKER.tmp" 2>/dev/null; then
+        mv -f "$VERSION_MARKER.tmp" "$VERSION_MARKER" 2>/dev/null || echo "warning: could not record installed version" >&2
+    else
+        echo "warning: could not write version marker" >&2
+    fi
+fi
+
+# Self-copy: keep a copy of this installer at $COMP_HOME/install.sh so an offline
+# units-only reinstall (BURROWEE_UNITS_ONLY=1, run by edge's LocalReinstall) can
+# re-render + reload the service units without a fresh download.
+mkdir -p "$COMP_HOME" 2>/dev/null || true
+cp "$0" "$COMP_HOME/install.sh" 2>/dev/null || true
+
+# ---- ROOT: managed system service ------------------------------------------
+# A root install sets up a managed root service running `burrowee-edge run` and
+# (re)starts it, so the same one-liner is a fresh install AND an in-place update.
+# Non-root installs skip this and fall through to the user-path note + first-run
+# bootstrap below.
+if is_root; then
+    setup_root_service
     "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
     echo "edge system install complete."
     # The managed service runs the daemon; pairing is a separate operator step:

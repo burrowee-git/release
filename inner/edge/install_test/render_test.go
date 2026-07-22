@@ -110,6 +110,9 @@ func runRootInstall(t *testing.T, home, staging string, extraEnv ...string) (str
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
 		"SYS_BIN_DIR=" + sysBinDir,
 		"SYSTEMD_UNIT_DIR=" + unitDir,
+		// Sandbox root's config home (COMP_HOME) so the self-copy + version
+		// marker land under the test HOME instead of the real /root.
+		"ROOT_HOME=" + filepath.Join(home, "root-home"),
 	}
 	env = append(env, extraEnv...)
 
@@ -414,5 +417,60 @@ func TestEdgeRootInstallDarwinRestartsOptedInUpdater(t *testing.T) {
 	log := readFile(t, filepath.Join(home, "stub-calls.log"))
 	if !strings.Contains(log, "kickstart -k system/com.burrowee.edge.updater") {
 		t.Errorf("opted-in updater LaunchDaemon must be kickstarted on reinstall; launchctl log:\n%s", log)
+	}
+}
+
+// TestEdgeUnitsOnlyRerendersUnitsWithoutBinaries is the guard for the offline
+// units-only reinstall (BURROWEE_UNITS_ONLY=1) that the component's LocalReinstall
+// runs against the on-disk install.sh: it must re-render BOTH system units and
+// (re)load the serve unit WITHOUT placing any binaries (no download either — the
+// inner installer never touches the network). Binaries are seeded in staging so
+// a regression that copies them would be caught.
+func TestEdgeUnitsOnlyRerendersUnitsWithoutBinaries(t *testing.T) {
+	home := t.TempDir()
+	staging := t.TempDir()
+	seedEdgeBins(t, staging)
+
+	sysBinDir, unitDir, out := runRootInstall(t, home, staging, "BURROWEE_UNITS_ONLY=1")
+
+	// Both system units re-rendered.
+	if _, err := os.Stat(filepath.Join(unitDir, "burrowee-edge.service")); err != nil {
+		t.Errorf("serve unit not rendered in units-only mode: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(unitDir, "burrowee-edge-updater.service")); err != nil {
+		t.Errorf("updater unit not rendered in units-only mode: %v", err)
+	}
+
+	// NO binaries placed — units-only must never touch $SYS_BIN_DIR.
+	for _, b := range edgeBins {
+		if _, err := os.Stat(filepath.Join(sysBinDir, b)); err == nil {
+			t.Errorf("units-only mode must not place binary %s into %s", b, sysBinDir)
+		}
+	}
+
+	// Serve unit (re)loaded; updater left opt-in (not enabled/started).
+	log := readFile(t, filepath.Join(home, "stub-calls.log"))
+	assertContains(t, log, "enable --now burrowee-edge")
+	if strings.Contains(log, "enable --now burrowee-edge-updater") ||
+		strings.Contains(log, "start burrowee-edge-updater") ||
+		strings.Contains(log, "restart burrowee-edge-updater") {
+		t.Errorf("units-only must leave the updater unit opt-in; systemctl log:\n%s", log)
+	}
+	assertContains(t, out, "units-only reinstall")
+}
+
+// TestEdgeFreshInstallWritesSelfCopy verifies a fresh (root) install leaves a
+// copy of the installer at $COMP_HOME/install.sh, so LocalReinstall has a local
+// installer to invoke offline. COMP_HOME resolves under the sandboxed ROOT_HOME.
+func TestEdgeFreshInstallWritesSelfCopy(t *testing.T) {
+	home := t.TempDir()
+	staging := t.TempDir()
+	seedEdgeBins(t, staging)
+
+	runRootInstall(t, home, staging)
+
+	selfCopy := filepath.Join(home, "root-home", ".burrowee", "edge", "install.sh")
+	if _, err := os.Stat(selfCopy); err != nil {
+		t.Errorf("self-copy missing at %s: %v", selfCopy, err)
 	}
 }

@@ -5,12 +5,23 @@
 # bootstrap verifies the zip (minisign + sha256) and ONLY THEN execs this with
 # cwd = the unzipped dir, so the binaries sit alongside this script. It installs
 # them into PREFIX/bin (default $HOME/.local/bin). Set BURROWEE_UNINSTALL to
-# remove them instead.
+# remove them instead. Set BURROWEE_UNITS_ONLY=1 for the offline units-only
+# reinstall (a no-op here — the cli lays no service unit).
 set -eu
 
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
 BINS="burrowee burrowee-cli burrowee-cli-updater"
 COMP=cli
+COMP_HOME="$HOME/.burrowee/$COMP"
+
+# Units-only mode (BURROWEE_UNITS_ONLY=1): the offline reinstall entrypoint run
+# by cli's LocalReinstall. The cli lays NO service unit, so there is nothing to
+# render or reload — this is a successful no-op that places no binaries and does
+# not touch the network.
+if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
+    echo "cli units-only reinstall: no service unit to render — nothing to do."
+    exit 0
+fi
 
 if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     for b in $BINS; do rm -f "$BIN_DIR/$b"; done
@@ -42,7 +53,6 @@ esac
 # controlling terminal (stdin is the curl pipe, not a tty): prompt only if
 # /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
 # next step. All tty I/O is fault-tolerant so it can never abort the install.
-COMP_HOME="$HOME/.burrowee/$COMP"
 if [ -d "$COMP_HOME" ] && [ -n "$(ls -A "$COMP_HOME" 2>/dev/null || true)" ]; then
     echo "$COMP already set up ($COMP_HOME) — skipping setup."
 elif { exec 3<>/dev/tty; } 2>/dev/null; then
@@ -64,3 +74,10 @@ elif { exec 3<>/dev/tty; } 2>/dev/null; then
 else
     echo "next: burrowee $COMP bootstrap <blob> <pin>"
 fi
+
+# Self-copy: keep a copy of this installer at $COMP_HOME/install.sh so an offline
+# units-only reinstall (BURROWEE_UNITS_ONLY=1, run by cli's LocalReinstall) has a
+# local installer to invoke. Written AFTER the setup check above so it never
+# makes a fresh install look already-set-up.
+mkdir -p "$COMP_HOME" 2>/dev/null || true
+cp "$0" "$COMP_HOME/install.sh" 2>/dev/null || true
