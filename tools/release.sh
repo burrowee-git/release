@@ -1014,7 +1014,7 @@ do_release() {
     mkdir -p "${stage}"
 
     # (3) per-target build + assemble + zip.
-    local zips=() pair os arch out_bins assemble asset b
+    local zips=() pair os arch out_bins assemble asset b s update_scripts
     for pair in "${TARGETS[@]}"; do
         read -r os arch <<<"${pair}"
         out_bins="${stage}/.bins-${os}-${arch}"
@@ -1045,19 +1045,25 @@ do_release() {
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
-        # Cloud-push update scripts: the burrowee-<comp>-updater runs `sh ./update.sh`
-        # (service update) and `sh ./updater.update.sh` (self-update) with cwd = the
-        # unzipped bundle, so those scripts MUST ride in the payload alongside the
-        # bins — mirroring the relay bundle. Without them a pushed update extracts +
-        # verifies but then fails "cannot open ./update.sh". Copied from the component
-        # source. (edge ships an updater; extend this list as cli/gateway wire push.)
-        if [ "${comp}" = edge ]; then
-            for s in update.sh updater.update.sh; do
-                [ -f "${src}/${s}" ] || { echo "✗ ${comp} update script missing in source: ${src}/${s}" >&2; exit 1; }
-                cp "${src}/${s}" "${assemble}/${s}"
-                chmod 0755 "${assemble}/${s}"
-            done
-        fi
+        # Cloud-push update scripts: the burrowee-<comp>-updater (and core's Phase-0
+        # routing) run `sh ./update.sh` (service update) with cwd = the unzipped
+        # bundle, so update.sh MUST ride in the payload alongside the bins. edge +
+        # relay additionally self-update via `sh ./updater.update.sh`; gateway + cli
+        # self-update in-process (UpgradeSelf binary swap), so they ship update.sh
+        # ONLY — no updater.update.sh exists in their source. Copied from the
+        # component source; without them a pushed update extracts + verifies but then
+        # fails "cannot open ./update.sh". (Mirrors cmd/rkit/assemble.go extraPayload.)
+        case "${comp}" in
+            edge)        update_scripts="update.sh updater.update.sh" ;;
+            gateway|cli) update_scripts="update.sh" ;;
+            *)           update_scripts="" ;;
+        esac
+        # shellcheck disable=SC2086  # ${update_scripts} is an intentional space-list of script names; word-splitting is the point.
+        for s in ${update_scripts}; do
+            [ -f "${src}/${s}" ] || { echo "✗ ${comp} update script missing in source: ${src}/${s}" >&2; exit 1; }
+            cp "${src}/${s}" "${assemble}/${s}"
+            chmod 0755 "${assemble}/${s}"
+        done
 
         # edge decoy covers (copied from the edge.web repo at package time)
         if [ "${comp}" = edge ]; then

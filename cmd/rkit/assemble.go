@@ -55,16 +55,21 @@ func assemble(comp, stamp, outRoot, installSh string, extras []pack.Content, com
 // assembly exactly:
 //
 //   - edge + relay carry update.sh + updater.update.sh, copied from the
-//     COMPONENT source worktree (release.sh lines 558-560 for relay, 728-734
-//     for edge). The burrowee-<comp>-updater runs `sh ./update.sh` /
-//     `sh ./updater.update.sh` with cwd = the unzipped bundle, so they must ship
-//     alongside the bins.
+//     COMPONENT source worktree (release.sh lines 1054-1060). The
+//     burrowee-<comp>-updater runs `sh ./update.sh` (service update) /
+//     `sh ./updater.update.sh` (updater self-update) with cwd = the unzipped
+//     bundle, so both must ship alongside the bins.
+//   - gateway + cli carry update.sh ONLY. Core's Phase-0 routing execs the
+//     bundled ./update.sh for a non-force `update`, so it must ship. They do
+//     NOT carry updater.update.sh: their updater self-updates via an in-process
+//     binary swap (UpgradeSelf/ApplyUpdaterBinary), not a shell script, so no
+//     such file exists in their source (release.sh lines 1054-1060).
 //   - edge additionally carries covers/admin.html + covers/default.html, decoy
 //     cover pages copied from the edge.web repo at package time (release.sh lines
-//     736-742): admin.html → covers/admin.html, login.html → covers/default.html.
-//     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/edge.web (release.sh line 738).
+//     1063-1068): admin.html → covers/admin.html, login.html → covers/default.html.
+//     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/edge.web (release.sh line 1064).
 //
-// All other components (cli/gateway/agent) have no extras.
+// The remaining component (agent) has no extras.
 func extraPayload(comp, srcDir string) ([]pack.Content, error) {
 	var extras []pack.Content
 	switch comp {
@@ -76,6 +81,13 @@ func extraPayload(comp, srcDir string) ([]pack.Content, error) {
 			}
 			extras = append(extras, pack.Content{Src: p, Name: s})
 		}
+	case "gateway", "cli":
+		s := "update.sh"
+		p := filepath.Join(srcDir, s)
+		if _, err := os.Stat(p); err != nil {
+			return nil, fmt.Errorf("%s update script missing in source %s: %w", comp, p, err)
+		}
+		extras = append(extras, pack.Content{Src: p, Name: s})
 	}
 	if comp == "edge" {
 		edgeWeb := os.Getenv("EDGE_WEB_DIR")
