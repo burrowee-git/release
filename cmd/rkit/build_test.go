@@ -46,7 +46,7 @@ func TestOrchestrateBuildsMatrixIntoScratch(t *testing.T) {
 	if len(res.Zips) != len(relconfig.Targets()) {
 		t.Fatalf("got %d zips, want %d: %v", len(res.Zips), len(relconfig.Targets()), res.Zips)
 	}
-	wantEntries := []string{"burrowee", "burrowee-cli", "burrowee-cli-updater", "install.sh"}
+	wantEntries := []string{"burrowee", "burrowee-cli", "burrowee-cli-updater", "install.sh", "update.sh"}
 	sort.Strings(wantEntries)
 	for _, zp := range res.Zips {
 		r, err := zip.OpenReader(zp)
@@ -96,6 +96,9 @@ func writeFixtureModule(t *testing.T, repo string) {
 	write("versions/cli", "0.1.0\n")
 	write("versions/burrowee", "0.1.0\n")
 	write("inner/cli/install.sh", "#!/bin/sh\necho fixture-install\n")
+	// cli ships update.sh (only) at its source root — core's Phase-0 routing
+	// execs it on a non-force update. extraPayload requires it present.
+	write("update.sh", "#!/bin/sh\necho fixture-update\n")
 
 	git := func(args ...string) {
 		t.Helper()

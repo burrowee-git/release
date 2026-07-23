@@ -146,3 +146,75 @@ func TestAssembleWithExtras(t *testing.T) {
 		t.Errorf("entries = %v, want %v", got, want)
 	}
 }
+
+// TestExtraPayloadUpdateScripts asserts each component's update-script payload:
+// gateway + cli ship update.sh ONLY (in-process updater self-update — no
+// updater.update.sh), while edge + relay ship both. A missing update.sh is
+// fail-loud (returned error) for every scripted component.
+func TestExtraPayloadUpdateScripts(t *testing.T) {
+	names := func(cs []pack.Content) []string {
+		var out []string
+		for _, c := range cs {
+			out = append(out, c.Name)
+		}
+		sort.Strings(out)
+		return out
+	}
+	writeSrc := func(t *testing.T, files ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, f := range files {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+
+	t.Run("gateway ships update.sh only", func(t *testing.T) {
+		src := writeSrc(t, "update.sh")
+		got, err := extraPayload("gateway", src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"update.sh"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("gateway extras = %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("cli ships update.sh only", func(t *testing.T) {
+		src := writeSrc(t, "update.sh")
+		got, err := extraPayload("cli", src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"update.sh"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("cli extras = %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("edge ships both update scripts", func(t *testing.T) {
+		src := writeSrc(t, "update.sh", "updater.update.sh")
+		got, err := extraPayload("edge", src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// edge also appends covers/*, resolved from a non-existent EDGE_WEB_DIR
+		// here; assert only that both update scripts are present.
+		set := map[string]bool{}
+		for _, n := range names(got) {
+			set[n] = true
+		}
+		if !set["update.sh"] || !set["updater.update.sh"] {
+			t.Errorf("edge extras = %v, want both update scripts", names(got))
+		}
+	})
+
+	for _, comp := range []string{"gateway", "cli", "relay"} {
+		t.Run("missing update.sh is fail-loud: "+comp, func(t *testing.T) {
+			if _, err := extraPayload(comp, t.TempDir()); err == nil {
+				t.Errorf("%s: expected error for missing update.sh, got nil", comp)
+			}
+		})
+	}
+}
