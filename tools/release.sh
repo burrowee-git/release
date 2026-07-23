@@ -319,7 +319,9 @@ register_staged() {
     # binaries: the product's first-party sub-module names as a JSON array.
     # dispatcher_version: the burrowee stamp bundled into this product's zip.
     local binaries_json
-    binaries_json="$(printf '%s\n' $(bins_for "${comp}") | jq -Rsc 'split("\n") | map(select(length>0))')"
+    local -a bins
+    read -r -a bins <<< "$(bins_for "${comp}")"
+    binaries_json="$(printf '%s\n' "${bins[@]}" | jq -Rsc 'split("\n") | map(select(length>0))')"
 
     local body
     # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
