@@ -69,6 +69,39 @@ func TestLimiterSweepsStaleBuckets(t *testing.T) {
 	}
 }
 
+func TestLimiterCapsBucketCardinality(t *testing.T) {
+	fakeNow := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	l := NewLimiter(60)
+	l.now = func() time.Time { return fakeNow }
+	l.maxBuckets = 3
+
+	// Fill the map to the cap with distinct (never-before-seen) keys.
+	for i := 0; i < 3; i++ {
+		if !l.Allow(strconv.Itoa(i)) {
+			t.Fatalf("key %d under cap should be allowed", i)
+		}
+	}
+	if got := len(l.buckets); got != 3 {
+		t.Fatalf("want 3 buckets at cap, got %d", got)
+	}
+
+	// A brand-new key beyond the cap is shed (denied) rather than allocating a
+	// new bucket, so a distributed flood of distinct keys cannot grow the map.
+	if l.Allow("overflow") {
+		t.Fatal("new key beyond cap must be denied")
+	}
+	if got := len(l.buckets); got != 3 {
+		t.Fatalf("map must not grow beyond cap: got %d", got)
+	}
+
+	// An already-tracked key is still served at the cap — the cap only blocks
+	// new allocations, never existing buckets.
+	if !l.Allow("0") {
+		t.Fatal("existing key at cap must still be served")
+	}
+}
+
 func TestLimiterConcurrent(t *testing.T) {
 	l := NewLimiter(60)
 	done := make(chan struct{})

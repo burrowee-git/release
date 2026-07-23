@@ -11,6 +11,18 @@ import (
 // on Allow caps map cardinality even under a large registry with high churn.
 const staleTTL = 5 * time.Minute
 
+// defaultMaxBuckets caps live bucket cardinality. The challenge limiter is
+// keyed by unauthenticated client IP (unlike the download limiter, which is
+// gated to registry-validated fingerprints), so a distributed flood of
+// distinct IPs would otherwise grow the map to the number of distinct IPs seen
+// within staleTTL — unbounded memory, and an O(n) sweep per Allow that turns
+// O(n²) under the flood. Once the map reaches the cap, keys with no existing
+// bucket are shed (denied) instead of allocating, bounding both. The stale
+// sweep runs first, so the cap only bites when genuinely many distinct keys
+// are active at once. ~100k buckets is a generous ceiling for legitimate IP
+// diversity while keeping worst-case memory in the tens of MB.
+const defaultMaxBuckets = 100_000
+
 // bucket holds the token state for a single rate-limit key.
 type bucket struct {
 	tokens   float64
@@ -21,18 +33,20 @@ type bucket struct {
 // Cap = perMinute tokens; refill rate = perMinute tokens/min.
 // Create with NewLimiter; call Allow(key) to consume one token.
 type Limiter struct {
-	mu      sync.Mutex
-	perMin  float64
-	buckets map[string]*bucket
-	now     func() time.Time
+	mu         sync.Mutex
+	perMin     float64
+	buckets    map[string]*bucket
+	maxBuckets int
+	now        func() time.Time
 }
 
 // NewLimiter returns a Limiter that allows perMinute requests per key per minute.
 func NewLimiter(perMinute int) *Limiter {
 	return &Limiter{
-		perMin:  float64(perMinute),
-		buckets: make(map[string]*bucket),
-		now:     time.Now,
+		perMin:     float64(perMinute),
+		buckets:    make(map[string]*bucket),
+		maxBuckets: defaultMaxBuckets,
+		now:        time.Now,
 	}
 }
 
@@ -55,6 +69,11 @@ func (l *Limiter) Allow(key string) bool {
 
 	b, ok := l.buckets[key]
 	if !ok {
+		// Shed new keys once the map is full so a distributed flood of distinct
+		// keys cannot grow it without limit. Existing buckets are unaffected.
+		if len(l.buckets) >= l.maxBuckets {
+			return false
+		}
 		b = &bucket{tokens: l.perMin, lastSeen: now}
 		l.buckets[key] = b
 	}
