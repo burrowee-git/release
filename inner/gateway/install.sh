@@ -8,7 +8,9 @@
 # remove them instead. Set BURROWEE_UNITS_ONLY=1 to write+load both service
 # units without touching binaries or running bootstrap. Set BURROWEE_UPDATE=1
 # to run update mode: per-binary sha256 change detection, transactional swap,
-# and a final BURROWEE_CHANGED=<names> line.
+# and a final BURROWEE_CHANGED=<names> line. In update mode, BURROWEE_FORCE=1
+# bypasses the sha256 check and re-places every serve binary (the `--force`
+# full-reinstall path — the diff would otherwise skip an identical version).
 #
 # Service model: binaries and config stay per-user, but the service units are
 # always SYSTEM-level, running as the installing user, so the gateway starts at
@@ -327,7 +329,11 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
 
     mkdir -p "$BIN_DIR"
 
-    # Phase 1: detect which binaries changed.
+    # Phase 1: detect which binaries changed. BURROWEE_FORCE=1 (set by the Go
+    # side only on `gateway update --force`) forces every serve binary to be
+    # re-placed regardless of sha256 — a --force onto the already-installed
+    # version has byte-identical binaries, so without this it would place
+    # nothing and the operator's "reinstall completely" would be a no-op.
     CHANGED=""
     for b in $BINS; do
         { [ "$b" = "burrowee-gateway-cli" ] || [ "$b" = "burrowee-gateway-updater" ]; } && continue   # updater binaries: updated separately, never during a gateway update
@@ -338,7 +344,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         if [ -f "$BIN_DIR/$b" ]; then
             _cur_sum="$(sha256_of "$BIN_DIR/$b")"
         fi
-        if [ "$_staged_sum" != "$_cur_sum" ]; then
+        if [ -n "${BURROWEE_FORCE:-}" ] || [ "$_staged_sum" != "$_cur_sum" ]; then
             CHANGED="${CHANGED:+$CHANGED }$b"
         fi
     done
