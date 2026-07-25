@@ -2,7 +2,7 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge | agent).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public-release] [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public|--public-release] [--dry-run] [--bump-minor|--bump-major]
 #
 # --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
 #   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
@@ -13,7 +13,7 @@
 #   ~/.claude/guidelines/APPLE-SIGNING.md.
 #
 # --vulncheck: hard-gate the cut on govulncheck — scans every shipped module
-#   and aborts on any finding. --public-release is shorthand for --apple
+#   and aborts on any finding. --public / --public-release is shorthand for --apple
 #   --vulncheck. Neither flag + an interactive TTY prompts to cut a public
 #   release (both); a non-interactive run or a "no" answer skips both.
 #
@@ -108,6 +108,27 @@ fi
 WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
+
+# --- Apple account plugin (project-specific) ---------------------------------
+# config/apple-account: one line = folder name under ~/Workstation/Apple/
+# Exports APPLE_ACCOUNT + APPLE_ACCOUNT_DIR for modernech-sign.
+load_apple_account() {
+    local conf="${REPO_ROOT}/config/apple-account"
+    [ -f "$conf" ] || conf="${REPO_ROOT}/config/apple.account"
+    [ -f "$conf" ] || return 0
+    local name
+    name="$(sed -n '/^[[:space:]]*#/d;/^[[:space:]]*$/d;p;q' "$conf" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -n "$name" ] || return 0
+    export APPLE_ACCOUNT="$name"
+    export APPLE_HOME="${APPLE_HOME:-$HOME/Workstation/Apple}"
+    export APPLE_ACCOUNT_DIR="${APPLE_ACCOUNT_DIR:-$APPLE_HOME/$name}"
+    if [ ! -d "$APPLE_ACCOUNT_DIR" ]; then
+        echo "⚠ Apple account folder missing: $APPLE_ACCOUNT_DIR (from $conf)" >&2
+    else
+        echo "→ Apple account: $APPLE_ACCOUNT ($APPLE_ACCOUNT_DIR)" >&2
+    fi
+}
+
 APPLE_SIGN=""
 VULNCHECK=""
 DISTRIBUTE_ONLY=0
@@ -130,7 +151,7 @@ for arg in "$@"; do
         cli|gateway|edge|agent|relay|all) WHAT="${arg}" ;;
         --apple)              APPLE_SIGN=1 ;;
         --vulncheck)          VULNCHECK=1 ;;
-        --public-release)     APPLE_SIGN=1; VULNCHECK=1 ;;
+        --public|--public-release) APPLE_SIGN=1; VULNCHECK=1 ;;
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
@@ -141,7 +162,7 @@ done
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     [ -z "${WHAT}" ] || { echo "✗ --distribute-only takes <comp> <stamp> as its own args — drop the trailing '${WHAT}'" >&2; exit 2; }
 else
-    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public-release] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public|--public-release] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
 fi
 
 # When neither signing nor the CVE gate was requested and we're interactive,
@@ -157,6 +178,7 @@ if [ "${DISTRIBUTE_ONLY}" != 1 ]; then
     _mode="$(resolve_release_mode "${APPLE_SIGN}" "${VULNCHECK}" "${PROMPT_ANS}")"
     APPLE_SIGN="${_mode%%|*}"; VULNCHECK="${_mode#*|}"
     export APPLE_SIGN VULNCHECK
+[ -n "${APPLE_SIGN}" ] && load_apple_account
 fi
 
 # ---- config / defaults ------------------------------------------------------

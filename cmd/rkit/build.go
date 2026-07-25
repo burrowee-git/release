@@ -71,7 +71,9 @@ func runBuild(args []string) error {
 	fs.StringVar(&o.SrcDir, "src", "", "component source worktree (default: resolved from BURROWEE_SRC_<COMP>/BB)")
 	fs.StringVar(&o.DispatcherDir, "dispatcher", "", "dispatcher source worktree (default: resolved from BURROWEE_SRC_DISPATCHER/BB)")
 	fs.StringVar(&o.SignKey, "sign-key", "", "minisign secret key (required for a real cut; --dry-run defaults to the TEST key)")
-	fs.BoolVar(&o.Apple, "apple", false, "notarize macOS binaries")
+	appleFlag := fs.Bool("apple", false, "Developer-ID sign + notarize macOS binaries")
+	publicFlag := fs.Bool("public", false, "public release: apple sign+notarize + CVE gate (standard ship path)")
+	publicReleaseFlag := fs.Bool("public-release", false, "alias for --public")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "build without bumping the version or requiring a real sign key")
 	fs.BoolVar(&o.NoVulncheck, "no-vulncheck", false, "skip the CVE gate (default: the gate runs)")
 	bumpPatch := fs.Bool("bump-patch", false, "bump the component's patch version before building")
@@ -79,6 +81,14 @@ func runBuild(args []string) error {
 	bumpMajor := fs.Bool("bump-major", false, "bump the component's major version before building (prompts unless BURROWEE_RELEASE_YES=1)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// --public / --public-release is the standard ship path: Apple sign+notarize + CVE gate.
+	if *publicFlag || *publicReleaseFlag {
+		o.Apple = true
+		o.NoVulncheck = false
+	}
+	if *appleFlag {
+		o.Apple = true
 	}
 	if (*bumpPatch && *bumpMinor) || (*bumpPatch && *bumpMajor) || (*bumpMinor && *bumpMajor) {
 		return fmt.Errorf("only one of --bump-patch|--bump-minor|--bump-major may be set")
@@ -92,6 +102,9 @@ func runBuild(args []string) error {
 		o.Bump = "major"
 	}
 	resolveComponentDirs(&o)
+	if o.Apple {
+		loadAppleAccount(o.RepoDir)
+	}
 	return buildRun(o)
 }
 
@@ -119,6 +132,35 @@ func resolveComponentDirs(o *buildOpts) {
 // bumps the component's version (registering a revert that fires on error or
 // --dry-run), runs the CVE gate unless NoVulncheck, then reuses orchestrate to
 // build+assemble+checksum+sign into <RepoDir>/dist/<stamp>/.
+
+// loadAppleAccount sets APPLE_ACCOUNT / APPLE_ACCOUNT_DIR from config/apple-account
+// when --apple/--public is set so modernech-sign picks the project account plugin.
+func loadAppleAccount(repoDir string) {
+	if os.Getenv("APPLE_ACCOUNT_DIR") != "" || os.Getenv("APPLE_ACCOUNT") != "" {
+		return
+	}
+	for _, name := range []string{"config/apple-account", "config/apple.account"} {
+		b, err := os.ReadFile(filepath.Join(repoDir, name))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			_ = os.Setenv("APPLE_ACCOUNT", line)
+			home := os.Getenv("APPLE_HOME")
+			if home == "" {
+				home = filepath.Join(os.Getenv("HOME"), "Workstation", "Apple")
+			}
+			_ = os.Setenv("APPLE_ACCOUNT_DIR", filepath.Join(home, line))
+			fmt.Fprintf(os.Stderr, "→ Apple account: %s\n", line)
+			return
+		}
+	}
+}
+
 func buildRun(o buildOpts) (err error) {
 	if o.DispatcherDir == "" {
 		o.DispatcherDir = o.RepoDir
