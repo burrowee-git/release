@@ -473,7 +473,12 @@ distribute_relay() {
 
     # (2) resolve the signing key (inline — resolve_sign_key is defined past the
     # DISTRIBUTE_ONLY dispatch) and re-sign SHA256SUMS over the latest.* names.
-    local sign_key shred_file=""
+    # The REAL key is decrypted into the SHARED ${SHRED_FILE}, never a local, so
+    # the shred_key trap registered above the DISTRIBUTE_ONLY dispatch covers
+    # this entry point: a minisign failure or a Ctrl-C between the decrypt and
+    # the cleanup must not leave the plaintext key on disk, and it must be
+    # overwritten rather than plain-rm'd (rm alone leaves it recoverable).
+    local sign_key
     if [ -n "${SIGN_KEY:-}" ]; then
         sign_key="${SIGN_KEY}"
         [ -f "${sign_key}" ] || { echo "✗ SIGN_KEY not found: ${sign_key}" >&2; exit 1; }
@@ -483,15 +488,15 @@ distribute_relay() {
     else
         [ -f "${AGE_IDENTITY}" ] || { echo "✗ age identity not found: ${AGE_IDENTITY}" >&2; exit 1; }
         [ -f "${AGE_KEY_AGE}" ] || { echo "✗ release.dp signing key not found: ${AGE_KEY_AGE}" >&2; exit 1; }
-        shred_file="$(mktemp "${TMPDIR:-/tmp}/burrowee-relay-key.XXXXXX")"
-        chmod 600 "${shred_file}"
-        age -d -i "${AGE_IDENTITY}" -o "${shred_file}" "${AGE_KEY_AGE}" \
+        SHRED_FILE="$(mktemp "${TMPDIR:-/tmp}/burrowee-relay-key.XXXXXX")"
+        chmod 600 "${SHRED_FILE}"
+        age -d -i "${AGE_IDENTITY}" -o "${SHRED_FILE}" "${AGE_KEY_AGE}" \
             || { echo "✗ failed to decrypt ${AGE_KEY_AGE}" >&2; exit 1; }
-        sign_key="${shred_file}"
+        sign_key="${SHRED_FILE}"
     fi
     ( cd "${latest_stage}" && minisign -S -s "${sign_key}" -m SHA256SUMS.txt \
         -t "burrowee relay ${stamp}" >/dev/null )
-    [ -n "${shred_file}" ] && rm -f "${shred_file}"
+    shred_key
 
     echo "Relay latest.* set + SHA256SUMS.txt + .minisig staged under ${latest_stage}:"
     # shellcheck disable=SC2012
@@ -644,6 +649,35 @@ distribute_only() {
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${comp}/${stamp}"
 }
 
+# ---- decrypted-key shredder + its trap --------------------------------------
+# MUST be registered BEFORE the DISTRIBUTE_ONLY dispatch below: distribute_relay
+# also age-decrypts the real signing key, and it runs and exits from inside that
+# dispatch. With the trap registered further down (past the dispatch) a minisign
+# failure or a Ctrl-C during the relay signing step left the plaintext key on
+# disk. Every path that decrypts the key assigns ${SHRED_FILE}, so this one
+# overwrite-then-unlink implementation covers all of them.
+SHRED_FILE=""
+shred_key() {
+    [ -n "${SHRED_FILE}" ] || return 0
+    [ -f "${SHRED_FILE}" ] || return 0
+    if command -v shred >/dev/null 2>&1; then
+        shred -u "${SHRED_FILE}" 2>/dev/null || rm -f "${SHRED_FILE}"
+    else
+        # no shred on macOS — overwrite then unlink. The decrypted signing key
+        # must NEVER survive on disk un-overwritten (rm alone leaves it
+        # recoverable), so a dd failure aborts loudly instead of silently
+        # rm'ing the still-readable key.
+        if ! dd if=/dev/urandom of="${SHRED_FILE}" bs=1k count=2 conv=notrunc 2>/dev/null; then
+            rm -f "${SHRED_FILE}"
+            echo "✗ FAILED to overwrite decrypted signing key at ${SHRED_FILE} — it may be recoverable; investigate" >&2
+            exit 1
+        fi
+        rm -f "${SHRED_FILE}"
+    fi
+    SHRED_FILE=""
+}
+trap shred_key EXIT INT TERM
+
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     distribute_only "${DIST_COMP}" "${DIST_STAMP}"
     exit 0
@@ -738,33 +772,12 @@ done
 # Runs before the first build so a vulnerable cut never produces a binary.
 vulncheck_gate
 
-# ---- resolve the signing key ------------------------------------------------
-# Sets SIGN_KEY. For the real key we age-decrypt into a chmod-600 tmpfile and
-# trap-shred it on EXIT. The TEST key is used as-is for --dry-run.
-SHRED_FILE=""
-shred_key() {
-    [ -n "${SHRED_FILE}" ] || return 0
-    [ -f "${SHRED_FILE}" ] || return 0
-    if command -v shred >/dev/null 2>&1; then
-        shred -u "${SHRED_FILE}" 2>/dev/null || rm -f "${SHRED_FILE}"
-    else
-        # no shred on macOS — overwrite then unlink. The decrypted signing key
-        # must NEVER survive on disk un-overwritten (rm alone leaves it
-        # recoverable), so a dd failure aborts loudly instead of silently
-        # rm'ing the still-readable key.
-        if ! dd if=/dev/urandom of="${SHRED_FILE}" bs=1k count=2 conv=notrunc 2>/dev/null; then
-            rm -f "${SHRED_FILE}"
-            echo "✗ FAILED to overwrite decrypted signing key at ${SHRED_FILE} — it may be recoverable; investigate" >&2
-            exit 1
-        fi
-        rm -f "${SHRED_FILE}"
-    fi
-    SHRED_FILE=""
-}
 # revert_dispatcher_version restores versions/burrowee when a real release
 # bumped it (below) but died before the first component's marker commit staged
 # it in. On success the bump is committed (no staged diff) → this is a no-op;
-# dry-runs never bump → also a no-op.
+# dry-runs never bump → also a no-op. It is deliberately NOT part of the
+# shred_key trap above: --distribute-only never bumps the dispatcher version, so
+# adding this to that path could only touch an operator's unrelated staging.
 revert_dispatcher_version() {
     git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee 2>/dev/null && return 0
     git -C "${REPO_ROOT}" restore --staged versions/burrowee 2>/dev/null || true
@@ -772,6 +785,10 @@ revert_dispatcher_version() {
 }
 trap 'shred_key; revert_dispatcher_version' EXIT INT TERM
 
+# ---- resolve the signing key ------------------------------------------------
+# Sets SIGN_KEY. For the real key we age-decrypt into the chmod-600 ${SHRED_FILE}
+# tmpfile that the trap registered above the DISTRIBUTE_ONLY dispatch shreds.
+# The TEST key is used as-is for --dry-run.
 resolve_sign_key() {
     if [ -n "${SIGN_KEY:-}" ]; then
         [ -f "${SIGN_KEY}" ] || { echo "✗ SIGN_KEY not found: ${SIGN_KEY}" >&2; exit 1; }
