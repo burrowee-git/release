@@ -261,27 +261,51 @@ EOF
 # the design doc). All steps are best-effort so a supervisor-less host (e.g. a
 # container) still completes the install; the unit files on disk are the
 # durable outcome.
+#
+# BURROWEE_NO_RESTART=1 stages the units (installed/enabled) without starting
+# or restarting anything already running — the local-stage counterpart to the
+# gateway's `update`/`reinstall` verbs without --auto (design §4.4). Fresh
+# install onto a host with nothing running yet needs at least an initial
+# bootstrap/enable so the service can be started later; only the "kick a
+# possibly-already-running unit" steps are skipped.
 # ---------------------------------------------------------------------------
 load_units() {
     case "$(uname -s)" in
     Darwin)
-        run_root launchctl bootout   "system/com.burrowee.gateway"          2>/dev/null || true
-        run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
-        run_root launchctl bootout   "system/com.burrowee.gateway.updater"  2>/dev/null || true
-        run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+        if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
+            # Stage only: bootstrap lays each unit in place (and fails harmlessly
+            # for an already-loaded label) without booting anything out from
+            # under a running instance. The two branches are exclusive — running
+            # bootstrap before the bootout+bootstrap pair would start, stop, then
+            # restart the service on every fresh install.
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+            echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
+        else
+            run_root launchctl bootout   "system/com.burrowee.gateway"          2>/dev/null || true
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
+            run_root launchctl bootout   "system/com.burrowee.gateway.updater"  2>/dev/null || true
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+        fi
         ;;
     Linux)
         run_root systemctl daemon-reload 2>/dev/null || true
-        run_root systemctl enable --now burrowee-gateway.service         2>/dev/null || true
-        run_root systemctl enable --now burrowee-gateway-updater.service 2>/dev/null || true
-        # A reinstall over an already-running (possibly stale) updater must advance
-        # it to the freshly-installed binary — `enable --now` no-ops a running unit,
-        # so restart it explicitly. Otherwise the stale updater keeps running old
-        # code and future pushes deadlock. (load_units is never called on the
-        # updater's own push path — BURROWEE_UPDATE renders units without loading
-        # them — so this can never self-kill. The Darwin branch above already
-        # advances the updater via its bootout+bootstrap.)
-        run_root systemctl restart burrowee-gateway-updater.service 2>/dev/null || true
+        if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
+            run_root systemctl enable burrowee-gateway.service         2>/dev/null || true
+            run_root systemctl enable burrowee-gateway-updater.service 2>/dev/null || true
+            echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
+        else
+            run_root systemctl enable --now burrowee-gateway.service         2>/dev/null || true
+            run_root systemctl enable --now burrowee-gateway-updater.service 2>/dev/null || true
+            # A reinstall over an already-running (possibly stale) updater must advance
+            # it to the freshly-installed binary — `enable --now` no-ops a running unit,
+            # so restart it explicitly. Otherwise the stale updater keeps running old
+            # code and future pushes deadlock. (load_units is never called on the
+            # updater's own push path — BURROWEE_UPDATE renders units without loading
+            # them — so this can never self-kill. The Darwin branch above already
+            # advances the updater via its bootout+bootstrap.)
+            run_root systemctl restart burrowee-gateway-updater.service 2>/dev/null || true
+        fi
         ;;
     esac
 }
