@@ -72,5 +72,9 @@ func buildHeaders(req *http.Request) (signedHeaders, canonicalHeaders string) {
 	return shBuf.String(), chBuf.String()
 }
 
-func hmacSHA256(key, data []byte) []byte { m := hmac.New(sha256.New, key); m.Write(data); return m.Sum(nil) }
-func hashHex(b []byte) string            { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+func hmacSHA256(key, data []byte) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write(data)
+	return m.Sum(nil)
+}
+func hashHex(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }

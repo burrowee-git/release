@@ -30,7 +30,8 @@
 #                                ONLY when github.com / api.github.com are unreachable
 #                                (default: gh-proxy.org cdn.gh-proxy.org v6.gh-proxy.org
 #                                gh-proxy.com; set empty to disable). minisign + sha256
-#                                verified, so an untrusted mirror cannot tamper undetected.
+#                                verified AND bound to the resolved tag, so an untrusted
+#                                mirror can neither tamper nor roll back undetected.
 
 set -eu
 
@@ -51,8 +52,10 @@ CONSOLE_URL="${CONSOLE_URL:-https://console.burrowee.com}"
 # GitHub HTTP mirrors, tried in order ONLY as a fallback when github.com /
 # api.github.com are unreachable (e.g. networks that block or throttle GitHub).
 # Each is tried as <mirror>/<original-https-github-url> until one succeeds; the
-# downloaded bytes are still minisign- + sha256-verified below, so an untrusted
-# mirror cannot inject tampered bytes undetected. Space-separated list.
+# downloaded bytes are still minisign- + sha256-verified below AND bound to the
+# resolved $TAG via the SIGNED trusted comment, so an untrusted mirror can
+# neither inject tampered bytes nor answer with an older, genuinely signed
+# release (a silent version rollback) undetected. Space-separated list.
 # ${VAR-default} (not :-) lets `BURROWEE_GH_PROXY=` explicitly disable the
 # mirrors while an unset value gets the default. Never used when DL_BASE is set.
 GH_PROXIES="${BURROWEE_GH_PROXY-https://gh-proxy.org https://cdn.gh-proxy.org https://v6.gh-proxy.org https://gh-proxy.com}"
@@ -240,8 +243,9 @@ dl() {
     # GH_PROXIES HTTP mirror in turn (no auth, helps GitHub-blocked networks).
     # R2 fallback (grant gate): if all fail AND `burrowee download-url` is
     # available with a device grant, resolve a presigned URL and download from it.
-    # Verification (minisign + sha256) is unchanged regardless of download source,
-    # so neither the mirror nor R2 can inject tampered bytes undetected.
+    # Verification (minisign + sha256 + tag binding) is unchanged regardless of
+    # download source, so neither the mirror nor R2 can inject tampered bytes or
+    # substitute an older signed release undetected.
     #
     # Only the grant-gated R2 fallback relies on `burrowee` being on PATH. A plain
     # `curl install.sh | sh` with GitHub down and no `burrowee` fails with a clear
@@ -338,10 +342,33 @@ fi
 
 # ---- VERIFY (the trust gate) --------------------------------------------
 info "verifying signature"
-# 1) signature over the sums file, using the baked pubkey (inline, no key fetch)
-"$MINISIGN" -V -P "$PUBKEY" -m "$TMP/SHA256SUMS.txt" -x "$TMP/SHA256SUMS.txt.minisig" >/dev/null \
+# 1) signature over the sums file, using the baked pubkey (inline, no key fetch).
+# Capture stdout — minisign prints the SIGNED "Trusted comment:" line there, and
+# that comment is the only version-bearing field in the whole verified set (the
+# zip name and SHA256SUMS.txt are both version-independent). stderr is left
+# attached so a verification failure still shows minisign's own diagnostics.
+verify_out="$("$MINISIGN" -V -P "$PUBKEY" -m "$TMP/SHA256SUMS.txt" -x "$TMP/SHA256SUMS.txt.minisig")" \
     || fail "signature verification failed — aborting (refusing to install unverified bytes)"
 ok "minisign signature valid"
+
+# 1b) BIND the verified bytes to the resolved $TAG. Signature + checksum alone
+# prove the bytes are a genuine Burrowee release — NOT that they are the release
+# we asked for. Any download source (notably an untrusted GH_PROXY mirror, but
+# equally a stale CDN or a hostile console catalog) can answer with an OLDER,
+# genuinely signed triple — zip + SHA256SUMS.txt + .minisig all mutually
+# consistent — and every check above passes: a silent rollback onto a
+# known-vulnerable build. The trusted comment is covered by the signature, so it
+# cannot be swapped for a different version's; releases are stamped by
+# tools/release.sh / rkit as `burrowee <comp> <stamp>` where <stamp> is the tag
+# minus its "<comp>/" prefix. Mismatch (or a release predating the stamp
+# convention) fails closed.
+trusted="$(printf '%s\n' "$verify_out" | sed -n 's/^Trusted comment: //p')"
+expect="burrowee $COMP ${TAG#*/}"
+[ "$trusted" = "$expect" ] || fail "version binding failed — the signed release is \"$trusted\" but \"$expect\" was requested.
+    Refusing to install: this is what a rollback to an older signed release looks like.
+    Retry (a mirror may be serving a stale release), or pin the version you want
+    and install again."
+ok "version binding verified ($TAG)"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
