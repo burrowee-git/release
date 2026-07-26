@@ -391,3 +391,89 @@ func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
 		t.Errorf("binary swap should still succeed: got %q", got)
 	}
 }
+
+// serveBins is BINS minus the two updater-owned binaries that update mode never
+// touches, in BINS order — the exact set --force must re-place.
+var serveBins = []string{
+	"burrowee",
+	"burrowee-gateway",
+	"burrowee-gateway-console",
+	"burrowee-register",
+}
+
+// TestUpdateForceReplacesIdenticalBinaries pins the BURROWEE_FORCE=1 branch,
+// which INVERTS what TestUpdateAllIdenticalIsNoop pins and shipped with no test
+// of its own. `gateway update --force` onto the already-installed version has
+// byte-identical binaries, so the sha256 diff would place nothing and the
+// operator's "reinstall completely" would be a silent no-op.
+//
+// Two halves, and the second is the one a careless test misses: --force must
+// re-place every SERVE binary, and must STILL skip the cli/updater pair. FORCE
+// bypasses the sha256 check, not the ownership rule — those two are updated
+// out-of-band by the updater, and re-placing the updater from inside a script
+// the updater is running is exactly what the exclusion exists to prevent.
+func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+
+	// Installed and staged content are IDENTICAL for every binary — without
+	// FORCE this is the no-op case (TestUpdateAllIdenticalIsNoop).
+	same := allBinsContent("identical-content")
+	seedInstalled(t, binDir, same)
+	stageDir := stageBundle(t, same)
+
+	// Mark the two updater-owned binaries so a swap would be detectable even
+	// though the staged bytes match: if update mode places them, the installed
+	// file loses this marker.
+	for _, b := range []string{"burrowee-gateway-cli", "burrowee-gateway-updater"} {
+		seedInstalled(t, binDir, map[string]string{b: "UPDATER-OWNED-" + b})
+	}
+
+	out := runUpdate(t, stageDir, home, stub,
+		[]string{"BURROWEE_UPDATE=1", "BURROWEE_FORCE=1"},
+		"--version", "v2",
+	)
+
+	// Half 1: every serve binary is named, in BINS order.
+	line := lastLineWithPrefix(out, "BURROWEE_CHANGED=")
+	want := "BURROWEE_CHANGED=" + strings.Join(serveBins, " ")
+	if line != want {
+		t.Fatalf("change-set = %q, want %q\noutput:\n%s", line, want, out)
+	}
+
+	// Half 2: the cli/updater pair is STILL omitted — FORCE bypasses the sha256
+	// check, not the ownership rule.
+	for _, b := range []string{"burrowee-gateway-cli", "burrowee-gateway-updater"} {
+		if strings.Contains(line, b) {
+			t.Errorf("--force must not claim %s: %q", b, line)
+		}
+		if got := readInstalled(t, binDir, b); got != "UPDATER-OWNED-"+b {
+			t.Errorf("--force swapped %s (content %q) — it is updated out-of-band", b, got)
+		}
+	}
+
+	// And the placement really happened: each serve binary is present and
+	// executable after the forced re-place, not merely listed.
+	for _, b := range serveBins {
+		info, err := os.Stat(filepath.Join(binDir, b))
+		if err != nil {
+			t.Errorf("serve binary %s missing after --force: %v", b, err)
+			continue
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Errorf("serve binary %s is not executable after --force: %v", b, info.Mode())
+		}
+	}
+
+	// No backup files may survive a successful forced update.
+	entries, err := os.ReadDir(binDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak-") {
+			t.Errorf("backup file left behind after a successful --force: %s", e.Name())
+		}
+	}
+}

@@ -102,6 +102,7 @@ config/console-pub.hex     ← live console signing pubkey, baked into edge buil
 skills/                    ← *-install / *-setup SKILL.md packages
 site/index.html            ← release.burrowee.com landing page
 tools/                     ← version.sh, build.sh, gen-bootstraps.sh, release.sh
+tools/RUNBOOK.md           ← operator notes on hazards the tooling does not prevent
 burrowee-release.pub       ← minisign signing public key (added at activation)
 ```
 

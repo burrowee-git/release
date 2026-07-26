@@ -63,6 +63,8 @@ cd "${REPO_ROOT}"
 
 # shellcheck source=tools/vulncheck.sh
 source "${REPO_ROOT}/tools/vulncheck.sh"
+# shellcheck source=tools/apple_sign.sh
+source "${REPO_ROOT}/tools/apple_sign.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -109,25 +111,9 @@ WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
 
-# --- Apple account plugin (project-specific) ---------------------------------
-# config/apple-account: one line = folder name under ~/Workstation/Apple/
-# Exports APPLE_ACCOUNT + APPLE_ACCOUNT_DIR for modernech-sign.
-load_apple_account() {
-    local conf="${REPO_ROOT}/config/apple-account"
-    [ -f "$conf" ] || conf="${REPO_ROOT}/config/apple.account"
-    [ -f "$conf" ] || return 0
-    local name
-    name="$(sed -n '/^[[:space:]]*#/d;/^[[:space:]]*$/d;p;q' "$conf" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    [ -n "$name" ] || return 0
-    export APPLE_ACCOUNT="$name"
-    export APPLE_HOME="${APPLE_HOME:-$HOME/Workstation/Apple}"
-    export APPLE_ACCOUNT_DIR="${APPLE_ACCOUNT_DIR:-$APPLE_HOME/$name}"
-    if [ ! -d "$APPLE_ACCOUNT_DIR" ]; then
-        echo "⚠ Apple account folder missing: $APPLE_ACCOUNT_DIR (from $conf)" >&2
-    else
-        echo "→ Apple account: $APPLE_ACCOUNT ($APPLE_ACCOUNT_DIR)" >&2
-    fi
-}
+# Apple account resolution + the Developer-ID reachability predicates live in
+# tools/apple_sign.sh (sourced above) so tools/apple_sign.test.sh can exercise
+# them without any part of the release path running.
 
 APPLE_SIGN=""
 VULNCHECK=""
@@ -178,7 +164,13 @@ if [ "${DISTRIBUTE_ONLY}" != 1 ]; then
     _mode="$(resolve_release_mode "${APPLE_SIGN}" "${VULNCHECK}" "${PROMPT_ANS}")"
     APPLE_SIGN="${_mode%%|*}"; VULNCHECK="${_mode#*|}"
     export APPLE_SIGN VULNCHECK
-[ -n "${APPLE_SIGN}" ] && load_apple_account
+    # Indented into the block it belongs to, and an explicit `exit 1` rather than
+    # an AND-OR list: a column-0 `[ … ] && load_apple_account` read as if it sat
+    # outside this `if`, and left the resolution's failure as the block's exit
+    # status instead of stopping the cut.
+    if [ -n "${APPLE_SIGN}" ]; then
+        load_apple_account "${REPO_ROOT}" || exit 1
+    fi
 fi
 
 # ---- config / defaults ------------------------------------------------------
@@ -682,10 +674,13 @@ if [ -n "${APPLE_SIGN}" ]; then
     # cut from a harness/SSH session, whose macOS security session is detached (its
     # keychain search list is System-only, so the login keychain is unreachable).
     # modernech-sign stays the source of truth for WHICH backend runs; this only
-    # fails fast when neither backend could possibly work.
-    if ! command -v rcodesign >/dev/null 2>&1 \
-        && ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$("${SIGN_BIN}" id)"; then
-        echo "✗ Developer ID identity unreachable: $("${SIGN_BIN}" id)" >&2
+    # fails fast when neither backend could possibly work. Both predicates live in
+    # tools/apple_sign.sh — resolve_sign_identity refuses an EMPTY identity (the
+    # old inline `grep -q "$("${SIGN_BIN}" id)"` degraded to `grep -q ""` and
+    # passed vacuously), and sign_identity_reachable does the literal match.
+    SIGN_ID="$(resolve_sign_identity "${SIGN_BIN}")" || exit 1
+    if ! sign_identity_reachable "${SIGN_ID}"; then
+        echo "✗ Developer ID identity unreachable: ${SIGN_ID}" >&2
         echo "  rcodesign (disk-key backend) is not on PATH and the identity is not in this session's keychain." >&2
         echo "  Install rcodesign (cargo install apple-codesign) or sign from a GUI Terminal session." >&2
         exit 1

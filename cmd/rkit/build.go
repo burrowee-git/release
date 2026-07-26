@@ -103,7 +103,12 @@ func runBuild(args []string) error {
 	}
 	resolveComponentDirs(&o)
 	if o.Apple {
-		loadAppleAccount(o.RepoDir)
+		// Fatal, not advisory: an unresolved account means the Developer-ID path
+		// runs with no account plugin, producing an ad-hoc signed build the
+		// operator believes is Developer-ID signed and notarized.
+		if err := loadAppleAccount(o.RepoDir); err != nil {
+			return err
+		}
 	}
 	return buildRun(o)
 }
@@ -133,13 +138,61 @@ func resolveComponentDirs(o *buildOpts) {
 // --dry-run), runs the CVE gate unless NoVulncheck, then reuses orchestrate to
 // build+assemble+checksum+sign into <RepoDir>/dist/<stamp>/.
 
-// loadAppleAccount sets APPLE_ACCOUNT / APPLE_ACCOUNT_DIR from config/apple-account
-// when --apple/--public is set so modernech-sign picks the project account plugin.
-func loadAppleAccount(repoDir string) {
-	if os.Getenv("APPLE_ACCOUNT_DIR") != "" || os.Getenv("APPLE_ACCOUNT") != "" {
-		return
+// appleAccountFiles are the config file names, in precedence order, that name
+// the Apple account plugin folder (one line: the folder name).
+var appleAccountFiles = []string{"config/apple-account", "config/apple.account"}
+
+// loadAppleAccount sets APPLE_ACCOUNT / APPLE_ACCOUNT_DIR / APPLE_HOME from
+// config/apple-account so modernech-sign picks the project account plugin. It is
+// called only when --apple/--public is set, so every failure is fatal: entering
+// the Developer-ID path with no account resolved produces an AD-HOC signed
+// build while the operator believes it is Developer-ID signed and notarized.
+// It used to return silently on every failure mode and runBuild ignored that it
+// had done nothing.
+//
+// APPLE_HOME (the directory holding one folder per account) must come from the
+// environment — no operator's machine layout is baked into this public repo, and
+// a $HOME-derived default silently becomes a RELATIVE path when HOME is unset
+// (launchd, cron, a detached harness session). tools/release.sh exports it.
+func loadAppleAccount(repoDir string) error {
+	if dir := os.Getenv("APPLE_ACCOUNT_DIR"); dir != "" {
+		fmt.Fprintf(os.Stderr, "→ Apple account dir (from APPLE_ACCOUNT_DIR): %s\n", dir)
+		return nil
 	}
-	for _, name := range []string{"config/apple-account", "config/apple.account"} {
+	// An operator cutting under a second account exports APPLE_ACCOUNT; honour
+	// it rather than overriding it from the repo's config file. Same precedence
+	// as tools/release.sh, which is the other entry point to this resolution.
+	account := os.Getenv("APPLE_ACCOUNT")
+	if account == "" {
+		var err error
+		if account, err = readAppleAccountFile(repoDir); err != nil {
+			return err
+		}
+	}
+	home := os.Getenv("APPLE_HOME")
+	if home == "" {
+		return fmt.Errorf("apple signing requested but APPLE_HOME is not set: "+
+			"export it as the directory holding one folder per Apple account (it is then "+
+			"joined with %q), or set APPLE_ACCOUNT_DIR directly — tools/release.sh exports both", account)
+	}
+	if !filepath.IsAbs(home) {
+		return fmt.Errorf("apple signing requested but APPLE_HOME=%q is not an absolute path", home)
+	}
+	accountDir := filepath.Join(home, account)
+	if _, err := os.Stat(accountDir); err != nil {
+		return fmt.Errorf("apple signing requested but the account plugin folder is missing: %s: %w", accountDir, err)
+	}
+	_ = os.Setenv("APPLE_ACCOUNT", account)
+	_ = os.Setenv("APPLE_HOME", home)
+	_ = os.Setenv("APPLE_ACCOUNT_DIR", accountDir)
+	fmt.Fprintf(os.Stderr, "→ Apple account: %s (%s)\n", account, accountDir)
+	return nil
+}
+
+// readAppleAccountFile returns the account folder name from the first readable
+// config file, or an error naming every path it tried.
+func readAppleAccountFile(repoDir string) (string, error) {
+	for _, name := range appleAccountFiles {
 		b, err := os.ReadFile(filepath.Join(repoDir, name))
 		if err != nil {
 			continue
@@ -149,16 +202,14 @@ func loadAppleAccount(repoDir string) {
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
-			_ = os.Setenv("APPLE_ACCOUNT", line)
-			home := os.Getenv("APPLE_HOME")
-			if home == "" {
-				home = filepath.Join(os.Getenv("HOME"), "Workstation", "Apple")
-			}
-			_ = os.Setenv("APPLE_ACCOUNT_DIR", filepath.Join(home, line))
-			fmt.Fprintf(os.Stderr, "→ Apple account: %s\n", line)
-			return
+			return line, nil
 		}
+		return "", fmt.Errorf("apple signing requested but %s holds no account name (only blank/comment lines)",
+			filepath.Join(repoDir, name))
 	}
+	return "", fmt.Errorf("apple signing requested but no Apple account resolved: create %s with the account "+
+		"plugin folder name, or export APPLE_ACCOUNT / APPLE_ACCOUNT_DIR",
+		filepath.Join(repoDir, appleAccountFiles[0]))
 }
 
 func buildRun(o buildOpts) (err error) {

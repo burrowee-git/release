@@ -47,7 +47,11 @@ skills/<name>/SKILL.md          12 self-contained AI-agent skills (burrowee,
                                  linked from the ai repo's skill index
 versions/                       per-component SemVer source of truth
 tools/                          build/version/bootstrap-generation scripts + the
-                                 operator-run release.sh orchestrator (see Scope above)
+                                 operator-run release.sh orchestrator (see Scope above);
+                                 apple_sign.sh + vulncheck.sh hold release.sh's
+                                 testable predicates, each with a *.test.sh beside it;
+                                 RUNBOOK.md = operator notes on hazards the tooling
+                                 does not prevent
 ops/                            nginx/systemd unit files for the hosting side (reference only)
 ```
 
