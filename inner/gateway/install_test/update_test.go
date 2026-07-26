@@ -1,115 +1,17 @@
 // Package install_test: D3b tests for BURROWEE_UPDATE mode of install.sh.
 // Tests verify per-binary sha256 change detection, transactional backup/restore,
-// and the BURROWEE_CHANGED=<names> last-line contract.
+// and the BURROWEE_CHANGED=<names> last-line contract. The fixture these
+// assertions run on — binary sets, seed/stage/read helpers, install.sh runners —
+// lives in update_harness_test.go.
 package install_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
-
-// allBins is the full set of binaries declared in BINS inside install.sh.
-var allBins = []string{
-	"burrowee",
-	"burrowee-gateway",
-	"burrowee-gateway-cli",
-	"burrowee-gateway-console",
-	"burrowee-register",
-	"burrowee-gateway-updater",
-}
-
-// seedInstalled writes each binary name→content into binDir with mode 0755.
-func seedInstalled(t *testing.T, binDir string, contents map[string]string) {
-	t.Helper()
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	for name, body := range contents {
-		p := filepath.Join(binDir, name)
-		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-			t.Fatalf("seed installed %s: %v", name, err)
-		}
-	}
-}
-
-// stageBundle creates a temp directory containing each binary name→content
-// and returns that directory (used as cwd when running install.sh).
-func stageBundle(t *testing.T, contents map[string]string) string {
-	t.Helper()
-	staged := t.TempDir()
-	for name, body := range contents {
-		p := filepath.Join(staged, name)
-		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-			t.Fatalf("stage bundle %s: %v", name, err)
-		}
-	}
-	return staged
-}
-
-// readInstalled reads and returns the content of a binary from binDir.
-func readInstalled(t *testing.T, binDir, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(binDir, name))
-	if err != nil {
-		t.Fatalf("readInstalled %s: %v", name, err)
-	}
-	return string(b)
-}
-
-// lastLineWithPrefix finds the last line in output that starts with prefix.
-func lastLineWithPrefix(output, prefix string) string {
-	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	result := ""
-	for _, l := range lines {
-		if strings.HasPrefix(l, prefix) {
-			result = l
-		}
-	}
-	return result
-}
-
-// runUpdate runs install.sh in BURROWEE_UPDATE=1 mode with cwd=stageDir.
-// env contains extra "KEY=VALUE" strings. scriptArgs are passed as positional
-// arguments to the script (e.g. "--version", "v2"). Returns combined output;
-// fails the test on non-zero exit.
-func runUpdate(t *testing.T, stageDir, home, stubDir string, env []string, scriptArgs ...string) string {
-	t.Helper()
-	args := append([]string{installShPath(t)}, scriptArgs...)
-	cmd := exec.Command("sh", args...)
-	cmd.Dir = stageDir
-	cmd.Env = installShEnv(home, stubDir, env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("install.sh output:\n%s", out)
-		t.Fatalf("install.sh failed: %v", err)
-	}
-	return string(out)
-}
-
-// runUpdateExpectFail is like runUpdate but expects a non-zero exit.
-// Returns combined output without failing the test.
-func runUpdateExpectFail(t *testing.T, stageDir, home, stubDir string, env []string, scriptArgs ...string) string {
-	t.Helper()
-	args := append([]string{installShPath(t)}, scriptArgs...)
-	cmd := exec.Command("sh", args...)
-	cmd.Dir = stageDir
-	cmd.Env = installShEnv(home, stubDir, env...)
-	out, _ := cmd.CombinedOutput()
-	return string(out)
-}
-
-// allBinsContent returns a map of all 5 bins each mapped to the given body.
-func allBinsContent(body string) map[string]string {
-	m := make(map[string]string, len(allBins))
-	for _, b := range allBins {
-		m[b] = body
-	}
-	return m
-}
 
 // TestUpdateReplacesOnlyChangedBinaries verifies that when only one binary
 // differs (burrowee-gateway), only that binary is replaced; the others stay
@@ -188,17 +90,6 @@ func TestUpdateAllIdenticalIsNoop(t *testing.T) {
 	line := lastLineWithPrefix(out, "BURROWEE_CHANGED=")
 	if line != "BURROWEE_CHANGED=" {
 		t.Fatalf("change-set = %q, want BURROWEE_CHANGED= (empty)", line)
-	}
-}
-
-// writeLaunchctlStub drops a fake `launchctl` into dir that appends its argv
-// to dir/launchctl.calls, so a test can assert whether install.sh restarted
-// services.
-func writeLaunchctlStub(t *testing.T, dir string) {
-	t.Helper()
-	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + filepath.Join(dir, "launchctl.calls") + "\"\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(dir, "launchctl"), []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -390,15 +281,6 @@ func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
 	if got := readInstalled(t, binDir, "burrowee-gateway"); got != "gw-v2-content" {
 		t.Errorf("binary swap should still succeed: got %q", got)
 	}
-}
-
-// serveBins is BINS minus the two updater-owned binaries that update mode never
-// touches, in BINS order — the exact set --force must re-place.
-var serveBins = []string{
-	"burrowee",
-	"burrowee-gateway",
-	"burrowee-gateway-console",
-	"burrowee-register",
 }
 
 // TestUpdateForceReplacesIdenticalBinaries pins the BURROWEE_FORCE=1 branch,

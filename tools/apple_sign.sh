@@ -8,11 +8,16 @@
 
 # load_apple_account <repo_root>
 # Resolves the Apple account plugin and exports APPLE_ACCOUNT, APPLE_HOME and
-# APPLE_ACCOUNT_DIR for modernech-sign and for `rkit build` (which reads them
-# rather than re-deriving them — this file is the single owner of the machine
-# layout; the Go side requires APPLE_HOME and bakes no default, the repo being
-# public). <repo_root>/config/apple-account holds one line: the folder name
-# under $APPLE_HOME.
+# APPLE_ACCOUNT_DIR for modernech-sign. <repo_root>/config/apple-account holds
+# one line: the folder name under $APPLE_HOME.
+#
+# `rkit build` carries its OWN copy of this resolution (cmd/rkit/apple_account.go)
+# and does not inherit this one: release.sh never invokes rkit — rkit produces,
+# release.sh distributes what rkit staged. So the two are independent
+# implementations that share a PRECEDENCE contract, not an environment:
+#   APPLE_ACCOUNT_DIR (explicit) → APPLE_ACCOUNT (explicit) → config/apple-account.
+# This copy keeps the operator-machine default for APPLE_HOME; the Go copy bakes
+# no default (public repo) and requires it to be set and absolute.
 #
 # Called only when Apple signing was requested, so every unresolved state
 # returns 1: continuing produces an AD-HOC signed cut while the operator
@@ -58,13 +63,44 @@ load_apple_account() {
 # matches the first line of any output, so the gate passed VACUOUSLY with no
 # reachable identity at all. The surrounding `if ! … && ! …` also suppresses
 # set -e/pipefail, so a failing `${SIGN_BIN} id` could not abort on its own.
+# Accepting any non-empty string is still too loose: a one-line diagnostic, a
+# usage message, or "0 valid identities found" would all be spliced into the
+# keychain match as a pattern that matches nothing, turning a misconfiguration
+# into the misleading "identity unreachable" error instead of "no identity".
+# The shape is not guessed — `modernech-sign id` prints exactly one line:
+#
+#     Developer ID Application: Modernech LLC (4J6JX598BJ)
+#
+# which is Apple's own canonical certificate common name, the same string
+# `security find-identity` quotes. So require exactly that: one line, the
+# "Developer ID Application: " prefix (this gate exists only for Developer-ID
+# signing — --apple means that tier and no other), a non-empty organisation, and
+# a trailing 10-character Apple Team ID in parentheses. If modernech-sign is ever
+# taught another signing tier, this is an intentional edit, not a silent pass.
+apple_identity_pattern='^Developer ID Application: .+ \([A-Z0-9]{10}\)$'
+
 resolve_sign_identity() {
     local sign_bin="$1" id
     id="$("${sign_bin}" id 2>/dev/null || true)"
+    # Trim surrounding whitespace: " " is non-empty but is not an identity.
+    id="$(printf '%s' "${id}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     if [ -z "${id}" ]; then
         echo "✗ --apple set but '${sign_bin} id' produced no identity" >&2
         echo "  usually APPLE_ACCOUNT_DIR points at a missing account plugin: ${APPLE_ACCOUNT_DIR:-<unset>}" >&2
         echo "  refusing to continue: the Developer ID gate cannot be checked without an identity." >&2
+        return 1
+    fi
+    if [ "$(printf '%s\n' "${id}" | wc -l | tr -d ' ')" != 1 ]; then
+        echo "✗ --apple set but '${sign_bin} id' printed more than one line:" >&2
+        printf '%s\n' "${id}" | sed 's/^/    /' >&2
+        echo "  expected a single Developer ID identity; refusing to continue." >&2
+        return 1
+    fi
+    if ! [[ ${id} =~ ${apple_identity_pattern} ]]; then
+        echo "✗ --apple set but '${sign_bin} id' did not print a Developer ID identity:" >&2
+        echo "    ${id}" >&2
+        echo "  expected 'Developer ID Application: <Org> (<10-char Team ID>)'." >&2
+        echo "  refusing to continue: this string would be matched against the keychain as-is." >&2
         return 1
     fi
     printf '%s' "${id}"
@@ -73,15 +109,28 @@ resolve_sign_identity() {
 # sign_identity_reachable <identity>
 # True when <identity> could actually be used to sign: either rcodesign is on
 # PATH (modernech-sign's disk-key backend, where the identity never enters a
-# keychain) or the identity is in this session's codesigning keychain.
+# keychain) or the identity appears in this session's codesigning keychain.
 #
-# -F: the identity is a literal string ("Developer ID Application: X (TEAMID)"),
-# not a regex — its parentheses must not be interpreted. --: it must never be
-# read as an option. An empty argument is rejected outright rather than matching
-# everything.
+# The keychain listing is CAPTURED and matched with `case`, not piped into grep.
+# Two reasons:
+#
+#   1. `security … | grep -q` is a SIGPIPE hazard. grep -q exits the instant it
+#      matches, so `security` can be killed mid-write and exit 141 — and under
+#      release.sh's `set -euo pipefail` the pipeline then reports 141 even though
+#      the identity WAS found, failing a legitimate cut at random. Observed as a
+#      flaky 141 in this function's own unit test.
+#   2. `case` with a QUOTED variable matches literally, so the identity's
+#      parentheses cannot be read as a pattern — the same guarantee `grep -F`
+#      gave, without depending on grep's flags or on `--` option handling.
+#
+# An empty identity is rejected outright rather than matching everything.
 sign_identity_reachable() {
-    local id="$1"
+    local id="$1" listing
     [ -n "${id}" ] || return 1
     command -v rcodesign >/dev/null 2>&1 && return 0
-    security find-identity -v -p codesigning 2>/dev/null | grep -qF -- "${id}"
+    listing="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    case "${listing}" in
+        *"${id}"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }

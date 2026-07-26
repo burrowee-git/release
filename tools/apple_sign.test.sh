@@ -74,6 +74,45 @@ restore_path
 check "real identity (rc)" "${rc}" "0"
 check "real identity is printed verbatim" "${out}" "Developer ID Application: Acme Corp (AB12CD34EF)"
 
+# Accepting any NON-EMPTY string was still too loose: a one-line diagnostic or a
+# "0 valid identities found" would be spliced into the keychain match as a
+# pattern matching nothing, reporting "identity unreachable" for what is really a
+# misconfiguration. The accepted shape is the real one — `modernech-sign id`
+# prints exactly `Developer ID Application: <Org> (<10-char Team ID>)`.
+for bogus in \
+    "0 valid identities found" \
+    "error: account plugin not found" \
+    "Developer ID Application: Acme Corp" \
+    "Developer ID Application: Acme Corp (SHORT)" \
+    "Apple Development: Acme Corp (AB12CD34EF)" \
+    "   " ; do
+    stub modernech-sign 0 "${bogus}"
+    only_stubs
+    out="$(resolve_sign_identity modernech-sign 2>&1)"; rc=$?
+    restore_path
+    check "non-identity output rejected: '${bogus}'" "${rc}" "1"
+done
+
+# Multi-line output is rejected even when one of the lines IS a valid identity:
+# the whole blob would become the keychain pattern.
+stub modernech-sign 0 "warning: keychain unavailable, falling back" \
+                      "Developer ID Application: Acme Corp (AB12CD34EF)"
+only_stubs
+out="$(resolve_sign_identity modernech-sign 2>&1)"; rc=$?
+restore_path
+check "multi-line output is rejected (rc)" "${rc}" "1"
+check_contains "multi-line output names the cause" "${out}" "printed more than one line"
+
+# Negative control for the tightening: a real identity with surrounding
+# whitespace and an organisation containing punctuation must still be ACCEPTED,
+# so the pattern is not so strict that it rejects legitimate output.
+stub modernech-sign 0 "  Developer ID Application: Acme Corp, L.L.C. (AB12CD34EF)  "
+only_stubs
+out="$(resolve_sign_identity modernech-sign 2>/dev/null)"; rc=$?
+restore_path
+check "punctuated org + padding accepted (rc)" "${rc}" "0"
+check "padding trimmed" "${out}" "Developer ID Application: Acme Corp, L.L.C. (AB12CD34EF)"
+
 echo "--- sign_identity_reachable -------------------------------------------"
 
 ID="Developer ID Application: Acme Corp (AB12CD34EF)"
@@ -104,8 +143,25 @@ sign_identity_reachable "${ID}"; rc=$?
 restore_path
 check "identity present in the keychain" "${rc}" "0"
 
-# Negative control for -F: a REGEX that would match the identity if the pattern
-# were interpreted must NOT be treated as a match.
+# Repeat the found case many times: `security … | grep -q` used to return 141
+# (SIGPIPE) at random when grep short-circuited before the producer finished
+# writing — and under release.sh's `set -euo pipefail` that failed a legitimate
+# cut. The listing is captured and matched with `case` now, so the result must be
+# 0 every single time.
+stub security 0 "  1) DEADBEEF \"${ID}\"" \
+                "  2) CAFEBABE \"Developer ID Application: Someone Else (ZZ99YY88XX)\"" \
+                "  3) F00DF00D \"Developer ID Installer: Acme Corp (AB12CD34EF)\"" \
+                "     3 valid identities found"
+only_stubs
+flaky=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    sign_identity_reachable "${ID}" || flaky=1
+done
+restore_path
+check "found-case is deterministic (no SIGPIPE)" "${flaky}" "0"
+
+# Negative control for literal matching: a REGEX that would match the identity if
+# the pattern were interpreted must NOT be treated as a match.
 stub security 0 "  1) DEADBEEF \"Developer ID Application: Acme Corp (AB12CD34EF)\""
 only_stubs
 sign_identity_reachable "Developer ID Application: Acme C.rp .AB12CD34EF."; rc=$?

@@ -154,16 +154,33 @@ func TestLoadAppleAccountFailsClosed(t *testing.T) {
 
 // TestLoadAppleAccountCarriesNoOperatorLayout: this repo is PUBLIC. No
 // operator's personal directory tree may be baked into its source as a default.
+// Scans every non-test source file in the package rather than one named file, so
+// the guard survives the code being moved between files (it already moved once,
+// from build.go to apple_account.go, when build.go crossed 400 lines).
 func TestLoadAppleAccountCarriesNoOperatorLayout(t *testing.T) {
-	src, err := os.ReadFile("build.go")
+	sources, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, banned := range []string{`"Workstation"`, "Workstation/Apple"} {
-		if strings.Contains(string(src), banned) {
-			t.Errorf("build.go bakes an operator machine layout (%s) into a public repo — "+
-				"APPLE_HOME must come from the environment", banned)
+	scanned := 0
+	for _, path := range sources {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
 		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for _, banned := range []string{`"Workstation"`, "Workstation/Apple"} {
+			if strings.Contains(string(src), banned) {
+				t.Errorf("%s bakes an operator machine layout (%s) into a public repo — "+
+					"APPLE_HOME must come from the environment", path, banned)
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no source files — the glob is wrong, so this guard proves nothing")
 	}
 }
 

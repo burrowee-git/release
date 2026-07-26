@@ -5,6 +5,45 @@ manual". Each note records a hazard that the tooling does **not** prevent.
 
 ---
 
+## Cutting a public release: the Apple environment
+
+**`rkit build` is the primary produce path.** `tools/release.sh` never invokes
+it — rkit builds, signs, checksums and stages into `dist/<stamp>/`; release.sh
+distributes what rkit already staged (`"run rkit build first"` is what it says
+when the stage is missing). They are two independent programs that share a
+*precedence contract*, not an inherited environment.
+
+So **`rkit build --apple` / `--public` needs the Apple environment set in its own
+process.** It requires, and aborts without:
+
+| Variable / file | Meaning |
+|---|---|
+| `config/apple-account` | one line: the account plugin folder name. Overridden by `$APPLE_ACCOUNT`. |
+| `APPLE_HOME` | **absolute** path to the directory holding one folder per Apple account. **No default** — the repo is public, so no operator's machine layout is baked into its source. |
+| `APPLE_ACCOUNT_DIR` | that account's folder directly; set it and the two above are not consulted. |
+
+```sh
+export APPLE_HOME="$HOME/Workstation/Apple"      # your own layout
+rkit build --component gateway --public --sign-key …
+```
+
+**This is a fail-closed change, and deliberate.** `loadAppleAccount` used to
+return silently on every failure mode — no config file, a comment-only config,
+`APPLE_HOME` unset, a missing plugin folder — and `runBuild` ignored that it had
+done nothing. `rkit build --public` then entered the Developer-ID path with no
+account, and produced an **ad-hoc signed** build that the operator believed was
+Developer-ID signed and notarized. It now aborts before compiling anything, with
+a message naming exactly what to set. A `$HOME`-derived default was also removed
+because it silently became a *relative* path whenever `HOME` was unset — launchd,
+cron, a detached harness session — pointing the signer at
+`./Workstation/Apple/<Account>` relative to the cwd.
+
+`tools/release.sh` keeps the operator-machine default for `APPLE_HOME` (it is
+operator tooling, which is where machine layout belongs) and hard-fails the same
+way on a missing plugin folder.
+
+---
+
 ## Two releases can carry the same source SHA
 
 **Observed:** `gateway/v0.1.94.2026.07.24.343fe73a` and
