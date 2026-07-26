@@ -1,115 +1,17 @@
 // Package install_test: D3b tests for BURROWEE_UPDATE mode of install.sh.
 // Tests verify per-binary sha256 change detection, transactional backup/restore,
-// and the BURROWEE_CHANGED=<names> last-line contract.
+// and the BURROWEE_CHANGED=<names> last-line contract. The fixture these
+// assertions run on — binary sets, seed/stage/read helpers, install.sh runners —
+// lives in update_harness_test.go.
 package install_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
-
-// allBins is the full set of binaries declared in BINS inside install.sh.
-var allBins = []string{
-	"burrowee",
-	"burrowee-gateway",
-	"burrowee-gateway-cli",
-	"burrowee-gateway-console",
-	"burrowee-register",
-	"burrowee-gateway-updater",
-}
-
-// seedInstalled writes each binary name→content into binDir with mode 0755.
-func seedInstalled(t *testing.T, binDir string, contents map[string]string) {
-	t.Helper()
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	for name, body := range contents {
-		p := filepath.Join(binDir, name)
-		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-			t.Fatalf("seed installed %s: %v", name, err)
-		}
-	}
-}
-
-// stageBundle creates a temp directory containing each binary name→content
-// and returns that directory (used as cwd when running install.sh).
-func stageBundle(t *testing.T, contents map[string]string) string {
-	t.Helper()
-	staged := t.TempDir()
-	for name, body := range contents {
-		p := filepath.Join(staged, name)
-		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-			t.Fatalf("stage bundle %s: %v", name, err)
-		}
-	}
-	return staged
-}
-
-// readInstalled reads and returns the content of a binary from binDir.
-func readInstalled(t *testing.T, binDir, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(binDir, name))
-	if err != nil {
-		t.Fatalf("readInstalled %s: %v", name, err)
-	}
-	return string(b)
-}
-
-// lastLineWithPrefix finds the last line in output that starts with prefix.
-func lastLineWithPrefix(output, prefix string) string {
-	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	result := ""
-	for _, l := range lines {
-		if strings.HasPrefix(l, prefix) {
-			result = l
-		}
-	}
-	return result
-}
-
-// runUpdate runs install.sh in BURROWEE_UPDATE=1 mode with cwd=stageDir.
-// env contains extra "KEY=VALUE" strings. scriptArgs are passed as positional
-// arguments to the script (e.g. "--version", "v2"). Returns combined output;
-// fails the test on non-zero exit.
-func runUpdate(t *testing.T, stageDir, home, stubDir string, env []string, scriptArgs ...string) string {
-	t.Helper()
-	args := append([]string{installShPath(t)}, scriptArgs...)
-	cmd := exec.Command("sh", args...)
-	cmd.Dir = stageDir
-	cmd.Env = installShEnv(home, stubDir, env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("install.sh output:\n%s", out)
-		t.Fatalf("install.sh failed: %v", err)
-	}
-	return string(out)
-}
-
-// runUpdateExpectFail is like runUpdate but expects a non-zero exit.
-// Returns combined output without failing the test.
-func runUpdateExpectFail(t *testing.T, stageDir, home, stubDir string, env []string, scriptArgs ...string) string {
-	t.Helper()
-	args := append([]string{installShPath(t)}, scriptArgs...)
-	cmd := exec.Command("sh", args...)
-	cmd.Dir = stageDir
-	cmd.Env = installShEnv(home, stubDir, env...)
-	out, _ := cmd.CombinedOutput()
-	return string(out)
-}
-
-// allBinsContent returns a map of all 5 bins each mapped to the given body.
-func allBinsContent(body string) map[string]string {
-	m := make(map[string]string, len(allBins))
-	for _, b := range allBins {
-		m[b] = body
-	}
-	return m
-}
 
 // TestUpdateReplacesOnlyChangedBinaries verifies that when only one binary
 // differs (burrowee-gateway), only that binary is replaced; the others stay
@@ -188,17 +90,6 @@ func TestUpdateAllIdenticalIsNoop(t *testing.T) {
 	line := lastLineWithPrefix(out, "BURROWEE_CHANGED=")
 	if line != "BURROWEE_CHANGED=" {
 		t.Fatalf("change-set = %q, want BURROWEE_CHANGED= (empty)", line)
-	}
-}
-
-// writeLaunchctlStub drops a fake `launchctl` into dir that appends its argv
-// to dir/launchctl.calls, so a test can assert whether install.sh restarted
-// services.
-func writeLaunchctlStub(t *testing.T, dir string) {
-	t.Helper()
-	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + filepath.Join(dir, "launchctl.calls") + "\"\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(dir, "launchctl"), []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -389,5 +280,82 @@ func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
 
 	if got := readInstalled(t, binDir, "burrowee-gateway"); got != "gw-v2-content" {
 		t.Errorf("binary swap should still succeed: got %q", got)
+	}
+}
+
+// TestUpdateForceReplacesIdenticalBinaries pins the BURROWEE_FORCE=1 branch,
+// which INVERTS what TestUpdateAllIdenticalIsNoop pins and shipped with no test
+// of its own. `gateway update --force` onto the already-installed version has
+// byte-identical binaries, so the sha256 diff would place nothing and the
+// operator's "reinstall completely" would be a silent no-op.
+//
+// Two halves, and the second is the one a careless test misses: --force must
+// re-place every SERVE binary, and must STILL skip the cli/updater pair. FORCE
+// bypasses the sha256 check, not the ownership rule — those two are updated
+// out-of-band by the updater, and re-placing the updater from inside a script
+// the updater is running is exactly what the exclusion exists to prevent.
+func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+
+	// Installed and staged content are IDENTICAL for every binary — without
+	// FORCE this is the no-op case (TestUpdateAllIdenticalIsNoop).
+	same := allBinsContent("identical-content")
+	seedInstalled(t, binDir, same)
+	stageDir := stageBundle(t, same)
+
+	// Mark the two updater-owned binaries so a swap would be detectable even
+	// though the staged bytes match: if update mode places them, the installed
+	// file loses this marker.
+	for _, b := range []string{"burrowee-gateway-cli", "burrowee-gateway-updater"} {
+		seedInstalled(t, binDir, map[string]string{b: "UPDATER-OWNED-" + b})
+	}
+
+	out := runUpdate(t, stageDir, home, stub,
+		[]string{"BURROWEE_UPDATE=1", "BURROWEE_FORCE=1"},
+		"--version", "v2",
+	)
+
+	// Half 1: every serve binary is named, in BINS order.
+	line := lastLineWithPrefix(out, "BURROWEE_CHANGED=")
+	want := "BURROWEE_CHANGED=" + strings.Join(serveBins, " ")
+	if line != want {
+		t.Fatalf("change-set = %q, want %q\noutput:\n%s", line, want, out)
+	}
+
+	// Half 2: the cli/updater pair is STILL omitted — FORCE bypasses the sha256
+	// check, not the ownership rule.
+	for _, b := range []string{"burrowee-gateway-cli", "burrowee-gateway-updater"} {
+		if strings.Contains(line, b) {
+			t.Errorf("--force must not claim %s: %q", b, line)
+		}
+		if got := readInstalled(t, binDir, b); got != "UPDATER-OWNED-"+b {
+			t.Errorf("--force swapped %s (content %q) — it is updated out-of-band", b, got)
+		}
+	}
+
+	// And the placement really happened: each serve binary is present and
+	// executable after the forced re-place, not merely listed.
+	for _, b := range serveBins {
+		info, err := os.Stat(filepath.Join(binDir, b))
+		if err != nil {
+			t.Errorf("serve binary %s missing after --force: %v", b, err)
+			continue
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Errorf("serve binary %s is not executable after --force: %v", b, info.Mode())
+		}
+	}
+
+	// No backup files may survive a successful forced update.
+	entries, err := os.ReadDir(binDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak-") {
+			t.Errorf("backup file left behind after a successful --force: %s", e.Name())
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -23,6 +24,16 @@ const staleTTL = 5 * time.Minute
 // diversity while keeping worst-case memory in the tens of MB.
 const defaultMaxBuckets = 100_000
 
+// sweepInterval throttles the stale sweep. The cap bounds memory but not CPU:
+// an unconditional sweep walks the WHOLE map on every Allow under the single
+// global mutex, so at the cap that is 100k iterations per challenge request,
+// serialised — the distributed flood the cap was added to survive would still
+// degrade the gate. Evicting late costs nothing (a stale bucket is a full
+// bucket, semantically identical to a fresh one), so sweeping at most once per
+// staleTTL/10 keeps retention within a tenth of the TTL while making the
+// per-request cost O(1) in the common case.
+const sweepInterval = staleTTL / 10
+
 // bucket holds the token state for a single rate-limit key.
 type bucket struct {
 	tokens   float64
@@ -38,6 +49,16 @@ type Limiter struct {
 	buckets    map[string]*bucket
 	maxBuckets int
 	now        func() time.Time
+	// lastSweep is when the stale sweep last ran; the zero value makes the
+	// first Allow sweep.
+	lastSweep time.Time
+	// shedding records whether the cap is currently rejecting new keys, so the
+	// two transitions are logged once each instead of per request. Shedding is
+	// otherwise invisible: it returns false, indistinguishable from an ordinary
+	// rate denial.
+	shedding bool
+	// logf reports the shed transitions. Tests swap it to capture them.
+	logf func(format string, args ...any)
 }
 
 // NewLimiter returns a Limiter that allows perMinute requests per key per minute.
@@ -47,6 +68,7 @@ func NewLimiter(perMinute int) *Limiter {
 		buckets:    make(map[string]*bucket),
 		maxBuckets: defaultMaxBuckets,
 		now:        time.Now,
+		logf:       log.Printf,
 	}
 }
 
@@ -60,11 +82,15 @@ func (l *Limiter) Allow(key string) bool {
 
 	// Opportunistic sweep of stale (idle, fully-refilled) buckets, mirroring
 	// NonceStore.Issue. Belt-and-suspenders on top of the caller only keying
-	// this limiter by registry-validated fingerprints.
-	for k, sb := range l.buckets {
-		if now.Sub(sb.lastSeen) > staleTTL {
-			delete(l.buckets, k)
+	// this limiter by registry-validated fingerprints. Throttled to once per
+	// sweepInterval so the O(n) walk cannot run per request under a flood.
+	if now.Sub(l.lastSweep) >= sweepInterval {
+		for k, sb := range l.buckets {
+			if now.Sub(sb.lastSeen) > staleTTL {
+				delete(l.buckets, k)
+			}
 		}
+		l.lastSweep = now
 	}
 
 	b, ok := l.buckets[key]
@@ -72,10 +98,16 @@ func (l *Limiter) Allow(key string) bool {
 		// Shed new keys once the map is full so a distributed flood of distinct
 		// keys cannot grow it without limit. Existing buckets are unaffected.
 		if len(l.buckets) >= l.maxBuckets {
+			l.setShedding(true)
 			return false
 		}
 		b = &bucket{tokens: l.perMin, lastSeen: now}
 		l.buckets[key] = b
+	}
+	// Leaving shed mode is driven by cardinality, not by this key: an existing
+	// key served while the map still sits at the cap is not recovery.
+	if len(l.buckets) < l.maxBuckets {
+		l.setShedding(false)
 	}
 
 	// Refill tokens proportional to elapsed time.
@@ -91,4 +123,23 @@ func (l *Limiter) Allow(key string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// setShedding records the shed state and logs each transition once. Caller must
+// hold l.mu.
+func (l *Limiter) setShedding(on bool) {
+	if l.shedding == on {
+		return
+	}
+	l.shedding = on
+	if l.logf == nil {
+		return
+	}
+	if on {
+		l.logf("gate: rate limiter shedding new keys — bucket cardinality reached the cap (buckets=%d max=%d)",
+			len(l.buckets), l.maxBuckets)
+		return
+	}
+	l.logf("gate: rate limiter no longer shedding new keys (buckets=%d max=%d)",
+		len(l.buckets), l.maxBuckets)
 }

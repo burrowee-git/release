@@ -71,8 +71,12 @@ func runBuild(args []string) error {
 	fs.StringVar(&o.SrcDir, "src", "", "component source worktree (default: resolved from BURROWEE_SRC_<COMP>/BB)")
 	fs.StringVar(&o.DispatcherDir, "dispatcher", "", "dispatcher source worktree (default: resolved from BURROWEE_SRC_DISPATCHER/BB)")
 	fs.StringVar(&o.SignKey, "sign-key", "", "minisign secret key (required for a real cut; --dry-run defaults to the TEST key)")
-	appleFlag := fs.Bool("apple", false, "Developer-ID sign + notarize macOS binaries")
-	publicFlag := fs.Bool("public", false, "public release: apple sign+notarize + CVE gate (standard ship path)")
+	appleFlag := fs.Bool("apple", false,
+		"Developer-ID sign + notarize macOS binaries (REQUIRES an Apple account: config/apple-account "+
+			"or $APPLE_ACCOUNT, plus an absolute $APPLE_HOME or $APPLE_ACCOUNT_DIR — aborts if unresolved)")
+	publicFlag := fs.Bool("public", false,
+		"public release: apple sign+notarize + CVE gate (standard ship path; same Apple account + "+
+			"$APPLE_HOME/$APPLE_ACCOUNT_DIR requirement as --apple)")
 	publicReleaseFlag := fs.Bool("public-release", false, "alias for --public")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "build without bumping the version or requiring a real sign key")
 	fs.BoolVar(&o.NoVulncheck, "no-vulncheck", false, "skip the CVE gate (default: the gate runs)")
@@ -103,7 +107,12 @@ func runBuild(args []string) error {
 	}
 	resolveComponentDirs(&o)
 	if o.Apple {
-		loadAppleAccount(o.RepoDir)
+		// Fatal, not advisory: an unresolved account means the Developer-ID path
+		// runs with no account plugin, producing an ad-hoc signed build the
+		// operator believes is Developer-ID signed and notarized.
+		if err := loadAppleAccount(o.RepoDir); err != nil {
+			return err
+		}
 	}
 	return buildRun(o)
 }
@@ -132,34 +141,6 @@ func resolveComponentDirs(o *buildOpts) {
 // bumps the component's version (registering a revert that fires on error or
 // --dry-run), runs the CVE gate unless NoVulncheck, then reuses orchestrate to
 // build+assemble+checksum+sign into <RepoDir>/dist/<stamp>/.
-
-// loadAppleAccount sets APPLE_ACCOUNT / APPLE_ACCOUNT_DIR from config/apple-account
-// when --apple/--public is set so modernech-sign picks the project account plugin.
-func loadAppleAccount(repoDir string) {
-	if os.Getenv("APPLE_ACCOUNT_DIR") != "" || os.Getenv("APPLE_ACCOUNT") != "" {
-		return
-	}
-	for _, name := range []string{"config/apple-account", "config/apple.account"} {
-		b, err := os.ReadFile(filepath.Join(repoDir, name))
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			_ = os.Setenv("APPLE_ACCOUNT", line)
-			home := os.Getenv("APPLE_HOME")
-			if home == "" {
-				home = filepath.Join(os.Getenv("HOME"), "Workstation", "Apple")
-			}
-			_ = os.Setenv("APPLE_ACCOUNT_DIR", filepath.Join(home, line))
-			fmt.Fprintf(os.Stderr, "→ Apple account: %s\n", line)
-			return
-		}
-	}
-}
 
 func buildRun(o buildOpts) (err error) {
 	if o.DispatcherDir == "" {
@@ -393,42 +374,4 @@ func copyExecutable(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0o755)
-}
-
-// placeholderConsolePubHex is the dead-key placeholder shipped in
-// config/console-pub.hex templates: valid-length hex a runtime check can't
-// distinguish from a real key. Mirrors tools/build.sh's edge/relay guard.
-const placeholderConsolePubHex = "0000000000000000000000000000000000000000000000000000000000000000"
-
-// resolveConsolePubHex returns the console signing pubkey hex for edge/relay
-// builds. An explicit Options.ConsolePubHex wins; otherwise it reads
-// config/console-pub.hex under RepoDir (skipping comment/blank lines, same
-// parsing as tools/release.sh's console_pub_hex()). A missing config file
-// resolves to "" with no error — components that don't need a console key
-// (cli/gateway/agent/burrowee) never hit this file. Either way, the resolved
-// value is rejected if it's the 64-zero placeholder.
-func resolveConsolePubHex(o Options) (string, error) {
-	hex := o.ConsolePubHex
-	if hex == "" {
-		path := filepath.Join(o.RepoDir, "config", "console-pub.hex")
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return "", nil
-			}
-			return "", fmt.Errorf("read %s: %w", path, err)
-		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			hex = line
-			break
-		}
-	}
-	if hex == placeholderConsolePubHex {
-		return "", fmt.Errorf("console pubkey is the placeholder — set config/console-pub.hex to the real console signing key before an edge/relay release")
-	}
-	return hex, nil
 }
