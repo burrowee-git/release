@@ -272,15 +272,20 @@ EOF
 load_units() {
     case "$(uname -s)" in
     Darwin)
-        run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
-        run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
-        if [ -z "${BURROWEE_NO_RESTART:-}" ]; then
+        if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
+            # Stage only: bootstrap lays each unit in place (and fails harmlessly
+            # for an already-loaded label) without booting anything out from
+            # under a running instance. The two branches are exclusive — running
+            # bootstrap before the bootout+bootstrap pair would start, stop, then
+            # restart the service on every fresh install.
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+            echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
+        else
             run_root launchctl bootout   "system/com.burrowee.gateway"          2>/dev/null || true
             run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
             run_root launchctl bootout   "system/com.burrowee.gateway.updater"  2>/dev/null || true
             run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
-        else
-            echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
         fi
         ;;
     Linux)

@@ -313,6 +313,64 @@ func TestInstallShNoRestartStagesWithoutKicking(t *testing.T) {
 	}
 }
 
+// TestInstallShDefaultPathDoesNotFlapUnits is the regression guard for the
+// BURROWEE_NO_RESTART guard's own blast radius: the staged and restart paths
+// must be mutually exclusive. An earlier shape ran the two bootstraps
+// unconditionally and THEN the bootout+bootstrap pair, which on a fresh Darwin
+// install started the service, stopped it, and started it again — a visible
+// flap on every install and reinstall. Each label must be bootstrapped exactly
+// once, after its bootout.
+func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchctl bootout/bootstrap sequencing is Darwin-only")
+	}
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+
+	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
+	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
+
+	// The sudo stub records its own "sudo -n launchctl …" line and then execs
+	// launchctl, which records "launchctl …" — so every real call appears on
+	// two lines. Match whole lines against the bare form to count each once.
+	var direct []string
+	for _, line := range strings.Split(calls, "\n") {
+		if s := strings.TrimSpace(line); strings.HasPrefix(s, "launchctl ") {
+			direct = append(direct, s)
+		}
+	}
+
+	for _, label := range []string{"com.burrowee.gateway", "com.burrowee.gateway.updater"} {
+		bootstrap := "launchctl bootstrap system " + launchdDir(home) + "/" + label + ".plist"
+		bootout := "launchctl bootout system/" + label
+
+		n, firstBootstrap, firstBootout := 0, -1, -1
+		for i, c := range direct {
+			switch c {
+			case bootstrap:
+				n++
+				if firstBootstrap < 0 {
+					firstBootstrap = i
+				}
+			case bootout:
+				if firstBootout < 0 {
+					firstBootout = i
+				}
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s: bootstrap called %d times, want exactly 1 (unit flap):\n%s", label, n, calls)
+		}
+		if firstBootout < 0 {
+			t.Errorf("%s: no bootout on the default path — a running unit would never advance:\n%s", label, calls)
+			continue
+		}
+		if firstBootstrap >= 0 && firstBootstrap < firstBootout {
+			t.Errorf("%s: bootstrap precedes bootout — starts the unit before stopping it:\n%s", label, calls)
+		}
+	}
+}
+
 // TestInstallShUninstall verifies that BURROWEE_UNINSTALL=1 removes binaries
 // and both system unit files.
 func TestInstallShUninstall(t *testing.T) {
