@@ -11,7 +11,6 @@ import (
 
 	"github.com/burrowee-git/release-kit/build"
 	"github.com/burrowee-git/release-kit/checksum"
-	"github.com/burrowee-git/release-kit/minisign"
 	"github.com/burrowee-git/release-kit/sign"
 	"github.com/burrowee-git/release-kit/vulncheck"
 
@@ -353,13 +352,40 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 		key = filepath.Join(o.RepoDir, "tools", "testkeys", "test.key")
 	}
 	if _, statErr := os.Stat(key); statErr == nil {
-		if err := minisign.Sign(ctx, sums, key); err != nil {
+		if err := signSums(ctx, sums, key, o.Component, stamp); err != nil {
 			return nil, fmt.Errorf("minisign: %w", err)
 		}
 		res.Minisig = sums + ".minisig"
 	}
 	res.Sums = sums
 	return res, nil
+}
+
+// trustedComment is the minisign trusted comment the whole release channel is
+// keyed on. It is the ONLY version-bearing field the outer bootstrap can verify
+// (the zip names and SHA256SUMS.txt are version-independent), so after checking
+// the signature the bootstrap asserts this exact string against the tag it
+// resolved — that is what stops an older, genuinely signed release from being
+// substituted for the requested one. tools/release.sh signs with the identical
+// `-t` value; the two must never diverge.
+func trustedComment(component, stamp string) string {
+	return "burrowee " + component + " " + stamp
+}
+
+// signSums writes sumsFile+".minisig", signing sumsFile with the password-less
+// minisign secret key at keyPath and stamping the trusted comment.
+//
+// release-kit's minisign.Sign is deliberately NOT used here: it omits -t, which
+// leaves the signature version-agnostic. A release signed that way carries
+// minisign's default `timestamp:… file:…` comment and the bootstrap's tag
+// binding fails closed on it.
+func signSums(ctx context.Context, sumsFile, keyPath, component, stamp string) error {
+	cmd := exec.CommandContext(ctx, "minisign", "-S", "-s", keyPath, "-m", sumsFile,
+		"-t", trustedComment(component, stamp))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("minisign sign: %w\n%s", err, out)
+	}
+	return nil
 }
 
 // copyExecutable copies src to dst with mode 0755. install.sh ships in the
