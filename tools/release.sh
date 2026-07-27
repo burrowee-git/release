@@ -830,13 +830,16 @@ console_pub_hex() {
 
 # ---- dispatcher version + build cache (one build per os/arch, reused) --------
 # The `burrowee` dispatcher is built once per run and bundled into EVERY
-# component zip. Bump its patch once here (real releases only) so it tracks
-# releases instead of sitting at 0.1.0 forever — `version.sh --bump-patch`
-# stages versions/burrowee, which then rides the first component's [RELEASED]
-# marker commit (`git commit` with no pathspec commits all staged files).
-if [ "${DRY_RUN}" != 1 ]; then
-    SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --bump-patch >/dev/null
-fi
+# component zip. It is a zero-logic exec table, so its binary changes ONLY when
+# the burrowee repo source changes — which is rare. The cut therefore does NOT
+# auto-bump it: it stamps the dispatcher at the CURRENT versions/burrowee, so a
+# routine component cut mints no dispatcher version churn.
+#
+# When (and only when) the dispatcher source actually changed, bump it MANUALLY
+# before the cut, from the release repo root: `bash tools/version.sh burrowee
+# --bump-patch` (no SRC_DIR needed — only --stamp reads it). That stages
+# versions/burrowee, which then rides the first component's [RELEASED] marker
+# commit (`git commit` with no pathspec commits all staged files).
 DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
 DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
 build_dispatcher() {
@@ -883,7 +886,7 @@ do_release_relay() {
     echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
-    echo "Disp    : ${DISP_STAMP}"
+    echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
     echo "Dry-run : ${DRY_RUN}"
 
     local stage="${REPO_ROOT}/dist/${stamp}"
@@ -1042,7 +1045,7 @@ do_release() {
     echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
-    echo "Disp    : ${DISP_STAMP}"
+    echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
     echo "Dry-run : ${DRY_RUN}"
 
     local stage="${REPO_ROOT}/dist/${stamp}"
