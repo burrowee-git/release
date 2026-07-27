@@ -174,13 +174,17 @@ for pair in ${MAP}; do
     fi
     # The updater binary's version is the core/updater module pin, not the
     # component STAMP — so it stays stable across cuts that don't repin
-    # core/updater. Overrides bin_ldflags wholesale but keeps relay's console
-    # identity flags (RELAY_CONSOLE_LDFLAGS is empty for every other component).
+    # core/updater. Substitute ONLY the "-X main.version=${STAMP}" term inside
+    # the already-computed bin_ldflags — do NOT rebuild bin_ldflags wholesale,
+    # or component-specific flags baked into the global LDFLAGS (e.g. edge's
+    # consolePubHexProd) get silently dropped from the updater binary. Relay's
+    # console-identity flags (already appended into bin_ldflags above, for
+    # burrowee-relay-updater) survive the same way.
     bin_version="${STAMP}"
     case "${bin}" in
         *-updater)
             bin_version="$(updater_pin "${build_dir}")"
-            bin_ldflags="-X main.version=${bin_version} ${RELAY_CONSOLE_LDFLAGS:-}"
+            bin_ldflags="${bin_ldflags/-X main.version=${STAMP}/-X main.version=${bin_version}}"
             ;;
     esac
     echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${bin_version})"
