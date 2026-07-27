@@ -7,15 +7,21 @@ import (
 	"testing"
 )
 
-// writeAppleAccountConfig creates repoDir/config/apple-account holding body.
-func writeAppleAccountConfig(t *testing.T, repoDir, body string) {
+// writeAppleConfig creates repoDir/config/<name> holding body.
+func writeAppleConfig(t *testing.T, repoDir, name, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(repoDir, "config"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repoDir, "config", "apple-account"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repoDir, "config", name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeAppleAccountConfig creates repoDir/config/apple-account holding body.
+func writeAppleAccountConfig(t *testing.T, repoDir, body string) {
+	t.Helper()
+	writeAppleConfig(t, repoDir, "apple-account", body)
 }
 
 // clearAppleEnv unsets every variable the resolution reads, restoring after.
@@ -88,6 +94,95 @@ func TestLoadAppleAccountHonoursPresetAccount(t *testing.T) {
 	}
 }
 
+// TestLoadAppleAccountResolvesHomeFromConfig: APPLE_HOME comes from the repo's
+// own config/apple-home, so a cut needs nothing exported. That is the whole
+// point of the file — requiring the export put the Go path one forgotten
+// `export` away from aborting, while the shell twin quietly used a baked
+// $HOME default, so the two entry points disagreed about where plugins live.
+func TestLoadAppleAccountResolvesHomeFromConfig(t *testing.T) {
+	clearAppleEnv(t)
+	repo := t.TempDir()
+	home := appleHome(t, "AcmeCorp")
+	writeAppleAccountConfig(t, repo, "AcmeCorp\n")
+	writeAppleConfig(t, repo, "apple-home", "# where the plugins live\n\n"+home+"\n")
+
+	if err := loadAppleAccount(repo); err != nil {
+		t.Fatalf("loadAppleAccount: %v", err)
+	}
+	if got := os.Getenv("APPLE_HOME"); got != home {
+		t.Errorf("APPLE_HOME = %q, want %q from config/apple-home", got, home)
+	}
+	if got, want := os.Getenv("APPLE_ACCOUNT_DIR"), filepath.Join(home, "AcmeCorp"); got != want {
+		t.Errorf("APPLE_ACCOUNT_DIR = %q, want %q", got, want)
+	}
+}
+
+// TestLoadAppleAccountEnvHomeBeatsConfig: an operator cutting against a second
+// plugin root exports APPLE_HOME, and that must win over the repo's file — the
+// same precedence the account already has.
+func TestLoadAppleAccountEnvHomeBeatsConfig(t *testing.T) {
+	clearAppleEnv(t)
+	repo := t.TempDir()
+	envHome := appleHome(t, "AcmeCorp")
+	writeAppleAccountConfig(t, repo, "AcmeCorp\n")
+	writeAppleConfig(t, repo, "apple-home", appleHome(t, "AcmeCorp")+"\n")
+	t.Setenv("APPLE_HOME", envHome)
+
+	if err := loadAppleAccount(repo); err != nil {
+		t.Fatalf("loadAppleAccount: %v", err)
+	}
+	if got := os.Getenv("APPLE_HOME"); got != envHome {
+		t.Errorf("APPLE_HOME = %q, want the exported %q", got, envHome)
+	}
+}
+
+// TestLoadAppleAccountDirSettlesBoth: APPLE_ACCOUNT_DIR names the plugin folder
+// itself, so neither config file is consulted — but it is now checked, since a
+// stale export pointing at a folder that no longer exists used to sail through
+// and fail later inside the signer.
+func TestLoadAppleAccountDirSettlesBoth(t *testing.T) {
+	clearAppleEnv(t)
+	repo := t.TempDir() // deliberately no config files at all
+	dir := filepath.Join(appleHome(t, "AcmeCorp"), "AcmeCorp")
+	t.Setenv("APPLE_ACCOUNT_DIR", dir)
+
+	if err := loadAppleAccount(repo); err != nil {
+		t.Fatalf("loadAppleAccount with APPLE_ACCOUNT_DIR and no config: %v", err)
+	}
+
+	t.Setenv("APPLE_ACCOUNT_DIR", filepath.Join(dir, "gone"))
+	if err := loadAppleAccount(repo); err == nil {
+		t.Fatal("a stale APPLE_ACCOUNT_DIR pointing at a missing folder must abort")
+	}
+}
+
+// TestAppleErrorsNameTheFix: every failure has to be self-sufficient. An
+// operator reading only the error should learn what was requested, why it
+// refused, and each of the three ways to supply the missing value — otherwise
+// the message costs a runbook lookup at exactly the wrong moment.
+func TestAppleErrorsNameTheFix(t *testing.T) {
+	clearAppleEnv(t)
+	repo := t.TempDir()
+	writeAppleAccountConfig(t, repo, "AcmeCorp\n") // account fine, home missing
+
+	err := loadAppleAccount(repo)
+	if err == nil {
+		t.Fatal("want an error when APPLE_HOME is unresolved")
+	}
+	for _, want := range []string{
+		"--apple/--public",             // what was requested
+		"AD-HOC",                       // what refusing protects
+		"config/apple-home",            // the file to create
+		"$APPLE_HOME",                  // the variable to export
+		"$APPLE_ACCOUNT_DIR",           // the way that settles both
+		"one folder per Apple account", // what the value holds
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error is missing %q — it must stand alone in a build log.\ngot: %v", want, err)
+		}
+	}
+}
+
 // TestLoadAppleAccountFailsClosed covers every mode that used to return
 // silently, leaving the Developer-ID path running with no account plugin — an
 // ad-hoc signed build the operator believes is Developer-ID signed.
@@ -100,18 +195,18 @@ func TestLoadAppleAccountFailsClosed(t *testing.T) {
 	}{
 		{
 			name:       "no config file and no env",
-			wantErrSub: "no Apple account resolved",
+			wantErrSub: "APPLE_ACCOUNT is unresolved",
 		},
 		{
 			name:       "config holds only comments and blanks",
 			config:     "# nothing here\n\n   \n",
 			appleHome:  "SET",
-			wantErrSub: "holds no account name",
+			wantErrSub: "holds no value",
 		},
 		{
 			name:       "APPLE_HOME unset — no baked operator layout, and no relative path when HOME is unset",
 			config:     "AcmeCorp\n",
-			wantErrSub: "APPLE_HOME is not set",
+			wantErrSub: "APPLE_HOME is unresolved",
 		},
 		{
 			name:       "APPLE_HOME relative",
@@ -123,7 +218,7 @@ func TestLoadAppleAccountFailsClosed(t *testing.T) {
 			name:       "account plugin folder missing",
 			config:     "MissingAccount\n",
 			appleHome:  "SET",
-			wantErrSub: "account plugin folder is missing",
+			wantErrSub: "account plugin folder points at",
 		},
 	}
 	for _, c := range cases {
@@ -197,7 +292,7 @@ func TestRunBuildAbortsWhenAppleAccountUnresolved(t *testing.T) {
 	if err == nil {
 		t.Fatal("rkit build --public with no resolvable Apple account must abort")
 	}
-	if !strings.Contains(err.Error(), "no Apple account resolved") {
+	if !strings.Contains(err.Error(), "APPLE_ACCOUNT is unresolved") {
 		t.Fatalf("error = %v, want the unresolved-account abort", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(repo, "dist")); statErr == nil {

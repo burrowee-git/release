@@ -6,47 +6,111 @@
 # orchestrator: tools/apple_sign.test.sh exercises them directly, with no part of
 # the release path running. Same split as tools/vulncheck.sh.
 
+# _first_config_line <file>
+# Prints the first non-blank, non-comment line, trimmed. Nothing when the file
+# is absent or holds only comments and blanks.
+_first_config_line() {
+    [ -f "$1" ] || return 0
+    sed -n '/^[[:space:]]*#/d;/^[[:space:]]*$/d;p;q' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# _apple_fix_hint <repo_root> <config-file> <env-var> <what it holds>
+# Lists every way to supply a missing value, so the operator can get unstuck
+# from the error alone without opening the runbook.
+_apple_fix_hint() {
+    echo "  supply it as one of:" >&2
+    echo "    $1/config/$2" >&2
+    echo "        one line: $4" >&2
+    echo "    \$$3" >&2
+    echo "        the same value, from the environment" >&2
+    echo "    \$APPLE_ACCOUNT_DIR" >&2
+    echo "        the account's folder itself, which settles account and home together" >&2
+}
+
 # load_apple_account <repo_root>
 # Resolves the Apple account plugin and exports APPLE_ACCOUNT, APPLE_HOME and
-# APPLE_ACCOUNT_DIR for modernech-sign. <repo_root>/config/apple-account holds
-# one line: the folder name under $APPLE_HOME.
+# APPLE_ACCOUNT_DIR for modernech-sign.
+#
+# Both values resolve the same way — an explicit environment variable first,
+# then a per-product config file:
+#
+#   account   APPLE_ACCOUNT → config/apple-account   (the plugin folder name)
+#   home      APPLE_HOME    → config/apple-home      (the absolute plugin root)
+#
+# or APPLE_ACCOUNT_DIR names the account's folder directly and settles both.
 #
 # `rkit build` carries its OWN copy of this resolution (cmd/rkit/apple_account.go)
 # and does not inherit this one: release.sh never invokes rkit — rkit produces,
 # release.sh distributes what rkit staged. So the two are independent
-# implementations that share a PRECEDENCE contract, not an environment:
-#   APPLE_ACCOUNT_DIR (explicit) → APPLE_ACCOUNT (explicit) → config/apple-account.
-# This copy keeps the operator-machine default for APPLE_HOME; the Go copy bakes
-# no default (public repo) and requires it to be set and absolute.
+# implementations sharing a PRECEDENCE contract, not an environment. That
+# contract is now the whole chain: this copy used to default APPLE_HOME to a
+# baked $HOME path while the Go copy refused to default at all, so the two
+# entry points disagreed about where plugins live. The config file replaces the
+# baked default — it is gitignored, so a machine path never enters this PUBLIC
+# repo, and $HOME is never consulted (it is unset under launchd, cron, and a
+# detached harness session, where the default silently went RELATIVE).
 #
 # Called only when Apple signing was requested, so every unresolved state
 # returns 1: continuing produces an AD-HOC signed cut while the operator
 # believes it is Developer-ID signed and notarized.
 load_apple_account() {
     local repo_root="$1"
+
+    if [ -n "${APPLE_ACCOUNT_DIR:-}" ]; then
+        if [ ! -d "${APPLE_ACCOUNT_DIR}" ]; then
+            echo "✗ Apple signing requested (--apple/--public) but APPLE_ACCOUNT_DIR points at" >&2
+            echo "  ${APPLE_ACCOUNT_DIR}, which is not a directory" >&2
+            echo "  refusing to continue: signing with no account plugin produces an AD-HOC build" >&2
+            echo "  that looks Developer-ID signed." >&2
+            return 1
+        fi
+        export APPLE_ACCOUNT_DIR
+        echo "→ Apple account dir (from APPLE_ACCOUNT_DIR): ${APPLE_ACCOUNT_DIR}" >&2
+        return 0
+    fi
+
+    # An already-exported value wins — an operator cutting under a second account,
+    # or against a second plugin root, exports it, and `rkit build` has always
+    # honoured that. Overriding it here made the same export respected by one
+    # entry point and silently ignored by the other.
     local conf="${repo_root}/config/apple-account"
     [ -f "$conf" ] || conf="${repo_root}/config/apple.account"
-    local name=""
-    if [ -f "$conf" ]; then
-        name="$(sed -n '/^[[:space:]]*#/d;/^[[:space:]]*$/d;p;q' "$conf" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    fi
-    # An already-exported APPLE_ACCOUNT wins — an operator cutting under a second
-    # account exports it, and `rkit build` has always honoured that. Overriding it
-    # here made the same export respected by one entry point and silently ignored
-    # by the other.
-    export APPLE_ACCOUNT="${APPLE_ACCOUNT:-$name}"
+    export APPLE_ACCOUNT="${APPLE_ACCOUNT:-$(_first_config_line "$conf")}"
     if [ -z "${APPLE_ACCOUNT}" ]; then
-        echo "✗ Apple signing requested but no Apple account resolved" >&2
-        echo "  create ${repo_root}/config/apple-account with the account plugin folder name," >&2
-        echo "  or export APPLE_ACCOUNT / APPLE_ACCOUNT_DIR" >&2
+        echo "✗ Apple signing requested (--apple/--public) but APPLE_ACCOUNT is unresolved" >&2
+        _apple_fix_hint "${repo_root}" "apple-account" "APPLE_ACCOUNT" \
+            "the Apple account plugin folder name"
+        echo "  refusing to continue: signing with no account plugin produces an AD-HOC build" >&2
+        echo "  that looks Developer-ID signed." >&2
         return 1
     fi
-    export APPLE_HOME="${APPLE_HOME:-$HOME/Workstation/Apple}"
-    export APPLE_ACCOUNT_DIR="${APPLE_ACCOUNT_DIR:-$APPLE_HOME/$APPLE_ACCOUNT}"
+
+    local home_conf="${repo_root}/config/apple-home"
+    [ -f "$home_conf" ] || home_conf="${repo_root}/config/apple.home"
+    export APPLE_HOME="${APPLE_HOME:-$(_first_config_line "$home_conf")}"
+    if [ -z "${APPLE_HOME}" ]; then
+        echo "✗ Apple signing requested (--apple/--public) but APPLE_HOME is unresolved" >&2
+        _apple_fix_hint "${repo_root}" "apple-home" "APPLE_HOME" \
+            "the absolute directory holding one folder per Apple account"
+        echo "  refusing to continue: signing with no account plugin produces an AD-HOC build" >&2
+        echo "  that looks Developer-ID signed." >&2
+        return 1
+    fi
+    case "${APPLE_HOME}" in
+        /*) ;;
+        *)
+            echo "✗ Apple signing requested (--apple/--public) but APPLE_HOME resolved to" >&2
+            echo "  \"${APPLE_HOME}\", which is not an absolute path" >&2
+            return 1
+            ;;
+    esac
+
+    export APPLE_ACCOUNT_DIR="${APPLE_HOME}/${APPLE_ACCOUNT}"
     if [ ! -d "$APPLE_ACCOUNT_DIR" ]; then
-        echo "✗ Apple account folder missing: $APPLE_ACCOUNT_DIR" >&2
-        echo "  Apple signing was requested (--apple/--public) but the account plugin is not there;" >&2
-        echo "  refusing to cut an ad-hoc signed release that would look Developer-ID signed." >&2
+        echo "✗ Apple signing requested (--apple/--public) but the account plugin folder points at" >&2
+        echo "  ${APPLE_ACCOUNT_DIR}, which is not a directory" >&2
+        echo "  refusing to continue: signing with no account plugin produces an AD-HOC build" >&2
+        echo "  that looks Developer-ID signed." >&2
         return 1
     fi
     echo "→ Apple account: $APPLE_ACCOUNT ($APPLE_ACCOUNT_DIR)" >&2

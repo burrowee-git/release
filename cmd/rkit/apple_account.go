@@ -14,57 +14,59 @@ import (
 // the Apple account plugin folder (one line: the folder name).
 var appleAccountFiles = []string{"config/apple-account", "config/apple.account"}
 
-// loadAppleAccount sets APPLE_ACCOUNT / APPLE_ACCOUNT_DIR / APPLE_HOME from
-// config/apple-account so modernech-sign picks the project account plugin. It is
-// called only when --apple/--public is set, so every failure is fatal: entering
-// the Developer-ID path with no account resolved produces an AD-HOC signed
-// build while the operator believes it is Developer-ID signed and notarized.
+// appleHomeFiles are the config file names, in precedence order, that hold the
+// absolute directory containing one folder per Apple account (one line).
+var appleHomeFiles = []string{"config/apple-home", "config/apple.home"}
+
+// loadAppleAccount sets APPLE_ACCOUNT / APPLE_ACCOUNT_DIR / APPLE_HOME from the
+// repo's config so modernech-sign picks the project account plugin. It is called
+// only when --apple/--public is set, so every failure is fatal: entering the
+// Developer-ID path with no account resolved produces an AD-HOC signed build
+// while the operator believes it is Developer-ID signed and notarized.
 // It used to return silently on every failure mode and runBuild ignored that it
 // had done nothing.
 //
-// APPLE_HOME (the directory holding one folder per account) must come from the
-// environment — no operator's machine layout is baked into this public repo, and
-// a $HOME-derived default silently becomes a RELATIVE path when HOME is unset
-// (launchd, cron, a detached harness session).
+// Both values resolve the same way — an explicit environment variable first,
+// then a per-product config file:
 //
-// NOTE FOR OPERATORS: `rkit build` is the PRIMARY produce path — tools/release.sh
-// never invokes it, it distributes what rkit already staged — so this requirement
-// lands on the normal cutting flow, not on a side path. Export APPLE_HOME (or
-// APPLE_ACCOUNT_DIR) before `rkit build --public`. tools/RUNBOOK.md → "Cutting a
-// public release: the Apple environment" documents it, and every failure below
-// names the two variables.
+//	account   APPLE_ACCOUNT → config/apple-account
+//	home      APPLE_HOME    → config/apple-home
+//
+// or APPLE_ACCOUNT_DIR names the account's folder directly and settles both.
+//
+// The config files are operator-local and gitignored. That is what lets this
+// PUBLIC repo resolve a machine path without carrying one: no $HOME-derived
+// default is baked in here, both because no operator's layout belongs in public
+// source and because such a default silently becomes a RELATIVE path when HOME
+// is unset (launchd, cron, a detached harness session).
+//
+// tools/apple_sign.sh is release.sh's independent copy of this resolution and
+// shares the same precedence — neither entry point invokes the other, so what
+// they share is a contract, not an inherited environment.
 func loadAppleAccount(repoDir string) error {
-	if dir := os.Getenv("APPLE_ACCOUNT_DIR"); dir != "" {
+	if dir := strings.TrimSpace(os.Getenv("APPLE_ACCOUNT_DIR")); dir != "" {
+		if err := checkAccountDir(dir, "APPLE_ACCOUNT_DIR"); err != nil {
+			return err
+		}
 		fmt.Fprintf(os.Stderr, "→ Apple account dir (from APPLE_ACCOUNT_DIR): %s\n", dir)
 		return nil
 	}
-	// An operator cutting under a second account exports APPLE_ACCOUNT; honour
-	// it rather than overriding it from the repo's config file. tools/apple_sign.sh
-	// (release.sh's copy of this resolution) now uses the same precedence — the two
-	// resolve independently, since neither entry point invokes the other, so the
-	// contract they share is the precedence, not an inherited environment.
-	account := os.Getenv("APPLE_ACCOUNT")
-	if account == "" {
-		var err error
-		if account, err = readAppleAccountFile(repoDir); err != nil {
-			return err
-		}
+	account, err := resolveAppleValue(repoDir, "APPLE_ACCOUNT", appleAccountFiles,
+		"the Apple account plugin folder name")
+	if err != nil {
+		return err
 	}
-	home := os.Getenv("APPLE_HOME")
-	if home == "" {
-		return fmt.Errorf("apple signing requested but APPLE_HOME is not set: "+
-			"export it as the ABSOLUTE directory holding one folder per Apple account "+
-			"(it is then joined with %q), or set APPLE_ACCOUNT_DIR to that account's folder "+
-			"directly. `rkit build --public` is the primary produce path and does not inherit "+
-			"anything from tools/release.sh; see tools/RUNBOOK.md → \"Cutting a public release: "+
-			"the Apple environment\"", account)
+	home, err := resolveAppleValue(repoDir, "APPLE_HOME", appleHomeFiles,
+		"the absolute directory holding one folder per Apple account")
+	if err != nil {
+		return err
 	}
 	if !filepath.IsAbs(home) {
-		return fmt.Errorf("apple signing requested but APPLE_HOME=%q is not an absolute path", home)
+		return appleErrorf("APPLE_HOME resolved to %q, which is not an absolute path", home)
 	}
 	accountDir := filepath.Join(home, account)
-	if _, err := os.Stat(accountDir); err != nil {
-		return fmt.Errorf("apple signing requested but the account plugin folder is missing: %s: %w", accountDir, err)
+	if err := checkAccountDir(accountDir, "the account plugin folder"); err != nil {
+		return err
 	}
 	_ = os.Setenv("APPLE_ACCOUNT", account)
 	_ = os.Setenv("APPLE_HOME", home)
@@ -73,25 +75,69 @@ func loadAppleAccount(repoDir string) error {
 	return nil
 }
 
-// readAppleAccountFile returns the account folder name from the first readable
-// config file, or an error naming every path it tried.
-func readAppleAccountFile(repoDir string) (string, error) {
-	for _, name := range appleAccountFiles {
-		b, err := os.ReadFile(filepath.Join(repoDir, name))
+// resolveAppleValue returns one value from the environment or, failing that,
+// from the first readable config file. holds describes the value, so an
+// unresolved one names what the operator is being asked for.
+func resolveAppleValue(repoDir, env string, files []string, holds string) (string, error) {
+	// An operator cutting under a second account, or against a second plugin
+	// root, exports the variable; honour it rather than overriding it from the
+	// repo's config file.
+	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+		return v, nil
+	}
+	for _, name := range files {
+		body, err := os.ReadFile(filepath.Join(repoDir, name))
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			return line, nil
+		if v := firstConfigLine(string(body)); v != "" {
+			return v, nil
 		}
-		return "", fmt.Errorf("apple signing requested but %s holds no account name (only blank/comment lines)",
-			filepath.Join(repoDir, name))
+		return "", appleErrorf("%s holds no value — only blank or comment lines.\n%s",
+			filepath.Join(repoDir, name), appleFixHint(repoDir, env, files, holds))
 	}
-	return "", fmt.Errorf("apple signing requested but no Apple account resolved: create %s with the account "+
-		"plugin folder name, or export APPLE_ACCOUNT / APPLE_ACCOUNT_DIR",
-		filepath.Join(repoDir, appleAccountFiles[0]))
+	return "", appleErrorf("%s is unresolved.\n%s", env, appleFixHint(repoDir, env, files, holds))
+}
+
+// firstConfigLine returns the first non-blank, non-comment line, trimmed.
+func firstConfigLine(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+// appleFixHint lists every way to supply the value, each with what it holds, so
+// an operator can get unstuck from the error alone without opening the runbook.
+func appleFixHint(repoDir, env string, files []string, holds string) string {
+	return fmt.Sprintf("  supply it as one of:\n"+
+		"    %s\n        one line: %s\n"+
+		"    $%s\n        the same value, from the environment\n"+
+		"    $APPLE_ACCOUNT_DIR\n        the account's folder itself, which settles account and home together",
+		filepath.Join(repoDir, files[0]), holds, env)
+}
+
+// checkAccountDir reports a path that is meant to be an account plugin folder
+// but is not a usable directory. label names where the path came from.
+func checkAccountDir(dir, label string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return appleErrorf("%s points at %s, which cannot be read: %v", label, dir, err)
+	}
+	if !info.IsDir() {
+		return appleErrorf("%s points at %s, which is not a directory", label, dir)
+	}
+	return nil
+}
+
+// appleErrorf prefixes every failure with what was requested and what refusing
+// protects, so the message stands on its own in a build log.
+func appleErrorf(format string, args ...any) error {
+	return fmt.Errorf("apple signing requested (--apple/--public) but "+format+
+		"\n  refusing to continue: signing with no account plugin produces an AD-HOC build "+
+		"that looks Developer-ID signed", args...)
 }

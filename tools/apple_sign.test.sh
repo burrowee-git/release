@@ -217,8 +217,8 @@ export APPLE_HOME="${PLUGINS}"
 export APPLE_ACCOUNT="NoSuchAccount"
 out="$(load_apple_account "${REPO}" 2>&1)"; rc=$?
 check "missing plugin folder is fatal (rc)" "${rc}" "1"
-check_contains "missing plugin folder is named" "${out}" "Apple account folder missing"
-check_contains "missing plugin folder refuses" "${out}" "refusing to cut an ad-hoc signed release"
+check_contains "missing plugin folder is named" "${out}" "account plugin folder points at"
+check_contains "missing plugin folder refuses" "${out}" "AD-HOC"
 
 # No config file and no env at all → refuse rather than proceed accountless.
 reset_apple_env
@@ -227,7 +227,55 @@ EMPTY_REPO="${WORK}/empty-repo"
 mkdir -p "${EMPTY_REPO}"
 out="$(load_apple_account "${EMPTY_REPO}" 2>&1)"; rc=$?
 check "no account anywhere is fatal (rc)" "${rc}" "1"
-check_contains "no account anywhere is explained" "${out}" "no Apple account resolved"
+check_contains "no account anywhere is explained" "${out}" "APPLE_ACCOUNT is unresolved"
+
+# APPLE_HOME comes from the repo's own config/apple-home, so a cut needs nothing
+# exported. This copy used to default it to a baked $HOME path while the Go twin
+# refused to default at all — the two disagreed about where plugins live, and
+# $HOME is unset under launchd/cron/a detached session anyway.
+reset_apple_env
+HOME_REPO="${WORK}/home-repo"
+mkdir -p "${HOME_REPO}/config"
+printf 'AcmeCorp\n' > "${HOME_REPO}/config/apple-account"
+printf '# where the plugins live\n\n%s\n' "${PLUGINS}" > "${HOME_REPO}/config/apple-home"
+load_apple_account "${HOME_REPO}" 2>/dev/null; rc=$?
+check "apple-home config resolution (rc)" "${rc}" "0"
+check "APPLE_HOME from config" "${APPLE_HOME}" "${PLUGINS}"
+check "APPLE_ACCOUNT_DIR joined from config home" "${APPLE_ACCOUNT_DIR}" "${PLUGINS}/AcmeCorp"
+
+# An exported APPLE_HOME still wins over the file — same precedence as account.
+reset_apple_env
+export APPLE_HOME="${PLUGINS}"
+load_apple_account "${HOME_REPO}" 2>/dev/null
+check "preset APPLE_HOME wins over config" "${APPLE_HOME}" "${PLUGINS}"
+
+# No APPLE_HOME anywhere is fatal, and the error names every way to supply it.
+reset_apple_env
+out="$(load_apple_account "${REPO}" 2>&1)"; rc=$?
+check "unresolved APPLE_HOME is fatal (rc)" "${rc}" "1"
+check_contains "unresolved APPLE_HOME is explained" "${out}" "APPLE_HOME is unresolved"
+check_contains "unresolved APPLE_HOME names the file" "${out}" "config/apple-home"
+check_contains "unresolved APPLE_HOME names the env var" "${out}" "\$APPLE_HOME"
+check_contains "unresolved APPLE_HOME names the dir escape" "${out}" "\$APPLE_ACCOUNT_DIR"
+
+# A relative APPLE_HOME is refused rather than joined into a relative dir.
+reset_apple_env
+export APPLE_HOME="Workstation/Apple"
+out="$(load_apple_account "${REPO}" 2>&1)"; rc=$?
+check "relative APPLE_HOME is fatal (rc)" "${rc}" "1"
+check_contains "relative APPLE_HOME is explained" "${out}" "not an absolute path"
+
+# APPLE_ACCOUNT_DIR settles both and consults no config — but a stale one
+# pointing at a folder that no longer exists must abort, not sail through.
+reset_apple_env
+export APPLE_ACCOUNT_DIR="${PLUGINS}/AcmeCorp"
+load_apple_account "${WORK}/empty-repo" 2>/dev/null; rc=$?
+check "APPLE_ACCOUNT_DIR alone resolves (rc)" "${rc}" "0"
+reset_apple_env
+export APPLE_ACCOUNT_DIR="${PLUGINS}/GoneAway"
+out="$(load_apple_account "${WORK}/empty-repo" 2>&1)"; rc=$?
+check "stale APPLE_ACCOUNT_DIR is fatal (rc)" "${rc}" "1"
+check_contains "stale APPLE_ACCOUNT_DIR is named" "${out}" "APPLE_ACCOUNT_DIR points at"
 
 # A config holding only comments/blanks is the same unresolved state.
 reset_apple_env
@@ -237,7 +285,7 @@ mkdir -p "${BLANK_REPO}/config"
 printf '# nothing here\n\n   \n' > "${BLANK_REPO}/config/apple-account"
 out="$(load_apple_account "${BLANK_REPO}" 2>&1)"; rc=$?
 check "comment-only config is fatal (rc)" "${rc}" "1"
-check_contains "comment-only config is explained" "${out}" "no Apple account resolved"
+check_contains "comment-only config is explained" "${out}" "APPLE_ACCOUNT is unresolved"
 
 echo
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
