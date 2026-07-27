@@ -318,5 +318,126 @@ printf '%s' "${BODY4}" | grep -q '\\u0001' \
 echo "✓ TEST 4 PASSED — json_escape handles quote/backslash/newline/tab/control; body is valid JSON"
 
 # =============================================================================
+# TEST 5 — updater_version (Task 2): public comp (edge) body carries the
+# resolved core/updater pin from its real source worktree (root module).
+# =============================================================================
+say "TEST 5 — updater_version: edge body carries the core/updater pin (root module)"
+
+EDGE_SRC="${BURROWEE_SRC_EDGE:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/edge/code/edge}"
+if [ ! -d "${EDGE_SRC}" ]; then
+    skip "TEST 5: edge source worktree not found at ${EDGE_SRC} — cannot resolve a real core/updater pin"
+else
+    STAGE5="${W}/stage5"
+    make_stage "${STAGE5}" "edge"
+    EXTRACT5="${W}/fn5.sh"
+    extract_register_staged "${EXTRACT5}"
+
+    # The pin this test expects the body to carry: same resolution the
+    # implementation uses (go list -m from the component's root module dir).
+    edge_pin="$(cd "${EDGE_SRC}" && GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" /opt/homebrew/bin/go list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
+
+    RESULT5="$(
+        GO_BIN=/opt/homebrew/bin/go \
+        GOTOOLCHAIN=go1.26.5 \
+        GOPRIVATE="github.com/burrowee-git/*" \
+        DRY_RUN=1 \
+        RELEASE_REPO="${RELEASE_REPO}" \
+        SHA256="${SHA256}" \
+        bash -c "
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            . '${EXTRACT5}'
+            register_staged edge v0.1.0.2026.06.17.edgepin 0.1.0 '${STAGE5}' '${EDGE_SRC}' edge/v0.1.0.2026.06.17.edgepin
+        " 2>&1
+    )"
+
+    printf '%s\n' "${RESULT5}" | grep -q "\"updater_version\":\"${edge_pin}\"" \
+        || die "TEST 5: updater_version '${edge_pin}' missing from register body. Output:\n${RESULT5}"
+    printf '%s' "$(body_of "${RESULT5}")" | json_ok \
+        || die "TEST 5: edge register body is not valid JSON. Output:\n${RESULT5}"
+
+    echo "✓ TEST 5 PASSED — updater_version resolves the real core/updater pin (root module) for edge"
+fi
+
+# =============================================================================
+# TEST 6 — updater_version (Task 2): relay body carries the resolved
+# core/updater pin from the NESTED cli module (cli/go.mod), not the relay
+# root module (which does not pin core/updater directly).
+# =============================================================================
+say "TEST 6 — updater_version: relay body carries the core/updater pin (nested cli module)"
+
+RELAY_SRC="${BURROWEE_SRC_RELAY:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/relay/code/relay}"
+if [ ! -d "${RELAY_SRC}/cli" ]; then
+    skip "TEST 6: relay source worktree (nested cli module) not found at ${RELAY_SRC}/cli — cannot resolve a real core/updater pin"
+else
+    STAGE6="${W}/stage6"
+    make_stage "${STAGE6}" "relay"
+    EXTRACT6="${W}/fn6.sh"
+    extract_register_staged "${EXTRACT6}"
+
+    relay_pin="$(cd "${RELAY_SRC}/cli" && GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" /opt/homebrew/bin/go list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
+
+    RESULT6="$(
+        GO_BIN=/opt/homebrew/bin/go \
+        GOTOOLCHAIN=go1.26.5 \
+        GOPRIVATE="github.com/burrowee-git/*" \
+        DRY_RUN=1 \
+        RELEASE_REPO="${RELEASE_REPO}" \
+        SHA256="${SHA256}" \
+        bash -c "
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            . '${EXTRACT6}'
+            register_staged relay v0.1.0.2026.06.17.relaypin 0.1.0 '${STAGE6}' '${RELAY_SRC}'
+        " 2>&1
+    )"
+
+    printf '%s\n' "${RESULT6}" | grep -q "\"updater_version\":\"${relay_pin}\"" \
+        || die "TEST 6: updater_version '${relay_pin}' missing from relay register body (nested cli module). Output:\n${RESULT6}"
+
+    echo "✓ TEST 6 PASSED — updater_version resolves the real core/updater pin (nested cli module) for relay"
+fi
+
+# =============================================================================
+# TEST 7 — updater_version (Task 2): agent has no core/updater dependency (no
+# burrowee-agent-updater binary exists) — must not crash register_staged, and
+# updater_version must be emitted as an empty string rather than aborting the
+# whole release under `set -euo pipefail`.
+# =============================================================================
+say "TEST 7 — updater_version: agent (no core/updater dep) does not crash, emits empty string"
+
+AGENT_SRC="${BURROWEE_SRC_AGENT:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/agent/code/agent}"
+if [ ! -d "${AGENT_SRC}" ]; then
+    skip "TEST 7: agent source worktree not found at ${AGENT_SRC}"
+else
+    STAGE7="${W}/stage7"
+    make_stage "${STAGE7}" "agent"
+    EXTRACT7="${W}/fn7.sh"
+    extract_register_staged "${EXTRACT7}"
+
+    RESULT7="$(
+        GO_BIN=/opt/homebrew/bin/go \
+        GOTOOLCHAIN=go1.26.5 \
+        GOPRIVATE="github.com/burrowee-git/*" \
+        DRY_RUN=1 \
+        RELEASE_REPO="${RELEASE_REPO}" \
+        SHA256="${SHA256}" \
+        bash -c "
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            . '${EXTRACT7}'
+            register_staged agent v0.1.0.2026.06.17.agentpin 0.1.0 '${STAGE7}' '${AGENT_SRC}' agent/v0.1.0.2026.06.17.agentpin
+            echo 'exit_code:0'
+        " 2>&1
+    )"
+
+    printf '%s\n' "${RESULT7}" | grep -q 'exit_code:0' \
+        || die "TEST 7: register_staged crashed for agent (no core/updater dep). Output:\n${RESULT7}"
+    printf '%s\n' "${RESULT7}" | grep -q '"updater_version":""' \
+        || die "TEST 7: expected empty updater_version for agent. Output:\n${RESULT7}"
+    printf '%s' "$(body_of "${RESULT7}")" | json_ok \
+        || die "TEST 7: agent register body is not valid JSON. Output:\n${RESULT7}"
+
+    echo "✓ TEST 7 PASSED — agent: no crash, updater_version emitted as empty string"
+fi
+
+# =============================================================================
 echo ""
 echo "✓ ALL TESTS PASSED"

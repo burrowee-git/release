@@ -337,9 +337,24 @@ register_staged() {
     read -r -a bins <<< "$(bins_for "${comp}")"
     binaries_json="$(printf '%s\n' "${bins[@]}" | jq -Rsc 'split("\n") | map(select(length>0))')"
 
+    # updater_version: the pinned core/updater tag bundled in this release
+    # (mirrors dispatcher_version; the burrowee-<comp>-updater binary is stamped
+    # from it — see build.sh's updater_pin). Resolved from the component's
+    # updater module dir: the root module for cli/gateway/edge, the NESTED
+    # `cli` module for relay (cli/go.mod pins core/updater separately from the
+    # relay root module — same distinction build.sh's updater_pin makes).
+    # agent ships no -updater binary and has no core/updater dependency at
+    # all, so its updater_version is "" rather than aborting the release.
+    local updater_mod_dir="${src_dir}"
+    [ "${comp}" = relay ] && updater_mod_dir="${src_dir}/cli"
+    local updater_ver=""
+    if [ "${comp}" != agent ] && [ -d "${updater_mod_dir}" ]; then
+        updater_ver="$(cd "${updater_mod_dir}" && "${GO_BIN:-go}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater 2>/dev/null)" || updater_ver=""
+    fi
+
     local body
     # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
-    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\",\"binaries\":${binaries_json},\"dispatcher_version\":\"$(json_escape "${DISP_STAMP}")\"}"
+    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\",\"binaries\":${binaries_json},\"dispatcher_version\":\"$(json_escape "${DISP_STAMP}")\",\"updater_version\":\"$(json_escape "${updater_ver}")\"}"
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ dry-run: would register ${comp} ${stamp} via burrowee-release-register"
