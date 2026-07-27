@@ -125,6 +125,25 @@ if [ "${COMP}" = "relay" ]; then
     RELAY_CONSOLE_LDFLAGS="-X main.consoleURLProd=${CONSOLE_URL_PROD} -X main.consolePubHexProd=${CONSOLE_PUB_HEX}"
 fi
 
+# updater_pin <mod-dir> — resolve the github.com/burrowee-git/core/updater pin from
+# the given module dir (relay's updater build_dir is the nested `cli` module) and
+# reject anything but a clean tag. The updater binary's version is the module pin,
+# NOT the component STAMP — so it stays stable across cuts that don't repin
+# core/updater, and a cut never ships an ugly pseudo-version.
+updater_pin() {
+    local mod_dir="$1"
+    local v
+    v="$(cd "${mod_dir}" && "${GO_BIN}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
+    case "${v}" in
+        v[0-9]*.[0-9]*.[0-9]*) : ;;   # clean tag
+        *) echo "✗ core/updater pinned to non-tag '${v}' in ${mod_dir} — repin to a tag before cut" >&2; exit 1 ;;
+    esac
+    case "${v}" in
+        *-*) echo "✗ core/updater pin '${v}' is a pseudo-version — repin to a tag before cut" >&2; exit 1 ;;
+    esac
+    printf '%s' "${v}"
+}
+
 mkdir -p "${OUT_DIR}"
 HOST_OS="$(uname -s)"
 
@@ -153,7 +172,18 @@ for pair in ${MAP}; do
                 ;;
         esac
     fi
-    echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${STAMP})"
+    # The updater binary's version is the core/updater module pin, not the
+    # component STAMP — so it stays stable across cuts that don't repin
+    # core/updater. Overrides bin_ldflags wholesale but keeps relay's console
+    # identity flags (RELAY_CONSOLE_LDFLAGS is empty for every other component).
+    bin_version="${STAMP}"
+    case "${bin}" in
+        *-updater)
+            bin_version="$(updater_pin "${build_dir}")"
+            bin_ldflags="-X main.version=${bin_version} ${RELAY_CONSOLE_LDFLAGS:-}"
+            ;;
+    esac
+    echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${bin_version})"
     ( cd "${build_dir}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOWORK="${bin_gowork}" \
         "${GO_BIN}" build -trimpath -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then
