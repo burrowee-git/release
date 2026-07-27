@@ -83,6 +83,20 @@ TARGETS=(
 )
 RELEASE_REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 
+# Real component source worktrees. Task 2's updater_version resolution now
+# hard-fails (mirrors dispatcher_version's nullability — see register_staged's
+# resolve_updater_pin) rather than silently swallowing an unresolvable
+# core/updater pin, so every test that exercises a non-agent component must
+# pass a REAL src_dir (a bogus placeholder path would make register_staged
+# fail loudly, which is now correct behavior, not a test artifact).
+CLI_SRC="${BURROWEE_SRC_CLI:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/cli/code/cli}"
+EDGE_SRC="${BURROWEE_SRC_EDGE:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/edge/code/edge}"
+RELAY_SRC="${BURROWEE_SRC_RELAY:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/relay/code/relay}"
+AGENT_SRC="${BURROWEE_SRC_AGENT:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/agent/code/agent}"
+# go env for real pin resolution (mirrors release.sh's own GO_BIN + the
+# private-module env the repo's other tests already export).
+GO_ENV=(GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*")
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -186,14 +200,16 @@ EXTRACT1="${W}/fn1.sh"
 extract_register_staged "${EXTRACT1}"
 
 RESULT1="$(
+    env \
     PATH="${W}/bin:${PATH}" \
+    "${GO_ENV[@]}" \
     DRY_RUN=1 \
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
     bash -c "
         TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
         . '${EXTRACT1}'
-        register_staged cli v0.1.0.2026.06.17.abcd1234 0.1.0 '${STAGE1}' cli/v0.1.0.2026.06.17.abcd1234
+        register_staged cli v0.1.0.2026.06.17.abcd1234 0.1.0 '${STAGE1}' '${CLI_SRC}' cli/v0.1.0.2026.06.17.abcd1234
     " 2>&1
 )"
 
@@ -223,13 +239,15 @@ EXTRACT2="${W}/fn2.sh"
 extract_register_staged "${EXTRACT2}"
 
 RESULT2="$(
+    env \
+    "${GO_ENV[@]}" \
     DRY_RUN=1 \
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
     bash -c "
         TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
         . '${EXTRACT2}'
-        register_staged relay v0.1.0.2026.06.17.abcd9999 0.1.0 '${STAGE2}'
+        register_staged relay v0.1.0.2026.06.17.abcd9999 0.1.0 '${STAGE2}' '${RELAY_SRC}'
     " 2>&1
 )"
 
@@ -261,15 +279,17 @@ FAKE_HOME="${W}/fakehome"
 mkdir -p "${FAKE_HOME}"
 
 TEST3_OUT="$(
+    env \
     PATH="${W}/bin:${PATH}" \
     HOME="${FAKE_HOME}" \
+    "${GO_ENV[@]}" \
     DRY_RUN=0 \
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
     bash -c "
         TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
         . '${EXTRACT3}'
-        register_staged edge v0.1.0.2026.06.17.abcdefgh 0.1.0 '${STAGE3}' edge/v0.1.0.2026.06.17.abcdefgh
+        register_staged edge v0.1.0.2026.06.17.abcdefgh 0.1.0 '${STAGE3}' '${EDGE_SRC}' edge/v0.1.0.2026.06.17.abcdefgh
         echo 'exit_code:0'
     " 2>&1
 )"
@@ -296,6 +316,8 @@ extract_register_staged "${EXTRACT4}"
 EVIL_STAMP="$(printf 'v0.1.0"evil\\back\nNL\tTAB\001CTRL')"
 
 RESULT4="$(
+    env \
+    "${GO_ENV[@]}" \
     DRY_RUN=1 \
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
@@ -303,7 +325,7 @@ RESULT4="$(
     bash -c '
         TARGETS=("darwin arm64" "darwin amd64" "linux arm64" "linux amd64")
         . '"'${EXTRACT4}'"'
-        register_staged cli "${EVIL_STAMP}" "${EVIL_STAMP}" '"'${STAGE4}'"' "cli/${EVIL_STAMP}"
+        register_staged cli "${EVIL_STAMP}" "${EVIL_STAMP}" '"'${STAGE4}'"' '"'${CLI_SRC}'"' "cli/${EVIL_STAMP}"
     ' 2>&1
 )"
 
@@ -323,7 +345,6 @@ echo "✓ TEST 4 PASSED — json_escape handles quote/backslash/newline/tab/cont
 # =============================================================================
 say "TEST 5 — updater_version: edge body carries the core/updater pin (root module)"
 
-EDGE_SRC="${BURROWEE_SRC_EDGE:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/edge/code/edge}"
 if [ ! -d "${EDGE_SRC}" ]; then
     skip "TEST 5: edge source worktree not found at ${EDGE_SRC} — cannot resolve a real core/updater pin"
 else
@@ -337,9 +358,8 @@ else
     edge_pin="$(cd "${EDGE_SRC}" && GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" /opt/homebrew/bin/go list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
 
     RESULT5="$(
-        GO_BIN=/opt/homebrew/bin/go \
-        GOTOOLCHAIN=go1.26.5 \
-        GOPRIVATE="github.com/burrowee-git/*" \
+        env \
+        "${GO_ENV[@]}" \
         DRY_RUN=1 \
         RELEASE_REPO="${RELEASE_REPO}" \
         SHA256="${SHA256}" \
@@ -365,7 +385,6 @@ fi
 # =============================================================================
 say "TEST 6 — updater_version: relay body carries the core/updater pin (nested cli module)"
 
-RELAY_SRC="${BURROWEE_SRC_RELAY:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/relay/code/relay}"
 if [ ! -d "${RELAY_SRC}/cli" ]; then
     skip "TEST 6: relay source worktree (nested cli module) not found at ${RELAY_SRC}/cli — cannot resolve a real core/updater pin"
 else
@@ -377,9 +396,8 @@ else
     relay_pin="$(cd "${RELAY_SRC}/cli" && GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" /opt/homebrew/bin/go list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
 
     RESULT6="$(
-        GO_BIN=/opt/homebrew/bin/go \
-        GOTOOLCHAIN=go1.26.5 \
-        GOPRIVATE="github.com/burrowee-git/*" \
+        env \
+        "${GO_ENV[@]}" \
         DRY_RUN=1 \
         RELEASE_REPO="${RELEASE_REPO}" \
         SHA256="${SHA256}" \
@@ -404,7 +422,6 @@ fi
 # =============================================================================
 say "TEST 7 — updater_version: agent (no core/updater dep) does not crash, emits empty string"
 
-AGENT_SRC="${BURROWEE_SRC_AGENT:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/agent/code/agent}"
 if [ ! -d "${AGENT_SRC}" ]; then
     skip "TEST 7: agent source worktree not found at ${AGENT_SRC}"
 else
@@ -414,9 +431,8 @@ else
     extract_register_staged "${EXTRACT7}"
 
     RESULT7="$(
-        GO_BIN=/opt/homebrew/bin/go \
-        GOTOOLCHAIN=go1.26.5 \
-        GOPRIVATE="github.com/burrowee-git/*" \
+        env \
+        "${GO_ENV[@]}" \
         DRY_RUN=1 \
         RELEASE_REPO="${RELEASE_REPO}" \
         SHA256="${SHA256}" \
@@ -436,6 +452,71 @@ else
         || die "TEST 7: agent register body is not valid JSON. Output:\n${RESULT7}"
 
     echo "✓ TEST 7 PASSED — agent: no crash, updater_version emitted as empty string"
+fi
+
+# =============================================================================
+# TEST 8 — updater_version (Task 2 fix-round-1): an unresolvable core/updater
+# pin for a NON-agent component must FAIL LOUDLY (non-zero exit + a clear
+# stderr diagnostic), never silently degrade to an empty updater_version.
+# This is the negative case that a prior version of this code got wrong (a
+# `2>/dev/null || updater_ver=""` swallow around `go list -m`), which could
+# have masked a real regression (e.g. a transient GOPRIVATE/auth/cache
+# failure) as a quietly-empty field in a live cut.
+#
+# Fixture: register cli (a component that DOES require core/updater) but
+# point its src_dir at the AGENT worktree, whose go.mod has no core/updater
+# dependency at all — go list -m deterministically fails offline with
+# "not a known dependency", no network required.
+# =============================================================================
+say "TEST 8 — updater_version: unresolvable pin FAILS loudly for a non-agent component"
+
+if [ ! -d "${AGENT_SRC}" ] || [ ! -d "${CLI_SRC}" ]; then
+    skip "TEST 8: agent or cli source worktree not found — cannot exercise the unresolvable-pin fixture"
+else
+    STAGE8="${W}/stage8"
+    make_stage "${STAGE8}" "cli"
+    EXTRACT8="${W}/fn8.sh"
+    extract_register_staged "${EXTRACT8}"
+
+    # The extracted function alone (no set -e) would tolerate the failure and
+    # keep going, exactly like the swallow bug did — so this invocation adds
+    # `set -euo pipefail` explicitly, matching release.sh's own top-of-script
+    # setting, to prove register_staged aborts the CALLER under the real
+    # error-propagation contract, not just under a lenient test harness.
+    set +e
+    RESULT8="$(
+        env \
+        "${GO_ENV[@]}" \
+        DRY_RUN=1 \
+        RELEASE_REPO="${RELEASE_REPO}" \
+        SHA256="${SHA256}" \
+        bash -c "
+            set -euo pipefail
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            # bins_for() lives earlier in release.sh, outside what
+            # extract_register_staged pulls out — stub it (real cli value)
+            # so THIS test isolates the updater_version failure path, not an
+            # unrelated harness gap surfaced only because set -e is on here.
+            bins_for() { printf '%s' 'burrowee-cli burrowee-cli-updater'; }
+            . '${EXTRACT8}'
+            register_staged cli v0.1.0.2026.06.17.badpin 0.1.0 '${STAGE8}' '${AGENT_SRC}' cli/v0.1.0.2026.06.17.badpin
+        " 2>&1
+    )"
+    RC8=$?
+    set -e
+
+    [ "${RC8}" -ne 0 ] \
+        || die "TEST 8: expected register_staged to FAIL (non-zero exit) for an unresolvable core/updater pin, got exit 0. Output:\n${RESULT8}"
+    printf '%s\n' "${RESULT8}" | grep -q 'cannot resolve core/updater pin' \
+        || die "TEST 8: expected a clear stderr diagnostic naming the unresolvable pin. Output:\n${RESULT8}"
+    if printf '%s\n' "${RESULT8}" | grep -q 'would register'; then
+        die "TEST 8: register_staged printed a dry-run preview despite an unresolvable pin — it must abort BEFORE building the body. Output:\n${RESULT8}"
+    fi
+    if printf '%s\n' "${RESULT8}" | grep -q '"updater_version":""'; then
+        die "TEST 8: register_staged silently emitted an empty updater_version instead of failing. Output:\n${RESULT8}"
+    fi
+
+    echo "✓ TEST 8 PASSED — unresolvable core/updater pin aborts loudly (exit ${RC8}), no silent empty updater_version"
 fi
 
 # =============================================================================

@@ -338,19 +338,37 @@ register_staged() {
     binaries_json="$(printf '%s\n' "${bins[@]}" | jq -Rsc 'split("\n") | map(select(length>0))')"
 
     # updater_version: the pinned core/updater tag bundled in this release
-    # (mirrors dispatcher_version; the burrowee-<comp>-updater binary is stamped
-    # from it — see build.sh's updater_pin). Resolved from the component's
-    # updater module dir: the root module for cli/gateway/edge, the NESTED
-    # `cli` module for relay (cli/go.mod pins core/updater separately from the
-    # relay root module — same distinction build.sh's updater_pin makes).
-    # agent ships no -updater binary and has no core/updater dependency at
-    # all, so its updater_version is "" rather than aborting the release.
+    # (mirrors dispatcher_version's nullability — DISP_STAMP is resolved by
+    # version.sh under this script's `set -euo pipefail` and hard-fails a cut
+    # rather than ever becoming ""; updater_version must carry the same
+    # guarantee, not silently swallow a resolution error). Resolved from the
+    # component's updater module dir: the root module for cli/gateway/edge,
+    # the NESTED `cli` module for relay (cli/go.mod pins core/updater
+    # separately from the relay root module — same distinction build.sh's
+    # updater_pin() makes). agent ships no -updater binary and has no
+    # core/updater dependency at all — it is the ONLY component whose
+    # updater_version is legitimately "".
+    #
+    # resolve_updater_pin <mod-dir>: mirrors build.sh's updater_pin() contract
+    # exactly — hard-fails (stderr message + non-zero) on an unresolvable
+    # module or a pseudo-version, so a cut (including distribute_relay(),
+    # which re-resolves this pin fresh at distribution time) can never
+    # silently ship an empty or ugly updater_version.
+    resolve_updater_pin() {
+        local mod_dir="$1"
+        local v
+        v="$(cd "${mod_dir}" && "${GO_BIN:-go}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)" \
+            || { echo "✗ cannot resolve core/updater pin for ${comp} in ${mod_dir}" >&2; exit 1; }
+        case "${v}" in
+            *-*) echo "✗ core/updater pin '${v}' is a pseudo-version in ${mod_dir} — repin to a tag before registering ${comp}" >&2; exit 1 ;;
+        esac
+        printf '%s' "${v}"
+    }
+
     local updater_mod_dir="${src_dir}"
     [ "${comp}" = relay ] && updater_mod_dir="${src_dir}/cli"
     local updater_ver=""
-    if [ "${comp}" != agent ] && [ -d "${updater_mod_dir}" ]; then
-        updater_ver="$(cd "${updater_mod_dir}" && "${GO_BIN:-go}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater 2>/dev/null)" || updater_ver=""
-    fi
+    [ "${comp}" = agent ] || updater_ver="$(resolve_updater_pin "${updater_mod_dir}")"
 
     local body
     # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
