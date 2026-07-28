@@ -192,6 +192,39 @@ SRC_AGENT="${BURROWEE_SRC_AGENT:-${BB}/agent/code/agent}"
 SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}"
 SRC_RELAY="${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}"
 
+# resolve_disp_stamp — the dispatcher stamp to bundle/register this cut. Reuses
+# the recorded versions/burrowee.stamp verbatim (date frozen) when the
+# dispatcher source is unchanged; else mints a fresh stamp (today) and records
+# it so it rides the [RELEASED] marker. Keeps dispatcher_version stable until
+# the dispatcher source actually changes, instead of churning on every cut's
+# date. Defined here (ahead of the --distribute-only early-exit below) so
+# every DISP_STAMP call site — distribute_relay, distribute_only, and the
+# dispatcher build-cache section — resolves the same way.
+DISP_STAMP_FILE="${REPO_ROOT}/versions/burrowee.stamp"
+resolve_disp_stamp() {
+    local cur_sha semver recorded rec_sha rec_sv fresh
+    cur_sha="$(git -C "${SRC_DISPATCHER}" rev-parse --short=8 HEAD)"
+    semver="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --semver | tr -d '[:space:]')"
+    if [ -f "${DISP_STAMP_FILE}" ]; then
+        recorded="$(tr -d '[:space:]' < "${DISP_STAMP_FILE}")"
+        rec_sha="${recorded##*.}"                 # trailing sha8 segment
+        rec_sv="$(printf '%s' "${recorded}" | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+)\..*/\1/')"
+        if [ "${rec_sha}" = "${cur_sha}" ] && [ "${rec_sv}" = "${semver}" ]; then
+            printf '%s' "${recorded}"; return 0   # unchanged → reuse (date frozen)
+        fi
+    fi
+    fresh="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp | tr -d '[:space:]')"
+    if [ "${DRY_RUN:-0}" != 1 ]; then
+        printf '%s\n' "${fresh}" > "${DISP_STAMP_FILE}"
+        # Rides the [RELEASED] marker commit; if the cut aborts before that
+        # commit, revert_dispatcher_version() (below, in the EXIT/INT/TERM
+        # trap) restores this staged write so a never-released date isn't
+        # left behind for the next unchanged-source cut to reuse.
+        ( cd "${REPO_ROOT}" && git add "versions/burrowee.stamp" )
+    fi
+    printf '%s' "${fresh}"
+}
+
 # edge skills source-of-truth (the edge repo owns these)
 EDGE_SKILLS_SRC="${SRC_EDGE}/skills"
 
@@ -560,7 +593,7 @@ distribute_relay() {
     # (5) console catalog row (LAST) — relay uses R2 keys, not GitHub URLs.
     # register_staged records the dispatcher stamp bundled into the zip; resolve
     # it here (the public distribute_only sets DISP_STAMP the same way).
-    DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
+    DISP_STAMP="$(resolve_disp_stamp)"
     register_staged "${comp}" "${stamp}" "${semver}" "${latest_stage}" "${src}"
     echo "✓ distributed relay ${stamp} (private, R2 relay/${stamp}/)"
 }
@@ -604,7 +637,7 @@ distribute_only() {
     command -v jq >/dev/null 2>&1 || { echo "✗ required tool not found: jq" >&2; exit 1; }
 
     [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
-    DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
+    DISP_STAMP="$(resolve_disp_stamp)"
     if command -v shasum >/dev/null 2>&1; then SHA256="shasum -a 256"
     elif command -v sha256sum >/dev/null 2>&1; then SHA256="sha256sum"
     else echo "✗ neither shasum nor sha256sum found" >&2; exit 1; fi
@@ -807,16 +840,30 @@ done
 # Runs before the first build so a vulnerable cut never produces a binary.
 vulncheck_gate
 
-# revert_dispatcher_version restores versions/burrowee when a real release
-# bumped it (below) but died before the first component's marker commit staged
-# it in. On success the bump is committed (no staged diff) → this is a no-op;
-# dry-runs never bump → also a no-op. It is deliberately NOT part of the
-# shred_key trap above: --distribute-only never bumps the dispatcher version, so
-# adding this to that path could only touch an operator's unrelated staging.
+# revert_dispatcher_version restores versions/burrowee (and versions/burrowee.stamp)
+# when a real release bumped/wrote them (below) but died before the first
+# component's marker commit staged them in. On success the bump/stamp is
+# committed (no staged diff) → this is a no-op; dry-runs never bump or write
+# the stamp → also a no-op. It is deliberately NOT part of the shred_key trap
+# above: --distribute-only never bumps the dispatcher version or writes the
+# stamp, so adding this to that path could only touch an operator's unrelated
+# staging.
+#
+# versions/burrowee.stamp is folded in here (rather than a separate trap
+# handler) because it's the same failure class as the semver bump: resolve_disp_stamp
+# (defined above, near SRC_DISPATCHER) writes + `git add`s it as soon as it
+# mints a fresh stamp, but that's only ever committed at the [RELEASED]
+# marker — a cut that aborts in between must not leave a staged stamp dated
+# today for the next unchanged-source cut to wrongly reuse.
 revert_dispatcher_version() {
-    git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee 2>/dev/null && return 0
-    git -C "${REPO_ROOT}" restore --staged versions/burrowee 2>/dev/null || true
-    git -C "${REPO_ROOT}" checkout -- versions/burrowee 2>/dev/null || true
+    git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee 2>/dev/null || {
+        git -C "${REPO_ROOT}" restore --staged versions/burrowee 2>/dev/null || true
+        git -C "${REPO_ROOT}" checkout -- versions/burrowee 2>/dev/null || true
+    }
+    git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee.stamp 2>/dev/null || {
+        git -C "${REPO_ROOT}" restore --staged versions/burrowee.stamp 2>/dev/null || true
+        git -C "${REPO_ROOT}" checkout -- versions/burrowee.stamp 2>/dev/null || true
+    }
 }
 trap 'shred_key; revert_dispatcher_version' EXIT INT TERM
 
@@ -867,15 +914,19 @@ console_pub_hex() {
 # The `burrowee` dispatcher is built once per run and bundled into EVERY
 # component zip. It is a zero-logic exec table, so its binary changes ONLY when
 # the burrowee repo source changes — which is rare. The cut therefore does NOT
-# auto-bump it: it stamps the dispatcher at the CURRENT versions/burrowee, so a
-# routine component cut mints no dispatcher version churn.
+# auto-bump it: resolve_disp_stamp() (defined above, near SRC_DISPATCHER)
+# reuses the recorded versions/burrowee.stamp verbatim — date frozen — when
+# the dispatcher source is unchanged, so a routine component cut mints no
+# dispatcher version churn.
 #
 # When (and only when) the dispatcher source actually changed, bump it MANUALLY
 # before the cut, from the release repo root: `bash tools/version.sh burrowee
 # --bump-patch` (no SRC_DIR needed — only --stamp reads it). That stages
-# versions/burrowee, which then rides the first component's [RELEASED] marker
-# commit (`git commit` with no pathspec commits all staged files).
-DISP_STAMP="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp)"
+# versions/burrowee; resolve_disp_stamp() then mints a fresh stamp (its
+# recorded sha8/semver no longer match) and records it to
+# versions/burrowee.stamp, which rides the first component's [RELEASED]
+# marker commit (`git commit` with no pathspec commits all staged files).
+DISP_STAMP="$(resolve_disp_stamp)"
 DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
 build_dispatcher() {
     # build_dispatcher <os> <arch> — idempotent; populates $DISP_DIR/<os>-<arch>/burrowee
