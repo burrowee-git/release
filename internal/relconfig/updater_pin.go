@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -114,3 +115,34 @@ func pinned(bins []build.BinSpec, stamp, updaterVersion string) ([]build.BinSpec
 	}
 	return bins, nil
 }
+
+// UpdaterModuleDir returns the module dir whose go.mod pins core/updater for
+// comp's updater binary. Relay's updater is built from the NESTED `cli` module,
+// not the repo root — build.sh has the same special case ("relay's updater
+// build_dir is the nested `cli` module"). Missing it here meant relay's pin
+// resolved against a module with no core/updater dependency, UpdaterPin returned
+// the no-dependency empty string, and the updater silently kept the component
+// stamp: relay v0.1.37 built with burrowee-relay-updater reporting v0.1.37.
+func UpdaterModuleDir(comp, srcDir string) string {
+	if comp == "relay" {
+		return filepath.Join(srcDir, "cli")
+	}
+	return srcDir
+}
+
+// RequiresUpdaterPin reports whether comp MUST resolve a core/updater pin.
+//
+// NOT YET ENFORCED at the rkit call site: rkit's build tests use minimal scratch
+// modules with no core/updater dependency, so asserting there fails them. Wiring
+// this in needs those fixtures to declare the dependency — tracked as follow-up.
+// UpdaterModuleDir fixes the bug that motivated it; this closes the remaining
+// ambiguity between "no dependency" and "wrong directory".
+// Only agent legitimately has none (no core/updater dependency at all), which
+// is exactly how release.sh phrases it — it skips agent at the caller.
+//
+// This exists because UpdaterPin's "no dependency → empty string" answer is
+// indistinguishable from "I looked in the wrong directory". That ambiguity is
+// what let the relay bug through: the pin came back empty, the stamp stood, and
+// nothing complained. Callers assert on this so a wrong module dir fails the
+// cut instead of shipping a mis-stamped binary.
+func RequiresUpdaterPin(comp string) bool { return comp != "agent" && comp != "burrowee" }
