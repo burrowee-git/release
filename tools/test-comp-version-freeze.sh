@@ -101,6 +101,11 @@ run_resolve() {
         DRY_RUN="${1:-0}"
         BUMP_KIND="${2:-patch}"
         FORCE_BUMP="${3:-0}"
+        # version.sh's minor/major bump prompts for confirmation unless this is
+        # set (or a TTY) — this harness is never interactive. Exported: version.sh
+        # runs as a child process, so a plain (non-exported) assignment here
+        # would never reach it.
+        export BURROWEE_RELEASE_YES=1
         # shellcheck source=/dev/null
         source "${HELPER}"
         resolve_comp_stamp cli "${FAKE_SRC}"
@@ -165,6 +170,28 @@ on_disk_semver="$(tr -d '[:space:]' < "${SEMVER_FILE}")"
     || die "(c) --force must still bump versions/cli (got '${on_disk_semver}')"
 echo "PASS (c): --force bumped an otherwise-unchanged component to '${got}'"
 
+# ---- (c2) BUMP_KIND=minor on an UNCHANGED component → bumps anyway --------
+# The reuse gate is patch-only (BUMP_KIND=patch AND not forced); an explicit
+# --bump-minor/--bump-major must still bump even when the sha/semver match
+# the record, same as --force.
+say "(c2) unchanged sha but BUMP_KIND=minor → bumps anyway (reuse gate is patch-only)"
+reset_semver
+recorded_stamp="v9.9.9.2020.01.01.${COMP_SHA}"
+printf '%s\n' "${recorded_stamp}" > "${STAMP_FILE}"
+got="$(run_resolve 0 minor 0)"
+case "${got}" in
+    v9.10.0."${today}".*) ;;
+    *) die "(c2) expected a fresh v9.10.0 stamp under BUMP_KIND=minor, got '${got}'" ;;
+esac
+[ "${got}" != "${recorded_stamp}" ] || die "(c2) BUMP_KIND=minor did not override the unchanged-sha reuse"
+on_disk_semver="$(tr -d '[:space:]' < "${SEMVER_FILE}")"
+[ "${on_disk_semver}" = "9.10.0" ] \
+    || die "(c2) BUMP_KIND=minor must still bump versions/cli (got '${on_disk_semver}')"
+on_disk_stamp="$(tr -d '[:space:]' < "${STAMP_FILE}")"
+[ "${on_disk_stamp}" = "${got}" ] \
+    || die "(c2) fresh minor stamp not written back to ${STAMP_FILE} (file has '${on_disk_stamp}', want '${got}')"
+echo "PASS (c2): BUMP_KIND=minor bumped an otherwise-unchanged component to '${got}'"
+
 # ---- (d) --dry-run: never bumps/writes; correct echo either way ----------
 say "(d) --dry-run unchanged → echoes recorded, no bump, no write"
 reset_semver
@@ -223,6 +250,29 @@ case "${got}" in
     *) die "(e-2) expected a fresh v9.9.10 stamp for a corrupt record, got '${got}'" ;;
 esac
 echo "PASS (e-2): corrupt record → minted '${got}'"
+
+# ---- (f) sha8 MATCHES the record but recorded semver DIFFERS → bump -------
+# Exercises the rec_sv arm of the reuse gate explicitly: an unchanged sha
+# alone is not enough to reuse — the recorded semver segment must ALSO match
+# versions/cli, else it's treated as changed (e.g. someone hand-edited
+# versions/cli, or the recorded stamp predates a since-reverted bump).
+say "(f) sha8 matches record but recorded semver differs → treated as changed → bump"
+reset_semver
+stale_semver_stamp="v1.2.3.2020.01.01.${COMP_SHA}"
+printf '%s\n' "${stale_semver_stamp}" > "${STAMP_FILE}"
+got="$(run_resolve 0 patch 0)"
+case "${got}" in
+    v9.9.10."${today}".*) ;;
+    *) die "(f) expected a fresh v9.9.10 stamp (recorded semver 1.2.3 != current 9.9.9), got '${got}'" ;;
+esac
+[ "${got}" != "${stale_semver_stamp}" ] || die "(f) stale-semver record was reused, not treated as changed"
+on_disk_semver="$(tr -d '[:space:]' < "${SEMVER_FILE}")"
+[ "${on_disk_semver}" = "9.9.10" ] \
+    || die "(f) versions/cli not bumped to patch+1 (got '${on_disk_semver}')"
+on_disk_stamp="$(tr -d '[:space:]' < "${STAMP_FILE}")"
+[ "${on_disk_stamp}" = "${got}" ] \
+    || die "(f) fresh stamp not written back to ${STAMP_FILE} (file has '${on_disk_stamp}', want '${got}')"
+echo "PASS (f): matching sha8 alone did not reuse — semver mismatch bumped + rewrote to '${got}'"
 
 echo
 echo "✓ ALL COMP-VERSION-FREEZE TESTS PASSED"

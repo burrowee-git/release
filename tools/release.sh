@@ -1040,7 +1040,13 @@ do_release_relay() {
         git restore --staged "versions/${comp}.stamp" 2>/dev/null || true
         git checkout -- "versions/${comp}.stamp" 2>/dev/null || true
     }
-    trap 'revert_relay_version; shred_key' ERR
+    # ERR INT TERM (not just ERR): a Ctrl-C/SIGTERM after resolve_comp_stamp
+    # bumped versions/${comp} must revert it too — mirrors resolve_disp_stamp's
+    # dispatcher revert already running on EXIT INT TERM (line ~946). The EXIT
+    # trap registered there (shred_key; revert_dispatcher_version) is untouched
+    # by this signal-scoped override, so the dispatcher side of cleanup still
+    # fires at actual process exit either way.
+    trap 'revert_relay_version; shred_key' ERR INT TERM
 
     if [ "${old_semver}" != "${new_semver}" ]; then
         echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
@@ -1148,7 +1154,7 @@ do_release_relay() {
         # (9) dry-run registration preview.
         register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
         revert_relay_version
-        trap shred_key ERR
+        trap shred_key ERR INT TERM
         return 0
     fi
 
@@ -1174,7 +1180,7 @@ do_release_relay() {
     register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
 
     echo "✓ released relay ${stamp} (private, R2 relay/${stamp}/)"
-    trap shred_key ERR
+    trap shred_key ERR INT TERM
 }
 
 # ---- per-component release --------------------------------------------------
@@ -1203,7 +1209,13 @@ do_release() {
         git restore --staged "versions/${comp}.stamp" 2>/dev/null || true
         git checkout -- "versions/${comp}.stamp" 2>/dev/null || true
     }
-    trap 'revert_version; shred_key' ERR
+    # ERR INT TERM (not just ERR): a Ctrl-C/SIGTERM after resolve_comp_stamp
+    # bumped versions/${comp} must revert it too — mirrors resolve_disp_stamp's
+    # dispatcher revert already running on EXIT INT TERM (line ~946). The EXIT
+    # trap registered there (shred_key; revert_dispatcher_version) is untouched
+    # by this signal-scoped override, so the dispatcher side of cleanup still
+    # fires at actual process exit either way.
+    trap 'revert_version; shred_key' ERR INT TERM
 
     if [ "${old_semver}" != "${new_semver}" ]; then
         echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
@@ -1323,7 +1335,7 @@ do_release() {
         local dry_tag="${comp}/${stamp}"
         register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${dry_tag}"
         revert_version
-        trap shred_key ERR
+        trap shred_key ERR INT TERM
         return 0
     fi
 
@@ -1332,7 +1344,7 @@ do_release() {
     gh_release_publish "${comp}" "${stamp}" "${stage}"
 
     # Past the tag/release — clear the version-revert trap.
-    trap shred_key ERR
+    trap shred_key ERR INT TERM
 
     # (7) regenerate bootstraps + refresh edge skills + scp the static surface.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
