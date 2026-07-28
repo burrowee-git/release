@@ -8,7 +8,7 @@ import (
 )
 
 func TestBinsCLI(t *testing.T) {
-	got, err := Bins("cli", "v1.0.0.2026.07.13.deadbeef", "", "")
+	got, err := Bins("cli", "v1.0.0.2026.07.13.deadbeef", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestBinsCLI(t *testing.T) {
 }
 
 func TestBinsAgentStampsCommandVar(t *testing.T) {
-	got, _ := Bins("agent", "vSTAMP", "", "")
+	got, _ := Bins("agent", "vSTAMP", "", "", "")
 	want := "-X main.version=vSTAMP -X github.com/burrowee-git/agent/internal/agent/command.version=vSTAMP"
 	if got[0].Ldflags != want {
 		t.Fatalf("agent ldflags=%q want %q", got[0].Ldflags, want)
@@ -30,7 +30,7 @@ func TestBinsAgentStampsCommandVar(t *testing.T) {
 }
 
 func TestBinsEdgeBakesConsolePubHex(t *testing.T) {
-	got, _ := Bins("edge", "vSTAMP", "abc123", "")
+	got, _ := Bins("edge", "vSTAMP", "abc123", "", "")
 	for _, b := range got {
 		want := "-X main.version=vSTAMP -X main.consolePubHexProd=abc123"
 		if b.Ldflags != want {
@@ -40,7 +40,7 @@ func TestBinsEdgeBakesConsolePubHex(t *testing.T) {
 }
 
 func TestBinsGateway(t *testing.T) {
-	got, err := Bins("gateway", "vSTAMP", "", "")
+	got, err := Bins("gateway", "vSTAMP", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestBinsGateway(t *testing.T) {
 }
 
 func TestBinsBurrowee(t *testing.T) {
-	got, err := Bins("burrowee", "vSTAMP", "", "")
+	got, err := Bins("burrowee", "vSTAMP", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestBinsBurrowee(t *testing.T) {
 }
 
 func TestBinsRelayConsoleIdentityOnCliAndUpdaterOnly(t *testing.T) {
-	got, _ := Bins("relay", "vSTAMP", "abc123", "wss://relay-api.burrowee.com")
+	got, _ := Bins("relay", "vSTAMP", "abc123", "wss://relay-api.burrowee.com", "")
 	byName := map[string]build.BinSpec{}
 	for _, b := range got {
 		byName[b.Name] = b

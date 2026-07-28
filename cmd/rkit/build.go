@@ -258,7 +258,16 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	bins, err := relconfig.Bins(o.Component, stamp, consolePubHex, o.ConsoleURL)
+	// The updater binary carries the core/updater MODULE PIN, not the component
+	// stamp — otherwise a node reports its component version as its updater
+	// version, which can never match the catalog's updater_version and leaves the
+	// console offering an updater update forever. rkit had no equivalent of
+	// build.sh's pin substitution, which is how edge v0.1.99 shipped mis-stamped.
+	updaterVersion, err := relconfig.UpdaterPin(ctx, "go", o.SrcDir)
+	if err != nil {
+		return nil, err
+	}
+	bins, err := relconfig.Bins(o.Component, stamp, consolePubHex, o.ConsoleURL, updaterVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +287,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dispatcher stamp: %w", err)
 	}
-	dispBins, err := relconfig.Bins("burrowee", dispStamp, "", "")
+	dispBins, err := relconfig.Bins("burrowee", dispStamp, "", "", "")
 	if err != nil {
 		return nil, fmt.Errorf("dispatcher bins: %w", err)
 	}
