@@ -16,16 +16,31 @@ when the stage is missing). They are two independent programs that share a
 So **`rkit build --apple` / `--public` needs the Apple environment set in its own
 process.** It requires, and aborts without:
 
-| Variable / file | Meaning |
-|---|---|
-| `config/apple-account` | one line: the account plugin folder name. Overridden by `$APPLE_ACCOUNT`. |
-| `APPLE_HOME` | **absolute** path to the directory holding one folder per Apple account. **No default** — the repo is public, so no operator's machine layout is baked into its source. |
-| `APPLE_ACCOUNT_DIR` | that account's folder directly; set it and the two above are not consulted. |
+Both values resolve the same way — an exported variable first, then a config
+file in this repo. The files are **gitignored**: that is what lets a public repo
+resolve a machine path without carrying one, so nothing here is baked into the
+source and nothing is derived from `$HOME` (unset under launchd, cron, and a
+detached harness session, where a `$HOME`-derived default silently goes
+*relative*).
+
+| Value | Exported | Config file | Meaning |
+|---|---|---|---|
+| account | `$APPLE_ACCOUNT` | `config/apple-account` | one line: the account plugin folder name |
+| home | `$APPLE_HOME` | `config/apple-home` | one line: the **absolute** directory holding one folder per Apple account |
+| both | `$APPLE_ACCOUNT_DIR` | — | that account's folder directly; set it and neither file is consulted |
+
+Create the two files once per machine and every later cut needs no environment
+at all:
 
 ```sh
-export APPLE_HOME="$HOME/Workstation/Apple"      # your own layout
+printf '<Account>\n'        > config/apple-account
+printf '%s\n' "$HOME/<your-apple-plugin-root>" > config/apple-home
 rkit build --component gateway --public --sign-key …
 ```
+
+`tools/release.sh` resolves identically (`tools/apple_sign.sh`), so both entry
+points now agree — the shell copy used to fall back to a baked `$HOME` path
+while the Go copy refused to default at all.
 
 **This is a fail-closed change, and deliberate.** `loadAppleAccount` used to
 return silently on every failure mode — no config file, a comment-only config,
