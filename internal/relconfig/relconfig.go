@@ -31,37 +31,41 @@ func Targets() []build.Target {
 // Bins returns the exact build.BinSpec list for comp, mirroring tools/build.sh.
 // consolePubHex is required for edge+relay; consoleURL defaults are applied by
 // the caller (orchestrate) — pass "" only for components that don't need them.
-func Bins(comp, stamp, consolePubHex, consoleURL string) ([]build.BinSpec, error) {
+// updaterVersion is the core/updater module pin (UpdaterPin); every *-updater
+// binary is stamped with it instead of the component stamp, so a node's reported
+// updater version can actually equal the catalog's updater_version. Pass "" for
+// a component with no core/updater dependency (agent) to keep the stamp.
+func Bins(comp, stamp, consolePubHex, consoleURL, updaterVersion string) ([]build.BinSpec, error) {
 	v := "-X main.version=" + stamp
 	switch comp {
 	case "cli":
-		return []build.BinSpec{
+		return pinned([]build.BinSpec{
 			{Name: "burrowee-cli", Package: "./cmd/burrowee-cli", Ldflags: v},
 			{Name: "burrowee-cli-updater", Package: "./cmd/burrowee-cli-updater", Ldflags: v},
-		}, nil
+		}, stamp, updaterVersion)
 	case "gateway":
-		return []build.BinSpec{
+		return pinned([]build.BinSpec{
 			{Name: "burrowee-gateway", Package: "./cmd/burrowee-gateway", Ldflags: v},
 			{Name: "burrowee-gateway-cli", Package: "./cmd/burrowee-gateway-cli", Ldflags: v},
 			{Name: "burrowee-gateway-console", Package: "./cmd/burrowee-gateway-console", Ldflags: v},
 			{Name: "burrowee-register", Package: "./cmd/burrowee-register", Ldflags: v},
 			{Name: "burrowee-gateway-updater", Package: "./cmd/burrowee-gateway-updater", Ldflags: v},
-		}, nil
+		}, stamp, updaterVersion)
 	case "agent":
 		av := v + " -X github.com/burrowee-git/agent/internal/agent/command.version=" + stamp
-		return []build.BinSpec{
+		return pinned([]build.BinSpec{
 			{Name: "burrowee-agent", Package: "./cmd/burrowee-agent", Ldflags: av},
-		}, nil
+		}, stamp, updaterVersion)
 	case "edge":
 		if consolePubHex == "" {
 			return nil, fmt.Errorf("edge requires consolePubHex")
 		}
 		ev := v + " -X main.consolePubHexProd=" + consolePubHex
-		return []build.BinSpec{
+		return pinned([]build.BinSpec{
 			{Name: "burrowee-edge", Package: "./cmd/burrowee-edge", Ldflags: ev},
 			{Name: "burrowee-edge-cli", Package: "./cmd/burrowee-edge-cli", Ldflags: ev},
 			{Name: "burrowee-edge-updater", Package: "./cmd/burrowee-edge-updater", Ldflags: ev},
-		}, nil
+		}, stamp, updaterVersion)
 	case "relay":
 		if consolePubHex == "" {
 			return nil, fmt.Errorf("relay requires consolePubHex")
@@ -70,17 +74,17 @@ func Bins(comp, stamp, consolePubHex, consoleURL string) ([]build.BinSpec, error
 			consoleURL = "wss://relay-api.burrowee.com"
 		}
 		ident := v + " -X main.consoleURLProd=" + consoleURL + " -X main.consolePubHexProd=" + consolePubHex
-		return []build.BinSpec{
+		return pinned([]build.BinSpec{
 			{Name: "burrowee-relay", Package: "./cmd/burrowee-relay", Ldflags: v},
 			// nested cli module: build.sh does cd cli && GOWORK=off, pkg ./cli→.
 			{Name: "burrowee-relay-cli", Package: ".", SubDir: "cli", GoWork: "off", Ldflags: ident},
 			// ./cli/cmd/burrowee-relay-updater → ./cmd/burrowee-relay-updater under SubDir cli
 			{Name: "burrowee-relay-updater", Package: "./cmd/burrowee-relay-updater", SubDir: "cli", GoWork: "off", Ldflags: ident},
-		}, nil
+		}, stamp, updaterVersion)
 	case "burrowee":
-		return []build.BinSpec{
+		return pinned([]build.BinSpec{
 			{Name: "burrowee", Package: ".", Ldflags: v},
-		}, nil
+		}, stamp, updaterVersion)
 	}
 	return nil, fmt.Errorf("unknown component %q", comp)
 }

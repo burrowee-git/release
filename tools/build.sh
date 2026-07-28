@@ -185,6 +185,20 @@ for pair in ${MAP}; do
         *-updater)
             bin_version="$(updater_pin "${build_dir}")"
             bin_ldflags="${bin_ldflags/-X main.version=${STAMP}/-X main.version=${bin_version}}"
+            # FAIL CLOSED. The line above is a bash pattern substitution: when the
+            # pattern does not match it substitutes NOTHING and says NOTHING, so
+            # the updater silently ships carrying the component STAMP instead of
+            # the core/updater pin. That shipped in edge v0.1.99 and relay
+            # v0.1.36 — both nodes reported their component version as their
+            # updater version, which permanently mismatches the catalog's
+            # updater_version and makes the console offer an update that can
+            # never converge. The echo below prints bin_version either way, so
+            # the build log looked correct while the binary was wrong; assert on
+            # the LDFLAGS, never on the intended value.
+            case "${bin_ldflags}" in
+                *"-X main.version=${bin_version}"*) ;;
+                *) echo "✗ ${bin}: updater pin substitution did not apply — ldflags still '${bin_ldflags}' (wanted -X main.version=${bin_version}). Refusing to ship an updater stamped with the component version." >&2; exit 1 ;;
+            esac
             ;;
     esac
     echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${bin_version})"
