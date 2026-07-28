@@ -2,7 +2,14 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge | agent).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major]
+#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major] [--force]
+#
+# --force: bump + mint a fresh stamp even when the component's source is
+#   unchanged since its last cut (versions/<comp>.stamp's recorded sha8 +
+#   semver both match). Without it, an unchanged component under the default
+#   patch bump is REUSED verbatim (no bump, no date churn) — see
+#   resolve_comp_stamp() below. Rare use case: re-shipping a component whose
+#   bundled dispatcher changed but whose own source didn't.
 #
 # --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
 #   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
@@ -19,7 +26,11 @@
 #   (--public-release is kept as a back-compat alias for --public.)
 #
 # For each requested component this:
-#   1. Stamps the version (bump unless --dry-run) via tools/version.sh.
+#   1. Stamps the version via tools/version.sh — bumps (patch/minor/major)
+#      ONLY when the component's source actually changed since its last cut,
+#      or --force/--bump-minor/--bump-major was given; otherwise reuses the
+#      last cut's recorded stamp verbatim (no bump, no date churn). See
+#      resolve_comp_stamp() below. Never bumps on --dry-run.
 #   2. Builds the `burrowee` dispatcher once per target (its own stamp).
 #   3. Cross-compiles the component for darwin/{arm64,amd64} + linux/{arm64,amd64},
 #      assembling each target into dist/<stamp>/burrowee-<comp>-<os>-<arch>/ that
@@ -111,6 +122,7 @@ fi
 WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
+FORCE_BUMP=0
 
 # Apple account resolution + the Developer-ID reachability predicates live in
 # tools/apple_sign.sh (sourced above) so tools/apple_sign.test.sh can exercise
@@ -143,6 +155,7 @@ for arg in "$@"; do
         --dry-run)            DRY_RUN=1 ;;
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
+        --force)              FORCE_BUMP=1 ;;
         -h|--help)            sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
@@ -150,7 +163,7 @@ done
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     [ -z "${WHAT}" ] || { echo "✗ --distribute-only takes <comp> <stamp> as its own args — drop the trailing '${WHAT}'" >&2; exit 2; }
 else
-    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major]" >&2; exit 2; }
+    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major] [--force]" >&2; exit 2; }
 fi
 
 # When neither signing nor the CVE gate was requested and we're interactive,
@@ -222,6 +235,71 @@ resolve_disp_stamp() {
         # left behind for the next unchanged-source cut to reuse.
         ( cd "${REPO_ROOT}" && git add "versions/burrowee.stamp" )
     fi
+    printf '%s' "${fresh}"
+}
+
+# resolve_comp_stamp <comp> <src_dir> — generalizes resolve_disp_stamp (above)
+# from the dispatcher-only freeze to EVERY component. Reuses the recorded
+# versions/<comp>.stamp verbatim (semver + date + changeset all frozen) when
+# the default bump is in effect (BUMP_KIND=patch, not --force'd) AND the
+# component source is unchanged since the last cut (recorded sha8 + semver
+# segment both still match); else bumps versions/<comp> per BUMP_KIND, mints a
+# fresh stamp, and records it so it rides the [RELEASED] marker. Unlike the
+# dispatcher (which is NEVER auto-bumped), a routine per-component cut still
+# bumps on a real source change — only the needless churn on an UNCHANGED
+# component is eliminated.
+#
+# --dry-run never bumps (matches pre-freeze behavior): echoes the recorded
+# stamp when unchanged, else a fresh stamp over the CURRENT (unbumped)
+# semver — regardless of BUMP_KIND/--force, since dry-run mints nothing.
+#
+# Callers: stamp="$(resolve_comp_stamp "${comp}" "${src}")" in do_release()
+# and do_release_relay(). On a real bump, the caller's revert_version /
+# revert_relay_version traps must ALSO revert versions/<comp>.stamp (mirrors
+# revert_dispatcher_version reverting versions/burrowee.stamp) — see those
+# functions below.
+resolve_comp_stamp() {
+    local comp="$1" src_dir="$2"
+    local cur_sha semver stamp_file recorded rec_sha rec_sv unchanged=0 fresh
+
+    cur_sha="$(git -C "${src_dir}" rev-parse --short=8 HEAD)"
+    semver="$(SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver | tr -d '[:space:]')"
+    stamp_file="${REPO_ROOT}/versions/${comp}.stamp"
+
+    if [ -f "${stamp_file}" ]; then
+        recorded="$(tr -d '[:space:]' < "${stamp_file}")"
+        rec_sha="${recorded##*.}"                 # trailing sha8 segment
+        rec_sv="$(printf '%s' "${recorded}" | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+)\..*/\1/')"
+        if [ "${rec_sha}" = "${cur_sha}" ] && [ "${rec_sv}" = "${semver}" ]; then
+            unchanged=1
+        fi
+    fi
+
+    if [ "${DRY_RUN:-0}" = 1 ]; then
+        if [ "${unchanged}" = 1 ]; then
+            printf '%s' "${recorded}"
+        else
+            SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp | tr -d '[:space:]'
+        fi
+        return 0
+    fi
+
+    if [ "${unchanged}" = 1 ] && [ "${BUMP_KIND}" = patch ] && [ "${FORCE_BUMP:-0}" != 1 ]; then
+        printf '%s' "${recorded}"; return 0   # unchanged, default bump → reuse (no bump)
+    fi
+
+    case "${BUMP_KIND}" in
+        patch) SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-patch >/dev/null ;;
+        minor) SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-minor >/dev/null ;;
+        major) SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-major >/dev/null ;;
+    esac
+    fresh="$(SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp | tr -d '[:space:]')"
+    printf '%s\n' "${fresh}" > "${stamp_file}"
+    # Rides the [RELEASED] marker commit; if the cut aborts before that
+    # commit, the caller's revert_version/revert_relay_version trap restores
+    # this staged write so a never-released date isn't left behind for the
+    # next unchanged-source cut to wrongly reuse.
+    ( cd "${REPO_ROOT}" && git add "versions/${comp}.stamp" )
     printf '%s' "${fresh}"
 }
 
@@ -947,29 +1025,33 @@ do_release_relay() {
     echo
     echo "=== burrowee relay release (private) ==="
 
-    # (1) stamp — bump unless dry-run.
+    # (1) stamp — reuse the recorded stamp verbatim (no bump) when relay's
+    # source is unchanged since its last cut and the default patch bump is in
+    # effect; else bump per BUMP_KIND and mint a fresh stamp. See
+    # resolve_comp_stamp() above.
     local old_semver new_semver stamp
     old_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
-    if [ "${DRY_RUN}" = 1 ]; then
-        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
-        new_semver="${old_semver}"
-    else
-        case "${BUMP_KIND}" in
-            patch) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-patch >/dev/null ;;
-            minor) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-minor >/dev/null ;;
-            major) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-major >/dev/null ;;
-        esac
-        new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
-        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
-    fi
+    stamp="$(resolve_comp_stamp "${comp}" "${src}")"
+    new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
 
     revert_relay_version() {
         git restore --staged "versions/${comp}" 2>/dev/null || true
         git checkout -- "versions/${comp}" 2>/dev/null || true
+        git restore --staged "versions/${comp}.stamp" 2>/dev/null || true
+        git checkout -- "versions/${comp}.stamp" 2>/dev/null || true
     }
     trap 'revert_relay_version; shred_key' ERR
 
-    echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
+    if [ "${old_semver}" != "${new_semver}" ]; then
+        echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
+    elif [ "${DRY_RUN}" = 1 ]; then
+        # dry-run never bumps regardless of whether the source changed, so
+        # old==new here doesn't necessarily mean "unchanged" — resolve_comp_stamp
+        # may still have minted a fresh (changed-source) stamp above.
+        echo "Bump    : (dry-run — not bumped; semver ${new_semver})"
+    else
+        echo "Bump    : reuse (unchanged, no bump) — ${new_semver}"
+    fi
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
     echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
@@ -1104,31 +1186,35 @@ do_release() {
     echo
     echo "=== burrowee ${comp} release ==="
 
-    # (1) stamp — bump unless dry-run.
+    # (1) stamp — reuse the recorded stamp verbatim (no bump) when ${comp}'s
+    # source is unchanged since its last cut and the default patch bump is in
+    # effect; else bump per BUMP_KIND and mint a fresh stamp. See
+    # resolve_comp_stamp() above.
     local old_semver new_semver stamp
     old_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
-    if [ "${DRY_RUN}" = 1 ]; then
-        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
-        new_semver="${old_semver}"
-    else
-        case "${BUMP_KIND}" in
-            patch) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-patch >/dev/null ;;
-            minor) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-minor >/dev/null ;;
-            major) SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-major >/dev/null ;;
-        esac
-        new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
-        stamp="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp)"
-    fi
+    stamp="$(resolve_comp_stamp "${comp}" "${src}")"
+    new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
 
-    # From here the versions/<comp> file may be modified. Any failure (or the
-    # dry-run completion) reverts it.
+    # From here the versions/<comp>(.stamp) files may be modified. Any
+    # failure (or the dry-run completion) reverts them.
     revert_version() {
         git restore --staged "versions/${comp}" 2>/dev/null || true
         git checkout -- "versions/${comp}" 2>/dev/null || true
+        git restore --staged "versions/${comp}.stamp" 2>/dev/null || true
+        git checkout -- "versions/${comp}.stamp" 2>/dev/null || true
     }
     trap 'revert_version; shred_key' ERR
 
-    echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
+    if [ "${old_semver}" != "${new_semver}" ]; then
+        echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
+    elif [ "${DRY_RUN}" = 1 ]; then
+        # dry-run never bumps regardless of whether the source changed, so
+        # old==new here doesn't necessarily mean "unchanged" — resolve_comp_stamp
+        # may still have minted a fresh (changed-source) stamp above.
+        echo "Bump    : (dry-run — not bumped; semver ${new_semver})"
+    else
+        echo "Bump    : reuse (unchanged, no bump) — ${new_semver}"
+    fi
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
     echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
