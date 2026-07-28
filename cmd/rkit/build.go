@@ -263,7 +263,11 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	// version, which can never match the catalog's updater_version and leaves the
 	// console offering an updater update forever. rkit had no equivalent of
 	// build.sh's pin substitution, which is how edge v0.1.99 shipped mis-stamped.
-	updaterVersion, err := relconfig.UpdaterPin(ctx, "go", o.SrcDir)
+	// Relay's updater is built from the NESTED cli module, so the pin must be
+	// resolved there — see UpdaterModuleDir. Assert the pin actually resolved
+	// for every component that must have one: an empty pin is how a wrong module
+	// dir silently degrades into shipping the component stamp (relay v0.1.37).
+	updaterVersion, err := relconfig.UpdaterPin(ctx, "go", relconfig.UpdaterModuleDir(o.Component, o.SrcDir))
 	if err != nil {
 		return nil, err
 	}
