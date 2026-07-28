@@ -63,12 +63,50 @@ open(out_path, 'w').writelines(result)
 PYEOF
 }
 
+# ---- (1b) same trick for revert_dispatcher_version() — the abort-recovery
+#           trap handler that must also cover versions/burrowee.stamp now ---
+extract_revert_dispatcher_version() {
+    local out="$1"
+    python3 - "${REPO_ROOT}/tools/release.sh" "${out}" <<'PYEOF'
+import sys
+
+src_path, out_path = sys.argv[1], sys.argv[2]
+lines = open(src_path).readlines()
+
+in_func = False
+depth = 0
+result = []
+
+for line in lines:
+    if not in_func:
+        if line.startswith('revert_dispatcher_version()'):
+            in_func = True
+            depth = 0
+        else:
+            continue
+
+    result.append(line)
+    depth += line.count('{') - line.count('}')
+    if depth <= 0 and len(result) > 2:
+        break  # closing brace of revert_dispatcher_version reached
+
+open(out_path, 'w').writelines(result)
+PYEOF
+}
+
 HELPER="${W}/resolve_disp_stamp.sh"
 extract_resolve_disp_stamp "${HELPER}"
 grep -q '^resolve_disp_stamp() {' "${HELPER}" \
     || die "extraction failed — resolve_disp_stamp() not found in ${HELPER}"
 grep -q '^}$' "${HELPER}" \
     || die "extraction failed — no closing brace captured in ${HELPER}"
+
+REVERT_HELPER="${W}/revert_dispatcher_version.sh"
+extract_revert_dispatcher_version "${REVERT_HELPER}"
+grep -q '^revert_dispatcher_version() {' "${REVERT_HELPER}" \
+    || die "extraction failed — revert_dispatcher_version() not found in ${REVERT_HELPER}"
+grep -q 'versions/burrowee\.stamp' "${REVERT_HELPER}" \
+    || die "extraction failed — revert_dispatcher_version() no longer reverts versions/burrowee.stamp"
 
 # ---- (2) fake dispatcher source worktree (isolated — never the real
 #          Burrowee/burrowee checkout) --------------------------------------
@@ -178,6 +216,41 @@ case "${got}" in
     *) die "(e) expected a fresh v9.9.9 stamp (registry semver bumped), got '${got}'" ;;
 esac
 echo "PASS (e): sha8 alone is not enough — semver mismatch also mints fresh"
+
+# ---- (f) abort recovery: revert_dispatcher_version() must also revert a
+#          staged-but-uncommitted versions/burrowee.stamp write, mirroring
+#          how it already reverts versions/burrowee. Without this, a cut that
+#          aborts between resolve_disp_stamp's `git add` and the [RELEASED]
+#          marker commit leaves a never-released date staged for the next
+#          unchanged-source cut to wrongly reuse. ------------------------
+say "(f) abort recovery — revert_dispatcher_version() reverts a staged versions/burrowee.stamp write"
+committed_stamp="v9.9.9.2020.01.01.${DISPATCHER_SHA}"
+printf '%s\n' "${committed_stamp}" > "${STAMP_FILE}"
+git -C "${FAKE_REPO_ROOT}" add versions/burrowee.stamp
+git -C "${FAKE_REPO_ROOT}" commit -q -m "commit baseline stamp"
+
+# Simulate what resolve_disp_stamp does when it mints a fresh stamp: overwrite
+# the file and stage it, as if the cut then died before its [RELEASED] marker.
+staged_stamp="v9.9.9.2026.01.01.deadbeef"
+printf '%s\n' "${staged_stamp}" > "${STAMP_FILE}"
+git -C "${FAKE_REPO_ROOT}" add versions/burrowee.stamp
+
+(
+    set -euo pipefail
+    REPO_ROOT="${FAKE_REPO_ROOT}"
+    # shellcheck source=/dev/null
+    source "${REVERT_HELPER}"
+    revert_dispatcher_version
+)
+
+on_disk="$(tr -d '[:space:]' < "${STAMP_FILE}")"
+[ "${on_disk}" = "${committed_stamp}" ] \
+    || die "(f) revert_dispatcher_version left '${on_disk}', want the committed '${committed_stamp}'"
+staged_diff="$(git -C "${FAKE_REPO_ROOT}" diff --cached --name-only)"
+case "${staged_diff}" in
+    *"versions/burrowee.stamp"*) die "(f) versions/burrowee.stamp is still staged after revert" ;;
+esac
+echo "PASS (f): aborted-cut stamp write reverted to the committed value, unstaged"
 
 echo
 echo "✓ ALL DISPATCHER-STAMP-FREEZE TESTS PASSED"

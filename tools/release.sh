@@ -216,7 +216,11 @@ resolve_disp_stamp() {
     fresh="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp | tr -d '[:space:]')"
     if [ "${DRY_RUN:-0}" != 1 ]; then
         printf '%s\n' "${fresh}" > "${DISP_STAMP_FILE}"
-        ( cd "${REPO_ROOT}" && git add "versions/burrowee.stamp" )   # rides the [RELEASED] marker
+        # Rides the [RELEASED] marker commit; if the cut aborts before that
+        # commit, revert_dispatcher_version() (below, in the EXIT/INT/TERM
+        # trap) restores this staged write so a never-released date isn't
+        # left behind for the next unchanged-source cut to reuse.
+        ( cd "${REPO_ROOT}" && git add "versions/burrowee.stamp" )
     fi
     printf '%s' "${fresh}"
 }
@@ -836,16 +840,30 @@ done
 # Runs before the first build so a vulnerable cut never produces a binary.
 vulncheck_gate
 
-# revert_dispatcher_version restores versions/burrowee when a real release
-# bumped it (below) but died before the first component's marker commit staged
-# it in. On success the bump is committed (no staged diff) → this is a no-op;
-# dry-runs never bump → also a no-op. It is deliberately NOT part of the
-# shred_key trap above: --distribute-only never bumps the dispatcher version, so
-# adding this to that path could only touch an operator's unrelated staging.
+# revert_dispatcher_version restores versions/burrowee (and versions/burrowee.stamp)
+# when a real release bumped/wrote them (below) but died before the first
+# component's marker commit staged them in. On success the bump/stamp is
+# committed (no staged diff) → this is a no-op; dry-runs never bump or write
+# the stamp → also a no-op. It is deliberately NOT part of the shred_key trap
+# above: --distribute-only never bumps the dispatcher version or writes the
+# stamp, so adding this to that path could only touch an operator's unrelated
+# staging.
+#
+# versions/burrowee.stamp is folded in here (rather than a separate trap
+# handler) because it's the same failure class as the semver bump: resolve_disp_stamp
+# (defined above, near SRC_DISPATCHER) writes + `git add`s it as soon as it
+# mints a fresh stamp, but that's only ever committed at the [RELEASED]
+# marker — a cut that aborts in between must not leave a staged stamp dated
+# today for the next unchanged-source cut to wrongly reuse.
 revert_dispatcher_version() {
-    git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee 2>/dev/null && return 0
-    git -C "${REPO_ROOT}" restore --staged versions/burrowee 2>/dev/null || true
-    git -C "${REPO_ROOT}" checkout -- versions/burrowee 2>/dev/null || true
+    git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee 2>/dev/null || {
+        git -C "${REPO_ROOT}" restore --staged versions/burrowee 2>/dev/null || true
+        git -C "${REPO_ROOT}" checkout -- versions/burrowee 2>/dev/null || true
+    }
+    git -C "${REPO_ROOT}" diff --cached --quiet versions/burrowee.stamp 2>/dev/null || {
+        git -C "${REPO_ROOT}" restore --staged versions/burrowee.stamp 2>/dev/null || true
+        git -C "${REPO_ROOT}" checkout -- versions/burrowee.stamp 2>/dev/null || true
+    }
 }
 trap 'shred_key; revert_dispatcher_version' EXIT INT TERM
 

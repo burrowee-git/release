@@ -108,3 +108,15 @@ easy to miss.
 would change the release identity format that installers, the console catalog and
 every already-published tag depend on. The ambiguity is narrow, the cost of
 changing the scheme is not.
+
+---
+
+## `versions/burrowee.stamp` — the dispatcher-stamp freeze record
+
+Records the last dispatcher stamp actually used, so `resolve_disp_stamp()`
+(in `release.sh`) reuses it verbatim — date frozen — across cuts where the
+`burrowee` dispatcher source hasn't changed, instead of re-dating it every
+cut. A cut that aborts before its `[RELEASED]` marker commit has its staged
+write to this file auto-reverted (`revert_dispatcher_version()`, the same
+EXIT/INT/TERM trap that reverts `versions/burrowee`) — don't hand-edit it to
+"fix" a dirty tree after a failed cut; re-running the cut is enough.
