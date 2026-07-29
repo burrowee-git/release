@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # test-build-updater-stamp.sh — prove burrowee-edge-updater is stamped from the
-# pinned github.com/burrowee-git/core/updater module version, NOT the component
-# STAMP that every other binary in the build map gets.
+# pinned github.com/burrowee-git/core/updater module's own full stamp (semver +
+# date + changeset fp), NOT the component STAMP that every other binary in the
+# build map gets.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; repo="$(cd "$here/.." && pwd)"
 
@@ -9,7 +10,9 @@ src="${EDGE_SRC:?set EDGE_SRC to the edge worktree}"
 GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 
-pin="$(cd "$src" && "${GO_BIN}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
+# shellcheck source=tools/updater_pin.sh
+source "${repo}/tools/updater_pin.sh"
+pin="$(cd "$src" && updater_pin .)"
 
 stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
 

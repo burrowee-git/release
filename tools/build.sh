@@ -60,6 +60,9 @@ GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /opt/homebrew/bin/go" >&2; exit 1; }
 
+# shellcheck source=tools/updater_pin.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/updater_pin.sh"
+
 [ -d "${SRC_DIR}" ] || { echo "✗ SRC_DIR '${SRC_DIR}' is not a directory" >&2; exit 1; }
 
 # Resolve the shared Modernech signer once, only when release-mode Apple signing
@@ -124,25 +127,6 @@ if [ "${COMP}" = "relay" ]; then
     CONSOLE_URL_PROD="${CONSOLE_URL_PROD:-wss://relay-api.burrowee.com}"
     RELAY_CONSOLE_LDFLAGS="-X main.consoleURLProd=${CONSOLE_URL_PROD} -X main.consolePubHexProd=${CONSOLE_PUB_HEX}"
 fi
-
-# updater_pin <mod-dir> — resolve the github.com/burrowee-git/core/updater pin from
-# the given module dir (relay's updater build_dir is the nested `cli` module) and
-# reject anything but a clean tag. The updater binary's version is the module pin,
-# NOT the component STAMP — so it stays stable across cuts that don't repin
-# core/updater, and a cut never ships an ugly pseudo-version.
-updater_pin() {
-    local mod_dir="$1"
-    local v
-    v="$(cd "${mod_dir}" && "${GO_BIN}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
-    case "${v}" in
-        v[0-9]*.[0-9]*.[0-9]*) : ;;   # clean tag
-        *) echo "✗ core/updater pinned to non-tag '${v}' in ${mod_dir} — repin to a tag before cut" >&2; exit 1 ;;
-    esac
-    case "${v}" in
-        *-*) echo "✗ core/updater pin '${v}' is a pseudo-version — repin to a tag before cut" >&2; exit 1 ;;
-    esac
-    printf '%s' "${v}"
-}
 
 mkdir -p "${OUT_DIR}"
 HOST_OS="$(uname -s)"
