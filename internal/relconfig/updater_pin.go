@@ -1,8 +1,11 @@
 package relconfig
 
 // updater_pin.go — the updater binary's version is the core/updater MODULE PIN,
-// not the component stamp. Mirrors tools/build.sh's updater_pin() contract so
-// the two produce paths (release.sh→build.sh and rkit) agree.
+// not the component stamp, carrying the pin's OWN date + changeset fp:
+// <semver>.<YYYY.MM.DD>.<sha8>. Mirrors tools/build.sh's updater_pin() (extracted
+// to tools/updater_pin.sh) contract so the two produce paths (release.sh→build.sh
+// and rkit) emit the IDENTICAL stamp for the same pin — see
+// TestUpdaterPinMatchesBashHelper, which pins the mirror itself.
 //
 // WHY THIS EXISTS AT ALL: rkit had no updater stamping, so every rkit cut baked
 // the component stamp into `burrowee-<comp>-updater`. A node then reports its
@@ -13,12 +16,15 @@ package relconfig
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/burrowee-git/release-kit/build"
 )
@@ -28,13 +34,49 @@ import (
 // building against a branch or a replace, which must never reach a cut.
 var cleanTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
+// hexHash matches a leading run of lowercase-hex digits, at least 8 of them —
+// mirroring tools/updater_pin.sh's `[0-9a-f]*` sed extraction so both sides
+// reject the same malformed Origin.Hash values identically.
+var hexHash = regexp.MustCompile(`^[0-9a-f]{8,}`)
+
+// updaterModDownload is the subset of `go mod download -json`'s output this
+// package needs: the absolute path to the module's cached .info file. Reading
+// the path go itself reports avoids hand-constructing
+// $GOMODCACHE/cache/download/... paths.
+type updaterModDownload struct {
+	Info string
+}
+
+// updaterModMeta is the subset of a module .info file this package needs: the
+// commit time and the origin changeset hash. `go list -m` does NOT surface
+// Origin, which is why the .info file is read instead of queried.
+type updaterModMeta struct {
+	Time   time.Time
+	Origin struct {
+		Hash string
+	}
+}
+
 // UpdaterPin resolves the github.com/burrowee-git/core/updater version pinned by
-// the module in modDir, rejecting anything but a clean tag. For relay the caller
+// the module in modDir, rejecting anything but a clean tag, and returns the
+// updater's full stamp: <semver>.<YYYY.MM.DD>.<sha8>. For relay the caller
 // passes the NESTED cli module dir, which is where its updater lives.
+//
+// All three parts come from the PIN's own module metadata, never from this
+// build, so the stamp is FROZEN while the pin is unchanged — the property this
+// function has always existed to protect (the updater must not be re-versioned
+// by a cut that did not repin core/updater) now extended to the date and
+// fingerprint. Same freeze semantics as tools/updater_pin.sh and
+// versions/burrowee.stamp for the dispatcher.
 //
 // Returns ("", nil) when the module has no core/updater dependency at all — the
 // agent's case. Callers keep the component stamp for those binaries, matching
-// build.sh, which excludes agent from pin resolution for the same reason.
+// build.sh, which excludes agent from pin resolution for the same reason. This
+// is the ONE case that is not an error: once the module IS a dependency and IS
+// pinned to a clean tag, every further failure below is returned, never
+// swallowed — a missing Time or Origin.Hash would otherwise yield "v0.1.12.."
+// or "v0.1.12.2026.07.26." — a malformed stamp reaching the console catalog and
+// the fleet.
 // goBin is the go toolchain to shell out to. Spec leaves it unset (release-kit
 // resolves "go" from PATH the same way), so callers pass "go".
 func UpdaterPin(ctx context.Context, goBin, modDir string) (string, error) {
@@ -72,7 +114,37 @@ func UpdaterPin(ctx context.Context, goBin, modDir string) (string, error) {
 	if !cleanTag.MatchString(v) {
 		return "", fmt.Errorf("relconfig: core/updater pinned to %q in %s — repin to a clean tag before cutting", v, modDir)
 	}
-	return v, nil
+
+	// From here the module IS a dependency, pinned to a clean tag — every
+	// further failure is a real error. FAIL CLOSED: an empty result aborts the
+	// build instead of shipping a wrong or malformed version.
+	dlCmd := exec.CommandContext(ctx, goBin, "mod", "download", "-json", "github.com/burrowee-git/core/updater")
+	dlCmd.Dir = modDir
+	dlOut, err := dlCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("relconfig: core/updater %s: go mod download -json in %s: %w", v, modDir, err)
+	}
+	var dl updaterModDownload
+	if err := json.Unmarshal(dlOut, &dl); err != nil || dl.Info == "" {
+		return "", fmt.Errorf("relconfig: core/updater %s: could not resolve module .info path via 'go mod download -json' in %s", v, modDir)
+	}
+	raw, err := os.ReadFile(dl.Info)
+	if err != nil {
+		return "", fmt.Errorf("relconfig: core/updater %s: could not read module info %s: %w", v, dl.Info, err)
+	}
+	var meta updaterModMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return "", fmt.Errorf("relconfig: core/updater %s: could not parse module info %s: %w", v, dl.Info, err)
+	}
+	if meta.Time.IsZero() {
+		return "", fmt.Errorf("relconfig: core/updater %s: no usable Time in %s — refusing to ship a malformed updater stamp", v, dl.Info)
+	}
+	if !hexHash.MatchString(meta.Origin.Hash) {
+		return "", fmt.Errorf("relconfig: core/updater %s: no usable Origin.Hash in %s (got %q) — refusing to ship a malformed updater stamp", v, dl.Info, meta.Origin.Hash)
+	}
+	date := meta.Time.UTC().Format("2006.01.02")
+	fp := meta.Origin.Hash[:8]
+	return fmt.Sprintf("%s.%s.%s", v, date, fp), nil
 }
 
 // applyUpdaterPin rewrites the version ldflag to updaterVersion for every
