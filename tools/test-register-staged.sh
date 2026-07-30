@@ -85,10 +85,11 @@ RELEASE_REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 
 # Real component source worktrees. Task 2's updater_version resolution now
 # hard-fails (mirrors dispatcher_version's nullability — see register_staged's
-# resolve_updater_pin) rather than silently swallowing an unresolvable
-# core/updater pin, so every test that exercises a non-agent component must
-# pass a REAL src_dir (a bogus placeholder path would make register_staged
-# fail loudly, which is now correct behavior, not a test artifact).
+# call to tools/updater_pin.sh's updater_pin()) rather than silently swallowing
+# an unresolvable core/updater pin, so every test that exercises a non-agent
+# component must pass a REAL src_dir (a bogus placeholder path would make
+# register_staged fail loudly, which is now correct behavior, not a test
+# artifact).
 CLI_SRC="${BURROWEE_SRC_CLI:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/cli/code/cli}"
 EDGE_SRC="${BURROWEE_SRC_EDGE:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/edge/code/edge}"
 RELAY_SRC="${BURROWEE_SRC_RELAY:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/relay/code/relay}"
@@ -104,9 +105,16 @@ GO_ENV=(GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/b
 # extract_register_staged <out_file>
 # Extracts the register_staged() function body from release.sh into a sourceable
 # file by locating the Phase-C block marker and copying through the function.
+#
+# register_staged now calls updater_pin() (tools/updater_pin.sh) directly,
+# same as release.sh itself does via its top-of-script `source
+# tools/updater_pin.sh` — so the extracted file must source the real helper
+# too, or every register_staged call below would fail with "updater_pin:
+# command not found" instead of exercising the actual resolution path.
 extract_register_staged() {
     local out="$1"
-    python3 - "${REPO_ROOT}/tools/release.sh" "${out}" <<'PYEOF'
+    printf 'source "%s/tools/updater_pin.sh"\n' "${REPO_ROOT}" > "${out}"
+    python3 - "${REPO_ROOT}/tools/release.sh" "${out}.body" <<'PYEOF'
 import sys
 
 src_path, out_path = sys.argv[1], sys.argv[2]
@@ -144,6 +152,8 @@ for line in lines:
 
 open(out_path, 'w').writelines(result)
 PYEOF
+    cat "${out}.body" >> "${out}"
+    rm -f "${out}.body"
 }
 
 # make_stage <dir> <comp>
@@ -341,9 +351,10 @@ echo "✓ TEST 4 PASSED — json_escape handles quote/backslash/newline/tab/cont
 
 # =============================================================================
 # TEST 5 — updater_version (Task 2): public comp (edge) body carries the
-# resolved core/updater pin from its real source worktree (root module).
+# FULL updater stamp (<semver>.<YYYY.MM.DD>.<sha8>) resolved from its real
+# source worktree (root module), not the bare core/updater tag.
 # =============================================================================
-say "TEST 5 — updater_version: edge body carries the core/updater pin (root module)"
+say "TEST 5 — updater_version: edge body carries the full updater stamp (root module)"
 
 if [ ! -d "${EDGE_SRC}" ]; then
     skip "TEST 5: edge source worktree not found at ${EDGE_SRC} — cannot resolve a real core/updater pin"
@@ -353,9 +364,15 @@ else
     EXTRACT5="${W}/fn5.sh"
     extract_register_staged "${EXTRACT5}"
 
-    # The pin this test expects the body to carry: same resolution the
-    # implementation uses (go list -m from the component's root module dir).
-    edge_pin="$(cd "${EDGE_SRC}" && GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" /opt/homebrew/bin/go list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
+    # The FULL updater stamp this test expects the body to carry: derived from
+    # the SAME helper register_staged itself now calls (tools/updater_pin.sh's
+    # updater_pin()), not hand-rolled via a bare `go list -m` — so this
+    # assertion tracks the helper instead of hardcoding a pin that rots the
+    # moment core/updater is repinned.
+    edge_pin="$(
+        env GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" \
+        bash -c 'set -euo pipefail; source "$1/tools/updater_pin.sh"; updater_pin "$2"' _ "${REPO_ROOT}" "${EDGE_SRC}"
+    )"
 
     RESULT5="$(
         env \
@@ -375,15 +392,15 @@ else
     printf '%s' "$(body_of "${RESULT5}")" | json_ok \
         || die "TEST 5: edge register body is not valid JSON. Output:\n${RESULT5}"
 
-    echo "✓ TEST 5 PASSED — updater_version resolves the real core/updater pin (root module) for edge"
+    echo "✓ TEST 5 PASSED — updater_version resolves the full updater stamp (root module) for edge"
 fi
 
 # =============================================================================
-# TEST 6 — updater_version (Task 2): relay body carries the resolved
-# core/updater pin from the NESTED cli module (cli/go.mod), not the relay
-# root module (which does not pin core/updater directly).
+# TEST 6 — updater_version (Task 2): relay body carries the FULL updater
+# stamp resolved from the NESTED cli module (cli/go.mod), not the relay root
+# module (which does not pin core/updater directly), and not the bare tag.
 # =============================================================================
-say "TEST 6 — updater_version: relay body carries the core/updater pin (nested cli module)"
+say "TEST 6 — updater_version: relay body carries the full updater stamp (nested cli module)"
 
 if [ ! -d "${RELAY_SRC}/cli" ]; then
     skip "TEST 6: relay source worktree (nested cli module) not found at ${RELAY_SRC}/cli — cannot resolve a real core/updater pin"
@@ -393,7 +410,13 @@ else
     EXTRACT6="${W}/fn6.sh"
     extract_register_staged "${EXTRACT6}"
 
-    relay_pin="$(cd "${RELAY_SRC}/cli" && GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" /opt/homebrew/bin/go list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
+    # Same helper-derived resolution as TEST 5, from relay's NESTED cli
+    # module — the same dir register_staged's own updater_mod_dir logic picks
+    # for relay.
+    relay_pin="$(
+        env GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*" \
+        bash -c 'set -euo pipefail; source "$1/tools/updater_pin.sh"; updater_pin "$2"' _ "${REPO_ROOT}" "${RELAY_SRC}/cli"
+    )"
 
     RESULT6="$(
         env \
@@ -411,7 +434,7 @@ else
     printf '%s\n' "${RESULT6}" | grep -q "\"updater_version\":\"${relay_pin}\"" \
         || die "TEST 6: updater_version '${relay_pin}' missing from relay register body (nested cli module). Output:\n${RESULT6}"
 
-    echo "✓ TEST 6 PASSED — updater_version resolves the real core/updater pin (nested cli module) for relay"
+    echo "✓ TEST 6 PASSED — updater_version resolves the full updater stamp (nested cli module) for relay"
 fi
 
 # =============================================================================
@@ -507,7 +530,11 @@ else
 
     [ "${RC8}" -ne 0 ] \
         || die "TEST 8: expected register_staged to FAIL (non-zero exit) for an unresolvable core/updater pin, got exit 0. Output:\n${RESULT8}"
-    printf '%s\n' "${RESULT8}" | grep -q 'cannot resolve core/updater pin' \
+    # register_staged now calls updater_pin() (tools/updater_pin.sh) directly
+    # instead of a local resolve_updater_pin() wrapper, so the diagnostic on
+    # this path is go's own `go list -m` stderr, not a hand-written message —
+    # still a clear, non-empty failure, which is what this test guards.
+    printf '%s\n' "${RESULT8}" | grep -q 'not a known dependency' \
         || die "TEST 8: expected a clear stderr diagnostic naming the unresolvable pin. Output:\n${RESULT8}"
     if printf '%s\n' "${RESULT8}" | grep -q 'would register'; then
         die "TEST 8: register_staged printed a dry-run preview despite an unresolvable pin — it must abort BEFORE building the body. Output:\n${RESULT8}"
