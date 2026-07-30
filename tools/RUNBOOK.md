@@ -66,12 +66,16 @@ every other binary that stamp is **not** derived from the component being cut.
 It's resolved from the **`core/updater` pin's own module metadata**
 (`go mod download -json` → the `.info` file's `Version`, `Time`,
 `Origin.Hash`) — the same freeze semantics `versions/burrowee.stamp` gives the
-dispatcher stamp. Two produce paths do this resolution and are kept in
-lockstep by a mirror test: the bash helper `tools/updater_pin.sh` (used by
-`tools/build.sh`) and the Go `internal/relconfig.UpdaterPin` (used by `rkit`,
-the primary produce path per the Apple-environment note above). Both fail
-closed on a missing or malformed `Time`/`Origin.Hash` rather than shipping a
-malformed stamp — see `tools/test-updater-pin.sh`.
+dispatcher stamp. **Three** produce paths do this resolution, all sharing the
+ONE bash helper `tools/updater_pin.sh`: `tools/build.sh` sources it directly to
+stamp the `-updater` binary's `-X main.version`; `rkit` goes through the Go
+mirror `internal/relconfig.UpdaterPin` (used by `rkit`, the primary produce
+path per the Apple-environment note above), kept in lockstep with the bash
+helper by a mirror test; and `tools/release.sh`'s `register_staged` — the
+**only** writer of the console catalog's `updater_version`, which is the value
+operators actually see — calls `tools/updater_pin.sh`'s `updater_pin()`
+directly. All three fail closed on a missing or malformed `Time`/`Origin.Hash`
+rather than shipping a malformed stamp — see `tools/test-updater-pin.sh`.
 
 Consequences worth knowing before triaging an updater stamp:
 

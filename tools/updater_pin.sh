@@ -25,7 +25,7 @@
 updater_pin() {
     local mod_dir="$1"
     local v info raw time_raw hash date fp
-    v="$(cd "${mod_dir}" && "${GO_BIN}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
+    v="$(cd "${mod_dir}" && "${GO_BIN:-go}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
     case "${v}" in
         v[0-9]*.[0-9]*.[0-9]*) : ;;   # clean tag
         *) echo "✗ core/updater pinned to non-tag '${v}' in ${mod_dir} — repin to a tag before cut" >&2; exit 1 ;;
@@ -34,7 +34,7 @@ updater_pin() {
         *-*) echo "✗ core/updater pin '${v}' is a pseudo-version — repin to a tag before cut" >&2; exit 1 ;;
     esac
 
-    info="$(cd "${mod_dir}" && "${GO_BIN}" mod download -json github.com/burrowee-git/core/updater \
+    info="$(cd "${mod_dir}" && "${GO_BIN:-go}" mod download -json github.com/burrowee-git/core/updater \
             | sed -n 's/.*"Info"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
     [ -n "${info}" ] && [ -f "${info}" ] || {
         echo "✗ core/updater ${v}: could not resolve module .info path via 'go mod download -json' in ${mod_dir}" >&2; exit 1; }

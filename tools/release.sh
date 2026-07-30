@@ -77,6 +77,8 @@ cd "${REPO_ROOT}"
 source "${REPO_ROOT}/tools/vulncheck.sh"
 # shellcheck source=tools/apple_sign.sh
 source "${REPO_ROOT}/tools/apple_sign.sh"
+# shellcheck source=tools/updater_pin.sh
+source "${REPO_ROOT}/tools/updater_pin.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -450,38 +452,33 @@ register_staged() {
     read -r -a bins <<< "$(bins_for "${comp}")"
     binaries_json="$(printf '%s\n' "${bins[@]}" | jq -Rsc 'split("\n") | map(select(length>0))')"
 
-    # updater_version: the pinned core/updater tag bundled in this release
-    # (mirrors dispatcher_version's nullability — DISP_STAMP is resolved by
-    # version.sh under this script's `set -euo pipefail` and hard-fails a cut
-    # rather than ever becoming ""; updater_version must carry the same
-    # guarantee, not silently swallow a resolution error). Resolved from the
-    # component's updater module dir: the root module for cli/gateway/edge,
-    # the NESTED `cli` module for relay (cli/go.mod pins core/updater
-    # separately from the relay root module — same distinction build.sh's
-    # updater_pin() makes). agent ships no -updater binary and has no
-    # core/updater dependency at all — it is the ONLY component whose
-    # updater_version is legitimately "".
+    # updater_version: the FULL updater stamp (<semver>.<YYYY.MM.DD>.<sha8>)
+    # bundled into this release's -updater binary (mirrors dispatcher_version's
+    # nullability — DISP_STAMP is resolved by version.sh under this script's
+    # `set -euo pipefail` and hard-fails a cut rather than ever becoming "";
+    # updater_version must carry the same guarantee, not silently swallow a
+    # resolution error). Resolved from the component's updater module dir: the
+    # root module for cli/gateway/edge, the NESTED `cli` module for relay
+    # (cli/go.mod pins core/updater separately from the relay root module —
+    # same distinction updater_pin() itself makes). agent ships no -updater
+    # binary and has no core/updater dependency at all — it is the ONLY
+    # component whose updater_version is legitimately "".
     #
-    # resolve_updater_pin <mod-dir>: mirrors build.sh's updater_pin() contract
-    # exactly — hard-fails (stderr message + non-zero) on an unresolvable
-    # module or a pseudo-version, so a cut (including distribute_relay(),
-    # which re-resolves this pin fresh at distribution time) can never
-    # silently ship an empty or ugly updater_version.
-    resolve_updater_pin() {
-        local mod_dir="$1"
-        local v
-        v="$(cd "${mod_dir}" && "${GO_BIN:-go}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)" \
-            || { echo "✗ cannot resolve core/updater pin for ${comp} in ${mod_dir}" >&2; exit 1; }
-        case "${v}" in
-            *-*) echo "✗ core/updater pin '${v}' is a pseudo-version in ${mod_dir} — repin to a tag before registering ${comp}" >&2; exit 1 ;;
-        esac
-        printf '%s' "${v}"
-    }
-
+    # updater_pin <mod-dir> (tools/updater_pin.sh, sourced above) is the SAME
+    # helper build.sh uses and the SAME contract rkit's relconfig.UpdaterPin
+    # mirrors — this used to be a local resolve_updater_pin() that only
+    # resolved the bare `go list -m` tag (not the full stamp) and never called
+    # the shared helper, so the console catalog carried a different string
+    # than the binary's -X main.version for the same pin. Calling the shared
+    # helper directly closes that gap: it hard-fails (stderr message +
+    # non-zero) on an unresolvable module, a pseudo-version, or a malformed
+    # Time/Origin.Hash, so a cut (including distribute_relay(), which
+    # re-resolves this pin fresh at distribution time) can never silently ship
+    # an empty, bare, or malformed updater_version.
     local updater_mod_dir="${src_dir}"
     [ "${comp}" = relay ] && updater_mod_dir="${src_dir}/cli"
     local updater_ver=""
-    [ "${comp}" = agent ] || updater_ver="$(resolve_updater_pin "${updater_mod_dir}")"
+    [ "${comp}" = agent ] || updater_ver="$(updater_pin "${updater_mod_dir}")"
 
     local body
     # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
