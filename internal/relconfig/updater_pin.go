@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/burrowee-git/release-kit/build"
 )
@@ -34,10 +33,32 @@ import (
 // building against a branch or a replace, which must never reach a cut.
 var cleanTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
-// hexHash matches a leading run of lowercase-hex digits, at least 8 of them —
-// mirroring tools/updater_pin.sh's `[0-9a-f]*` sed extraction so both sides
-// reject the same malformed Origin.Hash values identically.
-var hexHash = regexp.MustCompile(`^[0-9a-f]{8,}`)
+// hexHash matches a lowercase-hex string of at least 8 chars, ANCHORED at both
+// ends — mirroring tools/updater_pin.sh's `[0-9a-f]*` sed capture. bash's sed
+// command demands a literal `"` immediately after the captured group, so it
+// only matches when the ENTIRE quoted Hash value is hex; trailing garbage
+// (e.g. "65d86769XYZ") makes bash's whole substitution fail to match, leaving
+// hash empty and aborting the cut. An earlier version of this regex was
+// unanchored at the end (`{8,}` with no trailing `$`), which ACCEPTED
+// "65d86769XYZ" — a divergence caught by TestUpdaterPinRejectsHashWithTrailingGarbage.
+var hexHash = regexp.MustCompile(`^[0-9a-f]{8,}$`)
+
+// dateFromTime matches a literal "YYYY-MM-DD" prefix — mirroring
+// tools/updater_pin.sh's second sed command exactly:
+//
+//	sed -n 's/^\([0-9][0-9][0-9][0-9]\)-\([0-9][0-9]\)-\([0-9][0-9]\).*/\1.\2.\3/p'
+//
+// This is a string PREFIX match, not a calendar-aware parse: it accepts a
+// bare "2026-07-26" (no time-of-day) exactly as bash does, and for a full
+// RFC3339 timestamp with a non-UTC offset (e.g. "2026-07-27T01:00:00+05:00")
+// it takes the literal leading calendar date ("2026.07.27") rather than
+// converting to UTC. An earlier version of this package parsed Time as
+// time.Time, which REJECTED the bare-date case (encoding/json's time.Time
+// requires full RFC3339) and, for the offset case, computed the UTC-shifted
+// date ("2026.07.26") instead of bash's literal one — both divergences are
+// pinned by TestUpdaterPinAcceptsBareDate and
+// TestUpdaterPinUsesLiteralDatePrefixNotUTC.
+var dateFromTime = regexp.MustCompile(`^([0-9]{4})-([0-9]{2})-([0-9]{2})`)
 
 // updaterModDownload is the subset of `go mod download -json`'s output this
 // package needs: the absolute path to the module's cached .info file. Reading
@@ -48,10 +69,13 @@ type updaterModDownload struct {
 }
 
 // updaterModMeta is the subset of a module .info file this package needs: the
-// commit time and the origin changeset hash. `go list -m` does NOT surface
-// Origin, which is why the .info file is read instead of queried.
+// commit time and the origin changeset hash, both read as RAW STRINGS (not
+// time.Time) and then extracted with dateFromTime/hexHash — the same
+// shape-matching approach tools/updater_pin.sh's sed commands use — so both
+// sides accept and reject the identical set of values. `go list -m` does NOT
+// surface Origin, which is why the .info file is read instead of queried.
 type updaterModMeta struct {
-	Time   time.Time
+	Time   string
 	Origin struct {
 		Hash string
 	}
@@ -136,13 +160,14 @@ func UpdaterPin(ctx context.Context, goBin, modDir string) (string, error) {
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		return "", fmt.Errorf("relconfig: core/updater %s: could not parse module info %s: %w", v, dl.Info, err)
 	}
-	if meta.Time.IsZero() {
-		return "", fmt.Errorf("relconfig: core/updater %s: no usable Time in %s — refusing to ship a malformed updater stamp", v, dl.Info)
+	dateParts := dateFromTime.FindStringSubmatch(meta.Time)
+	if dateParts == nil {
+		return "", fmt.Errorf("relconfig: core/updater %s: no usable Time in %s (got %q) — refusing to ship a malformed updater stamp", v, dl.Info, meta.Time)
 	}
 	if !hexHash.MatchString(meta.Origin.Hash) {
 		return "", fmt.Errorf("relconfig: core/updater %s: no usable Origin.Hash in %s (got %q) — refusing to ship a malformed updater stamp", v, dl.Info, meta.Origin.Hash)
 	}
-	date := meta.Time.UTC().Format("2006.01.02")
+	date := dateParts[1] + "." + dateParts[2] + "." + dateParts[3]
 	fp := meta.Origin.Hash[:8]
 	return fmt.Sprintf("%s.%s.%s", v, date, fp), nil
 }

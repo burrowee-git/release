@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,5 +108,83 @@ func TestUpdaterPinMatchesBashHelper(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("produce paths disagree: relconfig.UpdaterPin=%q tools/updater_pin.sh=%q — an rkit cut and a release.sh cut would stamp the same pin two different ways", got, want)
+	}
+}
+
+// stubGo writes a fake `go` executable to a temp dir that answers `list -m`
+// with version and `mod download -json` with a .info file holding infoJSON —
+// mirroring tools/test-updater-pin.sh's stub_info() so the exact same fixture
+// JSON can pin both sides of the bash/Go mirror.
+func stubGo(t *testing.T, version, infoJSON string) string {
+	t.Helper()
+	dir := t.TempDir()
+	infoPath := filepath.Join(dir, "v.info")
+	if err := os.WriteFile(infoPath, []byte(infoJSON), 0o644); err != nil {
+		t.Fatalf("write .info fixture: %v", err)
+	}
+	goPath := filepath.Join(dir, "go")
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"$1\" = \"mod\" ] && [ \"$2\" = \"download\" ]; then\n" +
+		"    printf '{\\n\\t\"Path\": \"github.com/burrowee-git/core/updater\",\\n\\t\"Info\": \"" + infoPath + "\"\\n}\\n'\n" +
+		"    exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"list\" ]; then printf '" + version + "'; exit 0; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(goPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub go: %v", err)
+	}
+	return goPath
+}
+
+// TestUpdaterPinRejectsHashWithTrailingGarbage pins divergence row 1 from the
+// bash/Go equivalence review: hexHash used to be unanchored at the end and
+// ACCEPTED an Origin.Hash with trailing garbage after a valid-looking hash
+// prefix (e.g. "65d86769XYZ"), while tools/updater_pin.sh's sed extraction —
+// which demands a literal quote immediately after the captured hex run —
+// rejects it outright. Anchoring hexHash at both ends (see its doc comment)
+// closes this gap.
+func TestUpdaterPinRejectsHashWithTrailingGarbage(t *testing.T) {
+	goPath := stubGo(t, "v0.1.12", `{"Version":"v0.1.12","Time":"2026-07-26T21:25:11Z","Origin":{"Hash":"65d86769XYZ"}}`)
+	_, err := UpdaterPin(context.Background(), goPath, t.TempDir())
+	if err == nil {
+		t.Fatal("UpdaterPin accepted an Origin.Hash with trailing non-hex garbage — must reject, matching tools/updater_pin.sh's sed extraction")
+	}
+}
+
+// TestUpdaterPinAcceptsBareDate pins divergence row 2: tools/updater_pin.sh
+// accepts a Time value that is a bare "YYYY-MM-DD" with no time-of-day (its
+// sed extraction only needs the date prefix to match), but an earlier version
+// of this package rejected it because it parsed Time as time.Time, which
+// requires full RFC3339. Reading Time as a raw string and prefix-matching it
+// with dateFromTime (instead of type-parsing) fixes this.
+func TestUpdaterPinAcceptsBareDate(t *testing.T) {
+	goPath := stubGo(t, "v0.1.12", `{"Version":"v0.1.12","Time":"2026-07-26","Origin":{"Hash":"65d86769b2ccd42ecf5814702ca6a8d66c375b0c"}}`)
+	got, err := UpdaterPin(context.Background(), goPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("UpdaterPin rejected a bare YYYY-MM-DD Time value that tools/updater_pin.sh accepts: %v", err)
+	}
+	want := "v0.1.12.2026.07.26.65d86769"
+	if got != want {
+		t.Fatalf("UpdaterPin = %q, want %q", got, want)
+	}
+}
+
+// TestUpdaterPinUsesLiteralDatePrefixNotUTC pins divergence row 3 — the
+// silent two-string divergence this whole feature exists to prevent:
+// tools/updater_pin.sh takes the LITERAL leading "YYYY-MM-DD" from the Time
+// string, so a non-UTC offset does not shift the date. An earlier version of
+// this package called .UTC() on a parsed time.Time, which for
+// "2026-07-27T01:00:00+05:00" (UTC is one calendar day earlier) silently
+// produced "2026.07.26" instead of bash's "2026.07.27" — two different
+// stamps for the identical pin.
+func TestUpdaterPinUsesLiteralDatePrefixNotUTC(t *testing.T) {
+	goPath := stubGo(t, "v0.1.12", `{"Version":"v0.1.12","Time":"2026-07-27T01:00:00+05:00","Origin":{"Hash":"65d86769b2ccd42ecf5814702ca6a8d66c375b0c"}}`)
+	got, err := UpdaterPin(context.Background(), goPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("UpdaterPin: %v", err)
+	}
+	want := "v0.1.12.2026.07.27.65d86769"
+	if got != want {
+		t.Fatalf("UpdaterPin = %q, want %q (literal date prefix, not UTC-shifted)", got, want)
 	}
 }
