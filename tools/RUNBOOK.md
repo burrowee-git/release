@@ -59,6 +59,40 @@ way on a missing plugin folder.
 
 ---
 
+## The updater's version is the core/updater pin, not the cut
+
+`burrowee-<comp>-updater` is stamped `<semver>.<YYYY.MM.DD>.<sha8>`, but unlike
+every other binary that stamp is **not** derived from the component being cut.
+It's resolved from the **`core/updater` pin's own module metadata**
+(`go mod download -json` → the `.info` file's `Version`, `Time`,
+`Origin.Hash`) — the same freeze semantics `versions/burrowee.stamp` gives the
+dispatcher stamp. Two produce paths do this resolution and are kept in
+lockstep by a mirror test: the bash helper `tools/updater_pin.sh` (used by
+`tools/build.sh`) and the Go `internal/relconfig.UpdaterPin` (used by `rkit`,
+the primary produce path per the Apple-environment note above). Both fail
+closed on a missing or malformed `Time`/`Origin.Hash` rather than shipping a
+malformed stamp — see `tools/test-updater-pin.sh`.
+
+Consequences worth knowing before triaging an updater stamp:
+
+- **Cutting a component twice without repinning `core/updater` ships the
+  identical updater stamp both times.** That is correct: the binary is
+  unchanged, and a re-dated stamp would make the console offer an updater
+  update that changes nothing.
+- **The date in an updater stamp is the date the `core/updater` tag was
+  published**, so it will normally look *older* than the component's own
+  stamp date. Not a staleness bug — don't "fix" it by re-dating.
+- **The first cut of each component after this change re-stamps its
+  updater** (`v0.1.12` → `v0.1.12.<date>.<sha8>`), so every node's updater
+  self-update fires once: the up-to-date guard is exact string equality on
+  the updater's own version, the strings differ, the swap happens, and the
+  node converges. Expect **one updater swap per node, once per component** —
+  then quiet. Not a rollout bug, and not worth re-cutting to "avoid".
+- **`agent` ships no updater.** The shared-updater set is `cli`, `gateway`,
+  `edge`, `relay` only — don't expect an agent stamp to carry one.
+
+---
+
 ## Two releases can carry the same source SHA
 
 **Observed:** `gateway/v0.1.94.2026.07.24.343fe73a` and
