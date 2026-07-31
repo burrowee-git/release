@@ -364,3 +364,55 @@ func TestResolveComponentDirs(t *testing.T) {
 		t.Fatalf("gateway SrcDir wrongly empty/==repo: %q", o3.SrcDir)
 	}
 }
+
+// TestBuildRecordsCompStamp pins the bookkeeping half of a cut: a real build
+// must write versions/<comp>.stamp, matching the stamp its artifacts were built
+// under.
+//
+// This is not cosmetic. release.sh's resolve_comp_stamp reads that file and, when
+// its recorded sha8 + semver still match the source, reuses the stamp verbatim
+// instead of bumping — the no-op-cut freeze. rkit bumped versions/<comp> and never
+// wrote the stamp, so the file stayed one release behind on every cut through this
+// path (observed 2026-07-31: cli, gateway and relay all stale, cli reading v0.1.74
+// after v0.1.75 shipped), the freeze could never engage, and the record claimed a
+// release that had not shipped.
+func TestBuildRecordsCompStamp(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	if err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		NoVulncheck: true, SignKey: testMinisignKey(t)}); err != nil {
+		t.Fatal(err)
+	}
+	stamp := mustStamp(t, repo, "cli")
+	got, err := os.ReadFile(filepath.Join(repo, "versions", "cli.stamp"))
+	if err != nil {
+		t.Fatalf("versions/cli.stamp not written: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != stamp {
+		t.Fatalf("versions/cli.stamp = %q, want the built stamp %q", strings.TrimSpace(string(got)), stamp)
+	}
+}
+
+// TestBuildDryRunDoesNotRecordCompStamp is the other half of the contract, and
+// the more dangerous direction: --dry-run publishes nothing, so a stamp left
+// behind by one would be read by the NEXT unchanged-source cut as proof that
+// version had already shipped — freezing a release that never existed. Mirrors
+// the dispatcher's own dry-run guard in tools/test-dispatcher-stamp-freeze.sh (d).
+func TestBuildDryRunDoesNotRecordCompStamp(t *testing.T) {
+	repo := t.TempDir()
+	writeFixtureModule(t, repo)
+	if err := buildRun(buildOpts{Component: "cli", RepoDir: repo, SrcDir: repo, DispatcherDir: repo,
+		Bump: "patch", DryRun: true, NoVulncheck: true, SignKey: testMinisignKey(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "versions", "cli.stamp")); !os.IsNotExist(err) {
+		t.Fatalf("--dry-run wrote versions/cli.stamp (err=%v); a never-published stamp must not be recorded", err)
+	}
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain", "versions/cli.stamp").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("git status --porcelain versions/cli.stamp = %q, want clean", out)
+	}
+}
