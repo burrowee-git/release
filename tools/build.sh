@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # build.sh — cross-compile ONE Burrowee component for ONE target.
 #
-# Builds from the component's OWN source worktree (so its local go.mod /
-# go.work resolves `core`). Each component emits one or more binaries; the
+# Builds from the component's OWN source worktree, in MODULE mode: every build
+# runs with GOWORK=off so the pinned go.mod versions resolve and a (gitignored)
+# go.work in the worktree can never substitute local, unmerged module sources
+# into a release binary. Each component emits one or more binaries; the
 # binary→package map is fixed below. CGO is always off (pure-Go, portable).
 #
 # Env in (all required unless noted):
@@ -62,6 +64,26 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /o
 
 # shellcheck source=tools/updater_pin.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/updater_pin.sh"
+
+# assert_workspace_off <build-dir> <gowork-value> — refuse to build unless the
+# Go toolchain reports NO workspace in effect.
+#
+# Asked of `go env` instead of assumed. GOWORK="" is byte-identical in effect to
+# GOWORK being unset: go walks up from <build-dir> and adopts any go.work it
+# finds, silently replacing the pinned go.mod versions with whatever local
+# worktrees that file points at. go.work is gitignored, so release.sh's
+# source-cleanliness check cannot observe the substitution — this assertion is
+# the only place a regression here becomes visible. `go env GOWORK` prints the
+# adopted go.work path, or the literal "off"; only "off" may build a release.
+assert_workspace_off() {
+    local dir="$1" gowork="$2" seen
+    seen="$( cd "${dir}" && GOWORK="${gowork}" "${GO_BIN}" env GOWORK )"
+    [ "${seen}" = "off" ] || {
+        echo "✗ ${COMP}: workspace mode is active for ${dir} — go env GOWORK = '${seen:-<unset>}', want 'off'." >&2
+        echo "  A go.work here would build the release against LOCAL (possibly unmerged) module sources instead of the pinned go.mod versions, and go.work is gitignored so nothing downstream would notice. Refusing to build." >&2
+        exit 1
+    }
+}
 
 [ -d "${SRC_DIR}" ] || { echo "✗ SRC_DIR '${SRC_DIR}' is not a directory" >&2; exit 1; }
 
@@ -139,20 +161,28 @@ for pair in ${MAP}; do
     # Per-binary ldflags: relay bakes console identity into the cli + updater only.
     bin_ldflags="${LDFLAGS}"
     build_dir="${SRC_DIR}"
-    bin_gowork=""
+    # GOWORK is "off" for EVERY release build — never "".
+    #
+    # GOWORK="" is indistinguishable from GOWORK being unset: go still walks up
+    # from the build dir and adopts any go.work it finds. Component worktrees
+    # carry a per-worktree go.work (the concurrency mechanism) that `use`s LOCAL
+    # core/console checkouts, and it is gitignored — so release.sh's
+    # source-cleanliness check structurally cannot see it, and a cut would
+    # silently ship unmerged core against a pinned-tag go.mod. release-kit's
+    # build/build.go defaults this to "off" for exactly this reason; this script
+    # has to match. Verified below (assert_workspace_off) rather than assumed.
+    bin_gowork="off"
     if [ "${COMP}" = "relay" ]; then
         case "${bin}" in
             burrowee-relay-cli|burrowee-relay-updater)
                 bin_ldflags="${LDFLAGS} ${RELAY_CONSOLE_LDFLAGS}"
                 # The relay cli tree is a NESTED Go module (cli/go.mod pinning
-                # core by tag). Build from inside it with GOWORK=off so the
-                # pinned tags resolve: from SRC_DIR the package only resolves in
-                # workspace mode, which would silently substitute the LOCAL core
-                # worktrees via a gitignored go.work — a non-reproducible cut
-                # that can ship unmerged core.
+                # core by tag), so it must be built from INSIDE that module for
+                # the pinned tags to resolve — from SRC_DIR the package only
+                # resolves in workspace mode. (GOWORK=off is the default for
+                # every binary; see bin_gowork above.)
                 build_dir="${SRC_DIR}/cli"
                 pkg=".${pkg#./cli}"   # ./cli → . ; ./cli/cmd/x → ./cmd/x
-                bin_gowork="off"
                 ;;
         esac
     fi
@@ -186,6 +216,7 @@ for pair in ${MAP}; do
             ;;
     esac
     echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${bin_version})"
+    assert_workspace_off "${build_dir}" "${bin_gowork}"
     ( cd "${build_dir}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOWORK="${bin_gowork}" \
         "${GO_BIN}" build -trimpath -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then

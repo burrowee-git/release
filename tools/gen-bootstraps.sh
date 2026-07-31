@@ -27,6 +27,19 @@
 #
 # The @PUBKEY@ value is the base64 key line of a minisign .pub file (the last
 # non-comment line) — exactly what `minisign -V -P <pubkey>` expects inline.
+#
+# The public bootstraps also bake @MIN_VERSION@ — the component's last published
+# stamp, read from versions/<comp>.stamp. That is the installer's version floor:
+# a tag resolved from the network (a GH_PROXY mirror or the console catalog when
+# GitHub's API is unreachable) is refused if it is older, so the party serving
+# the artifacts cannot also pick an arbitrary older release to serve. release.sh
+# re-runs this script on every cut, AFTER the stamp file is written, so the
+# published install.sh always carries the version it was published beside.
+#
+#   BURROWEE_MIN_VERSION   test-only override for the baked floor (mirrors
+#                          BURROWEE_PUBKEY_FILE). Offline tests fabricate their
+#                          own release stamps, which have nothing to do with the
+#                          repo's real versions/<comp>.stamp.
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -65,6 +78,35 @@ else
     echo "! create the key (Phase 5a: minisign -G ... or Phase A2) and re-run." >&2
 fi
 
+# ---- resolve the version floor ------------------------------------------
+# min_version_of <comp> — the stamp to bake as @MIN_VERSION@. $BURROWEE_MIN_VERSION
+# overrides for tests; otherwise versions/<comp>.stamp, which release.sh writes
+# before it regenerates the bootstraps. Fails loudly rather than baking anything
+# the runtime guard would have to reject: a bootstrap without a usable floor
+# cannot resolve a version at all, so shipping one is not an option.
+min_version_of() {
+    _mv_comp="$1"
+    if [ -n "${BURROWEE_MIN_VERSION:-}" ]; then
+        _mv="${BURROWEE_MIN_VERSION}"
+        _mv_src="\$BURROWEE_MIN_VERSION"
+    else
+        _mv_file="$ROOT/versions/${_mv_comp}.stamp"
+        [ -f "$_mv_file" ] \
+            || { echo "✗ missing $_mv_file — cannot bake ${_mv_comp}'s version floor (cut the component, or set BURROWEE_MIN_VERSION for a test render)" >&2; exit 1; }
+        _mv="$(tr -d '[:space:]' < "$_mv_file")"
+        _mv_src="$_mv_file"
+    fi
+    # Validated whatever the source: the leading X.Y.Z must be numeric, because
+    # that is all the runtime comparison reads and it fails closed on anything
+    # else. Baking a floor the shipped installer would have to reject just turns
+    # a generator bug into an install-time outage.
+    case "${_mv#v}" in
+        [0-9]*.[0-9]*.[0-9]*) : ;;
+        *) echo "✗ ${_mv_src} holds '${_mv}', which has no numeric X.Y.Z prefix — refusing to bake an uncomparable version floor" >&2; exit 1 ;;
+    esac
+    printf '%s' "$_mv"
+}
+
 # ---- generate cli/gateway/edge/agent (public GitHub-release channel) ----
 # ORDER per comp: render <comp>/preflight.sh FIRST (so we can sha256 it), then
 # render <comp>/install.sh baking that hash as @PREFLIGHT_SHA256@. @NGINX@ is 1
@@ -85,14 +127,17 @@ for comp in cli gateway edge agent; do
     pf_sha="$(sha256_of "$pf_out")"
     echo "✓ wrote $pf_out  (sha256 $pf_sha)"
 
-    # (2) install.sh — bake @COMP@, @PUBKEY@, and the preflight's @PREFLIGHT_SHA256@.
-    # None of these values contains another's placeholder. tmp-then-mv atomic.
+    # (2) install.sh — bake @COMP@, @PUBKEY@, the preflight's @PREFLIGHT_SHA256@,
+    # and the @MIN_VERSION@ version floor. None of these values contains
+    # another's placeholder. tmp-then-mv atomic.
+    min_version="$(min_version_of "$comp")"
     out="$ROOT/$comp/install.sh"
     tmp="$out.tmp.$$"
-    sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" "$TEMPLATE" > "$tmp"
+    sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" \
+        -e "s|@MIN_VERSION@|$min_version|g" "$TEMPLATE" > "$tmp"
     chmod +x "$tmp"
     mv -f "$tmp" "$out"
-    echo "✓ wrote $out"
+    echo "✓ wrote $out  (version floor $min_version)"
 done
 
 # ---- generate relay (private gated channel) -----------------------------

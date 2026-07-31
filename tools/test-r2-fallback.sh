@@ -96,8 +96,16 @@ say "artifacts in ${W}/assets/"
 ls "${W}/assets/"
 
 # ---- (2) regenerate bootstraps baking the ephemeral pubkey --------------------
-say "gen-bootstraps.sh (baking ephemeral test pubkey)"
-BURROWEE_PUBKEY_FILE="${W}/test.pub" sh tools/gen-bootstraps.sh >/dev/null
+# BURROWEE_MIN_VERSION overrides the baked version floor too. This test resolves
+# its version through the console catalog — a network-resolved tag, so the floor
+# applies — and the catalog serves ${TEST_TAG}, a fabricated stamp unrelated to
+# the repo's real versions/cli.stamp. Baking the fabricated stamp AS the floor
+# keeps the floor honest (equal versions pass) without pinning this test to
+# whatever the cli happens to be at; the rollback direction is covered by
+# tools/test-version-floor.sh.
+say "gen-bootstraps.sh (baking ephemeral test pubkey + matching version floor)"
+BURROWEE_PUBKEY_FILE="${W}/test.pub" BURROWEE_MIN_VERSION="${TEST_TAG#*/}" \
+    sh tools/gen-bootstraps.sh >/dev/null
 
 # ---- (3) serve assets over local HTTP ------------------------------------------
 say "serving ${W}/assets/ on 127.0.0.1:${ASSET_PORT}"
