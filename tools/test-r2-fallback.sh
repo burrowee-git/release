@@ -97,12 +97,13 @@ ls "${W}/assets/"
 
 # ---- (2) regenerate bootstraps baking the ephemeral pubkey --------------------
 # BURROWEE_MIN_VERSION overrides the baked version floor too. This test resolves
-# its version through the console catalog — a network-resolved tag, so the floor
-# applies — and the catalog serves ${TEST_TAG}, a fabricated stamp unrelated to
-# the repo's real versions/cli.stamp. Baking the fabricated stamp AS the floor
-# keeps the floor honest (equal versions pass) without pinning this test to
-# whatever the cli happens to be at; the rollback direction is covered by
-# tools/test-version-floor.sh.
+# its version through the console catalog, which is EXEMPT from the floor (it
+# serves the last PROMOTED release and so trails the cut the floor is baked
+# from — see the version-resolve block in tools/bootstrap.template.sh), so the
+# floor no longer decides anything on this path. Baking ${TEST_TAG} as the floor
+# anyway keeps the render self-consistent and exercises the generator override;
+# the floor's own behaviour — accepted, rejected, and which resolvers it applies
+# to — is covered by tools/test-version-floor.sh.
 say "gen-bootstraps.sh (baking ephemeral test pubkey + matching version floor)"
 BURROWEE_PUBKEY_FILE="${W}/test.pub" BURROWEE_MIN_VERSION="${TEST_TAG#*/}" \
     sh tools/gen-bootstraps.sh >/dev/null

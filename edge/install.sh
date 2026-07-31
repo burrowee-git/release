@@ -44,10 +44,12 @@ PREFLIGHT_SHA256="20aff889401bbf192b378941923f58fd934f459b930436a3f225ba199b539e
 # The version floor: the stamp this component was at when THIS installer was
 # generated and published (baked from versions/<comp>.stamp by
 # tools/gen-bootstraps.sh, which release.sh re-runs on every cut). A tag
-# RESOLVED from the network must be at least this version — see "version floor"
-# below. It rides the same first-party static channel, over the same TLS fetch,
-# that delivered $PUBKEY, so it costs no trust the installer did not already
-# require; and no download source gets to choose it.
+# resolved from GitHub — or from a GH_PROXY mirror standing in for it — must be
+# at least this version; see "version floor" below (the first-party console
+# catalog is exempt, for the reason spelled out at the resolution choke point).
+# It rides the same first-party static channel, over the same TLS fetch, that
+# delivered $PUBKEY, so it costs no trust the installer did not already require;
+# and no download source gets to choose it.
 MIN_VERSION="v0.1.105.2026.07.30.88180cca"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
@@ -104,6 +106,11 @@ sha256_of() {
     else return 1; fi
 }
 
+# BEGIN release-resolver  (tools/test-version-floor.sh extracts this block — and
+# the version-resolve block further down — verbatim and drives them against a
+# stub $CURL; keep both self-contained between their markers, and keep the
+# markers.)
+#
 # Extract the highest "<comp>/v<semver>" tag from a GitHub /releases JSON body
 # read on stdin. The /releases order is by tag-commit date, NOT publish order,
 # so it is unreliable for "latest" — pick the highest tag via version sort.
@@ -119,6 +126,60 @@ latest_tag() {
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
     fi | grep -E "^${COMP}/v" | sort -V | tail -n1
 }
+
+# next_page_url — read a `curl -D` header dump on stdin and print the URL from
+# `Link: <…>; rel="next"`, or nothing when this was the last page. Only an
+# api.github.com URL is accepted: the header may have been written by a GH_PROXY
+# mirror, and a mirror must not get to walk the resolver onto a host of its own
+# choosing. (curl -L appends one header block per hop, so take the LAST Link.)
+next_page_url() {
+    _np="$(tr -d '\r' \
+        | grep -i '^link:' \
+        | tr ',' '\n' \
+        | grep 'rel="next"' \
+        | sed -E 's/.*<([^>]*)>.*/\1/' \
+        | tail -n1)"
+    case "$_np" in
+        https://api.github.com/*) printf '%s' "$_np" ;;
+    esac
+}
+
+# resolve_latest <url-prefix> — the highest "<comp>/v…" tag across EVERY page of
+# the repo's release list, following the `Link: rel="next"` header. <url-prefix>
+# is "" for a direct api.github.com fetch, or "<mirror>/" to route each page
+# through a GH_PROXY mirror.
+#
+# Why the pages matter: /releases serves at most 100 entries per page and this
+# repo publishes every component into ONE list. The moment a quiet component's
+# newest release scrolls off page 1, a single-page fetch answers with an OLDER
+# release OF THAT COMPONENT — not with nothing — and every downstream check
+# still passes, because those bytes are a genuine signed release. That is the
+# same stale-answer hazard the version floor exists for, except the installer
+# produced it itself, so the floor turns it into an install that cannot succeed
+# at all without a manual pin. Walk the whole list instead.
+#
+# Returns 1 if ANY page fetch fails: a partial walk can only answer too low, and
+# the caller has better options (the mirrors, then the console catalog) than a
+# stale tag.
+resolve_latest() {
+    _rl_prefix="$1"
+    _rl_url="https://api.github.com/repos/${REPO}/releases?per_page=100"
+    _rl_pages=0
+    : > "$TMP/tags"
+    while [ -n "$_rl_url" ]; do
+        _rl_pages=$((_rl_pages + 1))
+        # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
+        $CURL -D "$TMP/page.head" -o "$TMP/page.json" "${_rl_prefix}${_rl_url}" 2>/dev/null \
+            || return 1
+        latest_tag < "$TMP/page.json" >> "$TMP/tags"
+        # 20 pages = 2000 releases, far past this repo's list; the cap only
+        # bounds a source that keeps handing out a "next" link forever.
+        [ "$_rl_pages" -lt 20 ] || break
+        _rl_url="$(next_page_url < "$TMP/page.head")"
+    done
+    sort -V < "$TMP/tags" | tail -n1
+}
+# END release-resolver
 
 # ---- version floor helpers ----------------------------------------------
 # BEGIN version-floor  (tools/test-version-floor.sh extracts this block verbatim
@@ -160,9 +221,11 @@ version_ge() {
 
 # assert_version_floor <tag> — abort unless <tag> is at least $MIN_VERSION.
 #
-# <tag> here was answered BY THE NETWORK, and when api.github.com is unreachable
-# the party that answered is a GH_PROXY mirror (or the console catalog) — the
-# very same party that then serves the artifacts. The trusted-comment binding
+# <tag> here was answered by GITHUB, and when api.github.com is unreachable the
+# party that answered is a GH_PROXY mirror standing in for it — the very same
+# party that then serves the artifacts. (The console catalog resolves versions
+# too, but is exempt from this floor and never reaches here; the version-resolve
+# block says why.) The trusted-comment binding
 # further down compares the signed comment against the tag, so on that path it
 # compares the resolver's answer against itself: an older, genuinely signed
 # triple (zip + sums + minisig, all mutually consistent, all really ours) passes
@@ -187,10 +250,9 @@ assert_version_floor() {
     esac
     version_ge "${1#*/}" "$MIN_VERSION" \
         || fail "version floor not met — resolved \"$1\", but this installer was published at \"$MIN_VERSION\" and will not go backwards.
-    Refusing to install: this is what a mirror or catalog serving a stale, older
-    (but genuinely signed) release looks like. Retry when github.com is
-    reachable, or pin the version you actually want via the environment and
-    install again."
+    Refusing to install: this is what a mirror serving a stale, older (but
+    genuinely signed) release looks like. Retry when github.com is reachable, or
+    pin the version you actually want via the environment and install again."
     ok "version floor satisfied ($MIN_VERSION)"
 }
 # END version-floor
@@ -243,6 +305,7 @@ if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_SKIP_PREFLIGHT:-}" ]; th
 fi
 
 # ---- version resolution -------------------------------------------------
+# BEGIN version-resolve
 # Read the per-component pin env var by name (no eval). $COMP is a baked
 # literal, so a direct case over the four known components is exhaustive.
 case "$COMP" in
@@ -261,23 +324,23 @@ if [ -n "$PIN" ]; then
     info "using pinned version: $TAG"
 else
     info "resolving latest ${COMP} release"
-    api="https://api.github.com/repos/${REPO}/releases?per_page=100"
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    body="$($CURL "$api" 2>/dev/null)" || true
-    TAG="$(printf '%s' "$body" | latest_tag)" || true
+    # Who answered? "github" = api.github.com, or a GH_PROXY mirror standing in
+    # for it; "catalog" = the first-party console. Only the github answer is held
+    # to the version floor — see the choke point at the end of this block.
+    TAG_SOURCE=github
+    TAG="$(resolve_latest '')" || TAG=""
     # GitHub API unreachable/empty — retry through each mirror in turn BEFORE the
     # console catalog (mirrors need no authorized burrowee, so they serve fresh
     # hosts). Skipped under the DL_BASE test hook and when mirrors are disabled.
     if [ -z "$TAG" ] && [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
         for _proxy in $GH_PROXIES; do
             info "GitHub API unreachable — retrying via mirror $_proxy"
-            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            body="$($CURL "$_proxy/$api" 2>/dev/null)" || true
-            TAG="$(printf '%s' "$body" | latest_tag)" || true
+            TAG="$(resolve_latest "$_proxy/")" || TAG=""
             if [ -n "$TAG" ]; then info "mirror resolved: $TAG"; break; fi
         done
     fi
     if [ -z "$TAG" ]; then
+        TAG_SOURCE=catalog
         # GitHub unreachable or no releases published. Try the console catalog
         # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/edge/current.
         # This is the R2 fallback path — assets are served via `burrowee download-url`
@@ -315,10 +378,29 @@ else
         info "console catalog: $TAG"
     fi
     info "latest: $TAG"
-    # A resolver that also serves the artifacts must not get to pick the
-    # version too — hold its answer to the baked floor. See assert_version_floor.
-    assert_version_floor "$TAG"
+    # A resolver that also serves the artifacts must not get to pick the version
+    # too — GitHub's answer, and a mirror's answer standing in for it, are held
+    # to the baked floor. See assert_version_floor.
+    #
+    # The console catalog is EXEMPT, deliberately. $MIN_VERSION is baked from
+    # versions/<comp>.stamp — the version at CUT time — while the catalog serves
+    # the last PROMOTED release, and cut and promote are separate steps that
+    # legitimately lag each other. Holding the catalog to the cut floor aborts
+    # every install in that window, on the only path a GitHub-blocked host has,
+    # with advice ("retry when github.com is reachable") that host cannot act on.
+    # The catalog is also not a third party: it is the same first-party control
+    # plane the static channel and $PUBKEY come from, so exempting it costs no
+    # trust this installer had not already extended. The bytes it leads to are
+    # still minisign + sha256 verified and still bound to the resolved tag by the
+    # signed trusted comment, so the catalog can at worst name an older release
+    # OF OURS — never a forged one.
+    if [ "$TAG_SOURCE" = catalog ]; then
+        info "version floor not applied to the console catalog (first-party; serves the last PROMOTED release)"
+    else
+        assert_version_floor "$TAG"
+    fi
 fi
+# END version-resolve
 
 # ---- download -----------------------------------------------------------
 if [ -n "$DL_BASE" ]; then

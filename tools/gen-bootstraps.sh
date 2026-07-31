@@ -36,6 +36,12 @@
 # re-runs this script on every cut, AFTER the stamp file is written, so the
 # published install.sh always carries the version it was published beside.
 #
+# ANY merge or rebase that brings in a newer versions/*.stamp must be followed by
+# a re-run of this script (and a commit of the regenerated bootstraps) — the
+# stamp files and the baked floors are two halves of one fact, and only this
+# script keeps them in step. tools/test-version-floor.sh and
+# tools/test-tag-binding.sh both fail while they disagree.
+#
 #   BURROWEE_MIN_VERSION   test-only override for the baked floor (mirrors
 #                          BURROWEE_PUBKEY_FILE). Offline tests fabricate their
 #                          own release stamps, which have nothing to do with the
