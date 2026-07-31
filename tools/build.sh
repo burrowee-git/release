@@ -72,8 +72,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/updater_pin.sh"
 # GOWORK being unset: go walks up from <build-dir> and adopts any go.work it
 # finds, silently replacing the pinned go.mod versions with whatever local
 # worktrees that file points at. go.work is gitignored, so release.sh's
-# source-cleanliness check cannot observe the substitution — this assertion is
-# the only place a regression here becomes visible. `go env GOWORK` prints the
+# source-cleanliness check cannot observe the substitution — and nothing else
+# downstream can either. With bin_gowork hardcoded to "off" below, this
+# assertion is a tautology TODAY; it is kept as a tripwire for the day someone
+# reintroduces bin_gowork="" or a per-binary override, which is exactly the
+# regression that would otherwise ship silently. `go env GOWORK` prints the
 # adopted go.work path, or the literal "off"; only "off" may build a release.
 assert_workspace_off() {
     local dir="$1" gowork="$2" seen
