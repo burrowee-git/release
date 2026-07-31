@@ -168,6 +168,10 @@ func buildRun(o buildOpts) (err error) {
 	defer func() {
 		if err != nil || o.DryRun {
 			exec.Command("git", "-C", o.RepoDir, "restore", "--staged", "--worktree", "versions/"+o.Component).Run()
+			// The stamp write below is staged the same way and must be undone on
+			// the same conditions: a stamp for a cut that never published would be
+			// read by the next unchanged-source cut as proof it had already shipped.
+			exec.Command("git", "-C", o.RepoDir, "restore", "--staged", "--worktree", "versions/"+o.Component+".stamp").Run()
 		}
 	}()
 
@@ -184,6 +188,27 @@ func buildRun(o buildOpts) (err error) {
 	if err != nil {
 		return err
 	}
+
+	// Record the stamp beside the bumped version, mirroring release.sh's
+	// resolve_comp_stamp. versions/<comp>.stamp is not decoration: a later cut
+	// compares its recorded sha8 + semver against the source to decide the
+	// component is UNCHANGED and reuse the stamp instead of churning the version.
+	// This path bumped versions/<comp> but never wrote the stamp, so every cut
+	// through rkit left the record one release behind — the freeze could never
+	// engage, and the file said a release had shipped that had not.
+	//
+	// --dry-run must never write it (a stamp for a build that publishes nothing
+	// would be read as already-shipped), which the guard below and the revert
+	// registered above both enforce.
+	if !o.DryRun {
+		stampFile := filepath.Join(o.RepoDir, "versions", o.Component+".stamp")
+		if err = os.WriteFile(stampFile, []byte(stamp+"\n"), 0o644); err != nil {
+			return fmt.Errorf("record stamp: %w", err)
+		}
+		// Staged so it rides the [RELEASED] marker commit the distribute step makes.
+		exec.Command("git", "-C", o.RepoDir, "add", "versions/"+o.Component+".stamp").Run()
+	}
+
 	distDir := filepath.Join(o.RepoDir, "dist", stamp)
 
 	// CVE gate — ON BY DEFAULT for a real build (unlike harness, which
