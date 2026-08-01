@@ -50,7 +50,7 @@ PREFLIGHT_SHA256="2d91551afebe0819061120d138d80d365dc438e16ee47a4d952a2c64e63845
 # It rides the same first-party static channel, over the same TLS fetch, that
 # delivered $PUBKEY, so it costs no trust the installer did not already require;
 # and no download source gets to choose it.
-MIN_VERSION="v0.1.108.2026.07.31.d5698b26"
+MIN_VERSION="v0.1.109.2026.08.01.5da251ee"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
