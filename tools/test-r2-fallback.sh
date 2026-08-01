@@ -96,8 +96,17 @@ say "artifacts in ${W}/assets/"
 ls "${W}/assets/"
 
 # ---- (2) regenerate bootstraps baking the ephemeral pubkey --------------------
-say "gen-bootstraps.sh (baking ephemeral test pubkey)"
-BURROWEE_PUBKEY_FILE="${W}/test.pub" sh tools/gen-bootstraps.sh >/dev/null
+# BURROWEE_MIN_VERSION overrides the baked version floor too. This test resolves
+# its version through the console catalog, which is EXEMPT from the floor (it
+# serves the last PROMOTED release and so trails the cut the floor is baked
+# from — see the version-resolve block in tools/bootstrap.template.sh), so the
+# floor no longer decides anything on this path. Baking ${TEST_TAG} as the floor
+# anyway keeps the render self-consistent and exercises the generator override;
+# the floor's own behaviour — accepted, rejected, and which resolvers it applies
+# to — is covered by tools/test-version-floor.sh.
+say "gen-bootstraps.sh (baking ephemeral test pubkey + matching version floor)"
+BURROWEE_PUBKEY_FILE="${W}/test.pub" BURROWEE_MIN_VERSION="${TEST_TAG#*/}" \
+    sh tools/gen-bootstraps.sh >/dev/null
 
 # ---- (3) serve assets over local HTTP ------------------------------------------
 say "serving ${W}/assets/ on 127.0.0.1:${ASSET_PORT}"

@@ -29,9 +29,11 @@
 #   BURROWEE_GH_PROXY            Space-separated list of GitHub HTTP mirrors, tried in order
 #                                ONLY when github.com / api.github.com are unreachable
 #                                (default: gh-proxy.org cdn.gh-proxy.org v6.gh-proxy.org
-#                                gh-proxy.com; set empty to disable). minisign + sha256
-#                                verified AND bound to the resolved tag, so an untrusted
-#                                mirror can neither tamper nor roll back undetected.
+#                                gh-proxy.com; set empty to disable). Downloaded bytes are
+#                                minisign + sha256 verified and bound to the resolved tag,
+#                                so a mirror cannot tamper. A mirror that also RESOLVES the
+#                                tag (GitHub's API down) is additionally held to the version
+#                                floor baked into this installer — see "version floor" below.
 
 set -eu
 
@@ -39,6 +41,16 @@ set -eu
 COMP="@COMP@"
 PUBKEY="@PUBKEY@"
 PREFLIGHT_SHA256="@PREFLIGHT_SHA256@"
+# The version floor: the stamp this component was at when THIS installer was
+# generated and published (baked from versions/<comp>.stamp by
+# tools/gen-bootstraps.sh, which release.sh re-runs on every cut). A tag
+# resolved from GitHub — or from a GH_PROXY mirror standing in for it — must be
+# at least this version; see "version floor" below (the first-party console
+# catalog is exempt, for the reason spelled out at the resolution choke point).
+# It rides the same first-party static channel, over the same TLS fetch, that
+# delivered $PUBKEY, so it costs no trust the installer did not already require;
+# and no download source gets to choose it.
+MIN_VERSION="@MIN_VERSION@"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 PREFIX="${PREFIX:-$HOME/.local}"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
@@ -51,11 +63,19 @@ CHANNEL_BASE="${BURROWEE_CHANNEL_BASE:-https://release.burrowee.com/$COMP}"
 CONSOLE_URL="${CONSOLE_URL:-https://console.burrowee.com}"
 # GitHub HTTP mirrors, tried in order ONLY as a fallback when github.com /
 # api.github.com are unreachable (e.g. networks that block or throttle GitHub).
-# Each is tried as <mirror>/<original-https-github-url> until one succeeds; the
-# downloaded bytes are still minisign- + sha256-verified below AND bound to the
-# resolved $TAG via the SIGNED trusted comment, so an untrusted mirror can
-# neither inject tampered bytes nor answer with an older, genuinely signed
-# release (a silent version rollback) undetected. Space-separated list.
+# Each is tried as <mirror>/<original-https-github-url> until one succeeds.
+#
+# What the mirrors CANNOT do: inject tampered bytes. The downloaded bytes are
+# minisign- + sha256-verified below and bound to $TAG via the SIGNED trusted
+# comment.
+#
+# What that binding does NOT cover on its own: when the GitHub API is also
+# unreachable, the tag itself is resolved from a mirror — so the binding would
+# be comparing the mirror's own answer against itself, and any older, genuinely
+# signed release would pass every gate. The version floor (see below) is what
+# constrains that answer: a mirror can at worst hold you at the version the
+# first-party channel advertised when you fetched this installer, and cannot
+# walk you back to an arbitrary older signed release. Space-separated list.
 # ${VAR-default} (not :-) lets `BURROWEE_GH_PROXY=` explicitly disable the
 # mirrors while an unset value gets the default. Never used when DL_BASE is set.
 GH_PROXIES="${BURROWEE_GH_PROXY-https://gh-proxy.org https://cdn.gh-proxy.org https://v6.gh-proxy.org https://gh-proxy.com}"
@@ -86,6 +106,11 @@ sha256_of() {
     else return 1; fi
 }
 
+# BEGIN release-resolver  (tools/test-version-floor.sh extracts this block — and
+# the version-resolve block further down — verbatim and drives them against a
+# stub $CURL; keep both self-contained between their markers, and keep the
+# markers.)
+#
 # Extract the highest "<comp>/v<semver>" tag from a GitHub /releases JSON body
 # read on stdin. The /releases order is by tag-commit date, NOT publish order,
 # so it is unreliable for "latest" — pick the highest tag via version sort.
@@ -101,6 +126,136 @@ latest_tag() {
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
     fi | grep -E "^${COMP}/v" | sort -V | tail -n1
 }
+
+# next_page_url — read a `curl -D` header dump on stdin and print the URL from
+# `Link: <…>; rel="next"`, or nothing when this was the last page. Only an
+# api.github.com URL is accepted: the header may have been written by a GH_PROXY
+# mirror, and a mirror must not get to walk the resolver onto a host of its own
+# choosing. (curl -L appends one header block per hop, so take the LAST Link.)
+next_page_url() {
+    _np="$(tr -d '\r' \
+        | grep -i '^link:' \
+        | tr ',' '\n' \
+        | grep 'rel="next"' \
+        | sed -E 's/.*<([^>]*)>.*/\1/' \
+        | tail -n1)"
+    case "$_np" in
+        https://api.github.com/*) printf '%s' "$_np" ;;
+    esac
+}
+
+# resolve_latest <url-prefix> — the highest "<comp>/v…" tag across EVERY page of
+# the repo's release list, following the `Link: rel="next"` header. <url-prefix>
+# is "" for a direct api.github.com fetch, or "<mirror>/" to route each page
+# through a GH_PROXY mirror.
+#
+# Why the pages matter: /releases serves at most 100 entries per page and this
+# repo publishes every component into ONE list. The moment a quiet component's
+# newest release scrolls off page 1, a single-page fetch answers with an OLDER
+# release OF THAT COMPONENT — not with nothing — and every downstream check
+# still passes, because those bytes are a genuine signed release. That is the
+# same stale-answer hazard the version floor exists for, except the installer
+# produced it itself, so the floor turns it into an install that cannot succeed
+# at all without a manual pin. Walk the whole list instead.
+#
+# Returns 1 if ANY page fetch fails: a partial walk can only answer too low, and
+# the caller has better options (the mirrors, then the console catalog) than a
+# stale tag.
+resolve_latest() {
+    _rl_prefix="$1"
+    _rl_url="https://api.github.com/repos/${REPO}/releases?per_page=100"
+    _rl_pages=0
+    : > "$TMP/tags"
+    while [ -n "$_rl_url" ]; do
+        _rl_pages=$((_rl_pages + 1))
+        # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
+        $CURL -D "$TMP/page.head" -o "$TMP/page.json" "${_rl_prefix}${_rl_url}" 2>/dev/null \
+            || return 1
+        latest_tag < "$TMP/page.json" >> "$TMP/tags"
+        # 20 pages = 2000 releases, far past this repo's list; the cap only
+        # bounds a source that keeps handing out a "next" link forever.
+        [ "$_rl_pages" -lt 20 ] || break
+        _rl_url="$(next_page_url < "$TMP/page.head")"
+    done
+    sort -V < "$TMP/tags" | tail -n1
+}
+# END release-resolver
+
+# ---- version floor helpers ----------------------------------------------
+# BEGIN version-floor  (tools/test-version-floor.sh extracts this block verbatim
+# and exercises it directly — keep it self-contained between the markers, and
+# keep the markers.)
+#
+# semver_of <stamp> — the leading X.Y.Z of a release stamp (vX.Y.Z.<date>.<sha8>).
+# ONLY the semver is compared: release.sh bumps it monotonically on every cut,
+# whereas the date and changeset suffixes are not ordered text (two stamps that
+# differ only in changeset would compare arbitrarily).
+semver_of() {
+    printf '%s' "${1#v}" | cut -d. -f1-3
+}
+
+# is_semver <x> — true only for a bare numeric X.Y.Z. Everything else (empty,
+# an unsubstituted @…@ placeholder, a tag shape we don't understand) is NOT a
+# version and must never be compared as one.
+is_semver() {
+    case "$1" in
+        [0-9]*.[0-9]*.[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[!0-9.]*) return 1 ;;
+    esac
+    return 0
+}
+
+# version_ge <a> <b> — true when semver(a) >= semver(b). Fails CLOSED: if either
+# side is not a well-formed semver, the answer is "no".
+version_ge() {
+    _vg_a="$(semver_of "$1")"
+    _vg_b="$(semver_of "$2")"
+    is_semver "$_vg_a" || return 1
+    is_semver "$_vg_b" || return 1
+    if [ "$_vg_a" = "$_vg_b" ]; then return 0; fi
+    [ "$(printf '%s\n%s\n' "$_vg_a" "$_vg_b" | sort -V | head -n1)" = "$_vg_b" ]
+}
+
+# assert_version_floor <tag> — abort unless <tag> is at least $MIN_VERSION.
+#
+# <tag> here was answered by GITHUB, and when api.github.com is unreachable the
+# party that answered is a GH_PROXY mirror standing in for it — the very same
+# party that then serves the artifacts. (The console catalog resolves versions
+# too, but is exempt from this floor and never reaches here; the version-resolve
+# block says why.) The trusted-comment binding
+# further down compares the signed comment against the tag, so on that path it
+# compares the resolver's answer against itself: an older, genuinely signed
+# triple (zip + sums + minisig, all mutually consistent, all really ours) passes
+# every remaining gate. That is a silent rollback onto a known-vulnerable build,
+# and no amount of signature checking can catch it, because nothing about those
+# bytes is wrong — only the choice of WHICH release was wrong.
+#
+# $MIN_VERSION is the floor the resolver does not get to choose: the stamp this
+# component was at when this installer was generated and published. It reached
+# this host over the first-party static channel, in the same fetch that
+# delivered $PUBKEY — an attacker who can forge it can already forge the signing
+# key, so it adds no trust assumption.
+#
+# The exact property this buys, and the strongest one available without a signed
+# version catalog: a hostile resolver can at worst pin you to the version the
+# first-party channel itself advertised when you fetched this installer. It
+# cannot walk you back any further.
+assert_version_floor() {
+    case "$MIN_VERSION" in
+        ""|*@*|*PLACEHOLDER*|*TEMP*)
+            fail "no version floor baked into this installer — refusing to accept a network-resolved version with nothing to check it against (regenerate with tools/gen-bootstraps.sh, or pin the version yourself via the BURROWEE_<COMP>_VERSION env var)" ;;
+    esac
+    version_ge "${1#*/}" "$MIN_VERSION" \
+        || fail "version floor not met — resolved \"$1\", but this installer was published at \"$MIN_VERSION\" and will not go backwards.
+    Refusing to install: this is what a mirror serving a stale, older (but
+    genuinely signed) release looks like. Retry when github.com is reachable, or
+    pin the version you actually want via the environment and install again."
+    ok "version floor satisfied ($MIN_VERSION)"
+}
+# END version-floor
 
 # ---- platform detection -------------------------------------------------
 case "$(uname -s)" in
@@ -150,6 +305,7 @@ if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_SKIP_PREFLIGHT:-}" ]; th
 fi
 
 # ---- version resolution -------------------------------------------------
+# BEGIN version-resolve
 # Read the per-component pin env var by name (no eval). $COMP is a baked
 # literal, so a direct case over the four known components is exhaustive.
 case "$COMP" in
@@ -159,28 +315,32 @@ case "$COMP" in
     agent)   PIN="${BURROWEE_AGENT_VERSION:-}" ;;
     *)       fail "unknown component '$COMP' — cannot resolve its version pin" ;;
 esac
+# An explicit pin is the operator's own answer, not a resolver's — it is used
+# verbatim and is NOT held to the version floor below. Pinning an older release
+# is a deliberate, local downgrade (debugging, staged rollback); refusing it
+# would take away the only lever an operator has when a new cut misbehaves.
 if [ -n "$PIN" ]; then
     TAG="$PIN"
     info "using pinned version: $TAG"
 else
     info "resolving latest ${COMP} release"
-    api="https://api.github.com/repos/${REPO}/releases?per_page=100"
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    body="$($CURL "$api" 2>/dev/null)" || true
-    TAG="$(printf '%s' "$body" | latest_tag)" || true
+    # Who answered? "github" = api.github.com, or a GH_PROXY mirror standing in
+    # for it; "catalog" = the first-party console. Only the github answer is held
+    # to the version floor — see the choke point at the end of this block.
+    TAG_SOURCE=github
+    TAG="$(resolve_latest '')" || TAG=""
     # GitHub API unreachable/empty — retry through each mirror in turn BEFORE the
     # console catalog (mirrors need no authorized burrowee, so they serve fresh
     # hosts). Skipped under the DL_BASE test hook and when mirrors are disabled.
     if [ -z "$TAG" ] && [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
         for _proxy in $GH_PROXIES; do
             info "GitHub API unreachable — retrying via mirror $_proxy"
-            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            body="$($CURL "$_proxy/$api" 2>/dev/null)" || true
-            TAG="$(printf '%s' "$body" | latest_tag)" || true
+            TAG="$(resolve_latest "$_proxy/")" || TAG=""
             if [ -n "$TAG" ]; then info "mirror resolved: $TAG"; break; fi
         done
     fi
     if [ -z "$TAG" ]; then
+        TAG_SOURCE=catalog
         # GitHub unreachable or no releases published. Try the console catalog
         # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/@COMP@/current.
         # This is the R2 fallback path — assets are served via `burrowee download-url`
@@ -218,7 +378,29 @@ else
         info "console catalog: $TAG"
     fi
     info "latest: $TAG"
+    # A resolver that also serves the artifacts must not get to pick the version
+    # too — GitHub's answer, and a mirror's answer standing in for it, are held
+    # to the baked floor. See assert_version_floor.
+    #
+    # The console catalog is EXEMPT, deliberately. $MIN_VERSION is baked from
+    # versions/<comp>.stamp — the version at CUT time — while the catalog serves
+    # the last PROMOTED release, and cut and promote are separate steps that
+    # legitimately lag each other. Holding the catalog to the cut floor aborts
+    # every install in that window, on the only path a GitHub-blocked host has,
+    # with advice ("retry when github.com is reachable") that host cannot act on.
+    # The catalog is also not a third party: it is the same first-party control
+    # plane the static channel and $PUBKEY come from, so exempting it costs no
+    # trust this installer had not already extended. The bytes it leads to are
+    # still minisign + sha256 verified and still bound to the resolved tag by the
+    # signed trusted comment, so the catalog can at worst name an older release
+    # OF OURS — never a forged one.
+    if [ "$TAG_SOURCE" = catalog ]; then
+        info "version floor not applied to the console catalog (first-party; serves the last PROMOTED release)"
+    else
+        assert_version_floor "$TAG"
+    fi
 fi
+# END version-resolve
 
 # ---- download -----------------------------------------------------------
 if [ -n "$DL_BASE" ]; then
@@ -357,7 +539,16 @@ ok "minisign signature valid"
 # equally a stale CDN or a hostile console catalog) can answer with an OLDER,
 # genuinely signed triple — zip + SHA256SUMS.txt + .minisig all mutually
 # consistent — and every check above passes: a silent rollback onto a
-# known-vulnerable build. The trusted comment is covered by the signature, so it
+# known-vulnerable build.
+#
+# This check is what makes $TAG mean something for the BYTES. It is only as
+# strong as $TAG itself: when $TAG came from a pin it is the operator's own
+# answer, and when it was resolved from the network it has already been held to
+# $MIN_VERSION above (a resolver that also served the bytes cannot use this
+# comparison to launder its own answer). The two checks are complementary and
+# neither substitutes for the other.
+#
+# The trusted comment is covered by the signature, so it
 # cannot be swapped for a different version's; releases are stamped by
 # tools/release.sh / rkit as `burrowee <comp> <stamp>` where <stamp> is the tag
 # minus its "<comp>/" prefix. Mismatch (or a release predating the stamp
