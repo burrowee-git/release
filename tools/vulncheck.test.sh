@@ -31,9 +31,32 @@ COMPONENTS=(cli gateway)
 got="$(vulncheck_scan_dirs | tr '\t' '=' | paste -sd, -)"
 check "scan-dirs public" "${got}" "cli=/tmp/src-cli,gateway=/tmp/src-gw,burrowee=/tmp/src-disp"
 
+# Discovery, not declaration: give relay a real root module and a real nested
+# one, and assert both are found. relay/cli was previously a hardcoded entry —
+# this proves it is now discovered, so a future nested module is covered too.
+mkdir -p /tmp/src-relay/cli /tmp/src-disp
+: > /tmp/src-relay/go.mod
+: > /tmp/src-relay/cli/go.mod
 COMPONENTS=(relay)
 got="$(vulncheck_scan_dirs | tr '\t' '=' | paste -sd, -)"
-check "scan-dirs relay" "${got}" "relay=/tmp/src-relay,relay-cli=/tmp/src-relay/cli,burrowee=/tmp/src-disp"
+check "scan-dirs relay (discovered nested)" "${got}" \
+    "relay=/tmp/src-relay,relay-cli=/tmp/src-relay/cli,burrowee=/tmp/src-disp"
+
+# A newly-added nested module must appear with NO edit to vulncheck.sh — this
+# is the property the hardcoded list could not provide.
+mkdir -p /tmp/src-relay/probe
+: > /tmp/src-relay/probe/go.mod
+got="$(vulncheck_scan_dirs | tr '\t' '=' | paste -sd, -)"
+check "scan-dirs picks up a new nested module" "${got}" \
+    "relay=/tmp/src-relay,relay-cli=/tmp/src-relay/cli,relay-probe=/tmp/src-relay/probe,burrowee=/tmp/src-disp"
+rm -rf /tmp/src-relay/probe
+
+# A root with no go.mod is still emitted, so the gate reports it unscannable
+# rather than silently shipping it unchecked.
+rm -f /tmp/src-relay/go.mod /tmp/src-relay/cli/go.mod
+got="$(vulncheck_scan_dirs | tr '\t' '=' | paste -sd, -)"
+check "scan-dirs emits a root with no go.mod" "${got}" \
+    "relay=/tmp/src-relay,burrowee=/tmp/src-disp"
 
 # --- vulncheck_gate (stubbed govulncheck) -----------------------------------
 REPO_ROOT="$(mktemp -d)"; trap 'rm -rf "${REPO_ROOT}"' EXIT

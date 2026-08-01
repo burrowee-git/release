@@ -11,15 +11,49 @@ resolve_release_mode() {
     printf '%s|%s' "${apple}" "${vuln}"
 }
 
-# vulncheck_scan_dirs — prints "name<TAB>dir" for every module a cut ships.
-# Requires src_for(), the COMPONENTS array, SRC_RELAY and SRC_DISPATCHER.
+# vulncheck_scan_dirs — prints "name<TAB>dir" for every MODULE a cut ships.
+# Requires src_for(), the COMPONENTS array and SRC_DISPATCHER.
+#
+# The set is DISCOVERED, not declared. Every go.mod under a component's source
+# root is its own module with its own dependency graph, so scanning the parent
+# says nothing about it. `relay/cli` used to be a hardcoded special case here;
+# discovery covers it and anything like it that appears later with no edit to
+# this file — which matters because the gate silently under-covering a shipped
+# module looks identical to the module being clean.
+#
+# Per-component BINARIES (burrowee-gateway-cli, burrowee-edge-updater, …) are
+# cmd/ dirs inside their module, so `./...` at the module root already covers
+# them; they are not separate entries and do not need to be.
 vulncheck_scan_dirs() {
-    local c
+    local c root
     for c in "${COMPONENTS[@]}"; do
-        printf '%s\t%s\n' "${c}" "$(src_for "${c}")"
-        [ "${c}" = relay ] && printf 'relay-cli\t%s\n' "${SRC_RELAY}/cli"
+        root="$(src_for "${c}")"
+        [ -n "${root}" ] || continue
+        vulncheck_modules_under "${c}" "${root}"
     done
-    printf 'burrowee\t%s\n' "${SRC_DISPATCHER}"
+    vulncheck_modules_under burrowee "${SRC_DISPATCHER}"
+}
+
+# vulncheck_modules_under <name> <root> — one line per go.mod beneath root.
+# The root module keeps <name>; a nested one is <name>-<subpath> (so relay/cli
+# stays "relay-cli", the name the previous hardcoded entry used).
+#
+# A root with NO go.mod is still emitted, so the gate tries to scan it and
+# reports it as unscannable. Dropping it here would ship an unchecked module
+# while the gate reported success.
+vulncheck_modules_under() {
+    local name="$1" root="$2" mod dir sub found=0
+    while IFS= read -r mod; do
+        [ -n "${mod}" ] || continue
+        found=1
+        dir="$(dirname "${mod}")"
+        sub="${dir#"${root}"}"; sub="${sub#/}"
+        printf '%s\t%s\n' "${name}${sub:+-${sub//\//-}}" "${dir}"
+    done <<EOF
+$(find "${root}" -name go.mod -not -path '*/vendor/*' -not -path '*/node_modules/*' 2>/dev/null \
+    | awk -F/ '{print NF"\t"$0}' | sort -n -k1,1 -k2,2 | cut -f2-)
+EOF
+    [ "${found}" = 1 ] || printf '%s\t%s\n' "${name}" "${root}"
 }
 
 # vulncheck_gate — hard CVE gate. No-op unless VULNCHECK is set. Scans every
