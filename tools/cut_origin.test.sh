@@ -75,5 +75,69 @@ tree_clean "${MAIN}" && r=0 || r=1
 check "clean: an untracked file also fails" "${r}" "1"
 rm -f "${MAIN}/stray.txt"
 
+# ── check 5: origin comparison ───────────────────────────────────────────────
+SYNC="$(new_origin_and_clone sync)"
+check "origin: an up-to-date clone is in-sync" "$(origin_sync_status "${SYNC}")" "in-sync"
+origin_sync_status "${SYNC}" >/dev/null && r=0 || r=1
+check "origin: in-sync returns 0" "${r}" "0"
+
+# Behind: push a second commit through another clone, leave SYNC untouched.
+OTHER="${WORK}/sync-other"
+/usr/bin/git clone --quiet "${WORK}/sync.git" "${OTHER}" 2>/dev/null
+echo "second" > "${OTHER}/second.txt"
+/usr/bin/git -C "${OTHER}" add second.txt
+/usr/bin/git -C "${OTHER}" commit --quiet -m "second"
+/usr/bin/git -C "${OTHER}" push --quiet origin main
+check "origin: one commit behind is reported with its distance" "$(origin_sync_status "${SYNC}")" "behind:1"
+origin_sync_status "${SYNC}" >/dev/null && r=0 || r=1
+check "origin: behind returns 1" "${r}" "1"
+
+# Ahead: a local commit that was never pushed.
+AHEAD="$(new_origin_and_clone ahead)"
+echo "local" > "${AHEAD}/local.txt"
+/usr/bin/git -C "${AHEAD}" add local.txt
+/usr/bin/git -C "${AHEAD}" commit --quiet -m "local only"
+check "origin: one commit ahead is reported" "$(origin_sync_status "${AHEAD}")" "ahead:1"
+
+# Diverged: local commit here, different commit pushed there.
+DIV="$(new_origin_and_clone diverged)"
+DIVOTHER="${WORK}/diverged-other"
+/usr/bin/git clone --quiet "${WORK}/diverged.git" "${DIVOTHER}" 2>/dev/null
+echo "theirs" > "${DIVOTHER}/theirs.txt"
+/usr/bin/git -C "${DIVOTHER}" add theirs.txt
+/usr/bin/git -C "${DIVOTHER}" commit --quiet -m "theirs"
+/usr/bin/git -C "${DIVOTHER}" push --quiet origin main
+echo "mine" > "${DIV}/mine.txt"
+/usr/bin/git -C "${DIV}" add mine.txt
+/usr/bin/git -C "${DIV}" commit --quiet -m "mine"
+check "origin: divergence reports both counts" "$(origin_sync_status "${DIV}")" "diverged:1:1"
+
+# A remote with no fetch refspec still fetches on demand but no longer
+# updates refs/remotes/origin/main, so the tracking ref goes stale while
+# FETCH_HEAD stays fresh — the exact disagreement the FETCH_HEAD choice
+# exists for. Comparing against the tracking ref here would report in-sync
+# for a tree that is a commit behind.
+STALE="$(new_origin_and_clone stale-ref)"
+STALE_OTHER="${WORK}/stale-ref-other"
+/usr/bin/git clone --quiet "${WORK}/stale-ref.git" "${STALE_OTHER}" 2>/dev/null
+echo "newer" > "${STALE_OTHER}/newer.txt"
+/usr/bin/git -C "${STALE_OTHER}" add newer.txt
+/usr/bin/git -C "${STALE_OTHER}" commit --quiet -m "newer"
+/usr/bin/git -C "${STALE_OTHER}" push --quiet origin main
+/usr/bin/git -C "${STALE}" config --unset remote.origin.fetch
+tracking_before="$(/usr/bin/git -C "${STALE}" rev-parse refs/remotes/origin/main)"
+check "origin: a stale tracking ref does not mask a behind state" "$(origin_sync_status "${STALE}")" "behind:1"
+tracking_after="$(/usr/bin/git -C "${STALE}" rev-parse refs/remotes/origin/main)"
+check "origin: the tracking ref really was stale (the fetch could not move it)" "${tracking_after}" "${tracking_before}"
+
+# Fetch failure: point the remote at a path that does not exist. A cut must
+# never fall back to a stale remote ref, so this is its own status, not
+# in-sync.
+GONE="$(new_origin_and_clone gone)"
+/usr/bin/git -C "${GONE}" remote set-url origin "${WORK}/no-such-repo.git"
+check "origin: an unreachable remote is fetch-failed, not in-sync" "$(origin_sync_status "${GONE}")" "fetch-failed"
+origin_sync_status "${GONE}" >/dev/null && r=0 || r=1
+check "origin: fetch-failed returns 1" "${r}" "1"
+
 echo
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi

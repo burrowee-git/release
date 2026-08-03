@@ -49,3 +49,46 @@ worktree_branch() {
 tree_clean() {
     [ -z "$(/usr/bin/git -C "$1" status --porcelain 2>/dev/null)" ]
 }
+
+# origin_sync_status <dir> — fetches origin/main and prints the relationship
+# between HEAD and it: in-sync | behind:<n> | ahead:<n> |
+# diverged:<ahead>:<behind> | fetch-failed. Returns 0 only for in-sync.
+#
+# Compares against FETCH_HEAD rather than refs/remotes/origin/main: FETCH_HEAD
+# is exactly what this call just fetched, whereas the remote-tracking ref is
+# only opportunistically updated by `git fetch origin main` and can be stale
+# from an earlier fetch — comparing against it is the very mistake this check
+# exists to catch.
+#
+# A failed fetch is NOT treated as "assume in-sync" or "compare against what we
+# have": a delayed cut costs minutes, and a wrongly stamped artifact cannot be
+# withdrawn because a published version is never re-pointed.
+#
+# Read-only. It fetches (which touches only FETCH_HEAD and remote refs) and
+# never merges, pulls, checks out or stashes: a release tool that moves the
+# operator's checkout turns a typo into a shipped artifact.
+origin_sync_status() {
+    local dir="$1" counts ahead behind
+    if ! /usr/bin/git -C "${dir}" fetch --quiet origin main 2>/dev/null; then
+        printf 'fetch-failed'
+        return 1
+    fi
+    counts="$(/usr/bin/git -C "${dir}" rev-list --left-right --count HEAD...FETCH_HEAD 2>/dev/null)" || {
+        printf 'fetch-failed'
+        return 1
+    }
+    ahead="${counts%%[[:space:]]*}"
+    behind="${counts##*[[:space:]]}"
+    if [ "${ahead}" = 0 ] && [ "${behind}" = 0 ]; then
+        printf 'in-sync'
+        return 0
+    fi
+    if [ "${ahead}" != 0 ] && [ "${behind}" != 0 ]; then
+        printf 'diverged:%s:%s' "${ahead}" "${behind}"
+    elif [ "${behind}" != 0 ]; then
+        printf 'behind:%s' "${behind}"
+    else
+        printf 'ahead:%s' "${ahead}"
+    fi
+    return 1
+}
