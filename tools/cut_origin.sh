@@ -37,9 +37,10 @@ is_primary_worktree() {
 
 # worktree_branch <dir> — prints the checked-out branch name ("HEAD" when
 # detached). Printing rather than asserting keeps the branch available for the
-# failure message.
+# failure message. Non-repo inputs make git exit 128; the predicate contract is
+# 0/1, so the failure must be normalised via || return 1.
 worktree_branch() {
-    /usr/bin/git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null
+    /usr/bin/git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || return 1
 }
 
 # tree_clean <dir> — no modifications AND no untracked files. Untracked counts

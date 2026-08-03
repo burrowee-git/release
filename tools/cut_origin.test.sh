@@ -60,6 +60,8 @@ check "primary: a non-repo fails" "${r}" "1"
 # ── check 3: branch ──────────────────────────────────────────────────────────
 check "branch: reports main" "$(worktree_branch "${MAIN}")" "main"
 check "branch: reports a feature branch" "$(worktree_branch "${MAIN}/../primary-feature")" "feature"
+worktree_branch "${WORK}" >/dev/null; r=$?
+check "branch: a non-repo returns 1, not git's 128" "${r}" "1"
 
 # ── check 4: clean tree ──────────────────────────────────────────────────────
 tree_clean "${MAIN}" && r=0 || r=1
