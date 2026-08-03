@@ -158,3 +158,41 @@ cut. A cut that aborts before its `[RELEASED]` marker commit has its staged
 write to this file auto-reverted (`revert_dispatcher_version()`, the same
 EXIT/INT/TERM trap that reverts `versions/burrowee`) — don't hand-edit it to
 "fix" a dirty tree after a failed cut; re-running the cut is enough.
+
+---
+
+## `dist/.dispatcher/` — a `--dry-run` used to poison the next `--public` cut
+
+**Fixed; recorded because the failure mode was invisible and the trigger was the
+recommended workflow.**
+
+The bundled `burrowee` dispatcher is cached under `dist/.dispatcher/<DISP_STAMP>/`,
+and `DISP_STAMP` is derived from the dispatcher **source** — not from the signing
+mode. Both modes wrote into the same directory, and `build_dispatcher()` reused
+whatever was already there on existence alone. So:
+
+```sh
+tools/release.sh edge --dry-run     # leaves an AD-HOC signed dispatcher
+tools/release.sh edge --public      # reused it, in every component zip
+```
+
+Apple's notary rejected the edge zip for `burrowee` — *not signed with a valid
+Developer ID certificate*, *no secure timestamp*, *no hardened runtime* — after a
+full build and an upload. Nothing earlier said a word.
+
+Two changes close it, and neither needs anything from the operator:
+
+- `build_dispatcher()` **verifies** a cached darwin entry under `--apple`/`--public`
+  (`developer_id_signed()`, `tools/apple_sign.sh`) and rebuilds + re-signs when it
+  is ad-hoc, unsigned, or unverifiable. Verified rather than partitioned by mode,
+  so a wrong-mode artifact is caught whatever put it there.
+- Every payload is checked **before it is zipped**
+  (`assert_payload_developer_id_signed()`): under `--apple`/`--public`, every
+  Mach-O about to ship must carry a Developer ID authority, a Team ID, Apple's
+  secure timestamp and the hardened runtime. Seconds, locally, and it covers
+  `--apple` without notarization too.
+
+So a `--dry-run` before a real cut is safe, which is the point of having one.
+There is no cache to clear by hand: a stale `dist/.dispatcher/<stamp>/` left by an
+earlier ad-hoc build is now rebuilt on demand rather than shipped. Deleting it is
+harmless but unnecessary.

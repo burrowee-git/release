@@ -1003,10 +1003,34 @@ console_pub_hex() {
 # marker commit (`git commit` with no pathspec commits all staged files).
 DISP_STAMP="$(resolve_disp_stamp)"
 DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
+
+# THE CACHE IS SIGNING-AWARE, and has to be. Its key is the dispatcher SOURCE —
+# DISP_STAMP — which says nothing about signing mode, and BOTH modes write into
+# the same directory. `--dry-run`, the documented way to validate a cut before
+# making it, leaves an AD-HOC signed dispatcher under that key; the plain
+# `if [ -x "$out/burrowee" ]; then return 0; fi` cache then handed that binary to
+# the --public cut minutes later, which copied it into every component zip as
+# `burrowee`. Apple's notary rejected the edge zip for that exact file: not
+# Developer-ID signed, no secure timestamp, no hardened runtime. So the safe
+# pre-cut step POISONED the real cut.
+#
+# Verified rather than partitioned by mode: a mode-suffixed directory would fix
+# this one path and still trust whatever is found there, while
+# developer_id_signed() (tools/apple_sign.sh) rejects a wrong-mode artifact
+# whatever produced it — a hand-copied binary, an interrupted signer, a partial
+# rebuild. Fail closed: unsigned, ad-hoc, or UNDETERMINABLE all rebuild.
 build_dispatcher() {
     # build_dispatcher <os> <arch> — idempotent; populates $DISP_DIR/<os>-<arch>/burrowee
     local os="$1" arch="$2" out="${DISP_DIR}/$1-$2"
-    if [ -x "${out}/burrowee" ]; then return 0; fi
+    if [ -x "${out}/burrowee" ]; then
+        # Off darwin, and in every non-Apple mode, the cache means what it always
+        # meant: one build per target per run.
+        if [ -z "${APPLE_SIGN}" ] || [ "${os}" != darwin ]; then return 0; fi
+        if developer_id_signed "${out}/burrowee"; then return 0; fi
+        echo "→ dispatcher cache ${DISP_STAMP}/${os}-${arch} is not Developer-ID signed (an" >&2
+        echo "  earlier non-Apple build or --dry-run left it) — rebuilding and re-signing" >&2
+        rm -f "${out}/burrowee"
+    fi
     mkdir -p "${out}"
     COMP=burrowee SRC_DIR="${SRC_DISPATCHER}" TARGETOS="${os}" TARGETARCH="${arch}" \
         STAMP="${DISP_STAMP}" OUT_DIR="${out}" GO_BIN="${GO_BIN}" \
@@ -1096,6 +1120,15 @@ do_release_relay() {
             cp "${src}/${s}" "${assemble}/${s}"
             chmod 0755 "${assemble}/${s}"
         done
+
+        # Pre-assembly signing gate: prove every Mach-O in the payload is
+        # Developer-ID signed BEFORE it is zipped. Notarization below catches the
+        # same thing, but only for darwin, only over the wire, and only after
+        # every target is built — and --apple without --public never notarizes at
+        # all. See assert_payload_developer_id_signed in tools/apple_sign.sh.
+        if [ -n "${APPLE_SIGN}" ]; then
+            assert_payload_developer_id_signed "${assemble}" "${os}" || exit 1
+        fi
 
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
@@ -1291,6 +1324,13 @@ do_release() {
             mkdir -p "${assemble}/covers"
             cp "${EDGE_WEB}/admin.html" "${assemble}/covers/admin.html"
             cp "${EDGE_WEB}/login.html" "${assemble}/covers/default.html"
+        fi
+
+        # Pre-assembly signing gate — same assertion as the relay flow above; see
+        # assert_payload_developer_id_signed in tools/apple_sign.sh. This is the
+        # site that shipped the ad-hoc dispatcher Apple rejected.
+        if [ -n "${APPLE_SIGN}" ]; then
+            assert_payload_developer_id_signed "${assemble}" "${os}" || exit 1
         fi
 
         asset="burrowee-${comp}-${os}-${arch}.zip"
