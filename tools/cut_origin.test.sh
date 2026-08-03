@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# cut_origin.test.sh — unit tests for tools/cut_origin.sh.
+#
+# Exercises every predicate directly against throwaway repos under a temp dir.
+# NO part of the release path runs: release.sh is never invoked, nothing is
+# built, signed or published. "origin" is a local bare repo, so the fetch
+# predicate is exercised for real without a network.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${HERE}/cut_origin.sh"
+
+fail=0
+check() { # check <label> <got> <want>
+    if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1 — got '$2' want '$3'"; fail=1; fi
+}
+check_contains() { # check_contains <label> <haystack> <needle>
+    case "$2" in
+        *"$3"*) echo "ok: $1" ;;
+        *) echo "FAIL: $1 — '$2' does not contain '$3'"; fail=1 ;;
+    esac
+}
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "${WORK}"' EXIT
+export GIT_CONFIG_GLOBAL="${WORK}/gitconfig"   # keep the operator's identity/hooks out of it
+/usr/bin/git config --file "${GIT_CONFIG_GLOBAL}" user.name  "Cut Origin Test"
+/usr/bin/git config --file "${GIT_CONFIG_GLOBAL}" user.email "cut-origin@test.invalid"
+/usr/bin/git config --file "${GIT_CONFIG_GLOBAL}" init.defaultBranch main
+
+# new_origin_and_clone <name> — a bare "origin" plus a clone with one commit on
+# main, pushed. Prints the clone path.
+new_origin_and_clone() {
+    local bare="${WORK}/$1.git" clone="${WORK}/$1"
+    /usr/bin/git init --quiet --bare "${bare}"
+    /usr/bin/git clone --quiet "${bare}" "${clone}" 2>/dev/null
+    echo "seed" > "${clone}/README.md"
+    /usr/bin/git -C "${clone}" add README.md
+    /usr/bin/git -C "${clone}" commit --quiet -m "seed"
+    /usr/bin/git -C "${clone}" push --quiet -u origin main
+    printf '%s' "${clone}"
+}
+
+# ── check 1: registry source ─────────────────────────────────────────────────
+is_registry_source /a/b /a/b && r=0 || r=1
+check "registry: identical paths pass" "${r}" "0"
+is_registry_source /a/b/.worktrees/dev /a/b && r=0 || r=1
+check "registry: a different path fails" "${r}" "1"
+
+# ── check 2: primary worktree ────────────────────────────────────────────────
+MAIN="$(new_origin_and_clone primary)"
+/usr/bin/git -C "${MAIN}" worktree add --quiet -b feature "${MAIN}/../primary-feature" >/dev/null 2>&1
+is_primary_worktree "${MAIN}" && r=0 || r=1
+check "primary: the clone itself passes" "${r}" "0"
+is_primary_worktree "${MAIN}/../primary-feature" && r=0 || r=1
+check "primary: a linked worktree fails" "${r}" "1"
+is_primary_worktree "${WORK}" && r=0 || r=1
+check "primary: a non-repo fails" "${r}" "1"
+
+# ── check 3: branch ──────────────────────────────────────────────────────────
+check "branch: reports main" "$(worktree_branch "${MAIN}")" "main"
+check "branch: reports a feature branch" "$(worktree_branch "${MAIN}/../primary-feature")" "feature"
+worktree_branch "${WORK}" >/dev/null; r=$?
+check "branch: a non-repo returns 1, not git's 128" "${r}" "1"
+
+# ── check 4: clean tree ──────────────────────────────────────────────────────
+tree_clean "${MAIN}" && r=0 || r=1
+check "clean: a clean tree passes" "${r}" "0"
+echo "edit" >> "${MAIN}/README.md"
+tree_clean "${MAIN}" && r=0 || r=1
+check "clean: a modified file fails" "${r}" "1"
+/usr/bin/git -C "${MAIN}" checkout --quiet -- README.md
+touch "${MAIN}/stray.txt"
+tree_clean "${MAIN}" && r=0 || r=1
+check "clean: an untracked file also fails" "${r}" "1"
+rm -f "${MAIN}/stray.txt"
+
+# status.showUntrackedFiles=no is a per-repo config knob that must not be able
+# to quietly retire the untracked half of this check — tree_clean passes
+# --untracked-files=all specifically so this config cannot weaken it.
+UNTRACKED_CFG="$(new_origin_and_clone untracked-config)"
+/usr/bin/git -C "${UNTRACKED_CFG}" config --local status.showUntrackedFiles no
+touch "${UNTRACKED_CFG}/stray.txt"
+tree_clean "${UNTRACKED_CFG}" && r=0 || r=1
+check "clean: an untracked file fails even under status.showUntrackedFiles=no" "${r}" "1"
+rm -f "${UNTRACKED_CFG}/stray.txt"
+
+# ── check 5: origin comparison ───────────────────────────────────────────────
+SYNC="$(new_origin_and_clone sync)"
+check "origin: an up-to-date clone is in-sync" "$(origin_sync_status "${SYNC}")" "in-sync"
+origin_sync_status "${SYNC}" >/dev/null && r=0 || r=1
+check "origin: in-sync returns 0" "${r}" "0"
+
+# Behind: push a second commit through another clone, leave SYNC untouched.
+OTHER="${WORK}/sync-other"
+/usr/bin/git clone --quiet "${WORK}/sync.git" "${OTHER}" 2>/dev/null
+echo "second" > "${OTHER}/second.txt"
+/usr/bin/git -C "${OTHER}" add second.txt
+/usr/bin/git -C "${OTHER}" commit --quiet -m "second"
+/usr/bin/git -C "${OTHER}" push --quiet origin main
+check "origin: one commit behind is reported with its distance" "$(origin_sync_status "${SYNC}")" "behind:1"
+origin_sync_status "${SYNC}" >/dev/null && r=0 || r=1
+check "origin: behind returns 1" "${r}" "1"
+
+# Ahead: a local commit that was never pushed.
+AHEAD="$(new_origin_and_clone ahead)"
+echo "local" > "${AHEAD}/local.txt"
+/usr/bin/git -C "${AHEAD}" add local.txt
+/usr/bin/git -C "${AHEAD}" commit --quiet -m "local only"
+check "origin: one commit ahead is reported" "$(origin_sync_status "${AHEAD}")" "ahead:1"
+
+# Diverged: local commit here, different commit pushed there.
+DIV="$(new_origin_and_clone diverged)"
+DIVOTHER="${WORK}/diverged-other"
+/usr/bin/git clone --quiet "${WORK}/diverged.git" "${DIVOTHER}" 2>/dev/null
+echo "theirs" > "${DIVOTHER}/theirs.txt"
+/usr/bin/git -C "${DIVOTHER}" add theirs.txt
+/usr/bin/git -C "${DIVOTHER}" commit --quiet -m "theirs"
+/usr/bin/git -C "${DIVOTHER}" push --quiet origin main
+echo "mine" > "${DIV}/mine.txt"
+/usr/bin/git -C "${DIV}" add mine.txt
+/usr/bin/git -C "${DIV}" commit --quiet -m "mine"
+check "origin: divergence reports both counts" "$(origin_sync_status "${DIV}")" "diverged:1:1"
+
+# A remote with no fetch refspec still fetches on demand but no longer
+# updates refs/remotes/origin/main, so the tracking ref goes stale while
+# FETCH_HEAD stays fresh — the exact disagreement the FETCH_HEAD choice
+# exists for. Comparing against the tracking ref here would report in-sync
+# for a tree that is a commit behind.
+STALE="$(new_origin_and_clone stale-ref)"
+STALE_OTHER="${WORK}/stale-ref-other"
+/usr/bin/git clone --quiet "${WORK}/stale-ref.git" "${STALE_OTHER}" 2>/dev/null
+echo "newer" > "${STALE_OTHER}/newer.txt"
+/usr/bin/git -C "${STALE_OTHER}" add newer.txt
+/usr/bin/git -C "${STALE_OTHER}" commit --quiet -m "newer"
+/usr/bin/git -C "${STALE_OTHER}" push --quiet origin main
+/usr/bin/git -C "${STALE}" config --unset remote.origin.fetch
+tracking_before="$(/usr/bin/git -C "${STALE}" rev-parse refs/remotes/origin/main)"
+check "origin: a stale tracking ref does not mask a behind state" "$(origin_sync_status "${STALE}")" "behind:1"
+tracking_after="$(/usr/bin/git -C "${STALE}" rev-parse refs/remotes/origin/main)"
+check "origin: the tracking ref really was stale (the fetch could not move it)" "${tracking_after}" "${tracking_before}"
+
+# Fetch failure: point the remote at a path that does not exist. A cut must
+# never fall back to a stale remote ref, so this is its own status, not
+# in-sync.
+GONE="$(new_origin_and_clone gone)"
+/usr/bin/git -C "${GONE}" remote set-url origin "${WORK}/no-such-repo.git"
+check "origin: an unreachable remote is fetch-failed, not in-sync" "$(origin_sync_status "${GONE}")" "fetch-failed"
+origin_sync_status "${GONE}" >/dev/null && r=0 || r=1
+check "origin: fetch-failed returns 1" "${r}" "1"
+
+# ── the composite ────────────────────────────────────────────────────────────
+COMP="$(new_origin_and_clone composite)"
+out="$(assert_cut_origin edge "${COMP}" "${COMP}" strict 2>&1)" && r=0 || r=1
+check "assert: the happy path passes" "${r}" "0"
+check "assert: the happy path is silent" "${out}" ""
+
+out="$(assert_cut_origin edge "${COMP}" "/registry/edge/code/edge" strict 2>&1)" && r=0 || r=1
+check "assert: a non-registry path is rejected" "${r}" "1"
+check_contains "assert: rejection names the override mechanism" "${out}" "BURROWEE_SRC_"
+check_contains "assert: rejection shows what was expected" "${out}" "/registry/edge/code/edge"
+
+/usr/bin/git -C "${COMP}" worktree add --quiet -b wt "${WORK}/composite-wt" >/dev/null 2>&1
+out="$(assert_cut_origin edge "${WORK}/composite-wt" "${WORK}/composite-wt" strict 2>&1)" && r=0 || r=1
+check "assert: a linked worktree is rejected" "${r}" "1"
+check_contains "assert: worktree rejection says why" "${out}" "linked worktree"
+
+BEHIND="$(new_origin_and_clone composite-behind)"
+BOTHER="${WORK}/composite-behind-other"
+/usr/bin/git clone --quiet "${WORK}/composite-behind.git" "${BOTHER}" 2>/dev/null
+echo x > "${BOTHER}/x.txt"; /usr/bin/git -C "${BOTHER}" add x.txt
+/usr/bin/git -C "${BOTHER}" commit --quiet -m x
+/usr/bin/git -C "${BOTHER}" push --quiet origin main
+out="$(assert_cut_origin edge "${BEHIND}" "${BEHIND}" strict 2>&1)" && r=0 || r=1
+check "assert: behind origin is rejected" "${r}" "1"
+check_contains "assert: behind names the fix" "${out}" "git pull --ff-only"
+
+# report mode: same findings, never fatal — a dry run publishes nothing.
+out="$(assert_cut_origin edge "${BEHIND}" "/elsewhere" report 2>&1)" && r=0 || r=1
+check "assert: report mode returns 0" "${r}" "0"
+check_contains "assert: report mode still says what is wrong" "${out}" "⚠"
+
+echo
+if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
