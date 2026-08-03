@@ -75,6 +75,16 @@ tree_clean "${MAIN}" && r=0 || r=1
 check "clean: an untracked file also fails" "${r}" "1"
 rm -f "${MAIN}/stray.txt"
 
+# status.showUntrackedFiles=no is a per-repo config knob that must not be able
+# to quietly retire the untracked half of this check — tree_clean passes
+# --untracked-files=all specifically so this config cannot weaken it.
+UNTRACKED_CFG="$(new_origin_and_clone untracked-config)"
+/usr/bin/git -C "${UNTRACKED_CFG}" config --local status.showUntrackedFiles no
+touch "${UNTRACKED_CFG}/stray.txt"
+tree_clean "${UNTRACKED_CFG}" && r=0 || r=1
+check "clean: an untracked file fails even under status.showUntrackedFiles=no" "${r}" "1"
+rm -f "${UNTRACKED_CFG}/stray.txt"
+
 # ── check 5: origin comparison ───────────────────────────────────────────────
 SYNC="$(new_origin_and_clone sync)"
 check "origin: an up-to-date clone is in-sync" "$(origin_sync_status "${SYNC}")" "in-sync"

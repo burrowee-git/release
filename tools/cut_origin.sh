@@ -15,9 +15,12 @@
 # (burrowee-git/resources).
 
 # is_registry_source <dir> <expected> — dir is the registry main folder for its
-# component. `expected` is release.sh's OWN default for that component, so the
-# defaults are the only permitted values and there is no second definition of
-# "the registry path" to drift from.
+# component. `expected` is release.sh's OWN default for that component, so
+# this is the table a CUT is checked against, not a second definition
+# maintained here. That table is known to be duplicated elsewhere
+# (tools/cut-status.sh, cmd/rkit/harness.go) — this predicate does not claim
+# those don't exist, only that a cut's pass/fail can never disagree with
+# release.sh's own idea of the registry path.
 is_registry_source() {
     [ "$1" = "$2" ]
 }
@@ -45,9 +48,12 @@ worktree_branch() {
 
 # tree_clean <dir> — no modifications AND no untracked files. Untracked counts
 # as dirty on purpose: a stray file in a source tree is as likely to end up
-# inside a build as a modified one.
+# inside a build as a modified one. --untracked-files=all so a repo-local
+# status.showUntrackedFiles=no cannot quietly retire the untracked half of
+# this check — the config lives with the tree being asserted, not with the
+# operator running the guard.
 tree_clean() {
-    [ -z "$(/usr/bin/git -C "$1" status --porcelain 2>/dev/null)" ]
+    [ -z "$(/usr/bin/git -C "$1" status --porcelain --untracked-files=all 2>/dev/null)" ]
 }
 
 # origin_sync_status <dir> — fetches origin/main and prints the relationship
@@ -131,23 +137,31 @@ assert_cut_origin() {
         [ "${mode}" = report ] || return 1
     fi
 
-    local status
-    status="$(origin_sync_status "${dir}")" || true
-    case "${status}" in
+    # Named sync_status, not status: `status` is a read-only builtin variable
+    # in zsh (and shells that source this file for debugging outside the
+    # release.sh bash entry point), so `local status` aborts with "read-only
+    # variable: status" — right at this check, the one the design calls the
+    # hole that matters.
+    local sync_status
+    sync_status="$(origin_sync_status "${dir}")" || true
+    case "${sync_status}" in
         in-sync) return 0 ;;
         behind:*)
             printf '%s %s source is %s commit(s) behind origin/main: %s\n    run '"'"'git pull --ff-only'"'"' there, then re-run the cut\n' \
-                "${mark}" "${label}" "${status#behind:}" "${dir}" >&2 ;;
+                "${mark}" "${label}" "${sync_status#behind:}" "${dir}" >&2 ;;
         ahead:*)
             printf '%s %s source is %s commit(s) ahead of origin/main: %s\n    merge it through a PR first — a cut may only stamp a commit that exists on the remote\n' \
-                "${mark}" "${label}" "${status#ahead:}" "${dir}" >&2 ;;
+                "${mark}" "${label}" "${sync_status#ahead:}" "${dir}" >&2 ;;
         diverged:*)
-            local counts="${status#diverged:}"
+            local counts="${sync_status#diverged:}"
             printf '%s %s source has diverged from origin/main (%s ahead, %s behind): %s\n' \
                 "${mark}" "${label}" "${counts%%:*}" "${counts##*:}" "${dir}" >&2 ;;
         fetch-failed)
             printf '%s %s could not fetch origin/main: %s\n    a cut may not proceed against a stale remote ref — fix connectivity or credentials and re-run\n' \
                 "${mark}" "${label}" "${dir}" >&2 ;;
+        *)
+            printf '%s %s unrecognised origin status '"'"'%s'"'"': %s\n    a cut may not proceed on an unknown status — investigate before re-running\n' \
+                "${mark}" "${label}" "${sync_status}" "${dir}" >&2 ;;
     esac
     return "${rc}"
 }
