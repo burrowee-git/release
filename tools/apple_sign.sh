@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# apple_sign.sh — Developer-ID signing preconditions, sourced by tools/release.sh.
+# apple_sign.sh — Developer-ID signing preconditions and artifact checks,
+# sourced by tools/release.sh.
 #
-# These two checks decide whether a --public cut is Developer-ID signed or
-# quietly ad-hoc signed, so they live here as functions rather than inline in the
+# These checks decide whether a --public cut is Developer-ID signed or quietly
+# ad-hoc signed, so they live here as functions rather than inline in the
 # orchestrator: tools/apple_sign.test.sh exercises them directly, with no part of
 # the release path running. Same split as tools/vulncheck.sh.
+#
+# Two questions, both needed:
+#   "can this machine sign?"   load_apple_account, resolve_sign_identity,
+#                              sign_identity_reachable
+#   "is this FILE signed?"     is_macho, developer_id_signed,
+#                              assert_payload_developer_id_signed
 
 # _first_config_line <file>
 # Prints the first non-blank, non-comment line, trimmed. Nothing when the file
@@ -197,4 +204,128 @@ sign_identity_reachable() {
         *"${id}"*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# Is this FILE signed? — the third way a --public cut shipped ad-hoc signed.
+#
+# The predicates above answer "can this machine sign?". These answer "is this
+# artifact signed?", which nothing asked before Apple's notary did. release.sh
+# caches the bundled `burrowee` dispatcher under a key derived from the
+# dispatcher SOURCE (versions/burrowee.stamp) — signing mode is not part of that
+# key, and both modes write into the same directory. A --dry-run (the documented
+# pre-cut validation step) or any ordinary cut leaves an AD-HOC signed dispatcher
+# there, and a mere-existence cache handed it to the --public cut that followed.
+# Apple rejected the edge zip with exactly three complaints:
+#
+#     The binary is not signed with a valid Developer ID certificate.
+#     The signature does not include a secure timestamp.
+#     The executable does not have the hardened runtime enabled.
+#
+# So there is one check per complaint below. Same class as the two weaknesses
+# c21c081 closed: a public release ships ad-hoc rather than Developer-ID signed
+# while the operator believes otherwise, silently.
+# ---------------------------------------------------------------------------
+
+# is_macho <file>
+# True when <file> begins with a Mach-O or universal-binary magic number, so a
+# payload can be walked without asking codesign about shell scripts and HTML.
+# Both widths and both endiannesses, plus the fat magic.
+#
+# `cafebabe` is also the Java class-file magic. Nothing in a Burrowee payload is
+# a .class, and mis-reading one would ABORT a cut rather than pass it — the safe
+# direction for a signing gate.
+is_macho() {
+    local file="$1" magic
+    [ -f "${file}" ] || return 1
+    magic="$(od -An -v -tx1 -N4 "${file}" 2>/dev/null | tr -d '[:space:]')"
+    case "${magic}" in
+        cefaedfe|cffaedfe|feedface|feedfacf|cafebabe|bebafeca) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# developer_id_signed <file>
+# True only when <file> carries a real Developer ID signature: a Developer ID
+# Application authority, a Team ID, Apple's secure timestamp, and the hardened
+# runtime. One check per notary complaint, so a failure here is the failure Apple
+# would report — in milliseconds, off the wire, instead of after a full build and
+# an upload.
+#
+# FAIL CLOSED. Every unresolved state is "not signed": no file, no codesign, a
+# codesign that errors (which is what an UNSIGNED binary produces), or output
+# missing any one marker. An artifact whose signing state cannot be DETERMINED
+# must never be bundled into a --public cut — assuming it was fine is how the
+# ad-hoc dispatcher got in.
+developer_id_signed() {
+    local file="$1" out flag_words
+    [ -f "${file}" ] || return 1
+    command -v codesign >/dev/null 2>&1 || return 1
+    # --display writes its report to stderr; an unsigned binary exits non-zero.
+    out="$(codesign --display --verbose=4 "${file}" 2>&1)" || return 1
+    case "${out}" in *"Signature=adhoc"*) return 1 ;; esac
+    case "${out}" in *"Authority=Developer ID Application: "*) ;; *) return 1 ;; esac
+    case "${out}" in *"TeamIdentifier=not set"*) return 1 ;; esac
+    case "${out}" in *"TeamIdentifier="*) ;; *) return 1 ;; esac
+    # "Timestamp=" is Apple's TRUSTED timestamp. A signature made without the
+    # timestamp service prints "Signed Time=" instead — a different field, and
+    # the one Apple rejects as "does not include a secure timestamp".
+    case "${out}" in *"Timestamp="*) ;; *) return 1 ;; esac
+    # Hardened runtime = the CodeDirectory `runtime` flag. codesign prints the
+    # flag WORDS in parentheses after the numeric value — `flags=0x10000(runtime)`
+    # when it is the only one, a comma-separated list when it is not — so match
+    # the word inside the list, not the whole parenthesis. No parenthesis at all
+    # (`flags=0x0`) yields an empty list and fails, which is correct.
+    flag_words="$(printf '%s\n' "${out}" | sed -n 's/.*flags=[^(]*(\([^)]*\)).*/\1/p' | head -n1)"
+    case ",${flag_words}," in
+        *,runtime,*) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# assert_payload_developer_id_signed <dir> <os>
+# Pre-assembly gate: every Mach-O about to be zipped must carry a Developer ID
+# signature. release.sh calls this only under --apple/--public, once the payload
+# dir is populated and before `zip`.
+#
+# Notarization already catches an ad-hoc binary, but only for darwin, only over
+# the network, and only after every target has been built — and the --apple path
+# that does not notarize is never covered at all. This asks the same question
+# locally, for whatever the payload actually holds. It is a BACKSTOP, not the
+# fix: the dispatcher cache is signing-aware now (build_dispatcher in
+# tools/release.sh), so nothing should ever reach here unsigned.
+#
+# The walk is driven by file contents, not by <os>: a darwin binary that ended up
+# in a linux payload is checked too. <os> only supplies the emptiness rule — a
+# darwin payload with NO Mach-O in it means the assembly went wrong, not that
+# there was nothing to check, so that is refused rather than reported as a pass.
+assert_payload_developer_id_signed() {
+    local dir="$1" os="$2" file rel found=0 bad=0
+    if [ ! -d "${dir}" ]; then
+        echo "✗ signing check: payload dir does not exist: ${dir}" >&2
+        return 1
+    fi
+    while IFS= read -r -d '' file; do
+        is_macho "${file}" || continue
+        found=$((found + 1))
+        developer_id_signed "${file}" && continue
+        rel="${file#"${dir}"/}"
+        echo "✗ ${rel}: Mach-O binary is NOT Developer-ID signed — it needs a Developer" >&2
+        echo "  ID authority, a Team ID, Apple's secure timestamp and the hardened runtime" >&2
+        bad=$((bad + 1))
+    done < <(find "${dir}" -type f -print0)
+    if [ "${bad}" != 0 ]; then
+        echo "✗ refusing to zip ${dir##*/}: ${bad} of ${found} Mach-O binaries would ship" >&2
+        echo "  ad-hoc signed, unsigned, or unverifiable under --apple/--public. Apple's" >&2
+        echo "  notary rejects exactly this, and a user's Gatekeeper would too." >&2
+        return 1
+    fi
+    if [ "${os}" = darwin ] && [ "${found}" = 0 ]; then
+        echo "✗ refusing to zip ${dir##*/}: a darwin payload holding no Mach-O binary at" >&2
+        echo "  all — the assembly produced nothing to sign, so nothing was verified." >&2
+        return 1
+    fi
+    local noun="binaries"; [ "${found}" = 1 ] && noun="binary"
+    echo "→ signing check: ${found} Mach-O ${noun} in ${dir##*/} — all Developer-ID signed" >&2
 }

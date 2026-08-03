@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # apple_sign.test.sh — unit tests for tools/apple_sign.sh.
 #
-# Exercises the three functions directly with stubbed modernech-sign / security /
-# rcodesign on PATH. NO part of the release path runs: release.sh is never
-# invoked, nothing is built, signed, notarized or published.
+# Exercises every function directly with stubbed modernech-sign / security /
+# rcodesign / codesign on PATH. NO part of the release path runs: release.sh is
+# never invoked, nothing is built, signed, notarized or published, and the
+# "binaries" are four magic bytes plus a marker the codesign stub reads.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -286,6 +287,178 @@ printf '# nothing here\n\n   \n' > "${BLANK_REPO}/config/apple-account"
 out="$(load_apple_account "${BLANK_REPO}" 2>&1)"; rc=$?
 check "comment-only config is fatal (rc)" "${rc}" "1"
 check_contains "comment-only config is explained" "${out}" "APPLE_ACCOUNT is unresolved"
+
+echo "--- is_macho / developer_id_signed / assert_payload_developer_id_signed --"
+
+# A stub codesign that answers per-FILE, driven by a marker written into the file
+# after its magic bytes. One stub covers every signing shape below, and the two
+# realistic reports are the REAL output of `codesign -dv --verbose=4` on an
+# ad-hoc signed and a Developer-ID signed `burrowee` dispatcher.
+#
+# LC_ALL=C on the marker grep: Mach-O magic is not valid UTF-8, and grep in a
+# UTF-8 locale refuses to match inside a file it cannot decode — returning 1 with
+# no output, which would silently read as "marker absent".
+cat > "${STUBS}/codesign" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+target=""
+for a in "$@"; do case "${a}" in -*) ;; *) target="${a}" ;; esac; done
+[ -f "${target}" ] || { echo "${target}: No such file or directory" >&2; exit 1; }
+report() {
+    printf 'Identifier=burrowee\nFormat=Mach-O thin (arm64)\n' >&2
+    printf 'CodeDirectory v=20500 size=20084 %s hashes=622+2 location=embedded\n' "$1" >&2
+    printf 'Signature size=8970\n' >&2
+    printf 'Authority=%s\n' "$2" >&2
+    printf 'Authority=Developer ID Certification Authority\nAuthority=Apple Root CA\n' >&2
+    printf '%s\n' "$3" >&2
+    printf 'Info.plist=not bound\nTeamIdentifier=%s\nSealed Resources=none\n' "$4" >&2
+}
+marker() { LC_ALL=C grep -q "$1" "${target}" 2>/dev/null; }
+if marker DEVID;    then report 'flags=0x10000(runtime)' 'Developer ID Application: Acme Corp (AB12CD34EF)' 'Timestamp=Aug 2, 2026 at 10:46:06 AM' 'AB12CD34EF'; exit 0; fi
+if marker FLAGLIST; then report 'flags=0x12000(library-validation,runtime)' 'Developer ID Application: Acme Corp (AB12CD34EF)' 'Timestamp=Aug 2, 2026 at 10:46:06 AM' 'AB12CD34EF'; exit 0; fi
+if marker NOSTAMP;  then report 'flags=0x10000(runtime)' 'Developer ID Application: Acme Corp (AB12CD34EF)' 'Signed Time=Aug 2, 2026 at 10:46:06 AM' 'AB12CD34EF'; exit 0; fi
+if marker NORUNTIME; then report 'flags=0x0' 'Developer ID Application: Acme Corp (AB12CD34EF)' 'Timestamp=Aug 2, 2026 at 10:46:06 AM' 'AB12CD34EF'; exit 0; fi
+if marker NOTEAM;   then report 'flags=0x10000(runtime)' 'Developer ID Application: Acme Corp (AB12CD34EF)' 'Timestamp=Aug 2, 2026 at 10:46:06 AM' 'not set'; exit 0; fi
+if marker APPLEDEV; then report 'flags=0x10000(runtime)' 'Apple Development: Acme Corp (AB12CD34EF)' 'Timestamp=Aug 2, 2026 at 10:46:06 AM' 'AB12CD34EF'; exit 0; fi
+if marker ADHOC; then
+    printf 'Identifier=burrowee-5555494401446aec641a3c14dfb5574a1f06abc1\n' >&2
+    printf 'Format=Mach-O thin (arm64)\n' >&2
+    printf 'CodeDirectory v=20400 size=5194 flags=0x2(adhoc) hashes=156+2 location=embedded\n' >&2
+    printf 'Signature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\n' >&2
+    exit 0
+fi
+echo "${target}: code object is not signed at all" >&2
+exit 1
+STUB
+chmod 0755 "${STUBS}/codesign"
+
+BINS="${WORK}/bins"
+mkdir -p "${BINS}"
+# write_file <name> <magic-octal> [marker] — a fixture with real magic bytes.
+write_file() {
+    # shellcheck disable=SC2059  # $2 IS the format string — it carries the octal magic-byte escapes.
+    { printf "$2"; printf '%s\n' "${3:-}"; } > "${BINS}/$1"
+}
+MACHO='\317\372\355\376'   # 64-bit little-endian Mach-O
+FAT='\312\376\272\276'     # universal binary
+ELF='\177ELF'
+
+write_file macho.bin  "${MACHO}" DEVID
+write_file fat.bin    "${FAT}"   DEVID
+write_file elf.bin    "${ELF}"   DEVID
+printf '#!/bin/sh\necho hi\n' > "${BINS}/install.sh"
+printf '<html><body>hi</body></html>\n' > "${BINS}/cover.html"
+
+only_stubs
+check "is_macho: thin Mach-O" "$(is_macho "${BINS}/macho.bin"      && echo y || echo n)" "y"
+check "is_macho: universal"   "$(is_macho "${BINS}/fat.bin"        && echo y || echo n)" "y"
+check "is_macho: ELF"         "$(is_macho "${BINS}/elf.bin"        && echo y || echo n)" "n"
+check "is_macho: shell script" "$(is_macho "${BINS}/install.sh"    && echo y || echo n)" "n"
+check "is_macho: html"        "$(is_macho "${BINS}/cover.html"     && echo y || echo n)" "n"
+check "is_macho: missing file" "$(is_macho "${BINS}/nope"          && echo y || echo n)" "n"
+restore_path
+
+# THE REGRESSION. Apple rejected a --public cut with three complaints about the
+# bundled dispatcher — not Developer-ID signed, no secure timestamp, no hardened
+# runtime — because a --dry-run had left an AD-HOC signed binary in the cache
+# directory the cut then reused. There is one case below per complaint, plus the
+# two states where the answer is UNKNOWN, which must read as "not signed".
+for want_marker in \
+    "0 DEVID" \
+    "0 FLAGLIST" \
+    "1 ADHOC" \
+    "1 NOSTAMP" \
+    "1 NORUNTIME" \
+    "1 NOTEAM" \
+    "1 APPLEDEV" \
+    "1 UNSIGNED" ; do
+    want="${want_marker%% *}"; marker="${want_marker#* }"
+    write_file "case.bin" "${MACHO}" "${marker}"
+    only_stubs
+    developer_id_signed "${BINS}/case.bin"; rc=$?
+    restore_path
+    check "developer_id_signed: ${marker} → rc ${want}" "${rc}" "${want}"
+done
+
+# FAIL CLOSED on the two ways the question cannot be answered at all.
+write_file "case.bin" "${MACHO}" DEVID
+only_stubs
+developer_id_signed "${BINS}/nope"; rc=$?
+restore_path
+check "developer_id_signed: missing file is not signed" "${rc}" "1"
+
+# No codesign on PATH — the state is undeterminable, so it is "not signed".
+mv "${STUBS}/codesign" "${WORK}/codesign.parked"
+PATH="${STUBS}"
+developer_id_signed "${BINS}/case.bin"; rc=$?
+restore_path
+mv "${WORK}/codesign.parked" "${STUBS}/codesign"
+check "developer_id_signed: no codesign is not signed" "${rc}" "1"
+
+# ---- assert_payload_developer_id_signed: the pre-assembly gate -------------
+# Notarization catches an ad-hoc binary only for darwin, only over the network,
+# and only after every target is built — and --apple without --public never
+# notarizes at all. This asks the same question locally, over whatever the
+# payload actually holds.
+PAY="${WORK}/payload"
+new_payload() { rm -rf "${PAY}"; mkdir -p "${PAY}/covers"; }
+pay_file() {
+    # shellcheck disable=SC2059  # $2 IS the format string — octal magic-byte escapes.
+    { printf "$2"; printf '%s\n' "${3:-}"; } > "${PAY}/$1"
+}
+
+# A whole darwin payload: three signed Mach-Os plus the non-binary payload files.
+new_payload
+pay_file burrowee-edge "${MACHO}" DEVID
+pay_file burrowee-edge-cli "${MACHO}" DEVID
+pay_file burrowee "${MACHO}" DEVID
+printf '#!/bin/sh\n' > "${PAY}/install.sh"
+printf '<html></html>\n' > "${PAY}/covers/default.html"
+only_stubs
+out="$(assert_payload_developer_id_signed "${PAY}" darwin 2>&1)"; rc=$?
+restore_path
+check "payload: all signed (rc)" "${rc}" "0"
+check_contains "payload: reports the count it checked" "${out}" "3 Mach-O binaries"
+
+# ONE ad-hoc binary among signed ones is the shipped bug: the dispatcher.
+pay_file burrowee "${MACHO}" ADHOC
+only_stubs
+out="$(assert_payload_developer_id_signed "${PAY}" darwin 2>&1)"; rc=$?
+restore_path
+check "payload: one ad-hoc binary is fatal (rc)" "${rc}" "1"
+check_contains "payload: names the offending file" "${out}" "burrowee: Mach-O binary is NOT Developer-ID signed"
+check_contains "payload: counts it" "${out}" "1 of 3"
+
+# A darwin payload with no Mach-O at all is an assembly failure, not a pass:
+# reporting "0 binaries, all fine" is how a vacuous gate reads.
+new_payload
+printf '#!/bin/sh\n' > "${PAY}/install.sh"
+only_stubs
+out="$(assert_payload_developer_id_signed "${PAY}" darwin 2>&1)"; rc=$?
+restore_path
+check "payload: empty darwin payload is fatal (rc)" "${rc}" "1"
+check_contains "payload: empty darwin payload is explained" "${out}" "no Mach-O binary"
+
+# The same payload for LINUX is fine — there is nothing to code-sign there.
+only_stubs
+assert_payload_developer_id_signed "${PAY}" linux >/dev/null 2>&1; rc=$?
+restore_path
+check "payload: script-only linux payload passes" "${rc}" "0"
+
+# But the walk is driven by file CONTENTS, not by <os>: a darwin binary that ends
+# up in a linux payload is still checked.
+pay_file burrowee "${MACHO}" ADHOC
+only_stubs
+assert_payload_developer_id_signed "${PAY}" linux >/dev/null 2>&1; rc=$?
+restore_path
+check "payload: ad-hoc Mach-O in a linux payload is still fatal" "${rc}" "1"
+
+# A payload dir that isn't there is refused rather than treated as empty.
+only_stubs
+out="$(assert_payload_developer_id_signed "${WORK}/no-such-payload" darwin 2>&1)"; rc=$?
+restore_path
+check "payload: missing dir is fatal (rc)" "${rc}" "1"
+check_contains "payload: missing dir is explained" "${out}" "does not exist"
 
 echo
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
