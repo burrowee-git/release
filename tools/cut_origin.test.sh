@@ -139,5 +139,36 @@ check "origin: an unreachable remote is fetch-failed, not in-sync" "$(origin_syn
 origin_sync_status "${GONE}" >/dev/null && r=0 || r=1
 check "origin: fetch-failed returns 1" "${r}" "1"
 
+# ── the composite ────────────────────────────────────────────────────────────
+COMP="$(new_origin_and_clone composite)"
+out="$(assert_cut_origin edge "${COMP}" "${COMP}" strict 2>&1)" && r=0 || r=1
+check "assert: the happy path passes" "${r}" "0"
+check "assert: the happy path is silent" "${out}" ""
+
+out="$(assert_cut_origin edge "${COMP}" "/registry/edge/code/edge" strict 2>&1)" && r=0 || r=1
+check "assert: a non-registry path is rejected" "${r}" "1"
+check_contains "assert: rejection names the override mechanism" "${out}" "BURROWEE_SRC_"
+check_contains "assert: rejection shows what was expected" "${out}" "/registry/edge/code/edge"
+
+/usr/bin/git -C "${COMP}" worktree add --quiet -b wt "${WORK}/composite-wt" >/dev/null 2>&1
+out="$(assert_cut_origin edge "${WORK}/composite-wt" "${WORK}/composite-wt" strict 2>&1)" && r=0 || r=1
+check "assert: a linked worktree is rejected" "${r}" "1"
+check_contains "assert: worktree rejection says why" "${out}" "linked worktree"
+
+BEHIND="$(new_origin_and_clone composite-behind)"
+BOTHER="${WORK}/composite-behind-other"
+/usr/bin/git clone --quiet "${WORK}/composite-behind.git" "${BOTHER}" 2>/dev/null
+echo x > "${BOTHER}/x.txt"; /usr/bin/git -C "${BOTHER}" add x.txt
+/usr/bin/git -C "${BOTHER}" commit --quiet -m x
+/usr/bin/git -C "${BOTHER}" push --quiet origin main
+out="$(assert_cut_origin edge "${BEHIND}" "${BEHIND}" strict 2>&1)" && r=0 || r=1
+check "assert: behind origin is rejected" "${r}" "1"
+check_contains "assert: behind names the fix" "${out}" "git pull --ff-only"
+
+# report mode: same findings, never fatal — a dry run publishes nothing.
+out="$(assert_cut_origin edge "${BEHIND}" "/elsewhere" report 2>&1)" && r=0 || r=1
+check "assert: report mode returns 0" "${r}" "0"
+check_contains "assert: report mode still says what is wrong" "${out}" "⚠"
+
 echo
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
