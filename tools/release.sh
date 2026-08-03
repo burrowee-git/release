@@ -60,12 +60,12 @@
 #   SIGN_KEY                minisign secret key file (overrides the default resolution)
 #   AGE_IDENTITY            age identity file used to decrypt the real signing key
 #                           (default ~/.age/burrowee-release.txt — created at activation A2)
-#   BURROWEE_SRC_CLI        cli component source worktree (default: cli main worktree)
-#   BURROWEE_SRC_GATEWAY    gateway component source worktree
-#   BURROWEE_SRC_EDGE       edge component source worktree
-#   BURROWEE_SRC_AGENT      agent component source worktree
-#   BURROWEE_SRC_DISPATCHER burrowee dispatcher source worktree
-#   BURROWEE_SRC_RELAY      relay component source worktree (default: relay main worktree)
+#   BURROWEE_SRC_CLI        cli component source tree — DRY-RUN ONLY; a real cut
+#   BURROWEE_SRC_GATEWAY    is refused unless the source is the registry main
+#   BURROWEE_SRC_EDGE       folder (<Brand>/<comp>/code/<comp>), primary
+#   BURROWEE_SRC_AGENT      worktree, on main, clean, == origin/main.
+#   BURROWEE_SRC_DISPATCHER See tools/cut_origin.sh.
+#   BURROWEE_SRC_RELAY
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
 set -euo pipefail
@@ -79,6 +79,8 @@ source "${REPO_ROOT}/tools/vulncheck.sh"
 source "${REPO_ROOT}/tools/apple_sign.sh"
 # shellcheck source=tools/updater_pin.sh
 source "${REPO_ROOT}/tools/updater_pin.sh"
+# shellcheck source=tools/cut_origin.sh
+source "${REPO_ROOT}/tools/cut_origin.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -198,14 +200,58 @@ DP_DIR="${DP_DIR:-${REPO_ROOT}/../../../release.dp/code/release.dp}"
 AGE_KEY_AGE="${DP_DIR}/burrowee-release.key.age"
 AGE_IDENTITY="${AGE_IDENTITY:-${HOME}/.age/burrowee-release.txt}"
 
-# component source worktrees (default: each component's MAIN worktree)
+# Component source trees. REG_* are the registry main folders — the ONLY paths a
+# real cut may build from (tools/cut_origin.sh, is_registry_source). SRC_* keep
+# the documented BURROWEE_SRC_* overrides, which assert_cut_origin then accepts
+# only under --dry-run: keeping the variables and refusing them is better than
+# deleting them, because silently ignoring a variable an operator set is how a
+# cut ends up building something nobody asked for.
 BB="/Volumes/MacintoshED/Workstation/Coding/Burrowee"
-SRC_CLI="${BURROWEE_SRC_CLI:-${BB}/cli/code/cli}"
-SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/gateway}"
-SRC_EDGE="${BURROWEE_SRC_EDGE:-${BB}/edge/code/edge}"
-SRC_AGENT="${BURROWEE_SRC_AGENT:-${BB}/agent/code/agent}"
-SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}"
-SRC_RELAY="${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}"
+REG_CLI="${BB}/cli/code/cli"
+REG_GATEWAY="${BB}/gateway/code/gateway"
+REG_EDGE="${BB}/edge/code/edge"
+REG_AGENT="${BB}/agent/code/agent"
+REG_DISPATCHER="${BB}/burrowee/code/burrowee"
+REG_RELAY="${BB}/relay/code/relay"
+REG_RELEASE="${BB}/release/code/release"
+
+SRC_CLI="${BURROWEE_SRC_CLI:-${REG_CLI}}"
+SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${REG_GATEWAY}}"
+SRC_EDGE="${BURROWEE_SRC_EDGE:-${REG_EDGE}}"
+SRC_AGENT="${BURROWEE_SRC_AGENT:-${REG_AGENT}}"
+SRC_DISPATCHER="${BURROWEE_SRC_DISPATCHER:-${REG_DISPATCHER}}"
+SRC_RELAY="${BURROWEE_SRC_RELAY:-${REG_RELAY}}"
+
+# registry_src_for <comp> — the registry path for a component, mirroring
+# src_for()'s table so the two cannot disagree about which components exist.
+registry_src_for() {
+    case "$1" in
+        cli)     printf '%s' "${REG_CLI}" ;;
+        gateway) printf '%s' "${REG_GATEWAY}" ;;
+        edge)    printf '%s' "${REG_EDGE}" ;;
+        agent)   printf '%s' "${REG_AGENT}" ;;
+        relay)   printf '%s' "${REG_RELAY}" ;;
+        *) echo "registry_src_for: unknown component: $1" >&2; return 1 ;;
+    esac
+}
+
+# assert_cut_origins <mode> <comp...> — the guard over every tree a cut or a
+# distribute reads or writes. Called from BOTH entry points: a
+# --distribute-only publish mutates exactly as much as a full cut (tag,
+# GitHub Release, versions/<comp>, the [RELEASED: …] marker, the static
+# host), so it is held to the same rule.
+assert_cut_origins() {
+    local mode="$1"; shift
+    local comp src
+    for comp in "$@"; do
+        src="$(src_for "${comp}")"
+        [ -d "${src}" ] || { echo "✗ ${comp} source worktree missing: ${src}" >&2; return 1; }
+        assert_cut_origin "${comp}" "${src}" "$(registry_src_for "${comp}")" "${mode}" || return 1
+    done
+    [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; return 1; }
+    assert_cut_origin dispatcher "${SRC_DISPATCHER}" "${REG_DISPATCHER}" "${mode}" || return 1
+    assert_cut_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" || return 1
+}
 
 # resolve_disp_stamp — the dispatcher stamp to bundle/register this cut. Reuses
 # the recorded versions/burrowee.stamp verbatim (date frozen) when the
@@ -821,10 +867,55 @@ shred_key() {
 }
 trap shred_key EXIT INT TERM
 
+# Where this cut (or a --distribute-only publish) is allowed to build from
+# (tools/cut_origin.sh): the registry main folder, primary worktree, on main,
+# clean, and equal to origin/main — for every tree read or written. --dry-run
+# reports instead of failing. Computed once here so both entry points below
+# (distribute-only and the full cut) share the same mode.
+CUT_ORIGIN_MODE=strict
+[ "${DRY_RUN}" = 1 ] && CUT_ORIGIN_MODE=report
+
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
+    # distribute_only always mirrors edge skills (EDGE_SKILLS_SRC=${SRC_EDGE}/skills)
+    # into the release repo regardless of which component is being distributed
+    # (a stale edge tree would publish stale skills alongside a fresh cli/gateway/
+    # agent/edge release), so edge is asserted alongside the requested component.
+    # distribute_relay is the private R2 flow — it never reads edge.
+    if [ "${DIST_COMP}" = relay ]; then
+        assert_cut_origins "${CUT_ORIGIN_MODE}" relay || exit 1
+    elif [ "${DIST_COMP}" = edge ]; then
+        assert_cut_origins "${CUT_ORIGIN_MODE}" edge || exit 1
+    else
+        assert_cut_origins "${CUT_ORIGIN_MODE}" "${DIST_COMP}" edge || exit 1
+    fi
     distribute_only "${DIST_COMP}" "${DIST_STAMP}"
     exit 0
 fi
+
+# components to cut
+if [ "${WHAT}" = all ]; then COMPONENTS=(cli gateway edge agent); else COMPONENTS=("${WHAT}"); fi
+
+# Every do_release() (i.e. every non-relay component) mirrors the edge skills
+# (EDGE_SKILLS_SRC=${SRC_EDGE}/skills) unconditionally, so the edge tree is
+# read even when it is not the component being cut. Asserted here rather than
+# inside do_release so a stale edge tree fails the cut before anything is
+# built, and only once when edge IS already in COMPONENTS. do_release_relay
+# never reads edge, so a relay-only cut (the only way COMPONENTS can be just
+# "relay" — WHAT is a single token) does not assert it needlessly. Surfaced
+# ahead of the DP_DIR/signing-key/ghp/ssh pre-flight below so a bad source
+# tree is reported first, not masked by an unrelated environment error.
+CUT_ORIGIN_COMPS=("${COMPONENTS[@]}")
+needs_edge=0
+for c in "${COMPONENTS[@]}"; do
+    [ "${c}" = relay ] || { needs_edge=1; break; }
+done
+if [ "${needs_edge}" = 1 ]; then
+    case " ${COMPONENTS[*]} " in
+        *" edge "*) ;;
+        *) CUT_ORIGIN_COMPS+=(edge) ;;
+    esac
+fi
+assert_cut_origins "${CUT_ORIGIN_MODE}" "${CUT_ORIGIN_COMPS[@]}" || exit 1
 
 # ---- pre-flight -------------------------------------------------------------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "✗ required tool not found: $1" >&2; exit 1; }; }
@@ -889,27 +980,6 @@ if [ "${DRY_RUN}" != 1 ]; then
             || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
     fi
 fi
-
-# components to cut
-if [ "${WHAT}" = all ]; then COMPONENTS=(cli gateway edge agent); else COMPONENTS=("${WHAT}"); fi
-
-# per-component source-worktree cleanliness + branch (real releases must come
-# from a clean `main`; dry-runs are lenient so they can run off a prep worktree).
-for comp in "${COMPONENTS[@]}"; do
-    src="$(src_for "${comp}")"
-    [ -d "${src}" ] || { echo "✗ ${comp} source worktree missing: ${src}" >&2; exit 1; }
-    git -C "${src}" rev-parse --git-dir >/dev/null 2>&1 \
-        || { echo "✗ ${comp} source is not a git worktree: ${src}" >&2; exit 1; }
-    if [ "${DRY_RUN}" != 1 ]; then
-        br="$(git -C "${src}" rev-parse --abbrev-ref HEAD)"
-        [ "${br}" = main ] || { echo "✗ ${comp} source not on main (on ${br}): ${src}" >&2; exit 1; }
-        [ -z "$(git -C "${src}" status --porcelain)" ] \
-            || { echo "✗ ${comp} source worktree is dirty: ${src}" >&2; exit 1; }
-    fi
-done
-# Every component bundles the `burrowee` dispatcher (relay included), so its source
-# worktree is required for all release paths.
-[ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
 
 # CVE hard gate (public releases only): scan every module we're about to build.
 # Runs before the first build so a vulnerable cut never produces a binary.
