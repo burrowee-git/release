@@ -107,7 +107,7 @@ burrowee-release.pub       ← minisign signing public key (added at activation)
 ```
 
 - `burrowee-git/release` (PUBLIC). Trunk: `main`. gh.account: `burrowee-git`.
-- Call gh via `~/.claude/bin/ghp`, never bare `gh`.
+- Call gh via `~/bin/ghp`, never bare `gh`.
 
 ## Status
 
