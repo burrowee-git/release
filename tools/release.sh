@@ -426,7 +426,7 @@ bins_for() {
     esac
 }
 
-GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/.claude/bin/ghp")"
+GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/bin/ghp")"
 
 # ---- console registration (Phase C) -----------------------------------------
 # register_staged <comp> <stamp> <semver> <stage_dir> <src_dir> [<gh_tag>]
