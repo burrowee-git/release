@@ -339,5 +339,124 @@ out="$(assert_cut_origin edge "${BEHIND}" "/elsewhere" report 2>&1)" && r=0 || r
 check "assert: report mode returns 0" "${r}" "0"
 check_contains "assert: report mode still says what is wrong" "${out}" "⚠"
 
+# ── the guard's own coverage: four narrowing dimensions, cases (a)-(h) ──────
+# The tolerance admits EXACTLY versions/<comp> and versions/<comp>.stamp (b),
+# STAGED ONLY — never worktree-modified-on-top (c) or untracked (d) — and only
+# because release.sh forwards it for --distribute-only; every other call site
+# passes no trailing paths at all, so the SAME fixture with none supplied (f)
+# must refuse exactly like the pre-tolerance guard did. staged_tolerance_for
+# itself gates that last dimension (g)/(h): nothing for a full cut, exactly
+# the two paths for --distribute-only.
+#
+# Case (a) is the GATE, per assert_cut_origin's own short-circuit: it returns
+# at its FIRST failing arm, and the clean-tree check (where the tolerance
+# lives) is the fourth. A fixture that trips is_registry_source,
+# is_primary_worktree, or the on-main check would never reach the tolerance
+# at all — every case below would "pass" for a reason that has nothing to do
+# with the tolerance. (a) passing first is what makes (b)-(f) mean anything.
+#
+# A fresh fixture, not the DIST one above (same shape, own component name)
+# so this section stands as independent, permanent evidence rather than
+# reusing another task's harness.
+CLI="$(new_origin_and_clone task5-cli)"
+mkdir -p "${CLI}/versions"
+echo "1.0.0" > "${CLI}/versions/cli"
+/usr/bin/git -C "${CLI}" add versions/cli
+/usr/bin/git -C "${CLI}" commit --quiet -m "seed versions/cli"
+/usr/bin/git -C "${CLI}" push --quiet origin main
+
+# (a) — versions/cli bumped (M, against the just-committed HEAD entry) and
+# versions/cli.stamp created fresh (A), both staged, worktree otherwise clean,
+# HEAD == origin/main. Confirm what git status --porcelain ACTUALLY reports
+# before trusting the case — Task 3's own first MM fixture was a false
+# positive for skipping exactly this check.
+echo "1.0.1" > "${CLI}/versions/cli"
+echo "1.0.1" > "${CLI}/versions/cli.stamp"
+/usr/bin/git -C "${CLI}" add versions/cli versions/cli.stamp
+st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
+check_contains "case (a) fixture: versions/cli is really staged-modified (M )" "${st}" "M  versions/cli"
+check_contains "case (a) fixture: versions/cli.stamp is really staged-added (A )" "${st}" "A  versions/cli.stamp"
+out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+check "case (a): tolerance admits the staged versions/cli + versions/cli.stamp bump" "${r}" "0"
+check "case (a): case (a) is silent" "${out}" ""
+
+# (b) — an additional staged file the tolerance does not name (a dispatcher
+# bump landing in the same tree) is refused even though versions/cli and
+# versions/cli.stamp are still exactly as (a) left them: the tolerance is an
+# exact set, not "staged is fine now".
+echo "9.9.9" > "${CLI}/versions/burrowee"
+/usr/bin/git -C "${CLI}" add versions/burrowee
+st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
+check_contains "case (b) fixture: versions/burrowee is really staged-added (A )" "${st}" "A  versions/burrowee"
+out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+check "case (b): an unlisted staged file is refused" "${r}" "1"
+/usr/bin/git -C "${CLI}" reset --quiet -- versions/burrowee
+rm -f "${CLI}/versions/burrowee"
+
+# (c) — versions/cli staged AND further modified in the worktree on top: the
+# stamp would have been computed from the worktree file while the marker
+# commit records the index, so this MUST be refused even though the path is
+# on the allow-list. Verify the porcelain code really is "MM", not "AM" —
+# the exact substitution that made Task 3's original fixture unfalsifiable.
+echo "more" >> "${CLI}/versions/cli"
+st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
+check_contains "case (c) fixture: versions/cli is really MM (staged AND worktree-modified)" "${st}" "MM versions/cli"
+out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+check "case (c): MM on an allowed path is refused (staged only, not staged-plus-dirty)" "${r}" "1"
+/usr/bin/git -C "${CLI}" checkout --quiet -- versions/cli
+
+# (d) — (a) plus an untracked file anywhere in the tree: refused exactly as
+# tree_clean refuses it, tolerance or not.
+touch "${CLI}/stray.txt"
+st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
+check_contains "case (d) fixture: stray.txt is really untracked (?? )" "${st}" "?? stray.txt"
+out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+check "case (d): an untracked file is refused even with an allow-list" "${r}" "1"
+rm -f "${CLI}/stray.txt"
+
+# (f) — the SAME (a) fixture (still staged M + A, nothing else), called with
+# NO trailing paths at all: this is what every call site other than the
+# release-repo --distribute-only one actually does, so it must refuse exactly
+# like the pre-tolerance guard did. This is the permanent proof that the
+# tolerance is opt-in per call, not a default weakening.
+out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict 2>&1)" && r=0 || r=1
+check "case (f): the same fixture with no trailing paths is refused (default unchanged)" "${r}" "1"
+check_contains "case (f): the no-tolerance refusal is the dirty-tree message" "${out}" "source tree is dirty"
+
+# Hygiene: (a)'s fixture is back to its passing baseline after (b)-(f), none
+# of which should have left it dirty in a way (a) itself would not pass.
+out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+check "case (a)-(f): fixture restored to the passing baseline" "${r}" "0"
+
+# (e) — the bump COMMITTED instead of staged: the tree is clean (nothing
+# staged, nothing untracked), so tree_clean_except_staged passes trivially
+# regardless of the tolerance, and assert_cut_origin falls through to the
+# sync-status arm, where the un-pushed commit is one ahead of origin/main.
+# This is the case that proves the tolerance does not paper over the sync
+# check — a committed bump is refused for a completely different reason.
+CLI_AHEAD="$(new_origin_and_clone task5-cli-ahead)"
+mkdir -p "${CLI_AHEAD}/versions"
+echo "1.0.0" > "${CLI_AHEAD}/versions/cli"
+/usr/bin/git -C "${CLI_AHEAD}" add versions/cli
+/usr/bin/git -C "${CLI_AHEAD}" commit --quiet -m "seed versions/cli"
+/usr/bin/git -C "${CLI_AHEAD}" push --quiet origin main
+echo "1.0.1" > "${CLI_AHEAD}/versions/cli"
+echo "1.0.1" > "${CLI_AHEAD}/versions/cli.stamp"
+/usr/bin/git -C "${CLI_AHEAD}" add versions/cli versions/cli.stamp
+/usr/bin/git -C "${CLI_AHEAD}" commit --quiet -m "bump versions/cli"
+st="$(/usr/bin/git -C "${CLI_AHEAD}" status --porcelain --untracked-files=all)"
+check "case (e) fixture: worktree is clean once the bump is committed" "${st}" ""
+out="$(assert_cut_origin "release repo" "${CLI_AHEAD}" "${CLI_AHEAD}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+check "case (e): a committed (not staged) bump is refused, 1 ahead of origin" "${r}" "1"
+check_contains "case (e): the refusal message names 'ahead'" "${out}" "ahead"
+
+# (g)/(h) — the scoping decision itself, no repo involved: nothing for a full
+# cut, exactly the two component paths for --distribute-only.
+check "case (g): staged_tolerance_for 0 cli yields nothing" "$(staged_tolerance_for 0 cli)" ""
+staged_tolerance_for 0 cli >/dev/null && r=0 || r=1
+check "case (g): staged_tolerance_for 0 cli returns 0" "${r}" "0"
+check "case (h): staged_tolerance_for 1 cli names exactly versions/cli and its stamp" \
+    "$(staged_tolerance_for 1 cli)" "$(printf 'versions/cli\nversions/cli.stamp')"
+
 echo
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
