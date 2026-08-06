@@ -257,6 +257,21 @@ out="$(assert_cut_origin edge "${BEHIND}" "${BEHIND}" strict 2>&1)" && r=0 || r=
 check "assert: behind origin is rejected" "${r}" "1"
 check_contains "assert: behind names the fix" "${out}" "git pull --ff-only"
 
+# Ahead: a local commit that was never pushed, asserted THROUGH assert_cut_origin
+# directly (not via the staged-tolerance narrowing suite below, and not via
+# origin_sync_status alone — check 5 above already covers that unit). Without
+# this, "ahead" was checkable only inside case (e), which is really testing the
+# tolerance not swallowing the sync check; a mutation that breaks assert_cut_origin's
+# own ahead handling with no tolerance in play at all would have nothing else to
+# catch it at this composite level.
+AHEAD_COMPOSITE="$(new_origin_and_clone composite-ahead)"
+echo local > "${AHEAD_COMPOSITE}/local.txt"
+/usr/bin/git -C "${AHEAD_COMPOSITE}" add local.txt
+/usr/bin/git -C "${AHEAD_COMPOSITE}" commit --quiet -m "local only"
+out="$(assert_cut_origin edge "${AHEAD_COMPOSITE}" "${AHEAD_COMPOSITE}" strict 2>&1)" && r=0 || r=1
+check "assert: ahead of origin is rejected" "${r}" "1"
+check_contains "assert: ahead names the fix" "${out}" "merge it through a PR first"
+
 # ── the distribute-only staged tolerance, driven through the strict path ────
 # This cannot go through --dry-run: dry-run puts the guard in report mode,
 # which returns 0 regardless of findings, so a test that only exercised
