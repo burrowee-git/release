@@ -147,6 +147,12 @@ src_for() {
     esac
 }
 
+# Paths the RELEASE REPO may carry staged when the guard runs. Empty for every
+# entry point except --distribute-only, which is preceded by an `rkit build` that
+# stages the component's version + stamp so both ride the [RELEASED] marker commit.
+# Forwarded to the release-repo assertion ONLY: no component tree ever gets it.
+RELEASE_REPO_STAGED_OK=()
+
 # assert_cut_origins <mode> <comp...> — the guard over every tree a cut or a
 # distribute reads or writes. Called from ALL THREE entry points: `publish`
 # (below — no component trees, just the release repo itself), a
@@ -176,7 +182,8 @@ assert_cut_origins() {
     esac
     [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; return 1; }
     assert_cut_origin dispatcher "${SRC_DISPATCHER}" "${REG_DISPATCHER}" "${mode}" || return 1
-    assert_cut_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" || return 1
+    assert_cut_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" \
+        ${RELEASE_REPO_STAGED_OK[@]+"${RELEASE_REPO_STAGED_OK[@]}"} || return 1
 }
 
 # ---- build_register_helper: compile burrowee-release-register to dist/.tools/ ----
@@ -920,6 +927,21 @@ CUT_ORIGIN_MODE=strict
 [ "${DRY_RUN}" = 1 ] && CUT_ORIGIN_MODE=report
 
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
+    # rkit build staged the bump; both files ride the [RELEASED] marker commit
+    # distribute_only makes (`do_release`'s marker commit: `git commit` takes no pathspec
+    # commits the whole index). Without this the two-step path deadlocks: staged
+    # counts as dirty, and committing makes the repo ahead of origin/main.
+    # mapfile/readarray is a bash-4+ builtin, not present in macOS's system
+    # bash 3.2 that this script runs under (see tools/cut_origin.test.sh's own
+    # note on the same constraint) — build the array with a read loop instead.
+    RELEASE_REPO_STAGED_OK=()
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        RELEASE_REPO_STAGED_OK+=("${line}")
+    done <<EOF
+$(staged_tolerance_for 1 "${DIST_COMP}")
+EOF
+
     # distribute_only always mirrors edge skills (EDGE_SKILLS_SRC=${SRC_EDGE}/skills)
     # into the release repo regardless of which component is being distributed
     # (a stale edge tree would publish stale skills alongside a fresh cli/gateway/

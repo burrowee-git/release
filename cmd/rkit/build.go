@@ -54,6 +54,10 @@ type Result struct {
 // optional version bump shells the proven tools/version.sh with a
 // revert-on-failure/dry-run trap, and the CVE gate runs by DEFAULT (the
 // opposite of harness's SkipGate, which exists only for release.sh parity).
+// RepoDir is absolutized (absolutizeBuildDirs) before any derived path
+// (OutDir, distDir, the stamp file) is computed, and orchestrate refuses a
+// relative RepoDir/SrcDir/DispatcherDir/OutDir outright — so the promise
+// above is enforced, not merely assumed.
 type buildOpts struct {
 	Component, RepoDir, SrcDir, DispatcherDir, SignKey string
 	Apple, DryRun, NoVulncheck                         bool
@@ -105,6 +109,9 @@ func runBuild(args []string) error {
 		o.Bump = "major"
 	}
 	resolveComponentDirs(&o)
+	if err := absolutizeBuildDirs(&o); err != nil {
+		return err
+	}
 	if o.Apple {
 		// Fatal, not advisory: an unresolved account means the Developer-ID path
 		// runs with no account plugin, producing an ad-hoc signed build the
@@ -114,6 +121,40 @@ func runBuild(args []string) error {
 		}
 	}
 	return buildRun(o)
+}
+
+// absolutizeBuildDirs resolves RepoDir/SrcDir/DispatcherDir to absolute paths.
+//
+// Idempotent — filepath.Abs of an absolute path is that path — which is why it is
+// safe to call from both entry points, and it must be called from both: buildRun
+// is the documented testable seam every test enters through, while runBuild needs
+// the absolute RepoDir EARLIER, because loadAppleAccount reads
+// config/apple-account under it (build.go:112) before buildRun is reached.
+//
+// The defect this closes: release-kit's build.Compile creates OutDir relative to
+// the rkit process cwd but passes `-o <relative outPath>` to a `go build` whose
+// cmd.Dir is SrcDir (release-kit build/build.go:77-92), so with --repo . the
+// directory is made in the release repo and the binary is written into the
+// component source tree; the sign step then stats the relative path from rkit's
+// cwd and fails, naming codesign rather than the output path. runHarness already
+// did this (harness.go:99-102); the real cut path did not.
+//
+// SrcDir and DispatcherDir carry no live defect — they are only ever resolved
+// against the rkit cwd (cmd.Dir, `git -C`, rkit's own filepath.Join reads), never
+// handed as a relative path to a subprocess rooted somewhere else. They are
+// normalised here so the assertion in orchestrate can be unconditional.
+func absolutizeBuildDirs(o *buildOpts) error {
+	for _, p := range []*string{&o.RepoDir, &o.SrcDir, &o.DispatcherDir} {
+		if *p == "" {
+			continue
+		}
+		abs, err := filepath.Abs(*p)
+		if err != nil {
+			return fmt.Errorf("resolve %q to an absolute path: %w", *p, err)
+		}
+		*p = abs
+	}
+	return nil
 }
 
 // resolveComponentDirs fills SrcDir/DispatcherDir from the standard
@@ -142,6 +183,9 @@ func resolveComponentDirs(o *buildOpts) {
 // build+assemble+checksum+sign into <RepoDir>/dist/<stamp>/.
 
 func buildRun(o buildOpts) (err error) {
+	if err = absolutizeBuildDirs(&o); err != nil {
+		return err
+	}
 	if o.DispatcherDir == "" {
 		o.DispatcherDir = o.RepoDir
 	}
@@ -263,6 +307,19 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 	if o.SrcDir == "" {
 		o.SrcDir = o.RepoDir
+	}
+	// Every path in Options must be absolute by the time it reaches here. A
+	// relative OutDir is created in the rkit cwd and written to from SrcDir
+	// (release-kit build.Compile), which is how the binaries ended up in the
+	// component source tree; asserting it makes the invariant checkable instead
+	// of assumed by three call sites.
+	for _, d := range []struct{ name, path string }{
+		{"RepoDir", o.RepoDir}, {"SrcDir", o.SrcDir},
+		{"DispatcherDir", o.DispatcherDir}, {"OutDir", o.OutDir},
+	} {
+		if !filepath.IsAbs(d.path) {
+			return nil, fmt.Errorf("orchestrate: %s must be absolute, got %q", d.name, d.path)
+		}
 	}
 	// 1. CVE gate (fail-closed) — scan the component module. Skipped only under
 	//    harness parity (o.SkipGate): release.sh --dry-run does not gate, so the

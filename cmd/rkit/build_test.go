@@ -393,6 +393,101 @@ func TestBuildRecordsCompStamp(t *testing.T) {
 	}
 }
 
+// TestBuildRelativeRepoWritesIntoReleaseRepoNotSource pins the flag's own default.
+// `rkit build --repo .` (build.go:69) used RepoDir verbatim, so the derived
+// OutDir stayed relative — and release-kit's build.Compile creates OutDir in the
+// rkit process cwd while passing `-o <relative path>` to a `go build` whose
+// cmd.Dir is SrcDir (release-kit build/build.go:77-92). The binaries therefore
+// landed in the COMPONENT source worktree and the sign step, resolving the same
+// relative path from rkit's cwd, failed with a message naming codesign.
+//
+// TWO directories are load-bearing here. Every other test in this file doubles
+// one dir as repo and source, where a relative OutDir resolves to the same place
+// either way and the bug is invisible.
+func TestBuildRelativeRepoWritesIntoReleaseRepoNotSource(t *testing.T) {
+	repo := t.TempDir() // the release repo: versions/, inner/, tools/
+	src := t.TempDir()  // the component source worktree
+	writeFixtureModule(t, repo)
+	writeFixtureModule(t, src)
+
+	t.Chdir(repo) // rkit is invoked from the release repo; --repo . means "here"
+
+	if err := buildRun(buildOpts{
+		Component: "cli", RepoDir: ".", SrcDir: src, DispatcherDir: src,
+		NoVulncheck: true, SignKey: testMinisignKey(t),
+	}); err != nil {
+		t.Fatalf("buildRun(--repo .): %v", err)
+	}
+
+	// Anti-vacuity: the artifacts must actually be somewhere, or "nothing was
+	// written into the source tree" passes for a build that produced nothing.
+	//
+	// Stamp from src, NOT repo. This is the only test in this file where the two
+	// are different trees, and the stamp's sha8 comes from the COMPONENT source's
+	// git HEAD (release-kit version.Stamp runs `git rev-parse` in SrcDir) — which
+	// is what buildRun used to name dist/<stamp>. writeFixtureModule pins no
+	// GIT_AUTHOR_DATE, so the two fixtures' commits share a SHA only when they
+	// land in the same wall-clock second: stamping from repo passed locally and
+	// then failed roughly whenever the pair straddled a second boundary. The
+	// failure read "no zip under the RELEASE repo's dist/…", i.e. it impersonated
+	// the very defect this test guards. Do not "simplify" this back to repo.
+	stamp := mustStamp(t, src, "cli")
+	if _, err := os.Stat(filepath.Join(repo, "dist", stamp, "burrowee-cli-linux-amd64.zip")); err != nil {
+		t.Fatalf("no zip under the RELEASE repo's dist/%s: %v", stamp, err)
+	}
+
+	// The defect itself: nothing may be written into the component source tree.
+	if _, err := os.Stat(filepath.Join(src, "dist")); !os.IsNotExist(err) {
+		t.Errorf("dist/ exists in the COMPONENT source worktree %s (stat err = %v) — "+
+			"a relative --repo must resolve against the release repo, not leak into the "+
+			"tree being compiled", src, err)
+	}
+	out, err := exec.Command("git", "-C", src, "status", "--porcelain", "--untracked-files=all").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status in source tree: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("the component source worktree is no longer clean:\n%s", out)
+	}
+}
+
+// TestOrchestrateRejectsRelativePaths pins the fail-closed guard added at the
+// top of orchestrate: every one of RepoDir/SrcDir/DispatcherDir/OutDir must be
+// absolute, or orchestrate must refuse before touching the filesystem for
+// anything beyond the check itself (no fixture module is written — a failing
+// guard here has nothing else to blame the error on). An unreached guard is
+// worth as little as no guard, so each field is exercised on its own so a
+// broken check on one field can't hide behind the other three passing.
+func TestOrchestrateRejectsRelativePaths(t *testing.T) {
+	ctx := context.Background()
+	abs := t.TempDir()
+	base := Options{Component: "cli", OutDir: abs, RepoDir: abs, SrcDir: abs, DispatcherDir: abs}
+
+	for _, field := range []string{"RepoDir", "SrcDir", "DispatcherDir", "OutDir"} {
+		t.Run(field, func(t *testing.T) {
+			o := base
+			switch field {
+			case "RepoDir":
+				o.RepoDir = "relative"
+			case "SrcDir":
+				o.SrcDir = "relative"
+			case "DispatcherDir":
+				o.DispatcherDir = "relative"
+			case "OutDir":
+				o.OutDir = "relative"
+			}
+			_, err := orchestrate(ctx, o)
+			if err == nil {
+				t.Fatalf("orchestrate with relative %s: expected error, got nil", field)
+			}
+			if !strings.Contains(err.Error(), field+" must be absolute") {
+				t.Fatalf("orchestrate with relative %s: err = %v, want mention of %q must be absolute",
+					field, err, field)
+			}
+		})
+	}
+}
+
 // TestBuildDryRunDoesNotRecordCompStamp is the other half of the contract, and
 // the more dangerous direction: --dry-run publishes nothing, so a stamp left
 // behind by one would be read by the NEXT unchanged-source cut as proof that
