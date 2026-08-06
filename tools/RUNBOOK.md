@@ -161,6 +161,65 @@ EXIT/INT/TERM trap that reverts `versions/burrowee`) — don't hand-edit it to
 
 ---
 
+## `--distribute-only`'s staged-bump tolerance — narrow on purpose, and still not a push
+
+`rkit build` (the primary produce path) stages `versions/<comp>` and
+`versions/<comp>.stamp` — never commits them — so that `release.sh
+--distribute-only`'s own `[RELEASED: <comp>]` marker commit is the one that
+actually records the bump (cmd/rkit `buildRun` is where that staging, and
+its on-failure revert, both happen). `git commit` with no pathspec commits the
+whole index, so the marker commit picks up both staged files for free. **The
+two-step path — `rkit build` then `--distribute-only` — costs exactly one
+commit**, not two: don't read a two-commit cut as this path working correctly,
+that shape is what the deadlock below used to force before the guard was
+narrowed.
+
+`assert_cut_origin`'s clean-tree check (`tools/cut_origin.sh`) tolerates
+exactly those two staged paths, and nothing else, and only for the release
+repo, and only inside the `--distribute-only` dispatch. Every other tree a cut
+reads, and every other entry point, still gets zero tolerance. It still
+refuses, exactly as before this exemption existed:
+
+- a genuinely dirty tree (an edit outside the two tolerated paths, staged or not);
+- an untracked file anywhere in the tree;
+- `versions/<comp>` staged **and further modified** in the worktree (`MM`) —
+  the stamp would have been computed from the worktree file while the marker
+  commit records the index, so the two could disagree;
+- a release repo that isn't exactly in sync with `origin/main` (behind, ahead,
+  or diverged) — the staged-bump tolerance only widens the clean-tree check,
+  it does not touch `origin_sync_status` at all.
+
+**Residual 1 — the dispatcher bump is still a manual step.** `versions/burrowee`
+is deliberately not in the tolerated set. If a dispatcher bump is needed for
+this cut, commit and push it *before* running `rkit build` — there is no
+tool-created deadlock to break there, only a commit to make in the ordinary
+order. Staging a dispatcher bump alongside a component bump and expecting it
+to ride the same marker commit is refused, on purpose (`versions/burrowee`
+staged next to `versions/<comp>` fails the guard with "staged is tolerated for
+exactly: …").
+
+**Residual 2 — `release.sh` still never pushes.** The `[RELEASED]` marker
+commit is made locally; there is no `git push` anywhere in `release.sh`. A
+cut — full or `--distribute-only` — leaves the release repo one commit ahead
+of `origin/main`, and the next cut or distribute is refused by the very
+`origin_sync_status` check above until an operator pushes it. This is
+unchanged by the staged-bump fix: fixing the deadlock did not remove the push
+requirement, and reading it as removed is the trap. See
+`docs/specs/2026-08-03-cut-origin-and-worktree-flow-design.md`
+(`burrowee-git/resources`) for why the flow batches the push instead of doing
+it here.
+
+**If you write shell for `release.sh`/`tools/*.sh`: `mapfile`/`readarray` do
+not exist here.** `/usr/bin/env bash` on this machine resolves to macOS's
+system bash, 3.2.57 — there is no Homebrew bash on `PATH`, hooked or not — and
+both are bash-4+ builtins. A script that uses either will run clean under a
+newer bash on someone else's machine and crash with "command not found" the
+first time it runs for real here. Build an array from command output with the
+read-loop idiom `tools/cut_origin.sh` and `tools/cut_origin.test.sh` already
+use (`while IFS= read -r line; do … done <<EOF ... EOF`) instead.
+
+---
+
 ## `dist/.dispatcher/` — a `--dry-run` used to poison the next `--public` cut
 
 **Fixed; recorded because the failure mode was invisible and the trigger was the
