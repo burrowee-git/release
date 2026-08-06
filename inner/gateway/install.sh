@@ -12,26 +12,48 @@
 # bypasses the sha256 check and re-places every serve binary (the `--force`
 # full-reinstall path — the diff would otherwise skip an identical version).
 #
-# Service model: binaries and config stay per-user, but the service units are
-# always SYSTEM-level, running as the installing user, so the gateway starts at
-# boot without a GUI login: /Library/LaunchDaemons on macOS, /etc/systemd/system
-# on Linux. System steps run via sudo (prompting on the controlling tty; with
-# no tty and no cached credentials the unit step aborts with guidance). The
-# system slot is single: replacing a unit installed by a DIFFERENT user needs
-# consent — a /dev/tty prompt, or BURROWEE_FORCE_SERVICE_OVERRIDE=1 when
-# non-interactive. Same-user reinstalls replace silently.
+# Service model: the BINARIES stay per-user (PREFIX/bin, default
+# ~/.local/bin), but the service units are SYSTEM-level and the daemon they
+# start runs as ROOT, so the gateway starts at boot without a GUI login:
+# /Library/LaunchDaemons on macOS, /etc/systemd/system on Linux. Its config and
+# data live under the SYSTEM roots ($SYS_CONFIG_DIR / $SYS_DATA_DIR), named
+# explicitly in the unit rather than left to resolve from whoever's environment
+# the daemon happens to inherit. System steps run via sudo (prompting on the
+# controlling tty; with no tty and no cached credentials the unit step aborts
+# with guidance).
+#
+# Because a root-scheme unit runs as nobody in particular, it records no owner
+# and the single system slot is free for any installer to replace. Only a
+# LEGACY per-user unit (one that still carries UserName / User=) is owned, and
+# replacing another user's needs consent — a /dev/tty prompt, or
+# BURROWEE_FORCE_SERVICE_OVERRIDE=1 when non-interactive.
+#
+# The unit body must stay byte-identical to what the gateway's own renderer
+# emits (internal/gateway/service_install.go: LaunchdPlist / SystemdUnit and
+# their updater twins). Both writers rewrite whenever content differs and then
+# reload, so any divergence here does not merely disagree — it makes the two
+# writers fight, booting the daemon out on every refresh.
 set -eu
 
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
+# The invoking user. No longer rendered into any unit (the daemon runs as root)
+# — it is only compared against the owner a LEGACY per-user unit still records,
+# to decide whether taking over the slot needs consent.
 SERVICE_USER="$(id -un)"
-SERVICE_GROUP="$(id -gn)"
 # System unit locations. The BURROWEE_*_DIR overrides are test seams for the
 # sandboxed installer harness — never set them in production.
 LAUNCHD_DIR="${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}"
 SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
+# The root daemon's config and data roots — the same two constants the Go side
+# holds as systemConfigDir/systemDataDir (internal/gateway/home.go). They are
+# written into the units, so they must not drift from that pair. Same test-seam
+# caveat as above.
+SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
+SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
+SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 
 # ---------------------------------------------------------------------------
 # has_tty — whether a controlling terminal is available for prompts (stdin is
@@ -70,6 +92,12 @@ core_unit_path() {
 # unit_owner <file> — the run-as user recorded in an existing unit file
 # (plist UserName / systemd User=). Empty when absent or unowned. Mirrors the
 # Go side's UnitOwner so both unit-writers agree on slot ownership.
+#
+# Every unit this installer writes is now root-scheme and carries NO such
+# field, so an empty answer means "root-owned, current scheme" — a FREE slot,
+# not an unknown one. Only a legacy per-user unit names an owner, which is what
+# makes the consent prompt below fire on exactly the case that still needs it:
+# taking over the pre-split service of a different user.
 unit_owner() {
     [ -f "$1" ] || { echo ""; return 0; }
     case "$1" in
@@ -142,6 +170,100 @@ place_unit() {
 }
 
 # ---------------------------------------------------------------------------
+# ensure_system_log_dir — pre-create the units' log directory under the SYSTEM
+# data root, as root.
+#
+# launchd applies StandardOutPath at exec, so a missing parent is not a log
+# that appears late — it is a daemon that fails to spawn. Creation goes through
+# run_root because a NON-ROOT process must never create the root daemon's data
+# root: on a host where /usr/local/var is writable by the installing user
+# (Intel macOS, where Homebrew chowns it) an unprivileged mkdir succeeds and
+# leaves the root daemon's gateway.db and register/console sockets inside a
+# directory that user fully controls.
+#
+# 0700 is set explicitly, and only on the directories this created: mkdir -p
+# applies the process umask (0755 on a typical host, which would leave the
+# store world-readable), and re-tightening a root somebody else already
+# established is not this installer's call. Never fatal — the daemon creates
+# the tree on first start, so a missing sudo costs a log file, not an install.
+# ---------------------------------------------------------------------------
+ensure_system_log_dir() {
+    if [ -d "$SYS_LOG_DIR" ]; then return 0; fi
+    _data_root_existed=0
+    if [ -d "$SYS_DATA_DIR" ]; then _data_root_existed=1; fi
+    if ! run_root mkdir -p "$SYS_LOG_DIR"; then
+        echo "note: could not create $SYS_LOG_DIR (needs root) — the gateway creates it on first start" >&2
+        return 0
+    fi
+    if [ "$_data_root_existed" = 0 ]; then
+        run_root chmod 0700 "$SYS_DATA_DIR" 2>/dev/null || true
+    fi
+    run_root chmod 0700 "$SYS_LOG_DIR" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# record_migration_consent — hand the root daemon the pre-split per-user tree
+# it should adopt, by writing $SYS_CONFIG_DIR/migrate-from (root, 0600).
+#
+# Before the multi-user split the gateway kept its identity, config and store
+# under $GW_HOME. The daemon now runs as root out of the system roots, and it
+# cannot work out that legacy path for itself: under launchd/systemd there is
+# no SUDO_USER to derive a home from, and its legacy-tree scan — which does
+# find such trees — deliberately refuses to adopt one, because on a multi-user
+# host picking a home would mean picking somebody's identity for them.
+#
+# This installer can answer both halves: it knows the path, and it was run BY
+# that user, which is the consent. Recording it rather than passing
+# --migrate-from in the unit keeps the unit body free of anything per-user (the
+# two writers must render it byte-identically), and it lets the copy happen at
+# the daemon's next start — which is the only safe moment for it, since the
+# single unit slot means the old instance has been booted out by then and
+# gateway.db is no longer being written.
+#
+# Skipped when there is no identity to adopt, and when this config root already
+# carries the daemon's own "migrated-from" receipt. The receipt is what gets
+# tested rather than the destination key: the key sits in a 0700 root-owned
+# identity/, which a non-root installer cannot stat at all, whereas the receipt
+# lies directly in the traversable config root. Re-arming would be harmless
+# either way — the daemon's copy never overwrites — but it should not be the
+# thing keeping it harmless.
+# ---------------------------------------------------------------------------
+record_migration_consent() {
+    if [ ! -s "$GW_HOME/identity/relay_ed.key" ] && [ ! -s "$GW_HOME/keys/relay_ed.key" ]; then
+        return 0
+    fi
+    if [ -f "$SYS_CONFIG_DIR/migrated-from" ]; then return 0; fi
+
+    _consent="$SYS_CONFIG_DIR/migrate-from"
+    _tmp_consent="$(mktemp)"
+    printf '%s\n' "$GW_HOME" > "$_tmp_consent"
+    # Already recorded, same value: writing it again would only spend a sudo.
+    if [ -f "$_consent" ] && cmp -s "$_tmp_consent" "$_consent"; then
+        rm -f "$_tmp_consent"
+        return 0
+    fi
+    if [ ! -d "$SYS_CONFIG_DIR" ]; then
+        if ! run_root mkdir -p "$SYS_CONFIG_DIR"; then
+            rm -f "$_tmp_consent"
+            echo "note: could not create $SYS_CONFIG_DIR — see the migration hint below" >&2
+            echo "hint: after upgrading, run: sudo burrowee-gateway --migrate-from $GW_HOME" >&2
+            return 0
+        fi
+        # Traversable (0755) like the daemon's own EnsureConfigRoot: everything
+        # inside stays tight, but a 0700 root would revoke the admin-group
+        # grant on console.token.
+        run_root chmod 0755 "$SYS_CONFIG_DIR" 2>/dev/null || true
+    fi
+    if run_root /usr/bin/install -m 0600 "$_tmp_consent" "$_consent"; then
+        echo "migration: the gateway will adopt $GW_HOME on its next start"
+    else
+        echo "note: could not record the migration source at $_consent (needs root)." >&2
+        echo "hint: after upgrading, run: sudo burrowee-gateway --migrate-from $GW_HOME" >&2
+    fi
+    rm -f "$_tmp_consent"
+}
+
+# ---------------------------------------------------------------------------
 # render_units — write both SYSTEM service unit FILES for the host init
 # system (as root, via place_unit). Does NOT start, stop, or reload any live
 # services. Call load_units after render_units when a live reload is desired
@@ -150,7 +272,7 @@ place_unit() {
 render_units() {
     case "$(uname -s)" in
     Darwin)
-        mkdir -p "$GW_HOME/logs"
+        ensure_system_log_dir
 
         # Core unit. KeepAlive.PathState restarts the daemon after ANY exit
         # while the binary exists (a graceful SIGTERM exit is the
@@ -163,22 +285,21 @@ render_units() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway</string><string>--no-open</string></array>
-  <key>UserName</key><string>$SERVICE_USER</string>
-  <key>GroupName</key><string>$SERVICE_GROUP</string>
-  <key>InitGroups</key><true/>
-  <key>EnvironmentVariables</key><dict><key>HOME</key><string>$HOME</string><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway</string><string>--no-open</string><string>--config-dir</string><string>$SYS_CONFIG_DIR</string><string>--data-dir</string><string>$SYS_DATA_DIR</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>PathState</key><dict><key>$BIN_DIR/burrowee-gateway</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>$GW_HOME/logs/gateway.log</string>
-  <key>StandardErrorPath</key><string>$GW_HOME/logs/gateway.err.log</string>
+  <key>StandardOutPath</key><string>$SYS_LOG_DIR/gateway.log</string>
+  <key>StandardErrorPath</key><string>$SYS_LOG_DIR/gateway.err.log</string>
 </dict></plist>
 EOF
         place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
 
-        # Updater unit.
+        # Updater unit. No path flags: the updater agent resolves its own roots,
+        # which already default to the system pair under root's euid — the same
+        # defaulting the core unit's flags only make explicit.
         _tmp_unit="$(mktemp)"
         cat > "$_tmp_unit" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -186,26 +307,25 @@ EOF
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway.updater</string>
   <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway-updater</string><string>run</string></array>
-  <key>UserName</key><string>$SERVICE_USER</string>
-  <key>GroupName</key><string>$SERVICE_GROUP</string>
-  <key>InitGroups</key><true/>
-  <key>EnvironmentVariables</key><dict><key>HOME</key><string>$HOME</string><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>PathState</key><dict><key>$BIN_DIR/burrowee-gateway-updater</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>$GW_HOME/logs/updater.log</string>
-  <key>StandardErrorPath</key><string>$GW_HOME/logs/updater.err.log</string>
+  <key>StandardOutPath</key><string>$SYS_LOG_DIR/updater.log</string>
+  <key>StandardErrorPath</key><string>$SYS_LOG_DIR/updater.err.log</string>
 </dict></plist>
 EOF
         place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist"
         ;;
 
     Linux)
-        mkdir -p "$GW_HOME/logs"
+        ensure_system_log_dir
 
         # Core unit. Restart=always (not on-failure): a graceful SIGTERM exit
-        # must still restart — that is the update-restart mechanism.
+        # must still restart — that is the update-restart mechanism. No User=/
+        # Group=/Environment=HOME=: the daemon runs as root and takes both path
+        # roots as flags, so the unit body carries nothing caller-specific.
         _tmp_unit="$(mktemp)"
         cat > "$_tmp_unit" <<EOF
 [Unit]
@@ -213,10 +333,7 @@ Description=burrowee-gateway
 After=network-online.target
 
 [Service]
-User=$SERVICE_USER
-Group=$SERVICE_GROUP
-Environment=HOME=$HOME
-ExecStart=$BIN_DIR/burrowee-gateway --no-open
+ExecStart=$BIN_DIR/burrowee-gateway --no-open --config-dir $SYS_CONFIG_DIR --data-dir $SYS_DATA_DIR
 Restart=always
 RestartSec=2
 TimeoutStopSec=330
@@ -226,7 +343,9 @@ WantedBy=multi-user.target
 EOF
         place_unit "$_tmp_unit" "$SYSTEMD_DIR/burrowee-gateway.service"
 
-        # Updater unit.
+        # Updater unit. No path flags: the updater agent resolves its own roots,
+        # which already default to the system pair under root's euid — the same
+        # defaulting the core unit's flags only make explicit.
         _tmp_unit="$(mktemp)"
         cat > "$_tmp_unit" <<EOF
 [Unit]
@@ -234,9 +353,6 @@ Description=burrowee-gateway-updater
 After=network-online.target
 
 [Service]
-User=$SERVICE_USER
-Group=$SERVICE_GROUP
-Environment=HOME=$HOME
 ExecStart=$BIN_DIR/burrowee-gateway-updater run
 Restart=always
 RestartSec=2
@@ -327,6 +443,9 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     check_service_override
     remove_legacy_user_units
     render_units
+    # Before load_units, never after: load_units is what starts the daemon that
+    # consumes the record.
+    record_migration_consent
     load_units
     exit 0
 fi
@@ -422,8 +541,21 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     _slot_owner="$(unit_owner "$(core_unit_path)")"
     if [ -z "$_slot_owner" ] || [ "$_slot_owner" = "$SERVICE_USER" ]; then
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
+        # The upgrade path that matters most: this is how an existing pre-split
+        # install reaches the root daemon. load_units is deliberately not called
+        # here (the updater restarts the kernel out-of-band), and that restart is
+        # itself a stop-then-start, so the record is consumed in a safe window.
+        #
+        # Inside this branch, not beside it: recording a tree is claiming whose
+        # identity the root daemon adopts, and on a slot that belongs to someone
+        # else that claim would be wrong in the one direction that cannot be
+        # undone — a re-registered node under the wrong identity. Update mode has
+        # no consent prompt to settle it (unlike the install paths, which run
+        # check_service_override first), so it defers instead.
+        record_migration_consent
     else
         echo "note: gateway system service belongs to user '$_slot_owner' — units not refreshed" >&2
+        echo "note: not recording a migration source either — 'burrowee gateway service install' takes the slot over first" >&2
     fi
     mkdir -p "$GW_HOME"
     cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
@@ -497,6 +629,7 @@ cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
 check_service_override
 remove_legacy_user_units
 render_units
+record_migration_consent
 load_units
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------

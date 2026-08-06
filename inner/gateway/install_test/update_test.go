@@ -359,3 +359,59 @@ func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateRecordsMigrationConsent: update mode is the real upgrade path from a
+// pre-split install (the updater swaps binaries and refreshes units, then
+// restarts the daemon out-of-band), so the legacy tree has to be recorded here
+// or the new root daemon comes up beside an identity nothing will migrate.
+func TestUpdateRecordsMigrationConsent(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+
+	gwHome := seedLegacyIdentity(t, home, "identity")
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	stageDir := stageBundle(t, staged)
+
+	runUpdate(t, stageDir, home, stub, []string{"BURROWEE_UPDATE=1"})
+
+	got := readFile(t, consentPath(home))
+	if want := gwHome + "\n"; got != want {
+		t.Errorf("consent = %q, want %q", got, want)
+	}
+}
+
+// TestUpdateSkipsMigrationConsentForForeignSlot is the wrong-identity guard.
+// Update mode has no consent prompt, and it already refuses to touch a unit
+// slot recorded for another user. Recording a migration source is the same kind
+// of claim — whose identity the root daemon adopts — so it must defer too.
+// Recording this user's tree while another user owns the service would hand the
+// root daemon the wrong identity, and re-registering a node under a new
+// relay_ed.key is not something an operator can quietly undo.
+func TestUpdateSkipsMigrationConsentForForeignSlot(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+
+	seedLegacyIdentity(t, home, "identity")
+	seedForeignUnit(t, home)
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	stageDir := stageBundle(t, staged)
+
+	out := runUpdate(t, stageDir, home, stub, []string{"BURROWEE_UPDATE=1"})
+
+	if _, err := os.Stat(consentPath(home)); !os.IsNotExist(err) {
+		t.Errorf("migration source recorded while user 'someone-else' owns the slot: %v", err)
+	}
+	if !strings.Contains(out, "not recording a migration source") {
+		t.Errorf("no explanation of the deferral; output:\n%s", out)
+	}
+	// The binary swap is independent and must still complete.
+	if got := readInstalled(t, binDir, "burrowee-gateway"); got != "gw-v2-content" {
+		t.Errorf("binary swap should still succeed: got %q", got)
+	}
+}
