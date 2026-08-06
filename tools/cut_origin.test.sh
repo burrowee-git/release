@@ -90,13 +90,22 @@ rm -f "${UNTRACKED_CFG}/stray.txt"
 # versions/<comp>.stamp so both ride the [RELEASED] marker commit. Positive
 # case first, per the plan's falsifiability note — every negative case below
 # is a variation on a fixture that is proven to pass unmodified.
+#
+# versions/edge is committed to HEAD FIRST (as an earlier release would have
+# left it) and only then bumped+staged, so its status is real "M " —
+# index-modified against an existing HEAD entry. versions/edge.stamp is
+# newly created, so its status is real "A ". Both code letters the tolerance
+# is supposed to accept are exercised, not just one.
 TOL="$(new_origin_and_clone tolerance)"
 mkdir -p "${TOL}/versions"
 echo "1.0.0" > "${TOL}/versions/edge"
-echo "1.0.0" > "${TOL}/versions/edge.stamp"
+/usr/bin/git -C "${TOL}" add versions/edge
+/usr/bin/git -C "${TOL}" commit --quiet -m "seed versions/edge"
+echo "1.0.1" > "${TOL}/versions/edge"
+echo "1.0.1" > "${TOL}/versions/edge.stamp"
 /usr/bin/git -C "${TOL}" add versions/edge versions/edge.stamp
 tree_clean_except_staged "${TOL}" "versions/edge" "versions/edge.stamp" && r=0 || r=1
-check "clean-except-staged: the two allowed staged adds pass" "${r}" "0"
+check "clean-except-staged: an allowed 'M ' bump plus an allowed 'A ' stamp pass" "${r}" "0"
 
 # What would have to change for the above to fail: the allow-list must be
 # honoured. Confirm it actually distinguishes staged-and-listed from
