@@ -166,7 +166,7 @@ EXIT/INT/TERM trap that reverts `versions/burrowee`) — don't hand-edit it to
 `rkit build` (the primary produce path) stages `versions/<comp>` and
 `versions/<comp>.stamp` — never commits them — so that `release.sh
 --distribute-only`'s own `[RELEASED: <comp>]` marker commit is the one that
-actually records the bump (`cmd/rkit/build.go:208` is where that staging, and
+actually records the bump (cmd/rkit `buildRun` is where that staging, and
 its on-failure revert, both happen). `git commit` with no pathspec commits the
 whole index, so the marker commit picks up both staged files for free. **The
 two-step path — `rkit build` then `--distribute-only` — costs exactly one

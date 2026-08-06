@@ -191,7 +191,7 @@ esac
 printf '  OK: the same tree with no tolerance argument is still refused (default unchanged)\n'
 
 # ── pin the provenance shape of the marker commit ────────────────────────────
-# release.sh:870 commits with NO pathspec (git add -A already happened; rkit
+# release.sh's marker commit takes NO pathspec (its own `git add` is targeted; rkit
 # build itself staged the two version paths) — assert the marker commit
 # names both, and that it is the ONLY commit ahead of origin/main: one
 # produce-then-distribute cycle must cost exactly one commit, not two.

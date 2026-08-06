@@ -421,7 +421,17 @@ func TestBuildRelativeRepoWritesIntoReleaseRepoNotSource(t *testing.T) {
 
 	// Anti-vacuity: the artifacts must actually be somewhere, or "nothing was
 	// written into the source tree" passes for a build that produced nothing.
-	stamp := mustStamp(t, repo, "cli")
+	//
+	// Stamp from src, NOT repo. This is the only test in this file where the two
+	// are different trees, and the stamp's sha8 comes from the COMPONENT source's
+	// git HEAD (release-kit version.Stamp runs `git rev-parse` in SrcDir) — which
+	// is what buildRun used to name dist/<stamp>. writeFixtureModule pins no
+	// GIT_AUTHOR_DATE, so the two fixtures' commits share a SHA only when they
+	// land in the same wall-clock second: stamping from repo passed locally and
+	// then failed roughly whenever the pair straddled a second boundary. The
+	// failure read "no zip under the RELEASE repo's dist/…", i.e. it impersonated
+	// the very defect this test guards. Do not "simplify" this back to repo.
+	stamp := mustStamp(t, src, "cli")
 	if _, err := os.Stat(filepath.Join(repo, "dist", stamp, "burrowee-cli-linux-amd64.zip")); err != nil {
 		t.Fatalf("no zip under the RELEASE repo's dist/%s: %v", stamp, err)
 	}

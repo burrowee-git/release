@@ -928,7 +928,7 @@ CUT_ORIGIN_MODE=strict
 
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     # rkit build staged the bump; both files ride the [RELEASED] marker commit
-    # distribute_only makes (release.sh:868-870, `git commit` with no pathspec
+    # distribute_only makes (`do_release`'s marker commit: `git commit` takes no pathspec
     # commits the whole index). Without this the two-step path deadlocks: staged
     # counts as dirty, and committing makes the repo ahead of origin/main.
     # mapfile/readarray is a bash-4+ builtin, not present in macOS's system

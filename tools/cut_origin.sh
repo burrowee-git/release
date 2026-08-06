@@ -62,9 +62,9 @@ tree_clean() {
 #
 # One caller: the release repo under `release.sh --distribute-only`, where the
 # preceding `rkit build` staged versions/<comp> and versions/<comp>.stamp so both
-# ride the [RELEASED] marker commit (cmd/rkit/build.go:208). The full-cut path
+# ride the [RELEASED] marker commit (cmd/rkit `buildRun`). The full-cut path
 # already builds from a release repo that differs from origin/main by exactly that
-# bump, because it bumps AFTER this guard runs (release.sh:962 vs
+# bump, because it bumps AFTER this guard runs (`assert_cut_origins` at the distribute/full-cut dispatch vs
 # resolve_comp_stamp) — so this re-establishes an existing exemption for a bump
 # that moved into the produce half, rather than creating a new one.
 #
