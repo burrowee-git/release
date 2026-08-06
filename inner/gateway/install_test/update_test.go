@@ -360,55 +360,71 @@ func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 	}
 }
 
-// TestUpdateRecordsMigrationConsent: update mode is the real upgrade path from a
-// pre-split install (the updater swaps binaries and refreshes units, then
-// restarts the daemon out-of-band), so the legacy tree has to be recorded here
-// or the new root daemon comes up beside an identity nothing will migrate.
-func TestUpdateRecordsMigrationConsent(t *testing.T) {
+// stagedUpdateBundle builds an update-mode bundle that also carries the
+// installer and a fake migration, so the hand-off can be asserted: binaries in
+// cwd, install.sh beside migrations/v1_to_v2.sh (install.sh resolves the
+// migration relative to its own path, not cwd).
+func stagedUpdateBundle(t *testing.T, contents map[string]string, logPath string, migrateExit int) (script, stageDir string) {
+	t.Helper()
+	stageDir = stageBundle(t, contents)
+	script = stageInstaller(t, stageDir)
+	stageMigration(t, stageDir, logPath, migrateExit)
+	return script, stageDir
+}
+
+// TestUpdateAsksTheMigrationToPlaceUnits: update mode renders unit FILES but
+// never loads them (the updater restarts the kernel out-of-band). The unit SHAPE
+// changed in 0.2.0 and a binary swap cannot carry that, so the migration has to
+// be the one that moves the host onto the new units — otherwise the 0.1.x unit
+// stays loaded and runs the 0.2.x binary as a user who cannot read the now
+// root-owned identity.
+func TestUpdateAsksTheMigrationToPlaceUnits(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
 
-	gwHome := seedLegacyIdentity(t, home, "identity")
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
 	staged := allBinsContent("v1-content")
 	staged["burrowee-gateway"] = "gw-v2-content"
-	stageDir := stageBundle(t, staged)
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 0)
 
-	runUpdate(t, stageDir, home, stub, []string{"BURROWEE_UPDATE=1"})
-
-	got := readFile(t, consentPath(home))
-	if want := gwHome + "\n"; got != want {
-		t.Errorf("consent = %q, want %q", got, want)
+	out, err := runStaged(t, script, stageDir, home, stub, "BURROWEE_UPDATE=1")
+	if err != nil {
+		t.Fatalf("install.sh update failed: %v\n%s", err, out)
 	}
+
+	assertContains(t, migrationLog(t, logPath), "BURROWEE_MIGRATE_UNITS=1")
 }
 
-// TestUpdateSkipsMigrationConsentForForeignSlot is the wrong-identity guard.
-// Update mode has no consent prompt, and it already refuses to touch a unit
-// slot recorded for another user. Recording a migration source is the same kind
-// of claim — whose identity the root daemon adopts — so it must defer too.
-// Recording this user's tree while another user owns the service would hand the
-// root daemon the wrong identity, and re-registering a node under a new
-// relay_ed.key is not something an operator can quietly undo.
-func TestUpdateSkipsMigrationConsentForForeignSlot(t *testing.T) {
+// TestUpdateSkipsTheMigrationForForeignSlot is the wrong-identity guard. Update
+// mode has no consent prompt and already refuses to touch a unit slot recorded
+// for another user; migrating is the same class of claim — whose identity the
+// root daemon adopts — so it must defer too. Adopting this user's tree while
+// another owns the service would hand the daemon the wrong identity, and a node
+// re-registering under a new relay_ed.key is not quietly undone.
+func TestUpdateSkipsTheMigrationForForeignSlot(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
 
-	seedLegacyIdentity(t, home, "identity")
 	seedForeignUnit(t, home)
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
 	staged := allBinsContent("v1-content")
 	staged["burrowee-gateway"] = "gw-v2-content"
-	stageDir := stageBundle(t, staged)
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 0)
 
-	out := runUpdate(t, stageDir, home, stub, []string{"BURROWEE_UPDATE=1"})
-
-	if _, err := os.Stat(consentPath(home)); !os.IsNotExist(err) {
-		t.Errorf("migration source recorded while user 'someone-else' owns the slot: %v", err)
+	out, err := runStaged(t, script, stageDir, home, stub, "BURROWEE_UPDATE=1")
+	if err != nil {
+		t.Fatalf("install.sh update failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "not recording a migration source") {
-		t.Errorf("no explanation of the deferral; output:\n%s", out)
+
+	if got := migrationLog(t, logPath); got != "" {
+		t.Errorf("migrated while user 'someone-else' owns the slot:\n%s", got)
+	}
+	if !strings.Contains(out, "not migrating either") {
+		t.Errorf("no explanation of the deferral:\n%s", out)
 	}
 	// The binary swap is independent and must still complete.
 	if got := readInstalled(t, binDir, "burrowee-gateway"); got != "gw-v2-content" {

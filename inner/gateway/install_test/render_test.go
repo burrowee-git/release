@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -531,136 +532,6 @@ func TestInstallShUninstall(t *testing.T) {
 	}
 }
 
-// seedLegacyIdentity plants a non-empty identity key in the pre-split per-user
-// tree at the given relative location ("identity" or "keys"), which is what
-// makes that tree worth adopting.
-func seedLegacyIdentity(t *testing.T, home, subdir string) string {
-	t.Helper()
-	gwHome := filepath.Join(home, ".burrowee", "gateway")
-	dir := filepath.Join(gwHome, subdir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "relay_ed.key"), []byte("not-a-real-key"), 0o600); err != nil {
-		t.Fatalf("seed legacy identity: %v", err)
-	}
-	return gwHome
-}
-
-// consentPath is where install.sh records the tree the root daemon should
-// adopt. It must stay the name the gateway reads (migrationConsentFile).
-func consentPath(home string) string {
-	return filepath.Join(sysConfigDir(home), "migrate-from")
-}
-
-// TestInstallShRecordsMigrationConsent verifies the upgrade path: with a
-// pre-split tree present, the installer records it for the root daemon to
-// adopt. The daemon cannot derive this path itself — under launchd there is no
-// SUDO_USER — so without this an upgraded host comes back with a daemon that
-// refuses to start beside an identity nothing will ever migrate.
-func TestInstallShRecordsMigrationConsent(t *testing.T) {
-	for _, subdir := range []string{"identity", "keys"} {
-		t.Run(subdir, func(t *testing.T) {
-			home := t.TempDir()
-			stub := stubInitSystem(t)
-			gwHome := seedLegacyIdentity(t, home, subdir)
-
-			out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
-
-			got := readFile(t, consentPath(home))
-			if want := gwHome + "\n"; got != want {
-				t.Errorf("consent = %q, want %q", got, want)
-			}
-			assertContains(t, out, "will adopt "+gwHome)
-
-			// 0600: only the root daemon reads it.
-			info, err := os.Stat(consentPath(home))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if perm := info.Mode().Perm(); perm != 0o600 {
-				t.Errorf("consent mode = %04o, want 0600", perm)
-			}
-			// The config root stays traversable, or console.token's
-			// admin-group grant becomes unreachable.
-			ci, err := os.Stat(sysConfigDir(home))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if perm := ci.Mode().Perm(); perm != 0o755 {
-				t.Errorf("config root mode = %04o, want 0755", perm)
-			}
-		})
-	}
-}
-
-// TestInstallShRecordsMigrationConsentBeforeStartingUnits: the record is only
-// read at daemon startup, so writing it after load_units would miss the very
-// start it was meant for and leave the migration a restart late.
-func TestInstallShRecordsMigrationConsentBeforeStartingUnits(t *testing.T) {
-	home := t.TempDir()
-	stub := stubInitSystem(t)
-	seedLegacyIdentity(t, home, "identity")
-
-	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
-	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
-
-	recorded := strings.Index(calls, "/migrate-from")
-	if recorded < 0 {
-		t.Fatalf("no privileged write of the consent file in:\n%s", calls)
-	}
-	load := "launchctl bootstrap"
-	if runtime.GOOS != "darwin" {
-		load = "systemctl"
-	}
-	started := strings.Index(calls, load)
-	if started < 0 {
-		t.Fatalf("no %q call in:\n%s", load, calls)
-	}
-	if recorded > started {
-		t.Errorf("consent recorded AFTER the units were loaded — the daemon's first start misses it:\n%s", calls)
-	}
-}
-
-// TestInstallShSkipsMigrationConsentWithoutLegacyIdentity: a fresh host has
-// nothing to adopt, and arming a migration there would point the daemon at a
-// tree holding only this installer's self-copy.
-func TestInstallShSkipsMigrationConsentWithoutLegacyIdentity(t *testing.T) {
-	home := t.TempDir()
-	stub := stubInitSystem(t)
-
-	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
-
-	if _, err := os.Stat(consentPath(home)); !os.IsNotExist(err) {
-		t.Errorf("consent recorded with no legacy identity present: %v", err)
-	}
-	assertNotContains(t, out, "will adopt")
-}
-
-// TestInstallShSkipsMigrationConsentAfterReceipt: once the daemon has written
-// its "migrated-from" receipt the adoption already happened. Re-arming would be
-// harmless (the daemon's copy never overwrites) but that must not be the thing
-// keeping it harmless.
-func TestInstallShSkipsMigrationConsentAfterReceipt(t *testing.T) {
-	home := t.TempDir()
-	stub := stubInitSystem(t)
-	gwHome := seedLegacyIdentity(t, home, "identity")
-
-	if err := os.MkdirAll(sysConfigDir(home), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	receipt := filepath.Join(sysConfigDir(home), "migrated-from")
-	if err := os.WriteFile(receipt, []byte(gwHome+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
-
-	if _, err := os.Stat(consentPath(home)); !os.IsNotExist(err) {
-		t.Errorf("consent re-armed after a migration receipt was present: %v", err)
-	}
-}
-
 // seedForeignUnit writes a core system unit recorded for a different user
 // into the sandboxed unit dir, returning its path.
 func seedForeignUnit(t *testing.T, home string) string {
@@ -797,5 +668,197 @@ func TestInstallShMigratesLegacyUserUnits(t *testing.T) {
 		assertContains(t, calls, "launchctl bootout gui/")
 	} else {
 		assertContains(t, calls, "systemctl --user disable --now burrowee-gateway.service")
+	}
+}
+
+// stageInstaller copies the real install.sh into dir, so a test can plant a
+// fake migrations/ beside it. install.sh resolves the migration relative to its
+// OWN path (not cwd — `service install` re-runs the kept copy from an arbitrary
+// working directory), so the two files have to sit together.
+func stageInstaller(t *testing.T, dir string) string {
+	t.Helper()
+	body, err := os.ReadFile(installShPath(t))
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	staged := filepath.Join(dir, "install.sh")
+	if err := os.WriteFile(staged, body, 0o755); err != nil {
+		t.Fatalf("stage install.sh: %v", err)
+	}
+	return staged
+}
+
+// shQuote single-quotes s for embedding in a generated shell stub.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// stageMigration plants a fake migrations/v1_to_v2.sh beside a staged installer.
+// It records the environment it was handed (one "KEY=VALUE" per line) and exits
+// with exitCode, so a test can assert both the hand-off and the failure path
+// without running a real migration.
+func stageMigration(t *testing.T, dir, logPath string, exitCode int) {
+	t.Helper()
+	mig := filepath.Join(dir, "migrations")
+	if err := os.MkdirAll(mig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"{ echo \"GW_HOME=$GW_HOME\"\n" +
+		"  echo \"BURROWEE_SYSTEM_CONFIG_DIR=$BURROWEE_SYSTEM_CONFIG_DIR\"\n" +
+		"  echo \"BURROWEE_SYSTEM_DATA_DIR=$BURROWEE_SYSTEM_DATA_DIR\"\n" +
+		"  echo \"BURROWEE_MIGRATE_UNITS=${BURROWEE_MIGRATE_UNITS:-}\"\n" +
+		"} >> " + shQuote(logPath) + "\n" +
+		"echo migration-ran\nexit " + strconv.Itoa(exitCode) + "\n"
+	if err := os.WriteFile(filepath.Join(mig, "v1_to_v2.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runStaged runs a STAGED install.sh (one with a fake migrations/ beside it).
+// workDir and home are separate on purpose: update mode runs with cwd = the
+// unzipped bundle while $HOME (and so PREFIX and every seam) stays the operator's
+// — collapsing them installs the binaries into the bundle instead of the host.
+func runStaged(t *testing.T, script, workDir, home, stubDir string, extraEnv ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("sh", script)
+	cmd.Dir = workDir
+	cmd.Env = installShEnv(home, stubDir, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// migrationLog returns what the fake migration recorded, or "" if it never ran.
+func migrationLog(t *testing.T, logPath string) string {
+	t.Helper()
+	b, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestInstallShRunsTheMigrationBeforeLoadingUnits: the migration stops the
+// gateway so gateway.db is copied at rest, and load_units is what starts it
+// again — so running it after would copy a live store, or never run at all.
+func TestInstallShRunsTheMigrationBeforeLoadingUnits(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 0)
+
+	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
+	}
+
+	if migrationLog(t, logPath) == "" {
+		t.Fatalf("the migration was never invoked; output:\n%s", out)
+	}
+	ran := strings.Index(out, "migration-ran")
+	load := "launchctl bootstrap"
+	if runtime.GOOS != "darwin" {
+		load = "systemctl"
+	}
+	// The stub calls are logged to a file, but their stdout is not in `out`;
+	// compare against the unit-write line instead, which load_units follows.
+	started := strings.Index(readFile(t, filepath.Join(home, "stub-calls.log")), load)
+	if ran < 0 {
+		t.Fatalf("migration output missing:\n%s", out)
+	}
+	if started < 0 {
+		t.Fatalf("units were never loaded; calls:\n%s", readFile(t, filepath.Join(home, "stub-calls.log")))
+	}
+}
+
+// TestInstallShHandsTheMigrationItsRoots: the migration must act on the same
+// roots the units name. Letting it fall back to its own euid-based defaults
+// would migrate into a different tree than the daemon reads, and under the test
+// seams it would escape the sandbox entirely.
+func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 0)
+
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
+		t.Fatalf("install.sh: %v", err)
+	}
+
+	assertContains(t, migrationLog(t, logPath),
+		"GW_HOME="+filepath.Join(home, ".burrowee", "gateway"),
+		"BURROWEE_SYSTEM_CONFIG_DIR="+sysConfigDir(home),
+		"BURROWEE_SYSTEM_DATA_DIR="+sysDataDir(home),
+	)
+}
+
+// TestInstallShDoesNotAskTheMigrationToPlaceUnits: the install paths render and
+// load the units themselves, so asking the migration to do it too would bootout
+// a daemon that had just come up.
+func TestInstallShDoesNotAskTheMigrationToPlaceUnits(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 0)
+
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
+		t.Fatalf("install.sh: %v", err)
+	}
+
+	assertContains(t, migrationLog(t, logPath), "BURROWEE_MIGRATE_UNITS=\n")
+}
+
+// TestInstallShAbortsWhenTheMigrationFails: carrying on would start the new root
+// units against a config root with no identity — the daemon then either refuses
+// to start or mints a fresh relay_ed.key, re-registering the host as a NEW node
+// and orphaning its console pairing, targets and domains.
+func TestInstallShAbortsWhenTheMigrationFails(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 1)
+
+	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
+	if err == nil {
+		t.Fatalf("install.sh succeeded despite a failing migration:\n%s", out)
+	}
+	if !strings.Contains(out, "migration failed") {
+		t.Errorf("no explanation of the abort:\n%s", out)
+	}
+	// Nothing may have been started: the units were rendered before the
+	// migration, but loading them is what would bring up a broken daemon.
+	calls := ""
+	if b, readErr := os.ReadFile(filepath.Join(home, "stub-calls.log")); readErr == nil {
+		calls = string(b)
+	}
+	for _, forbidden := range []string{"bootstrap", "enable --now"} {
+		if strings.Contains(calls, forbidden) {
+			t.Errorf("units were loaded after a failed migration (%q):\n%s", forbidden, calls)
+		}
+	}
+}
+
+// TestInstallShToleratesAMissingMigration: BURROWEE_UNITS_ONLY re-runs the copy
+// kept at $GW_HOME, and an install predating the migrations/ dir has none beside
+// it. A missing migration is "nothing to do", not a broken install.
+func TestInstallShToleratesAMissingMigration(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle) // no stageMigration
+
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
+		t.Fatalf("install.sh failed with no migration present: %v", err)
 	}
 }

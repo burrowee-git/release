@@ -202,65 +202,51 @@ ensure_system_log_dir() {
 }
 
 # ---------------------------------------------------------------------------
-# record_migration_consent — hand the root daemon the pre-split per-user tree
-# it should adopt, by writing $SYS_CONFIG_DIR/migrate-from (root, 0600).
+# migrate_from_legacy — run the release's migrations/v1_to_v2.sh, which performs the
+# 0.1.x → 0.2.x config migration when it detects a 0.1.x install.
 #
-# Before the multi-user split the gateway kept its identity, config and store
-# under $GW_HOME. The daemon now runs as root out of the system roots, and it
-# cannot work out that legacy path for itself: under launchd/systemd there is
-# no SUDO_USER to derive a home from, and its legacy-tree scan — which does
-# find such trees — deliberately refuses to adopt one, because on a multi-user
-# host picking a home would mean picking somebody's identity for them.
+# 0.2.0 is the version that moved the gateway's config and state into the SYSTEM
+# roots with the daemon running as root, so a 0.1.x host holds its identity,
+# config and store somewhere the new daemon will not look. The script owns the
+# whole decision — version detection, stopping the old gateway, and the copy —
+# and is a no-op on anything already migrated, so this may be called
+# unconditionally.
 #
-# This installer can answer both halves: it knows the path, and it was run BY
-# that user, which is the consent. Recording it rather than passing
-# --migrate-from in the unit keeps the unit body free of anything per-user (the
-# two writers must render it byte-identically), and it lets the copy happen at
-# the daemon's next start — which is the only safe moment for it, since the
-# single unit slot means the old instance has been booted out by then and
-# gateway.db is no longer being written.
+# Called BEFORE any step that starts the gateway, never after: the script stops
+# it so gateway.db is at rest while it is copied.
 #
-# Skipped when there is no identity to adopt, and when this config root already
-# carries the daemon's own "migrated-from" receipt. The receipt is what gets
-# tested rather than the destination key: the key sits in a 0700 root-owned
-# identity/, which a non-root installer cannot stat at all, whereas the receipt
-# lies directly in the traversable config root. Re-arming would be harmless
-# either way — the daemon's copy never overwrites — but it should not be the
-# thing keeping it harmless.
+# The single argument decides who places the new units, and the two modes differ:
+#   with-units  update mode, which renders unit FILES but never loads them (the
+#               updater restarts the kernel out-of-band). The unit SHAPE changed
+#               in 0.2.0, and a binary swap cannot carry that — without this the
+#               0.1.x unit stays loaded and would run the 0.2.x binary as the
+#               invoking user, who cannot read the now root-owned identity.
+#   (empty)     the install paths, where load_units below places and loads them
+#               anyway; asking the script to do it too would bootout a daemon
+#               that had just come up.
+#
+# A migration failure is FATAL. Carrying on would start the new root units
+# against a config root with no identity: the daemon then either refuses to
+# start or mints a fresh one, and a new relay_ed.key re-registers this host as a
+# NEW node — orphaning its console pairing, targets and domains.
+#
+# Not found is not an error: BURROWEE_UNITS_ONLY runs from $GW_HOME's self-copy
+# rather than an unzipped release dir, where there is no migrations/ dir beside us.
 # ---------------------------------------------------------------------------
-record_migration_consent() {
-    if [ ! -s "$GW_HOME/identity/relay_ed.key" ] && [ ! -s "$GW_HOME/keys/relay_ed.key" ]; then
-        return 0
+migrate_from_legacy() {
+    _migrate="$(dirname "$0")/migrations/v1_to_v2.sh"
+    if [ ! -f "$_migrate" ]; then return 0; fi
+    _migrate_units=""
+    if [ "${1:-}" = "with-units" ]; then _migrate_units=1; fi
+    if ! GW_HOME="$GW_HOME" \
+         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR" \
+         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR" \
+         BURROWEE_MIGRATE_UNITS="$_migrate_units" \
+         sh "$_migrate"; then
+        echo "error: the 0.1.x → 0.2.x migration failed — stopping before the service is started." >&2
+        echo "hint: $GW_HOME is untouched; fix the cause reported above and re-run this installer." >&2
+        exit 1
     fi
-    if [ -f "$SYS_CONFIG_DIR/migrated-from" ]; then return 0; fi
-
-    _consent="$SYS_CONFIG_DIR/migrate-from"
-    _tmp_consent="$(mktemp)"
-    printf '%s\n' "$GW_HOME" > "$_tmp_consent"
-    # Already recorded, same value: writing it again would only spend a sudo.
-    if [ -f "$_consent" ] && cmp -s "$_tmp_consent" "$_consent"; then
-        rm -f "$_tmp_consent"
-        return 0
-    fi
-    if [ ! -d "$SYS_CONFIG_DIR" ]; then
-        if ! run_root mkdir -p "$SYS_CONFIG_DIR"; then
-            rm -f "$_tmp_consent"
-            echo "note: could not create $SYS_CONFIG_DIR — see the migration hint below" >&2
-            echo "hint: after upgrading, run: sudo burrowee-gateway --migrate-from $GW_HOME" >&2
-            return 0
-        fi
-        # Traversable (0755) like the daemon's own EnsureConfigRoot: everything
-        # inside stays tight, but a 0700 root would revoke the admin-group
-        # grant on console.token.
-        run_root chmod 0755 "$SYS_CONFIG_DIR" 2>/dev/null || true
-    fi
-    if run_root /usr/bin/install -m 0600 "$_tmp_consent" "$_consent"; then
-        echo "migration: the gateway will adopt $GW_HOME on its next start"
-    else
-        echo "note: could not record the migration source at $_consent (needs root)." >&2
-        echo "hint: after upgrading, run: sudo burrowee-gateway --migrate-from $GW_HOME" >&2
-    fi
-    rm -f "$_tmp_consent"
 }
 
 # ---------------------------------------------------------------------------
@@ -443,9 +429,9 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     check_service_override
     remove_legacy_user_units
     render_units
-    # Before load_units, never after: load_units is what starts the daemon that
-    # consumes the record.
-    record_migration_consent
+    # Before load_units, never after: the migration stops the gateway to copy its
+    # store at rest, and load_units is what starts it again.
+    migrate_from_legacy
     load_units
     exit 0
 fi
@@ -552,10 +538,13 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         # undone — a re-registered node under the wrong identity. Update mode has
         # no consent prompt to settle it (unlike the install paths, which run
         # check_service_override first), so it defers instead.
-        record_migration_consent
+        #
+        # with-units: this mode renders unit FILES without loading them, so
+        # the migration has to be the one that moves the host onto the new units.
+        migrate_from_legacy with-units
     else
         echo "note: gateway system service belongs to user '$_slot_owner' — units not refreshed" >&2
-        echo "note: not recording a migration source either — 'burrowee gateway service install' takes the slot over first" >&2
+        echo "note: not migrating either — 'burrowee gateway service install' takes the slot over first" >&2
     fi
     mkdir -p "$GW_HOME"
     cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
@@ -623,13 +612,18 @@ esac
 # `service install` verbs can re-render + reload units without a new download.
 mkdir -p "$GW_HOME"
 cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
+# Keep the migrations dir beside the self-copy: install.sh resolves it relative
+# to its own path, so a later 'service install' run from $GW_HOME would otherwise
+# find no migration script at all.
+mkdir -p "$GW_HOME/migrations"
+cp "$(dirname "$0")/migrations/v1_to_v2.sh" "$GW_HOME/migrations/v1_to_v2.sh" 2>/dev/null || true
 
 # Write and load both SYSTEM service units (single-slot consent first, then
 # migrate any legacy per-user units out of the way).
 check_service_override
 remove_legacy_user_units
 render_units
-record_migration_consent
+migrate_from_legacy
 load_units
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------
