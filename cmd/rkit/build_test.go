@@ -393,6 +393,54 @@ func TestBuildRecordsCompStamp(t *testing.T) {
 	}
 }
 
+// TestBuildRelativeRepoWritesIntoReleaseRepoNotSource pins the flag's own default.
+// `rkit build --repo .` (build.go:69) used RepoDir verbatim, so the derived
+// OutDir stayed relative — and release-kit's build.Compile creates OutDir in the
+// rkit process cwd while passing `-o <relative path>` to a `go build` whose
+// cmd.Dir is SrcDir (release-kit build/build.go:77-92). The binaries therefore
+// landed in the COMPONENT source worktree and the sign step, resolving the same
+// relative path from rkit's cwd, failed with a message naming codesign.
+//
+// TWO directories are load-bearing here. Every other test in this file doubles
+// one dir as repo and source, where a relative OutDir resolves to the same place
+// either way and the bug is invisible.
+func TestBuildRelativeRepoWritesIntoReleaseRepoNotSource(t *testing.T) {
+	repo := t.TempDir() // the release repo: versions/, inner/, tools/
+	src := t.TempDir()  // the component source worktree
+	writeFixtureModule(t, repo)
+	writeFixtureModule(t, src)
+
+	t.Chdir(repo) // rkit is invoked from the release repo; --repo . means "here"
+
+	if err := buildRun(buildOpts{
+		Component: "cli", RepoDir: ".", SrcDir: src, DispatcherDir: src,
+		NoVulncheck: true, SignKey: testMinisignKey(t),
+	}); err != nil {
+		t.Fatalf("buildRun(--repo .): %v", err)
+	}
+
+	// Anti-vacuity: the artifacts must actually be somewhere, or "nothing was
+	// written into the source tree" passes for a build that produced nothing.
+	stamp := mustStamp(t, repo, "cli")
+	if _, err := os.Stat(filepath.Join(repo, "dist", stamp, "burrowee-cli-linux-amd64.zip")); err != nil {
+		t.Fatalf("no zip under the RELEASE repo's dist/%s: %v", stamp, err)
+	}
+
+	// The defect itself: nothing may be written into the component source tree.
+	if _, err := os.Stat(filepath.Join(src, "dist")); !os.IsNotExist(err) {
+		t.Errorf("dist/ exists in the COMPONENT source worktree %s (stat err = %v) — "+
+			"a relative --repo must resolve against the release repo, not leak into the "+
+			"tree being compiled", src, err)
+	}
+	out, err := exec.Command("git", "-C", src, "status", "--porcelain", "--untracked-files=all").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status in source tree: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("the component source worktree is no longer clean:\n%s", out)
+	}
+}
+
 // TestBuildDryRunDoesNotRecordCompStamp is the other half of the contract, and
 // the more dangerous direction: --dry-run publishes nothing, so a stamp left
 // behind by one would be read by the NEXT unchanged-source cut as proof that
