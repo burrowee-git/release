@@ -202,50 +202,79 @@ ensure_system_log_dir() {
 }
 
 # ---------------------------------------------------------------------------
-# migrate_from_legacy — run the release's migrations/v1_to_v2.sh, which performs the
-# 0.1.x → 0.2.x config migration when it detects a 0.1.x install.
+# migrate_from_legacy — run the release's migrations/run.sh, which walks every
+# migration in its ledger and runs the ones this host has not reached yet.
 #
-# 0.2.0 is the version that moved the gateway's config and state into the SYSTEM
-# roots with the daemon running as root, so a 0.1.x host holds its identity,
-# config and store somewhere the new daemon will not look. The script owns the
-# whole decision — version detection, stopping the old gateway, and the copy —
-# and is a no-op on anything already migrated, so this may be called
-# unconditionally.
+# The runner owns the whole decision: it resolves the installed version, gates
+# each migration on `installed_ver < target`, runs them oldest first, and records
+# each one that completes. It is a no-op unless one applies, so this may be
+# called unconditionally.
 #
-# Called BEFORE any step that starts the gateway, never after: the script stops
-# it so gateway.db is at rest while it is copied.
+# Called BEFORE any step that starts the gateway, never after: the runner stops
+# the gateway so its state is at rest while it is copied, and leaves the restart
+# to us.
 #
-# The single argument decides who places the new units, and the two modes differ:
-#   with-units  update mode, which renders unit FILES but never loads them (the
-#               updater restarts the kernel out-of-band). The unit SHAPE changed
-#               in 0.2.0, and a binary swap cannot carry that — without this the
-#               0.1.x unit stays loaded and would run the 0.2.x binary as the
-#               invoking user, who cannot read the now root-owned identity.
-#   (empty)     the install paths, where load_units below places and loads them
-#               anyway; asking the script to do it too would bootout a daemon
-#               that had just come up.
+# It places no units and knows nothing about them. Unit placement is render_units
+# + load_units below, on the paths that have them; reaching the units from inside
+# a migration would mean re-entering this script via `service install` and
+# booting out whichever supervisor is running it.
 #
-# A migration failure is FATAL. Carrying on would start the new root units
-# against a config root with no identity: the daemon then either refuses to
-# start or mints a fresh one, and a new relay_ed.key re-registers this host as a
-# NEW node — orphaning its console pairing, targets and domains.
+# MIGRATED is set when the runner reports exit 2 — "migrations ran, the gateway is
+# stopped" — so a mode with no load_units step can say so rather than leaving the
+# operator to discover a stopped service.
 #
-# Not found is not an error: BURROWEE_UNITS_ONLY runs from $GW_HOME's self-copy
-# rather than an unzipped release dir, where there is no migrations/ dir beside us.
+# Any other non-zero is FATAL. Carrying on would start the new root units against
+# a config root with no identity: the daemon then either refuses to start or mints
+# a fresh one, and a new relay_ed.key re-registers this host as a NEW node,
+# orphaning its console pairing, targets and domains.
+#
+# Not found is not an error: BURROWEE_UNITS_ONLY can run from $GW_HOME's
+# self-copy, and an install predating the migrations/ dir has none beside it.
 # ---------------------------------------------------------------------------
+MIGRATED=0
 migrate_from_legacy() {
-    _migrate="$(dirname "$0")/migrations/v1_to_v2.sh"
-    if [ ! -f "$_migrate" ]; then return 0; fi
-    _migrate_units=""
-    if [ "${1:-}" = "with-units" ]; then _migrate_units=1; fi
-    if ! GW_HOME="$GW_HOME" \
-         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR" \
-         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR" \
-         BURROWEE_MIGRATE_UNITS="$_migrate_units" \
-         sh "$_migrate"; then
-        echo "error: the 0.1.x → 0.2.x migration failed — stopping before the service is started." >&2
+    _runner="$(dirname "$0")/migrations/run.sh"
+    if [ ! -f "$_runner" ]; then return 0; fi
+    set +e
+    GW_HOME="$GW_HOME" \
+        PREFIX="${PREFIX:-$HOME/.local}" \
+        BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR" \
+        BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR" \
+        SUDO="${SUDO:-sudo}" \
+        sh "$_runner"
+    _rc=$?
+    set -e
+    case "$_rc" in
+    0) ;;
+    2) MIGRATED=1 ;;
+    *)
+        echo "error: a state migration failed — stopping before the service is started." >&2
         echo "hint: $GW_HOME is untouched; fix the cause reported above and re-run this installer." >&2
         exit 1
+        ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# keep_installer_copy — keep this installer AND the migrations beside it under
+# $GW_HOME, so a later `service install` can re-render units and run any pending
+# migration without a fresh download.
+#
+# Both, in every mode. install.sh resolves the runner relative to its OWN path, so
+# a $GW_HOME holding install.sh without migrations/ is an installer that silently
+# cannot migrate — and `burrowee gateway service install` is the remedy this
+# script points operators at.
+# ---------------------------------------------------------------------------
+keep_installer_copy() {
+    mkdir -p "$GW_HOME"
+    cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
+    _src_migrations="$(dirname "$0")/migrations"
+    if [ -d "$_src_migrations" ]; then
+        mkdir -p "$GW_HOME/migrations"
+        if ! cp "$_src_migrations"/*.sh "$GW_HOME/migrations/" 2>/dev/null; then
+            echo "note: could not keep a copy of migrations/ at $GW_HOME — a later" >&2
+            echo "note: 'burrowee gateway service install' will not be able to migrate." >&2
+        fi
     fi
 }
 
@@ -513,11 +542,11 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         rm -f "$BIN_DIR/$b.bak-$$"
     done
 
-    # Record installed version if provided.
-    if [ -n "$_install_version" ]; then
-        mkdir -p "$GW_HOME"
-        printf '%s\n' "$_install_version" > "$GW_HOME/.installed-version"
-    fi
+    # The kept copy FIRST, before the migration runs. `service install` re-runs
+    # $GW_HOME/install.sh, so a stale copy there is a stale unit-writer; and the
+    # runner is resolved beside whichever install.sh is executing, so the copy is
+    # also what makes a later `service install` able to migrate at all.
+    keep_installer_copy
 
     # Refresh the system unit FILES only — never load/restart them here (the
     # updater restarts the kernel out-of-band; loading would bootout the very
@@ -527,27 +556,34 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     _slot_owner="$(unit_owner "$(core_unit_path)")"
     if [ -z "$_slot_owner" ] || [ "$_slot_owner" = "$SERVICE_USER" ]; then
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
-        # The upgrade path that matters most: this is how an existing pre-split
-        # install reaches the root daemon. load_units is deliberately not called
-        # here (the updater restarts the kernel out-of-band), and that restart is
-        # itself a stop-then-start, so the record is consumed in a safe window.
-        #
-        # Inside this branch, not beside it: recording a tree is claiming whose
-        # identity the root daemon adopts, and on a slot that belongs to someone
-        # else that claim would be wrong in the one direction that cannot be
-        # undone — a re-registered node under the wrong identity. Update mode has
-        # no consent prompt to settle it (unlike the install paths, which run
+        # Inside this branch, not beside it: a migration claims whose identity the
+        # root daemon adopts, and on a slot belonging to someone else that claim
+        # would be wrong in the one direction that cannot be undone — a
+        # re-registered node under the wrong identity. Update mode has no consent
+        # prompt to settle it (unlike the install paths, which run
         # check_service_override first), so it defers instead.
-        #
-        # with-units: this mode renders unit FILES without loading them, so
-        # the migration has to be the one that moves the host onto the new units.
-        migrate_from_legacy with-units
+        migrate_from_legacy
     else
         echo "note: gateway system service belongs to user '$_slot_owner' — units not refreshed" >&2
         echo "note: not migrating either — 'burrowee gateway service install' takes the slot over first" >&2
     fi
-    mkdir -p "$GW_HOME"
-    cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
+
+    # The version LAST, and only once everything above succeeded. Recording it
+    # before the migration would mean a failed migration leaves the new version on
+    # disk with the old layout still in place — after which every later run reads
+    # "already up to date" and the host never migrates again. A failed migration
+    # exits non-zero above, so reaching here means there is nothing pending.
+    if [ -n "$_install_version" ]; then
+        mkdir -p "$GW_HOME"
+        printf '%s\n' "$_install_version" > "$GW_HOME/.installed-version"
+    fi
+
+    # This mode has no start step of its own; say so rather than leaving the
+    # operator to find a stopped service.
+    if [ "$MIGRATED" = "1" ]; then
+        echo "note: a migration stopped the gateway — it starts again on the updater's restart," >&2
+        echo "note: or run 'burrowee gateway restart' now." >&2
+    fi
 
     # Final change-set line (MUST be the last stdout line).
     printf 'BURROWEE_CHANGED=%s\n' "$CHANGED"
@@ -608,15 +644,9 @@ esac
 
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
-# Self-copy: keep a copy of this installer at $GW_HOME/install.sh so subsequent
-# `service install` verbs can re-render + reload units without a new download.
-mkdir -p "$GW_HOME"
-cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
-# Keep the migrations dir beside the self-copy: install.sh resolves it relative
-# to its own path, so a later 'service install' run from $GW_HOME would otherwise
-# find no migration script at all.
-mkdir -p "$GW_HOME/migrations"
-cp "$(dirname "$0")/migrations/v1_to_v2.sh" "$GW_HOME/migrations/v1_to_v2.sh" 2>/dev/null || true
+# Keep this installer + its migrations at $GW_HOME so subsequent `service install`
+# verbs can re-render units and run a pending migration without a new download.
+keep_installer_copy
 
 # Write and load both SYSTEM service units (single-slot consent first, then
 # migrate any legacy per-user units out of the way).

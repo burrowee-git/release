@@ -151,7 +151,7 @@ func TestAssembleWithExtras(t *testing.T) {
 // TestExtraPayloadUpdateScripts asserts each component's scripted payload:
 // gateway + cli carry update.sh but no updater.update.sh (their updater
 // self-updates by an in-process binary swap), while edge + relay carry both.
-// gateway additionally carries migrations/v1_to_v2.sh. A missing file is
+// gateway additionally carries its whole migrations/ dir. A missing file is
 // fail-loud (returned error) for every scripted component.
 func TestExtraPayloadUpdateScripts(t *testing.T) {
 	names := func(cs []pack.Content) []string {
@@ -177,13 +177,20 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		return dir
 	}
 
-	t.Run("gateway ships update.sh plus the migration", func(t *testing.T) {
-		src := writeSrc(t, "update.sh", filepath.Join("migrations", "v1_to_v2.sh"))
+	// Every script in migrations/ ships, discovered by glob — adding a migration
+	// must not require a change here, or the runner's ledger could name a script
+	// that is not in the zip.
+	t.Run("gateway ships update.sh plus every migration", func(t *testing.T) {
+		src := writeSrc(t, "update.sh",
+			filepath.Join("migrations", "run.sh"),
+			filepath.Join("migrations", "v1_to_v2.sh"),
+			filepath.Join("migrations", "v2_to_v3.sh"))
 		got, err := extraPayload("gateway", src)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := []string{"migrations/v1_to_v2.sh", "update.sh"}; !reflect.DeepEqual(names(got), want) {
+		want := []string{"migrations/run.sh", "migrations/v1_to_v2.sh", "migrations/v2_to_v3.sh", "update.sh"}
+		if !reflect.DeepEqual(names(got), want) {
 			t.Errorf("gateway extras = %v, want %v", names(got), want)
 		}
 	})
@@ -192,7 +199,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	// are always "/"-separated, and a filepath.Join here would silently produce
 	// a backslash member the moment this is built anywhere non-unix.
 	t.Run("the migration's zip name is slash-separated", func(t *testing.T) {
-		src := writeSrc(t, "update.sh", filepath.Join("migrations", "v1_to_v2.sh"))
+		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"), filepath.Join("migrations", "v1_to_v2.sh"))
 		got, err := extraPayload("gateway", src)
 		if err != nil {
 			t.Fatal(err)
@@ -211,13 +218,22 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		}
 	})
 
-	// Fail-loud, not best-effort: a gateway zip without the migration turns
-	// every 0.1.x upgrade into a daemon that comes back without its identity,
-	// which is far worse than a build that stops here.
-	t.Run("gateway without the migration is a build error", func(t *testing.T) {
+	// Fail-loud, not best-effort: a gateway zip without the runner turns every
+	// upgrade that needs a migration into a daemon that comes back without its
+	// state, which is far worse than a build that stops here.
+	t.Run("gateway without the runner is a build error", func(t *testing.T) {
 		src := writeSrc(t, "update.sh")
 		if _, err := extraPayload("gateway", src); err == nil {
-			t.Error("missing migrations/v1_to_v2.sh accepted, want a build error")
+			t.Error("missing migrations/run.sh accepted, want a build error")
+		}
+	})
+
+	// A migrations/ dir holding scripts but no runner is the subtler mistake:
+	// nothing invokes them, so the zip looks complete and migrates nothing.
+	t.Run("migrations without the runner is a build error", func(t *testing.T) {
+		src := writeSrc(t, "update.sh", filepath.Join("migrations", "v1_to_v2.sh"))
+		if _, err := extraPayload("gateway", src); err == nil {
+			t.Error("migrations/ without run.sh accepted, want a build error")
 		}
 	})
 

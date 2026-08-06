@@ -693,10 +693,10 @@ func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// stageMigration plants a fake migrations/v1_to_v2.sh beside a staged installer.
-// It records the environment it was handed (one "KEY=VALUE" per line) and exits
-// with exitCode, so a test can assert both the hand-off and the failure path
-// without running a real migration.
+// stageMigration plants a fake migrations/run.sh beside a staged installer. It
+// records the environment it was handed (one "KEY=VALUE" per line) and exits with
+// exitCode, so a test can assert the hand-off, the "migrations ran" contract
+// (exit 2) and the failure path without running a real migration.
 func stageMigration(t *testing.T, dir, logPath string, exitCode int) {
 	t.Helper()
 	mig := filepath.Join(dir, "migrations")
@@ -704,13 +704,15 @@ func stageMigration(t *testing.T, dir, logPath string, exitCode int) {
 		t.Fatal(err)
 	}
 	script := "#!/bin/sh\n" +
+		"_kept=no; [ -f \"$GW_HOME/install.sh\" ] && [ -f \"$GW_HOME/migrations/run.sh\" ] && _kept=yes\n" +
 		"{ echo \"GW_HOME=$GW_HOME\"\n" +
+		"  echo \"KEPT_INSTALLER=$_kept\"\n" +
 		"  echo \"BURROWEE_SYSTEM_CONFIG_DIR=$BURROWEE_SYSTEM_CONFIG_DIR\"\n" +
 		"  echo \"BURROWEE_SYSTEM_DATA_DIR=$BURROWEE_SYSTEM_DATA_DIR\"\n" +
-		"  echo \"BURROWEE_MIGRATE_UNITS=${BURROWEE_MIGRATE_UNITS:-}\"\n" +
+		"  echo \"SUDO=${SUDO:-}\"\n" +
 		"} >> " + shQuote(logPath) + "\n" +
 		"echo migration-ran\nexit " + strconv.Itoa(exitCode) + "\n"
-	if err := os.WriteFile(filepath.Join(mig, "v1_to_v2.sh"), []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(mig, "run.sh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -721,7 +723,16 @@ func stageMigration(t *testing.T, dir, logPath string, exitCode int) {
 // — collapsing them installs the binaries into the bundle instead of the host.
 func runStaged(t *testing.T, script, workDir, home, stubDir string, extraEnv ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("sh", script)
+	return runStagedArgs(t, script, workDir, home, stubDir, nil, extraEnv...)
+}
+
+// runStagedArgs is runStaged with positional script arguments. install.sh's update
+// mode reads --version from ARGV, not the environment, so a test that needs it must
+// pass it here — putting it in extraEnv leaves _install_version empty and any
+// assertion about the recorded version passes for the wrong reason.
+func runStagedArgs(t *testing.T, script, workDir, home, stubDir string, scriptArgs []string, extraEnv ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("sh", append([]string{script}, scriptArgs...)...)
 	cmd.Dir = workDir
 	cmd.Env = installShEnv(home, stubDir, extraEnv...)
 	out, err := cmd.CombinedOutput()
@@ -799,10 +810,12 @@ func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
 	)
 }
 
-// TestInstallShDoesNotAskTheMigrationToPlaceUnits: the install paths render and
-// load the units themselves, so asking the migration to do it too would bootout
-// a daemon that had just come up.
-func TestInstallShDoesNotAskTheMigrationToPlaceUnits(t *testing.T) {
+// TestInstallShForwardsItsSudoSeamToTheMigration: install.sh has its own root
+// discipline (run_root: direct when root, prompting sudo on a tty, `sudo -n`
+// otherwise). The migration elevates too, so without the seam it would fall back
+// to a bare prompting sudo — from a curl-pipe install with no tty, or from a
+// daemon, where the surrounding script guarantees it never prompts.
+func TestInstallShForwardsItsSudoSeamToTheMigration(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	bundle := t.TempDir()
@@ -810,11 +823,11 @@ func TestInstallShDoesNotAskTheMigrationToPlaceUnits(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 	stageMigration(t, bundle, logPath, 0)
 
-	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1", "SUDO=/stub/sudo"); err != nil {
 		t.Fatalf("install.sh: %v", err)
 	}
 
-	assertContains(t, migrationLog(t, logPath), "BURROWEE_MIGRATE_UNITS=\n")
+	assertContains(t, migrationLog(t, logPath), "SUDO=/stub/sudo")
 }
 
 // TestInstallShAbortsWhenTheMigrationFails: carrying on would start the new root

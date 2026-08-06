@@ -372,13 +372,12 @@ func stagedUpdateBundle(t *testing.T, contents map[string]string, logPath string
 	return script, stageDir
 }
 
-// TestUpdateAsksTheMigrationToPlaceUnits: update mode renders unit FILES but
-// never loads them (the updater restarts the kernel out-of-band). The unit SHAPE
-// changed in 0.2.0 and a binary swap cannot carry that, so the migration has to
-// be the one that moves the host onto the new units — otherwise the 0.1.x unit
-// stays loaded and runs the 0.2.x binary as a user who cannot read the now
-// root-owned identity.
-func TestUpdateAsksTheMigrationToPlaceUnits(t *testing.T) {
+// TestUpdateKeepsTheInstallerCopyBeforeMigrating: `service install` re-runs
+// $GW_HOME/install.sh, and the runner is resolved beside whichever install.sh is
+// executing. If the self-copy happened after the migration, the kept copy would be
+// the PREVIOUS version's installer — a stale unit-writer, and on a host whose only
+// contact with this release was update mode, a $GW_HOME with no migrations/ at all.
+func TestUpdateKeepsTheInstallerCopyBeforeMigrating(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	binDir := home + "/.local/bin"
@@ -394,7 +393,68 @@ func TestUpdateAsksTheMigrationToPlaceUnits(t *testing.T) {
 		t.Fatalf("install.sh update failed: %v\n%s", err, out)
 	}
 
-	assertContains(t, migrationLog(t, logPath), "BURROWEE_MIGRATE_UNITS=1")
+	// Asserted from INSIDE the migration: it records whether the kept copy was
+	// already in place when it ran. Checking afterwards would pass just as happily
+	// with the copy written last, which is the bug.
+	log := migrationLog(t, logPath)
+	if log == "" {
+		t.Fatal("the migration never ran")
+	}
+	assertContains(t, log, "KEPT_INSTALLER=yes")
+}
+
+// TestUpdateRecordsTheVersionOnlyAfterMigrating: recording it first means a failed
+// migration leaves the NEW version on disk beside the OLD layout, after which the
+// runner's gate reads "already up to date" and the host never migrates again.
+func TestUpdateRecordsTheVersionOnlyAfterMigrating(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 1) // migration FAILS
+
+	out, err := runStagedArgs(t, script, stageDir, home, stub,
+		[]string{"--version", "0.2.0"}, "BURROWEE_UPDATE=1")
+	if err == nil {
+		t.Fatalf("install.sh update succeeded despite a failing migration:\n%s", out)
+	}
+
+	versionFile := filepath.Join(home, ".burrowee", "gateway", ".installed-version")
+	if b, readErr := os.ReadFile(versionFile); readErr == nil {
+		t.Errorf("version recorded despite the failed migration: %q", string(b))
+	}
+}
+
+// TestUpdateReportsAStoppedGatewayAfterMigrating: update mode renders unit files
+// but never loads them, so it has no start step of its own. The runner's exit 2
+// means it stopped the gateway — say so rather than leaving the operator to find a
+// dead service.
+func TestUpdateReportsAStoppedGatewayAfterMigrating(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 2) // "migrations ran"
+
+	out, err := runStaged(t, script, stageDir, home, stub, "BURROWEE_UPDATE=1")
+	if err != nil {
+		t.Fatalf("exit 2 from the runner must not fail the update: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "stopped the gateway") {
+		t.Errorf("no notice that the gateway is down:\n%s", out)
+	}
+	// The change-set line still has to be last on stdout — core parses it.
+	if got := lastLineWithPrefix(out, "BURROWEE_CHANGED="); got == "" {
+		t.Errorf("BURROWEE_CHANGED line missing:\n%s", out)
+	}
 }
 
 // TestUpdateSkipsTheMigrationForForeignSlot is the wrong-identity guard. Update

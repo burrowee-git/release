@@ -59,8 +59,8 @@ func assemble(comp, stamp, outRoot, installSh string, extras []pack.Content, com
 //     burrowee-<comp>-updater runs `sh ./update.sh` (service update) /
 //     `sh ./updater.update.sh` (updater self-update) with cwd = the unzipped
 //     bundle, so both must ship alongside the bins.
-//   - gateway additionally carries migrations/v1_to_v2.sh, the 0.1.x → 0.2.x config
-//     migration invoked by both install.sh and update.sh from the unzipped dir.
+//   - gateway additionally carries the whole migrations/ dir (run.sh + every
+//     migration in its ledger), invoked by install.sh and update.sh from the unzipped dir.
 //   - gateway + cli carry update.sh ONLY. Core's Phase-0 routing execs the
 //     bundled ./update.sh for a non-force `update`, so it must ship. They do
 //     NOT carry updater.update.sh: their updater self-updates via an in-process
@@ -92,20 +92,35 @@ func extraPayload(comp, srcDir string) ([]pack.Content, error) {
 		extras = append(extras, pack.Content{Src: p, Name: s})
 	}
 	if comp == "gateway" {
-		// migrations/v1_to_v2.sh performs the 0.1.x → 0.2.x config migration (0.2.0 moved the
-		// gateway's config and state into SYSTEM roots, with the daemon running as
-		// root). Both install.sh and update.sh invoke it from the unzipped release
-		// dir, so it has to be IN the zip — and REQUIRED, not best-effort: a
-		// gateway zip without it turns every 0.1.x upgrade into a daemon that comes
-		// back without its identity, which is worse than a build that fails here.
-		// The zip entry name is a literal forward-slash path (like covers/ above):
-		// archive members are always "/"-separated, so filepath.Join would be
-		// wrong the moment this is built anywhere non-unix.
-		p := filepath.Join(srcDir, "migrations", "v1_to_v2.sh")
-		if _, err := os.Stat(p); err != nil {
-			return nil, fmt.Errorf("gateway migration script missing in source %s: %w", p, err)
+		// The whole migrations/ dir rides along: migrations/run.sh is the runner
+		// install.sh and update.sh invoke, and it needs every migration named in
+		// its ledger present, because a host may be upgrading across several
+		// releases at once. Discovered by glob rather than listed here, so adding a
+		// migration stays a gateway-repo change — a hardcoded list would silently
+		// ship a runner whose ledger names a script that is not in the zip.
+		//
+		// run.sh is REQUIRED: a gateway zip without it turns every upgrade that
+		// needs a migration into a daemon that comes back without its state, which
+		// is far worse than a build that stops here.
+		mig := filepath.Join(srcDir, "migrations")
+		scripts, globErr := filepath.Glob(filepath.Join(mig, "*.sh"))
+		if globErr != nil {
+			return nil, fmt.Errorf("gateway migrations glob %s: %w", mig, globErr)
 		}
-		extras = append(extras, pack.Content{Src: p, Name: "migrations/v1_to_v2.sh"})
+		sort.Strings(scripts)
+		haveRunner := false
+		for _, p := range scripts {
+			base := filepath.Base(p)
+			if base == "run.sh" {
+				haveRunner = true
+			}
+			// Zip member names are always "/"-separated; filepath.Join would be
+			// wrong the moment this is built anywhere non-unix.
+			extras = append(extras, pack.Content{Src: p, Name: "migrations/" + base})
+		}
+		if !haveRunner {
+			return nil, fmt.Errorf("gateway migration runner missing in source %s", filepath.Join(mig, "run.sh"))
+		}
 	}
 	if comp == "edge" {
 		edgeWeb := os.Getenv("EDGE_WEB_DIR")
