@@ -441,6 +441,43 @@ func TestBuildRelativeRepoWritesIntoReleaseRepoNotSource(t *testing.T) {
 	}
 }
 
+// TestOrchestrateRejectsRelativePaths pins the fail-closed guard added at the
+// top of orchestrate: every one of RepoDir/SrcDir/DispatcherDir/OutDir must be
+// absolute, or orchestrate must refuse before touching the filesystem for
+// anything beyond the check itself (no fixture module is written — a failing
+// guard here has nothing else to blame the error on). An unreached guard is
+// worth as little as no guard, so each field is exercised on its own so a
+// broken check on one field can't hide behind the other three passing.
+func TestOrchestrateRejectsRelativePaths(t *testing.T) {
+	ctx := context.Background()
+	abs := t.TempDir()
+	base := Options{Component: "cli", OutDir: abs, RepoDir: abs, SrcDir: abs, DispatcherDir: abs}
+
+	for _, field := range []string{"RepoDir", "SrcDir", "DispatcherDir", "OutDir"} {
+		t.Run(field, func(t *testing.T) {
+			o := base
+			switch field {
+			case "RepoDir":
+				o.RepoDir = "relative"
+			case "SrcDir":
+				o.SrcDir = "relative"
+			case "DispatcherDir":
+				o.DispatcherDir = "relative"
+			case "OutDir":
+				o.OutDir = "relative"
+			}
+			_, err := orchestrate(ctx, o)
+			if err == nil {
+				t.Fatalf("orchestrate with relative %s: expected error, got nil", field)
+			}
+			if !strings.Contains(err.Error(), field+" must be absolute") {
+				t.Fatalf("orchestrate with relative %s: err = %v, want mention of %q must be absolute",
+					field, err, field)
+			}
+		})
+	}
+}
+
 // TestBuildDryRunDoesNotRecordCompStamp is the other half of the contract, and
 // the more dangerous direction: --dry-run publishes nothing, so a stamp left
 // behind by one would be read by the NEXT unchanged-source cut as proof that
