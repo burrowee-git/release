@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,14 @@ func installShPath(t *testing.T) string {
 // maps to (via the BURROWEE_*_DIR seams).
 func launchdDir(home string) string { return filepath.Join(home, "LaunchDaemons") }
 func systemdDir(home string) string { return filepath.Join(home, "systemd-system") }
+
+// sysConfigDir/sysDataDir are the sandboxed stand-ins for the real system
+// roots (/usr/local/etc|var/burrowee/gateway) that the SYSTEM units name, via
+// the BURROWEE_SYSTEM_*_DIR seams. The suite must never create the real ones.
+func sysConfigDir(home string) string {
+	return filepath.Join(home, "system-etc", "burrowee", "gateway")
+}
+func sysDataDir(home string) string { return filepath.Join(home, "system-var", "burrowee", "gateway") }
 
 // currentUsername is the user install.sh's `id -un` resolves while under test.
 func currentUsername(t *testing.T) string {
@@ -85,6 +94,8 @@ func installShEnv(home, stubDir string, extraEnv ...string) []string {
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
 		"BURROWEE_LAUNCHD_DIR=" + launchdDir(home),
 		"BURROWEE_SYSTEMD_DIR=" + systemdDir(home),
+		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
+		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
 	}
 	return append(env, extraEnv...)
 }
@@ -139,6 +150,19 @@ func assertContains(t *testing.T, s string, want ...string) {
 	}
 }
 
+// assertNotContains asserts that s contains none of the substrings in unwanted.
+// The root-scheme unit assertions need this: a test that only checks the new
+// fields are present would still pass with a stale UserName left beside them,
+// and that leftover is exactly what makes the slot look legacy-owned.
+func assertNotContains(t *testing.T, s string, unwanted ...string) {
+	t.Helper()
+	for _, w := range unwanted {
+		if strings.Contains(s, w) {
+			t.Errorf("expected content NOT to contain %q\ngot:\n%s", w, s)
+		}
+	}
+}
+
 // seedDummyBins creates dummy executable files for each name in BINS inside dir.
 func seedDummyBins(t *testing.T, dir string) {
 	t.Helper()
@@ -159,8 +183,15 @@ func seedDummyBins(t *testing.T, dir string) {
 }
 
 // TestInstallShWritesBothUnits verifies that BURROWEE_UNITS_ONLY=1 renders
-// both SYSTEM service unit files with the correct labels, run-as user, and
-// ExecStart paths, for the host OS only.
+// both SYSTEM service unit files in the ROOT-SCHEME shape the gateway's own
+// renderer emits: no run-as user, no HOME, the two path roots passed
+// explicitly, and logs under the system data root.
+//
+// The absence assertions carry as much weight as the presence ones. A unit
+// that still records a UserName runs the daemon as that user (which cannot
+// read the root-owned identity), and it also reads as legacy-owned to both
+// unit-writers' ownership guards — so leaving one behind would flap the
+// service between this installer and the Go side on every refresh.
 func TestInstallShWritesBothUnits(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -169,6 +200,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 
 	binDir := home + "/.local/bin"
 	username := currentUsername(t)
+	logDir := filepath.Join(sysDataDir(home), "logs")
 
 	if runtime.GOOS == "darwin" {
 		core := readFile(t, filepath.Join(launchdDir(home), "com.burrowee.gateway.plist"))
@@ -178,44 +210,105 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 			"<string>com.burrowee.gateway</string>",
 			"<string>"+binDir+"/burrowee-gateway</string>",
 			"<string>--no-open</string>",
-			"<key>UserName</key><string>"+username+"</string>",
-			"<key>InitGroups</key><true/>",
-			"<key>HOME</key><string>"+home+"</string>",
-			"<key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>",
+			"<string>--config-dir</string><string>"+sysConfigDir(home)+"</string>",
+			"<string>--data-dir</string><string>"+sysDataDir(home)+"</string>",
+			"<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>",
 			"<key>WorkingDirectory</key><string>/tmp</string>",
 			"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+binDir+"/burrowee-gateway</key><true/></dict></dict>",
-			"<string>"+home+"/.burrowee/gateway/logs/gateway.log</string>",
-			"<string>"+home+"/.burrowee/gateway/logs/gateway.err.log</string>",
+			"<string>"+filepath.Join(logDir, "gateway.log")+"</string>",
+			"<string>"+filepath.Join(logDir, "gateway.err.log")+"</string>",
+		)
+		assertNotContains(t, core,
+			"<key>UserName</key>",
+			"<key>GroupName</key>",
+			"<key>InitGroups</key>",
+			"<key>HOME</key>",
+			home+"/.burrowee/gateway/logs",
 		)
 		assertContains(t, upd,
 			"<string>com.burrowee.gateway.updater</string>",
 			"<string>"+binDir+"/burrowee-gateway-updater</string>",
 			"<string>run</string>",
-			"<key>UserName</key><string>"+username+"</string>",
 			"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+binDir+"/burrowee-gateway-updater</key><true/></dict></dict>",
-			"<string>"+home+"/.burrowee/gateway/logs/updater.log</string>",
-			"<string>"+home+"/.burrowee/gateway/logs/updater.err.log</string>",
+			"<string>"+filepath.Join(logDir, "updater.log")+"</string>",
+			"<string>"+filepath.Join(logDir, "updater.err.log")+"</string>",
 		)
+		assertNotContains(t, upd,
+			"<key>UserName</key>",
+			"<key>HOME</key>",
+			// The updater resolves its own roots under root's euid; passing
+			// them would be a second place to keep in step for no gain.
+			"--config-dir",
+			home+"/.burrowee/gateway/logs",
+		)
+		// The run-as user must not appear anywhere in either unit.
+		assertNotContains(t, core, ">"+username+"<")
+		assertNotContains(t, upd, ">"+username+"<")
 	} else {
 		core := readFile(t, filepath.Join(systemdDir(home), "burrowee-gateway.service"))
 		upd := readFile(t, filepath.Join(systemdDir(home), "burrowee-gateway-updater.service"))
 
 		assertContains(t, core,
 			"Description=burrowee-gateway",
-			"User="+username,
-			"Environment=HOME="+home,
-			"ExecStart="+binDir+"/burrowee-gateway --no-open",
+			"ExecStart="+binDir+"/burrowee-gateway --no-open --config-dir "+sysConfigDir(home)+" --data-dir "+sysDataDir(home),
 			"Restart=always",
+			"RestartSec=2",
 			"TimeoutStopSec=330",
 			"WantedBy=multi-user.target",
 		)
+		assertNotContains(t, core,
+			"User=",
+			"Group=",
+			"Environment=HOME=",
+		)
 		assertContains(t, upd,
 			"Description=burrowee-gateway-updater",
-			"User="+username,
 			"ExecStart="+binDir+"/burrowee-gateway-updater run",
 			"Restart=always",
 			"WantedBy=multi-user.target",
 		)
+		assertNotContains(t, upd,
+			"User=",
+			"Environment=HOME=",
+			"--config-dir",
+		)
+	}
+}
+
+// TestInstallShCreatesSystemLogDir verifies the units' log directory is
+// pre-created under the system data root, as root. launchd redirects
+// StandardOutPath at exec: a missing parent there is not a log that shows up
+// late, it is a daemon that fails to spawn. The Go side's
+// ensureSystemUnitLogDir does the same, so an install via either writer leaves
+// the same tree.
+func TestInstallShCreatesSystemLogDir(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+
+	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
+
+	logDir := filepath.Join(sysDataDir(home), "logs")
+	info, err := os.Stat(logDir)
+	if err != nil {
+		t.Fatalf("system unit log dir not created at %s: %v", logDir, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", logDir)
+	}
+	// The data root holds gateway.db and the register/console sockets. It is
+	// created 0700 so that a permissive umask on the parent can never leave
+	// the store world-readable.
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("log dir mode = %04o, want 0700", perm)
+	}
+	if di, err := os.Stat(sysDataDir(home)); err != nil {
+		t.Errorf("stat system data root: %v", err)
+	} else if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Errorf("system data root mode = %04o, want 0700", perm)
+	}
+	// Nothing may be left in the old per-user location.
+	if _, err := os.Stat(filepath.Join(home, ".burrowee", "gateway", "logs")); err == nil {
+		t.Errorf("per-user log dir still created at $GW_HOME/logs")
 	}
 }
 
@@ -479,7 +572,11 @@ func TestInstallShCrossUserOverrideAborts(t *testing.T) {
 
 // TestInstallShCrossUserOverrideForced verifies that
 // BURROWEE_FORCE_SERVICE_OVERRIDE=1 takes over a foreign unit: the run
-// succeeds and the unit is rewritten for the current user.
+// succeeds and the legacy per-user unit is replaced by the root-scheme one.
+//
+// The replacement records NO owner at all — not the current user. That is the
+// point of the root scheme: the slot stops belonging to anybody, so the next
+// installer (whoever runs it) sees a free slot instead of a unit to contest.
 func TestInstallShCrossUserOverrideForced(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -492,12 +589,32 @@ func TestInstallShCrossUserOverrideForced(t *testing.T) {
 	if strings.Contains(got, "someone-else") {
 		t.Errorf("unit still records the previous owner:\n%s", got)
 	}
-	username := currentUsername(t)
 	if runtime.GOOS == "darwin" {
-		assertContains(t, got, "<key>UserName</key><string>"+username+"</string>")
+		assertContains(t, got, "<string>com.burrowee.gateway</string>")
+		assertNotContains(t, got, "<key>UserName</key>")
 	} else {
-		assertContains(t, got, "User="+username)
+		assertContains(t, got, "Description=burrowee-gateway")
+		assertNotContains(t, got, "User=")
 	}
+	assertNotContains(t, got, ">"+currentUsername(t)+"<")
+}
+
+// TestInstallShRootSchemeUnitIsAFreeSlot verifies the consent guard treats an
+// already-installed ROOT-SCHEME unit as a free slot: a second run (as would
+// happen for any user on the host) replaces it silently, with no prompt and no
+// force env. This mirrors the Go side's UnitOwnerRootScheme ruling — a unit
+// that runs as root belongs to no user, so there is nothing to contest.
+func TestInstallShRootSchemeUnitIsAFreeSlot(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+
+	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
+	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
+
+	assertNotContains(t, out, "belongs to user", "overriding gateway service")
+	// Identical content the second time: place_unit must report "unchanged"
+	// rather than rewriting, or every refresh would bootout a live daemon.
+	assertContains(t, out, "(unchanged)")
 }
 
 // TestInstallShMigratesLegacyUserUnits verifies that a units-only run removes
@@ -551,5 +668,210 @@ func TestInstallShMigratesLegacyUserUnits(t *testing.T) {
 		assertContains(t, calls, "launchctl bootout gui/")
 	} else {
 		assertContains(t, calls, "systemctl --user disable --now burrowee-gateway.service")
+	}
+}
+
+// stageInstaller copies the real install.sh into dir, so a test can plant a
+// fake migrations/ beside it. install.sh resolves the migration relative to its
+// OWN path (not cwd — `service install` re-runs the kept copy from an arbitrary
+// working directory), so the two files have to sit together.
+func stageInstaller(t *testing.T, dir string) string {
+	t.Helper()
+	body, err := os.ReadFile(installShPath(t))
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	staged := filepath.Join(dir, "install.sh")
+	if err := os.WriteFile(staged, body, 0o755); err != nil {
+		t.Fatalf("stage install.sh: %v", err)
+	}
+	return staged
+}
+
+// shQuote single-quotes s for embedding in a generated shell stub.
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// stageMigration plants a fake migrations/run.sh beside a staged installer. It
+// records the environment it was handed (one "KEY=VALUE" per line) and exits with
+// exitCode, so a test can assert the hand-off, the "migrations ran" contract
+// (exit 2) and the failure path without running a real migration.
+func stageMigration(t *testing.T, dir, logPath string, exitCode int) {
+	t.Helper()
+	mig := filepath.Join(dir, "migrations")
+	if err := os.MkdirAll(mig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"_kept=no; [ -f \"$GW_HOME/install.sh\" ] && [ -f \"$GW_HOME/migrations/run.sh\" ] && _kept=yes\n" +
+		"{ echo \"GW_HOME=$GW_HOME\"\n" +
+		"  echo \"KEPT_INSTALLER=$_kept\"\n" +
+		"  echo \"BURROWEE_SYSTEM_CONFIG_DIR=$BURROWEE_SYSTEM_CONFIG_DIR\"\n" +
+		"  echo \"BURROWEE_SYSTEM_DATA_DIR=$BURROWEE_SYSTEM_DATA_DIR\"\n" +
+		"  echo \"SUDO=${SUDO:-}\"\n" +
+		"} >> " + shQuote(logPath) + "\n" +
+		"echo migration-ran\nexit " + strconv.Itoa(exitCode) + "\n"
+	if err := os.WriteFile(filepath.Join(mig, "run.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runStaged runs a STAGED install.sh (one with a fake migrations/ beside it).
+// workDir and home are separate on purpose: update mode runs with cwd = the
+// unzipped bundle while $HOME (and so PREFIX and every seam) stays the operator's
+// — collapsing them installs the binaries into the bundle instead of the host.
+func runStaged(t *testing.T, script, workDir, home, stubDir string, extraEnv ...string) (string, error) {
+	t.Helper()
+	return runStagedArgs(t, script, workDir, home, stubDir, nil, extraEnv...)
+}
+
+// runStagedArgs is runStaged with positional script arguments. install.sh's update
+// mode reads --version from ARGV, not the environment, so a test that needs it must
+// pass it here — putting it in extraEnv leaves _install_version empty and any
+// assertion about the recorded version passes for the wrong reason.
+func runStagedArgs(t *testing.T, script, workDir, home, stubDir string, scriptArgs []string, extraEnv ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("sh", append([]string{script}, scriptArgs...)...)
+	cmd.Dir = workDir
+	cmd.Env = installShEnv(home, stubDir, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// migrationLog returns what the fake migration recorded, or "" if it never ran.
+func migrationLog(t *testing.T, logPath string) string {
+	t.Helper()
+	b, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestInstallShRunsTheMigrationBeforeLoadingUnits: the migration stops the
+// gateway so gateway.db is copied at rest, and load_units is what starts it
+// again — so running it after would copy a live store, or never run at all.
+func TestInstallShRunsTheMigrationBeforeLoadingUnits(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 0)
+
+	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
+	}
+
+	if migrationLog(t, logPath) == "" {
+		t.Fatalf("the migration was never invoked; output:\n%s", out)
+	}
+	ran := strings.Index(out, "migration-ran")
+	load := "launchctl bootstrap"
+	if runtime.GOOS != "darwin" {
+		load = "systemctl"
+	}
+	// The stub calls are logged to a file, but their stdout is not in `out`;
+	// compare against the unit-write line instead, which load_units follows.
+	started := strings.Index(readFile(t, filepath.Join(home, "stub-calls.log")), load)
+	if ran < 0 {
+		t.Fatalf("migration output missing:\n%s", out)
+	}
+	if started < 0 {
+		t.Fatalf("units were never loaded; calls:\n%s", readFile(t, filepath.Join(home, "stub-calls.log")))
+	}
+}
+
+// TestInstallShHandsTheMigrationItsRoots: the migration must act on the same
+// roots the units name. Letting it fall back to its own euid-based defaults
+// would migrate into a different tree than the daemon reads, and under the test
+// seams it would escape the sandbox entirely.
+func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 0)
+
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
+		t.Fatalf("install.sh: %v", err)
+	}
+
+	assertContains(t, migrationLog(t, logPath),
+		"GW_HOME="+filepath.Join(home, ".burrowee", "gateway"),
+		"BURROWEE_SYSTEM_CONFIG_DIR="+sysConfigDir(home),
+		"BURROWEE_SYSTEM_DATA_DIR="+sysDataDir(home),
+	)
+}
+
+// TestInstallShForwardsItsSudoSeamToTheMigration: install.sh has its own root
+// discipline (run_root: direct when root, prompting sudo on a tty, `sudo -n`
+// otherwise). The migration elevates too, so without the seam it would fall back
+// to a bare prompting sudo — from a curl-pipe install with no tty, or from a
+// daemon, where the surrounding script guarantees it never prompts.
+func TestInstallShForwardsItsSudoSeamToTheMigration(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 0)
+
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1", "SUDO=/stub/sudo"); err != nil {
+		t.Fatalf("install.sh: %v", err)
+	}
+
+	assertContains(t, migrationLog(t, logPath), "SUDO=/stub/sudo")
+}
+
+// TestInstallShAbortsWhenTheMigrationFails: carrying on would start the new root
+// units against a config root with no identity — the daemon then either refuses
+// to start or mints a fresh relay_ed.key, re-registering the host as a NEW node
+// and orphaning its console pairing, targets and domains.
+func TestInstallShAbortsWhenTheMigrationFails(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	stageMigration(t, bundle, logPath, 1)
+
+	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
+	if err == nil {
+		t.Fatalf("install.sh succeeded despite a failing migration:\n%s", out)
+	}
+	if !strings.Contains(out, "migration failed") {
+		t.Errorf("no explanation of the abort:\n%s", out)
+	}
+	// Nothing may have been started: the units were rendered before the
+	// migration, but loading them is what would bring up a broken daemon.
+	calls := ""
+	if b, readErr := os.ReadFile(filepath.Join(home, "stub-calls.log")); readErr == nil {
+		calls = string(b)
+	}
+	for _, forbidden := range []string{"bootstrap", "enable --now"} {
+		if strings.Contains(calls, forbidden) {
+			t.Errorf("units were loaded after a failed migration (%q):\n%s", forbidden, calls)
+		}
+	}
+}
+
+// TestInstallShToleratesAMissingMigration: BURROWEE_UNITS_ONLY re-runs the copy
+// kept at $GW_HOME, and an install predating the migrations/ dir has none beside
+// it. A missing migration is "nothing to do", not a broken install.
+func TestInstallShToleratesAMissingMigration(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle) // no stageMigration
+
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
+		t.Fatalf("install.sh failed with no migration present: %v", err)
 	}
 }

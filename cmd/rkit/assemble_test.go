@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/burrowee-git/release-kit/build"
@@ -147,9 +148,10 @@ func TestAssembleWithExtras(t *testing.T) {
 	}
 }
 
-// TestExtraPayloadUpdateScripts asserts each component's update-script payload:
-// gateway + cli ship update.sh ONLY (in-process updater self-update — no
-// updater.update.sh), while edge + relay ship both. A missing update.sh is
+// TestExtraPayloadUpdateScripts asserts each component's scripted payload:
+// gateway + cli carry update.sh but no updater.update.sh (their updater
+// self-updates by an in-process binary swap), while edge + relay carry both.
+// gateway additionally carries its whole migrations/ dir. A missing file is
 // fail-loud (returned error) for every scripted component.
 func TestExtraPayloadUpdateScripts(t *testing.T) {
 	names := func(cs []pack.Content) []string {
@@ -164,21 +166,89 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		for _, f := range files {
-			if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o755); err != nil {
+			p := filepath.Join(dir, f)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 		}
 		return dir
 	}
 
-	t.Run("gateway ships update.sh only", func(t *testing.T) {
-		src := writeSrc(t, "update.sh")
+	// Every script in migrations/ ships, discovered by glob — adding a migration
+	// must not require a change here, or the runner's ledger could name a script
+	// that is not in the zip.
+	t.Run("gateway ships update.sh plus every migration", func(t *testing.T) {
+		src := writeSrc(t, "update.sh",
+			filepath.Join("migrations", "run.sh"),
+			filepath.Join("migrations", "v1_to_v2.sh"),
+			filepath.Join("migrations", "v2_to_v3.sh"))
 		got, err := extraPayload("gateway", src)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := []string{"update.sh"}; !reflect.DeepEqual(names(got), want) {
+		want := []string{"migrations/run.sh", "migrations/v1_to_v2.sh", "migrations/v2_to_v3.sh", "update.sh"}
+		if !reflect.DeepEqual(names(got), want) {
 			t.Errorf("gateway extras = %v, want %v", names(got), want)
+		}
+	})
+
+	// The zip entry name must be a literal forward-slash path: archive members
+	// are always "/"-separated, and a filepath.Join here would silently produce
+	// a backslash member the moment this is built anywhere non-unix.
+	t.Run("the migration's zip name is slash-separated", func(t *testing.T) {
+		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"), filepath.Join("migrations", "v1_to_v2.sh"))
+		got, err := extraPayload("gateway", src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, c := range got {
+			if c.Name == "migrations/v1_to_v2.sh" {
+				found = true
+			}
+			if strings.Contains(c.Name, `\`) {
+				t.Errorf("zip member %q contains a backslash", c.Name)
+			}
+		}
+		if !found {
+			t.Errorf("no migrations/v1_to_v2.sh member in %v", names(got))
+		}
+	})
+
+	// Fail-loud, not best-effort: a gateway zip without the runner turns every
+	// upgrade that needs a migration into a daemon that comes back without its
+	// state, which is far worse than a build that stops here.
+	t.Run("gateway without the runner is a build error", func(t *testing.T) {
+		src := writeSrc(t, "update.sh")
+		if _, err := extraPayload("gateway", src); err == nil {
+			t.Error("missing migrations/run.sh accepted, want a build error")
+		}
+	})
+
+	// A migrations/ dir holding scripts but no runner is the subtler mistake:
+	// nothing invokes them, so the zip looks complete and migrates nothing.
+	t.Run("migrations without the runner is a build error", func(t *testing.T) {
+		src := writeSrc(t, "update.sh", filepath.Join("migrations", "v1_to_v2.sh"))
+		if _, err := extraPayload("gateway", src); err == nil {
+			t.Error("migrations/ without run.sh accepted, want a build error")
+		}
+	})
+
+	// Only gateway needs it — cli shares the update.sh arm but has no such
+	// config move, so requiring the file there would break its builds.
+	t.Run("cli does not require the migration", func(t *testing.T) {
+		src := writeSrc(t, "update.sh")
+		got, err := extraPayload("cli", src)
+		if err != nil {
+			t.Fatalf("cli should not require the gateway migration: %v", err)
+		}
+		for _, c := range got {
+			if strings.Contains(c.Name, "migrations/") {
+				t.Errorf("cli extras include %q", c.Name)
+			}
 		}
 	})
 

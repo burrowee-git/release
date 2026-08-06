@@ -359,3 +359,135 @@ func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 		}
 	}
 }
+
+// stagedUpdateBundle builds an update-mode bundle that also carries the
+// installer and a fake migration, so the hand-off can be asserted: binaries in
+// cwd, install.sh beside migrations/v1_to_v2.sh (install.sh resolves the
+// migration relative to its own path, not cwd).
+func stagedUpdateBundle(t *testing.T, contents map[string]string, logPath string, migrateExit int) (script, stageDir string) {
+	t.Helper()
+	stageDir = stageBundle(t, contents)
+	script = stageInstaller(t, stageDir)
+	stageMigration(t, stageDir, logPath, migrateExit)
+	return script, stageDir
+}
+
+// TestUpdateKeepsTheInstallerCopyBeforeMigrating: `service install` re-runs
+// $GW_HOME/install.sh, and the runner is resolved beside whichever install.sh is
+// executing. If the self-copy happened after the migration, the kept copy would be
+// the PREVIOUS version's installer — a stale unit-writer, and on a host whose only
+// contact with this release was update mode, a $GW_HOME with no migrations/ at all.
+func TestUpdateKeepsTheInstallerCopyBeforeMigrating(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 0)
+
+	out, err := runStaged(t, script, stageDir, home, stub, "BURROWEE_UPDATE=1")
+	if err != nil {
+		t.Fatalf("install.sh update failed: %v\n%s", err, out)
+	}
+
+	// Asserted from INSIDE the migration: it records whether the kept copy was
+	// already in place when it ran. Checking afterwards would pass just as happily
+	// with the copy written last, which is the bug.
+	log := migrationLog(t, logPath)
+	if log == "" {
+		t.Fatal("the migration never ran")
+	}
+	assertContains(t, log, "KEPT_INSTALLER=yes")
+}
+
+// TestUpdateRecordsTheVersionOnlyAfterMigrating: recording it first means a failed
+// migration leaves the NEW version on disk beside the OLD layout, after which the
+// runner's gate reads "already up to date" and the host never migrates again.
+func TestUpdateRecordsTheVersionOnlyAfterMigrating(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 1) // migration FAILS
+
+	out, err := runStagedArgs(t, script, stageDir, home, stub,
+		[]string{"--version", "0.2.0"}, "BURROWEE_UPDATE=1")
+	if err == nil {
+		t.Fatalf("install.sh update succeeded despite a failing migration:\n%s", out)
+	}
+
+	versionFile := filepath.Join(home, ".burrowee", "gateway", ".installed-version")
+	if b, readErr := os.ReadFile(versionFile); readErr == nil {
+		t.Errorf("version recorded despite the failed migration: %q", string(b))
+	}
+}
+
+// TestUpdateReportsAStoppedGatewayAfterMigrating: update mode renders unit files
+// but never loads them, so it has no start step of its own. The runner's exit 2
+// means it stopped the gateway — say so rather than leaving the operator to find a
+// dead service.
+func TestUpdateReportsAStoppedGatewayAfterMigrating(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 2) // "migrations ran"
+
+	out, err := runStaged(t, script, stageDir, home, stub, "BURROWEE_UPDATE=1")
+	if err != nil {
+		t.Fatalf("exit 2 from the runner must not fail the update: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "stopped the gateway") {
+		t.Errorf("no notice that the gateway is down:\n%s", out)
+	}
+	// The change-set line still has to be last on stdout — core parses it.
+	if got := lastLineWithPrefix(out, "BURROWEE_CHANGED="); got == "" {
+		t.Errorf("BURROWEE_CHANGED line missing:\n%s", out)
+	}
+}
+
+// TestUpdateSkipsTheMigrationForForeignSlot is the wrong-identity guard. Update
+// mode has no consent prompt and already refuses to touch a unit slot recorded
+// for another user; migrating is the same class of claim — whose identity the
+// root daemon adopts — so it must defer too. Adopting this user's tree while
+// another owns the service would hand the daemon the wrong identity, and a node
+// re-registering under a new relay_ed.key is not quietly undone.
+func TestUpdateSkipsTheMigrationForForeignSlot(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := home + "/.local/bin"
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+
+	seedForeignUnit(t, home)
+	seedInstalled(t, binDir, allBinsContent("v1-content"))
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway"] = "gw-v2-content"
+	script, stageDir := stagedUpdateBundle(t, staged, logPath, 0)
+
+	out, err := runStaged(t, script, stageDir, home, stub, "BURROWEE_UPDATE=1")
+	if err != nil {
+		t.Fatalf("install.sh update failed: %v\n%s", err, out)
+	}
+
+	if got := migrationLog(t, logPath); got != "" {
+		t.Errorf("migrated while user 'someone-else' owns the slot:\n%s", got)
+	}
+	if !strings.Contains(out, "not migrating either") {
+		t.Errorf("no explanation of the deferral:\n%s", out)
+	}
+	// The binary swap is independent and must still complete.
+	if got := readInstalled(t, binDir, "burrowee-gateway"); got != "gw-v2-content" {
+		t.Errorf("binary swap should still succeed: got %q", got)
+	}
+}

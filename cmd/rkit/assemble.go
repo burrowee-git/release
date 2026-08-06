@@ -59,6 +59,8 @@ func assemble(comp, stamp, outRoot, installSh string, extras []pack.Content, com
 //     burrowee-<comp>-updater runs `sh ./update.sh` (service update) /
 //     `sh ./updater.update.sh` (updater self-update) with cwd = the unzipped
 //     bundle, so both must ship alongside the bins.
+//   - gateway additionally carries the whole migrations/ dir (run.sh + every
+//     migration in its ledger), invoked by install.sh and update.sh from the unzipped dir.
 //   - gateway + cli carry update.sh ONLY. Core's Phase-0 routing execs the
 //     bundled ./update.sh for a non-force `update`, so it must ship. They do
 //     NOT carry updater.update.sh: their updater self-updates via an in-process
@@ -88,6 +90,37 @@ func extraPayload(comp, srcDir string) ([]pack.Content, error) {
 			return nil, fmt.Errorf("%s update script missing in source %s: %w", comp, p, err)
 		}
 		extras = append(extras, pack.Content{Src: p, Name: s})
+	}
+	if comp == "gateway" {
+		// The whole migrations/ dir rides along: migrations/run.sh is the runner
+		// install.sh and update.sh invoke, and it needs every migration named in
+		// its ledger present, because a host may be upgrading across several
+		// releases at once. Discovered by glob rather than listed here, so adding a
+		// migration stays a gateway-repo change — a hardcoded list would silently
+		// ship a runner whose ledger names a script that is not in the zip.
+		//
+		// run.sh is REQUIRED: a gateway zip without it turns every upgrade that
+		// needs a migration into a daemon that comes back without its state, which
+		// is far worse than a build that stops here.
+		mig := filepath.Join(srcDir, "migrations")
+		scripts, globErr := filepath.Glob(filepath.Join(mig, "*.sh"))
+		if globErr != nil {
+			return nil, fmt.Errorf("gateway migrations glob %s: %w", mig, globErr)
+		}
+		sort.Strings(scripts)
+		haveRunner := false
+		for _, p := range scripts {
+			base := filepath.Base(p)
+			if base == "run.sh" {
+				haveRunner = true
+			}
+			// Zip member names are always "/"-separated; filepath.Join would be
+			// wrong the moment this is built anywhere non-unix.
+			extras = append(extras, pack.Content{Src: p, Name: "migrations/" + base})
+		}
+		if !haveRunner {
+			return nil, fmt.Errorf("gateway migration runner missing in source %s", filepath.Join(mig, "run.sh"))
+		}
 	}
 	if comp == "edge" {
 		edgeWeb := os.Getenv("EDGE_WEB_DIR")
