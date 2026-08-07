@@ -93,21 +93,34 @@ func TestUpdateAllIdenticalIsNoop(t *testing.T) {
 	}
 }
 
-// TestUpdateModeExcludesUpdaterBinary verifies that a changed
-// burrowee-gateway-cli is neither swapped nor named in BURROWEE_CHANGED.
-func TestUpdateModeExcludesUpdaterBinary(t *testing.T) {
+// TestUpdateModeExcludesOnlyTheUpdaterBinary pins the two halves of the
+// exclusion rule, which are NOT the same rule and used to be conflated.
+//
+// burrowee-gateway-updater is excluded because it is on its own update track:
+// replacing the binary a running updater is executing from, from inside a
+// script that updater launched, is the hazard the exclusion exists to prevent.
+//
+// burrowee-gateway-cli is NOT excluded, and the shape that excluded it is the
+// release blocker. The migration calls `burrowee-gateway-cli migrate` and the
+// runner probes the INSTALLED cli for that verb; leaving a 0.1.115 cli on disk
+// while every binary around it advances guaranteed the probe would fail — after
+// the root-scheme units were already written. gateway/update.sh has always
+// carried the cli in its BINS; this is the two paths agreeing.
+func TestUpdateModeExcludesOnlyTheUpdaterBinary(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	binDir := home + "/.local/bin"
 
-	// Pre-install: burrowee-gateway-cli is OLD, all others at v1.
+	// Pre-install: the cli and the updater are OLD, all others at v1.
 	installed := allBinsContent("v1-content")
 	installed["burrowee-gateway-cli"] = "OLD-CLI"
+	installed["burrowee-gateway-updater"] = "OLD-UPDATER"
 	seedInstalled(t, binDir, installed)
 
-	// Stage: burrowee-gateway-cli differs (NEW-CLI) and burrowee-gateway differs (v2).
+	// Stage: cli, updater and gateway all differ.
 	staged := allBinsContent("v1-content")
-	staged["burrowee-gateway-cli"] = "NEW-CLI"
+	staged["burrowee-gateway-cli"] = cliWithMigrate
+	staged["burrowee-gateway-updater"] = "NEW-UPDATER"
 	staged["burrowee-gateway"] = "v2-content"
 	stageDir := stageBundle(t, staged)
 
@@ -116,18 +129,26 @@ func TestUpdateModeExcludesUpdaterBinary(t *testing.T) {
 		"--version", "v2",
 	)
 
-	// burrowee-gateway-cli must NOT appear in BURROWEE_CHANGED.
-	if got := lastLineWithPrefix(out, "BURROWEE_CHANGED="); strings.Contains(got, "burrowee-gateway-cli") {
-		t.Fatalf("update mode must not change burrowee-gateway-cli; got %q", got)
+	line := lastLineWithPrefix(out, "BURROWEE_CHANGED=")
+
+	// The cli advances: named, and really swapped.
+	if !strings.Contains(line, "burrowee-gateway-cli") {
+		t.Errorf("update mode must place burrowee-gateway-cli; got %q", line)
+	}
+	if got := readInstalled(t, binDir, "burrowee-gateway-cli"); got != cliWithMigrate {
+		t.Errorf("burrowee-gateway-cli was not swapped in update mode (got %q)", got)
 	}
 
-	// burrowee-gateway-cli must NOT be swapped — content stays OLD-CLI.
-	cur, err := os.ReadFile(filepath.Join(binDir, "burrowee-gateway-cli"))
-	if err != nil {
-		t.Fatalf("read burrowee-gateway-cli: %v", err)
+	// The updater does not: not named, and not swapped.
+	if strings.Contains(line, "burrowee-gateway-updater") {
+		t.Errorf("update mode must not claim burrowee-gateway-updater; got %q", line)
 	}
-	if string(cur) != "OLD-CLI" {
-		t.Fatalf("burrowee-gateway-cli was swapped in update mode (got %q)", cur)
+	cur, err := os.ReadFile(filepath.Join(binDir, "burrowee-gateway-updater"))
+	if err != nil {
+		t.Fatalf("read burrowee-gateway-updater: %v", err)
+	}
+	if string(cur) != "OLD-UPDATER" {
+		t.Fatalf("burrowee-gateway-updater was swapped in update mode (got %q)", cur)
 	}
 }
 
@@ -290,10 +311,10 @@ func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
 // operator's "reinstall completely" would be a silent no-op.
 //
 // Two halves, and the second is the one a careless test misses: --force must
-// re-place every SERVE binary, and must STILL skip the cli/updater pair. FORCE
-// bypasses the sha256 check, not the ownership rule — those two are updated
-// out-of-band by the updater, and re-placing the updater from inside a script
-// the updater is running is exactly what the exclusion exists to prevent.
+// re-place every SERVE binary, and must STILL skip burrowee-gateway-updater.
+// FORCE bypasses the sha256 check, not the ownership rule — the updater is
+// updated out-of-band, and re-placing it from inside a script the updater is
+// running is exactly what the exclusion exists to prevent.
 func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -301,16 +322,14 @@ func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 
 	// Installed and staged content are IDENTICAL for every binary — without
 	// FORCE this is the no-op case (TestUpdateAllIdenticalIsNoop).
-	same := allBinsContent("identical-content")
+	same := withCLI(allBinsContent("identical-content"), cliWithMigrate)
 	seedInstalled(t, binDir, same)
 	stageDir := stageBundle(t, same)
 
-	// Mark the two updater-owned binaries so a swap would be detectable even
-	// though the staged bytes match: if update mode places them, the installed
-	// file loses this marker.
-	for _, b := range []string{"burrowee-gateway-cli", "burrowee-gateway-updater"} {
-		seedInstalled(t, binDir, map[string]string{b: "UPDATER-OWNED-" + b})
-	}
+	// Mark the updater-owned binary so a swap would be detectable even though
+	// the staged bytes match: if update mode places it, the installed file
+	// loses this marker.
+	seedInstalled(t, binDir, map[string]string{"burrowee-gateway-updater": "UPDATER-OWNED"})
 
 	out := runUpdate(t, stageDir, home, stub,
 		[]string{"BURROWEE_UPDATE=1", "BURROWEE_FORCE=1"},
@@ -324,15 +343,13 @@ func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 		t.Fatalf("change-set = %q, want %q\noutput:\n%s", line, want, out)
 	}
 
-	// Half 2: the cli/updater pair is STILL omitted — FORCE bypasses the sha256
-	// check, not the ownership rule.
-	for _, b := range []string{"burrowee-gateway-cli", "burrowee-gateway-updater"} {
-		if strings.Contains(line, b) {
-			t.Errorf("--force must not claim %s: %q", b, line)
-		}
-		if got := readInstalled(t, binDir, b); got != "UPDATER-OWNED-"+b {
-			t.Errorf("--force swapped %s (content %q) — it is updated out-of-band", b, got)
-		}
+	// Half 2: burrowee-gateway-updater is STILL omitted — FORCE bypasses the
+	// sha256 check, not the ownership rule.
+	if strings.Contains(line, "burrowee-gateway-updater") {
+		t.Errorf("--force must not claim burrowee-gateway-updater: %q", line)
+	}
+	if got := readInstalled(t, binDir, "burrowee-gateway-updater"); got != "UPDATER-OWNED" {
+		t.Errorf("--force swapped burrowee-gateway-updater (content %q) — it is updated out-of-band", got)
 	}
 
 	// And the placement really happened: each serve binary is present and
@@ -383,8 +400,8 @@ func TestUpdateKeepsTheInstallerCopyBeforeMigrating(t *testing.T) {
 	binDir := home + "/.local/bin"
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
-	seedInstalled(t, binDir, allBinsContent("v1-content"))
-	staged := allBinsContent("v1-content")
+	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
+	staged := withCLI(allBinsContent("v1-content"), cliWithMigrate)
 	staged["burrowee-gateway"] = "gw-v2-content"
 	script, stageDir := stagedUpdateBundle(t, staged, logPath, 0)
 
@@ -412,8 +429,8 @@ func TestUpdateRecordsTheVersionOnlyAfterMigrating(t *testing.T) {
 	binDir := home + "/.local/bin"
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
-	seedInstalled(t, binDir, allBinsContent("v1-content"))
-	staged := allBinsContent("v1-content")
+	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
+	staged := withCLI(allBinsContent("v1-content"), cliWithMigrate)
 	staged["burrowee-gateway"] = "gw-v2-content"
 	script, stageDir := stagedUpdateBundle(t, staged, logPath, 1) // migration FAILS
 
@@ -439,8 +456,8 @@ func TestUpdateReportsAStoppedGatewayAfterMigrating(t *testing.T) {
 	binDir := home + "/.local/bin"
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
-	seedInstalled(t, binDir, allBinsContent("v1-content"))
-	staged := allBinsContent("v1-content")
+	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
+	staged := withCLI(allBinsContent("v1-content"), cliWithMigrate)
 	staged["burrowee-gateway"] = "gw-v2-content"
 	script, stageDir := stagedUpdateBundle(t, staged, logPath, 2) // "migrations ran"
 
@@ -470,8 +487,8 @@ func TestUpdateSkipsTheMigrationForForeignSlot(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedForeignUnit(t, home)
-	seedInstalled(t, binDir, allBinsContent("v1-content"))
-	staged := allBinsContent("v1-content")
+	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
+	staged := withCLI(allBinsContent("v1-content"), cliWithMigrate)
 	staged["burrowee-gateway"] = "gw-v2-content"
 	script, stageDir := stagedUpdateBundle(t, staged, logPath, 0)
 

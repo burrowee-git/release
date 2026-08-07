@@ -739,6 +739,22 @@ func runStagedArgs(t *testing.T, script, workDir, home, stubDir string, scriptAr
 	return string(out), err
 }
 
+// seedMigrateCapableCLI installs a burrowee-gateway-cli that answers
+// `migrate --help`, which units-only mode requires before it will write a unit:
+// it places no binaries, so the cli already on disk is the one the runner will
+// probe, and a host whose cli cannot migrate must be refused BEFORE the
+// root-scheme units are written (see assert_can_migrate).
+func seedMigrateCapableCLI(t *testing.T, home string) {
+	t.Helper()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "burrowee-gateway-cli"), []byte(cliWithMigrate), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // migrationLog returns what the fake migration recorded, or "" if it never ran.
 func migrationLog(t *testing.T, logPath string) string {
 	t.Helper()
@@ -761,6 +777,7 @@ func TestInstallShRunsTheMigrationBeforeLoadingUnits(t *testing.T) {
 	bundle := t.TempDir()
 	script := stageInstaller(t, bundle)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
 	stageMigration(t, bundle, logPath, 0)
 
 	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
@@ -797,6 +814,7 @@ func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
 	bundle := t.TempDir()
 	script := stageInstaller(t, bundle)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
 	stageMigration(t, bundle, logPath, 0)
 
 	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
@@ -821,6 +839,7 @@ func TestInstallShForwardsItsSudoSeamToTheMigration(t *testing.T) {
 	bundle := t.TempDir()
 	script := stageInstaller(t, bundle)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
 	stageMigration(t, bundle, logPath, 0)
 
 	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1", "SUDO=/stub/sudo"); err != nil {
@@ -840,6 +859,7 @@ func TestInstallShAbortsWhenTheMigrationFails(t *testing.T) {
 	bundle := t.TempDir()
 	script := stageInstaller(t, bundle)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
 	stageMigration(t, bundle, logPath, 1)
 
 	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
