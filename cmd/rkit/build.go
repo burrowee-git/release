@@ -461,8 +461,15 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 // (the zip names and SHA256SUMS.txt are version-independent), so after checking
 // the signature the bootstrap asserts this exact string against the tag it
 // resolved — that is what stops an older, genuinely signed release from being
-// substituted for the requested one. tools/release.sh signs with the identical
-// `-t` value; the two must never diverge.
+// substituted for the requested one.
+//
+// This is the Go half of a three-way agreement, not a lone definition: the
+// shell cut path writes the same string via tools/trustcomment.sh, and
+// tools/bootstrap.template.sh independently reconstructs it to verify. The
+// standing comment here used to say only "tools/release.sh signs with the
+// identical -t value; the two must never diverge" — an unenforced assertion,
+// and there were four spellings, not two. trusted_comment_test.go now executes
+// the other two and compares. Do not change this format without it.
 func trustedComment(component, stamp string) string {
 	return "burrowee " + component + " " + stamp
 }
