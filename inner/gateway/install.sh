@@ -841,6 +841,19 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     render_units
     load_units
     report_unrecorded_migration
+    # The anchor, from the fourth and last entry point. Its absence here is a
+    # large part of why the ledger is effectively unwritten in the field: the
+    # runner falls back to a migration's own --applies probe only when NOTHING is
+    # recorded, and with two of the four entry points never writing, that
+    # exceptional path became the normal one on most hosts.
+    #
+    # Same guard as everywhere else: an unrecorded migration must not have its
+    # version written, or the receipt-gated re-runnable rung becomes a
+    # version-gated never-again one. And no version supplied still records
+    # nothing — inventing one is worse than leaving it absent.
+    if [ "$MIGRATE_UNRECORDED" = "0" ]; then
+        record_installed_version "${BURROWEE_VERSION:-}"
+    fi
     exit 0
 fi
 

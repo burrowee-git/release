@@ -143,3 +143,76 @@ func TestUpdateKeepsTheInstallerCopyOnADeferredSlot(t *testing.T) {
 		t.Errorf("the installer copy was lost on the deferring branch: %v", statErr)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// MEDIUM — units-only is the fourth entry point and must write the anchor.
+// ---------------------------------------------------------------------------
+
+// TestUnitsOnlyRecordsTheVersion: the runner falls back to a migration's own
+// --applies probe only when NOTHING is recorded, and with two of the four entry
+// points never writing the anchor, that exceptional path became the normal one
+// on most hosts in the field. `burrowee gateway service install` is the entry
+// point an operator reaches for most often and it recorded nothing at all.
+func TestUnitsOnlyRecordsTheVersion(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
+	stageMigration(t, bundle, logPath, 0)
+
+	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1",
+		"BURROWEE_VERSION=gateway/v0.2.0.2026.08.07.4f1c3ec8")
+	if err != nil {
+		t.Fatalf("units-only failed: %v\n%s", err, out)
+	}
+	if got, want := installedVersion(t, home), "v0.2.0.2026.08.07.4f1c3ec8"; got != want {
+		t.Errorf("installed-version = %q, want %q (the component prefix must be stripped)", got, want)
+	}
+}
+
+// TestUnitsOnlyWithoutAVersionRecordsNothing: `service install` supplies no
+// BURROWEE_VERSION today, and inventing one would be worse than none — a wrong
+// anchor gates real migrations off permanently, an absent one falls back to the
+// --applies probe.
+func TestUnitsOnlyWithoutAVersionRecordsNothing(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
+	stageMigration(t, bundle, logPath, 0)
+
+	if _, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1"); err != nil {
+		t.Fatalf("units-only failed: %v", err)
+	}
+	if v := installedVersion(t, home); v != "" {
+		t.Errorf("a version was invented with none supplied: %q", v)
+	}
+}
+
+// TestUnitsOnlyDoesNotRecordTheVersionOnAnUnrecordedMigration: exit 3 is
+// "migrated but the receipt was lost". The receipt is what keeps a rung
+// re-runnable; writing the anchor anyway closes the only remaining gate on work
+// nothing on this host can prove finished.
+func TestUnitsOnlyDoesNotRecordTheVersionOnAnUnrecordedMigration(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
+	stageMigration(t, bundle, logPath, 3)
+
+	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1",
+		"BURROWEE_VERSION=gateway/v0.2.0")
+	if err != nil {
+		t.Fatalf("exit 3 from the runner must not fail units-only: %v\n%s", err, out)
+	}
+	if v := installedVersion(t, home); v != "" {
+		t.Errorf("version recorded for an unrecorded migration: %q", v)
+	}
+	assertContains(t, out, "receipt could not be written")
+}
