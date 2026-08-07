@@ -39,6 +39,10 @@ BIN_DIR="${PREFIX:-$HOME/.local}/bin"
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
+# The per-user component tree. Identical to $GW_HOME for this component, spelled
+# separately because the first-run bootstrap probe at the bottom is written in
+# terms of "this component's home" and reads better that way.
+COMP_HOME="$HOME/.burrowee/$COMP"
 # The invoking user. No longer rendered into any unit (the daemon runs as root)
 # — it is only compared against the owner a LEGACY per-user unit still records,
 # to decide whether taking over the slot needs consent.
@@ -202,6 +206,95 @@ ensure_system_log_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# migration_runner — the path of the runner shipped beside this installer, or
+# empty when this bundle carries none (a $GW_HOME self-copy from an install that
+# predates migrations/, or a component zip built before the dir existed).
+# ---------------------------------------------------------------------------
+migration_runner() {
+    _r="$(dirname "$0")/migrations/run.sh"
+    if [ -f "$_r" ]; then echo "$_r"; else echo ""; fi
+}
+
+# ---------------------------------------------------------------------------
+# assert_can_migrate <cli-path> — refuse, BEFORE anything on this host has been
+# written, when the migration this bundle carries could not complete.
+#
+# The runner calls `burrowee-gateway-cli migrate` and probes the INSTALLED cli
+# for that verb (migrations/run.sh: cli_supports_migrate). The verb arrived
+# after 0.1.115, so on a live 0.1.115 host the cli on disk does not have it.
+#
+# Discovering that from inside the runner is far too late. install.sh exits 1
+# and records no version, so the CALLER reports a failed update — but by then
+# the binaries have been swapped and render_units has already written the
+# root-scheme units to /Library/LaunchDaemons. Nothing removes them. On the next
+# reboot launchd bootstraps the root daemon against an empty system config root,
+# it mints a fresh relay_ed.key, and the node re-registers as a NEW node,
+# orphaning its console pairing, targets and domains. A failed update that
+# silently rebuilds the host's identity at the next power cycle is the worst
+# outcome available, and it is reached through the "safe" branch.
+#
+# So the probe moves in FRONT of every write. The invariant it establishes: no
+# unit file is written and no binary is swapped unless the migration is known to
+# be able to complete. The caller passes the cli the runner will actually probe
+# — the staged one in the bundle for the modes that place binaries (they place
+# the cli too, see BINS), the installed one for units-only, which places none.
+# ---------------------------------------------------------------------------
+assert_can_migrate() {
+    if [ -z "$(migration_runner)" ]; then return 0; fi
+    if [ -x "$1" ] && "$1" migrate --help >/dev/null 2>&1; then return 0; fi
+    echo "error: this release's state migration needs 'burrowee-gateway-cli migrate'," >&2
+    echo "error: and $1 does not provide it — refusing before anything is changed." >&2
+    echo "hint: nothing has been touched: no binary was replaced and no service unit written." >&2
+    echo "hint: install the current release first (it ships a cli that carries the verb):" >&2
+    echo "hint:   curl -fsSL https://release.burrowee.com/gateway/install.sh | sh" >&2
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# migration_sudo — the elevation command handed to the runner, following THIS
+# script's own root policy (run_root): a prompting `sudo` only when there is a
+# controlling tty to prompt on, `sudo -n` otherwise. An explicit SUDO from the
+# caller wins, so the updater's own seam still reaches the runner.
+#
+# The documented install flow is `curl … | sh`, where stdin is the pipe. A bare
+# `sudo` there fails with "no tty present and no askpass program" — and it fails
+# AFTER the runner has stopped the gateway, with none of run_root's hint text.
+# ---------------------------------------------------------------------------
+migration_sudo() {
+    if [ -n "${SUDO:-}" ]; then echo "$SUDO"; return 0; fi
+    if has_tty; then echo "sudo"; else echo "sudo -n"; fi
+}
+
+# ---------------------------------------------------------------------------
+# record_installed_version <version> — write the migration ladder's version
+# anchor at $GW_HOME/.installed-version.
+#
+# The runner gates each migration on `installed_version < target` and falls back
+# to the migration's own --applies probe only when NOTHING is recorded. Leaving
+# the anchor unwritten is therefore not a safe default: it routes every host to
+# the path the runner's own header calls exceptional, and any future migration
+# that cannot recognise its precondition structurally silently never runs.
+#
+# The version may arrive as the release TAG, which carries a "<component>/"
+# prefix (gateway/v0.1.115.2026.08.06.d0d79ec6). The runner reads dot-separated
+# fields as numbers, so "gateway/v0" is non-numeric and resolves the whole
+# version to 0.0.0 — which would make a freshly-installed 0.2.x host look older
+# than every migration ever written. Strip the prefix here, where the shape is
+# known; the runner already strips a leading "v".
+#
+# NOTE for the gateway repo: gateway/update.sh (the console-push path) still has
+# no writer for this file, so a host updated only by push keeps whatever anchor
+# its last install.sh run left. That half belongs to the gateway repo — see the
+# platform review's H8.
+# ---------------------------------------------------------------------------
+record_installed_version() {
+    _ver="${1##*/}"
+    if [ -z "$_ver" ]; then return 0; fi
+    mkdir -p "$GW_HOME"
+    printf '%s\n' "$_ver" > "$GW_HOME/.installed-version"
+}
+
+# ---------------------------------------------------------------------------
 # migrate_from_legacy — run the release's migrations/run.sh, which walks every
 # migration in its ledger and runs the ones this host has not reached yet.
 #
@@ -223,6 +316,13 @@ ensure_system_log_dir() {
 # stopped" — so a mode with no load_units step can say so rather than leaving the
 # operator to discover a stopped service.
 #
+# Exit 3 is exit 2 plus "and the receipt could not be written". The migration
+# ran, so the gateway is stopped exactly as for 2; what differs is that the only
+# surviving gate on re-running it is the version anchor. Recording the version
+# there would convert a receipt-gated, re-runnable migration into a
+# version-gated never-again one, so MIGRATE_UNRECORDED suppresses the write and
+# the next install re-runs the migration (every migration is idempotent).
+#
 # Any other non-zero is FATAL. Carrying on would start the new root units against
 # a config root with no identity: the daemon then either refuses to start or mints
 # a fresh one, and a new relay_ed.key re-registers this host as a NEW node,
@@ -232,27 +332,42 @@ ensure_system_log_dir() {
 # self-copy, and an install predating the migrations/ dir has none beside it.
 # ---------------------------------------------------------------------------
 MIGRATED=0
+MIGRATE_UNRECORDED=0
 migrate_from_legacy() {
-    _runner="$(dirname "$0")/migrations/run.sh"
-    if [ ! -f "$_runner" ]; then return 0; fi
+    _runner="$(migration_runner)"
+    if [ -z "$_runner" ]; then return 0; fi
     set +e
     GW_HOME="$GW_HOME" \
         PREFIX="${PREFIX:-$HOME/.local}" \
         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR" \
         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR" \
-        SUDO="${SUDO:-sudo}" \
+        SUDO="$(migration_sudo)" \
         sh "$_runner"
     _rc=$?
     set -e
     case "$_rc" in
     0) ;;
     2) MIGRATED=1 ;;
+    3) MIGRATED=1; MIGRATE_UNRECORDED=1 ;;
     *)
         echo "error: a state migration failed — stopping before the service is started." >&2
         echo "hint: $GW_HOME is untouched; fix the cause reported above and re-run this installer." >&2
         exit 1
         ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# report_unrecorded_migration — say that a migration completed without its
+# receipt, and that the version anchor was withheld on purpose so it runs again.
+# Every mode that calls migrate_from_legacy calls this after it.
+# ---------------------------------------------------------------------------
+report_unrecorded_migration() {
+    if [ "$MIGRATE_UNRECORDED" != "1" ]; then return 0; fi
+    echo "note: a migration completed but its receipt could not be written." >&2
+    echo "note: the installed version is deliberately NOT recorded, so the next install" >&2
+    echo "note: re-runs the migration (they are idempotent) rather than gating it off" >&2
+    echo "note: on a version number with no receipt behind it." >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -455,13 +570,23 @@ sha256_of() {
 # ---------------------------------------------------------------------------
 
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
+    # First, ahead of the consent prompt and every write: this mode places no
+    # binaries at all, so the cli the runner will probe is the one already on
+    # disk. If it cannot migrate, render_units below would leave root-scheme
+    # units on a host whose state never moved.
+    assert_can_migrate "$BIN_DIR/burrowee-gateway-cli"
     check_service_override
     remove_legacy_user_units
-    render_units
-    # Before load_units, never after: the migration stops the gateway to copy its
-    # store at rest, and load_units is what starts it again.
+    # Before render_units as well as before load_units. Before load_units because
+    # the migration stops the gateway to copy its store at rest and load_units is
+    # what starts it again; before render_units because a migration that fails for
+    # ANY reason exits this script — and a root-scheme unit left on disk by a run
+    # that then aborted is bootstrapped by launchd at the next reboot regardless,
+    # against a config root the migration never populated.
     migrate_from_legacy
+    render_units
     load_units
+    report_unrecorded_migration
     exit 0
 fi
 
@@ -484,6 +609,18 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         *) shift ;;
         esac
     done
+    # The outer bootstrap re-runs this script in update mode (the `--force` full
+    # reinstall) with the resolved release tag in BURROWEE_VERSION and NO argv of
+    # its own, so that path recorded no version at all. Argv wins where both are
+    # present; record_installed_version normalises either shape.
+    if [ -z "$_install_version" ]; then _install_version="${BURROWEE_VERSION:-}"; fi
+
+    # Whose slot is it? Answered up front, because it decides both whether a
+    # migration will be attempted at all (and so whether the pre-flight below
+    # applies) and whether the version may be recorded at the end.
+    _slot_owner="$(unit_owner "$(core_unit_path)")"
+    _own_slot=0
+    if [ -z "$_slot_owner" ] || [ "$_slot_owner" = "$SERVICE_USER" ]; then _own_slot=1; fi
 
     mkdir -p "$BIN_DIR"
 
@@ -492,9 +629,19 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # re-placed regardless of sha256 — a --force onto the already-installed
     # version has byte-identical binaries, so without this it would place
     # nothing and the operator's "reinstall completely" would be a no-op.
+    #
+    # burrowee-gateway-cli IS placed here, and that is a change from the shape
+    # that shipped: the migration calls `burrowee-gateway-cli migrate`, and the
+    # runner probes the INSTALLED cli for the verb. Leaving a 0.1.115 cli on
+    # disk while swapping everything around it guaranteed that probe would fail
+    # — with the units already written. gateway/update.sh, the other half of the
+    # same update, has always carried the cli in its BINS; the two paths now
+    # agree. Only burrowee-gateway-updater stays excluded: it is on its own
+    # track, and replacing the binary a running updater is executing from
+    # mid-update is what that exclusion exists to prevent.
     CHANGED=""
     for b in $BINS; do
-        { [ "$b" = "burrowee-gateway-cli" ] || [ "$b" = "burrowee-gateway-updater" ]; } && continue   # updater binaries: updated separately, never during a gateway update
+        [ "$b" = "burrowee-gateway-updater" ] && continue   # its own update track: never replaced from inside an update it is running
         _staged="./$b"
         [ -f "$_staged" ] || { echo "missing $b in bundle" >&2; exit 1; }
         _staged_sum="$(sha256_of "$_staged")"
@@ -506,6 +653,18 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
             CHANGED="${CHANGED:+$CHANGED }$b"
         fi
     done
+
+    # Phase 1b — the pre-flight, deliberately between detection (which writes
+    # nothing) and the first write. Phase 1 has already proved every staged
+    # binary exists, so a refusal here is about the verb, not a missing file.
+    #
+    # Skipped when the slot belongs to another user: the branch below then
+    # defers the migration entirely, so there is nothing to be unable to
+    # complete, and refusing would block a binary swap that is independently
+    # correct.
+    if [ "$_own_slot" = "1" ]; then
+        assert_can_migrate "./burrowee-gateway-cli"
+    fi
 
     # Phase 2: transactional backup of all to-be-replaced binaries.
     _backed_up=""
@@ -548,14 +707,18 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # also what makes a later `service install` able to migrate at all.
     keep_installer_copy
 
-    # Refresh the system unit FILES only — never load/restart them here (the
-    # updater restarts the kernel out-of-band; loading would bootout the very
-    # process running this script), never touch another user's slot, and never
-    # fail the binary swap for lack of sudo: a unit refresh can always happen
-    # later via 'burrowee gateway service install'.
-    _slot_owner="$(unit_owner "$(core_unit_path)")"
-    if [ -z "$_slot_owner" ] || [ "$_slot_owner" = "$SERVICE_USER" ]; then
-        render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
+    # Migrate, THEN refresh the system unit FILES only — never load/restart them
+    # here (the updater restarts the kernel out-of-band; loading would bootout the
+    # very process running this script), never touch another user's slot, and
+    # never fail the binary swap for lack of sudo: a unit refresh can always
+    # happen later via 'burrowee gateway service install'.
+    #
+    # The migration comes first because a failed one exits this script, and a
+    # root-scheme unit already on disk is bootstrapped by launchd at the next
+    # reboot whatever this run reported — against a config root the migration
+    # never populated. Leaving the OLD units in place is strictly better: they
+    # point at a tree that still holds the host's identity.
+    if [ "$_own_slot" = "1" ]; then
         # Inside this branch, not beside it: a migration claims whose identity the
         # root daemon adopts, and on a slot belonging to someone else that claim
         # would be wrong in the one direction that cannot be undone — a
@@ -563,20 +726,30 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         # prompt to settle it (unlike the install paths, which run
         # check_service_override first), so it defers instead.
         migrate_from_legacy
+        render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
+
+        # The version LAST, and only once everything above succeeded. Recording it
+        # before the migration would mean a failed migration leaves the new version on
+        # disk with the old layout still in place — after which every later run reads
+        # "already up to date" and the host never migrates again. A failed migration
+        # exits non-zero above, so reaching here means there is nothing pending.
+        #
+        # INSIDE this branch, for the same reason the migration is: the deferring
+        # branch below leaves a legacy tree unmigrated, and the runner consults a
+        # migration's own --applies probe only when NO version is recorded. Writing
+        # the version there would hand the numeric gate sole authority over a rung
+        # that never ran, permanently — a second, independent route to the node
+        # re-registering under a fresh identity.
+        if [ "$MIGRATE_UNRECORDED" = "0" ]; then
+            record_installed_version "$_install_version"
+        fi
     else
         echo "note: gateway system service belongs to user '$_slot_owner' — units not refreshed" >&2
         echo "note: not migrating either — 'burrowee gateway service install' takes the slot over first" >&2
+        echo "note: and the installed version is not recorded, so the migration stays pending" >&2
     fi
 
-    # The version LAST, and only once everything above succeeded. Recording it
-    # before the migration would mean a failed migration leaves the new version on
-    # disk with the old layout still in place — after which every later run reads
-    # "already up to date" and the host never migrates again. A failed migration
-    # exits non-zero above, so reaching here means there is nothing pending.
-    if [ -n "$_install_version" ]; then
-        mkdir -p "$GW_HOME"
-        printf '%s\n' "$_install_version" > "$GW_HOME/.installed-version"
-    fi
+    report_unrecorded_migration
 
     # This mode has no start step of its own; say so rather than leaving the
     # operator to find a stopped service.
@@ -627,6 +800,11 @@ fi
 # ---------------------------------------------------------------------------
 # Fresh install (default mode).
 # ---------------------------------------------------------------------------
+
+# Before the first write, same invariant as update mode: this run places every
+# binary including the cli, so the staged cli is the one the runner will probe.
+assert_can_migrate "./burrowee-gateway-cli"
+
 mkdir -p "$BIN_DIR"
 for b in $BINS; do
     [ -f "./$b" ] || { echo "missing $b in archive" >&2; exit 1; }
@@ -649,23 +827,60 @@ esac
 keep_installer_copy
 
 # Write and load both SYSTEM service units (single-slot consent first, then
-# migrate any legacy per-user units out of the way).
+# migrate any legacy per-user units out of the way). The state migration runs
+# before render_units, not between it and load_units: a failed migration exits
+# here, and a root-scheme unit left behind by an aborted run is bootstrapped by
+# launchd at the next reboot regardless of what this run reported.
 check_service_override
 remove_legacy_user_units
-render_units
 migrate_from_legacy
+render_units
 load_units
+report_unrecorded_migration
+
+# Record the ladder's version anchor here too. Fresh mode never did, which left
+# the anchor written from exactly ONE place platform-wide (update mode, and only
+# with --version) — so essentially every host reached a future rung through the
+# runner's --applies fallback, the path its own header calls exceptional. The
+# outer bootstrap passes the resolved release tag as BURROWEE_VERSION; a run
+# without it (a hand-invoked inner installer) records nothing and keeps today's
+# behaviour rather than inventing a version.
+if [ "$MIGRATE_UNRECORDED" = "0" ]; then
+    record_installed_version "${BURROWEE_VERSION:-}"
+fi
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------
-# Re-install short-circuit: if this component already has persisted state under
-# ~/.burrowee/<comp> (the gateway db/keys, cli/edge identity, …) it is already
-# set up — never re-prompt for a setup blob. Otherwise read blob+PIN from the
-# controlling terminal (stdin is the curl pipe, not a tty): prompt only if
-# /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
+# Re-install short-circuit: if this host already holds gateway STATE it is
+# already set up — never re-prompt for a setup blob. Otherwise read blob+PIN
+# from the controlling terminal (stdin is the curl pipe, not a tty): prompt only
+# if /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
 # next step. All tty I/O is fault-tolerant so it can never abort the install.
-COMP_HOME="$HOME/.burrowee/$COMP"
-if [ -d "$COMP_HOME" ] && [ -n "$(ls -A "$COMP_HOME" 2>/dev/null || true)" ]; then
-    echo "$COMP already set up ($COMP_HOME) — skipping setup."
+#
+# gateway_already_set_up probes for the state itself, never for a non-empty
+# $COMP_HOME. keep_installer_copy above creates that directory and writes
+# install.sh + migrations/ into it a few dozen lines earlier, so "non-empty" is
+# something THIS script guarantees: on a genuinely virgin host the old test
+# printed "already set up — skipping setup" and the blob + PIN prompt never ran.
+#
+# Both layouts count. Pre-0.2.0 state lives in the per-user tree; on a migrated
+# or root-installed host the identity and the store are under the SYSTEM roots
+# and $COMP_HOME holds nothing but the installer copy — so a probe that looked
+# only at $COMP_HOME would re-prompt a fully enrolled 0.2.x host.
+gateway_already_set_up() {
+    for _p in \
+        "$COMP_HOME/identity/relay_ed.key" \
+        "$COMP_HOME/keys/relay_ed.key" \
+        "$COMP_HOME/gateway.db" \
+        "$SYS_CONFIG_DIR/identity/relay_ed.key" \
+        "$SYS_DATA_DIR/gateway.db"
+    do
+        if [ -e "$_p" ]; then return 0; fi
+    done
+    return 1
+}
+
+if gateway_already_set_up; then
+    echo "$COMP already set up — skipping setup."
 elif { exec 3<>/dev/tty; } 2>/dev/null; then
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
     printf 'blob> ' >&3 2>/dev/null || true

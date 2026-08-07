@@ -103,7 +103,7 @@ func runUpdateExpectFail(t *testing.T, stageDir, home, stubDir string, env []str
 	return string(out)
 }
 
-// allBinsContent returns a map of all 5 bins each mapped to the given body.
+// allBinsContent returns a map of all 6 bins each mapped to the given body.
 func allBinsContent(body string) map[string]string {
 	m := make(map[string]string, len(allBins))
 	for _, b := range allBins {
@@ -112,13 +112,43 @@ func allBinsContent(body string) map[string]string {
 	return m
 }
 
-// serveBins is BINS minus the two updater-owned binaries that update mode never
-// touches, in BINS order — the exact set --force must re-place.
+// serveBins is BINS minus burrowee-gateway-updater — the one binary on its own
+// update track — in BINS order. This is the exact set --force must re-place,
+// and burrowee-gateway-cli is IN it: the migration calls
+// `burrowee-gateway-cli migrate` and the runner probes the INSTALLED cli, so an
+// update that swaps everything around the cli guarantees that probe fails.
 var serveBins = []string{
 	"burrowee",
 	"burrowee-gateway",
+	"burrowee-gateway-cli",
 	"burrowee-gateway-console",
 	"burrowee-register",
+}
+
+// cliWithMigrate / cliWithoutMigrate stand in for burrowee-gateway-cli. The
+// runner's capability probe is `<cli> migrate --help`, so a stand-in has to be
+// executable and answer that call — a plain text file would fail the probe for
+// the wrong reason and make every migration test pass vacuously.
+//
+// cliWithoutMigrate is the shipped 0.1.115 cli: every other verb works, the
+// verb the migration needs does not exist.
+const (
+	cliWithMigrate = "#!/bin/sh\n" +
+		"case \"$1\" in migrate) exit 0 ;; esac\n" +
+		"exit 0\n"
+	cliWithoutMigrate = "#!/bin/sh\n" +
+		"case \"$1\" in migrate) echo \"unknown verb: migrate\" >&2; exit 2 ;; esac\n" +
+		"exit 0\n"
+)
+
+// withCLI returns contents with burrowee-gateway-cli replaced by body.
+func withCLI(contents map[string]string, body string) map[string]string {
+	out := make(map[string]string, len(contents))
+	for k, v := range contents {
+		out[k] = v
+	}
+	out["burrowee-gateway-cli"] = body
+	return out
 }
 
 // writeLaunchctlStub drops a fake `launchctl` into dir that appends its argv
