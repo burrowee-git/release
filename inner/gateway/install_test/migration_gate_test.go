@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -437,5 +438,139 @@ func TestFreshInstallWithoutAVersionRecordsNothing(t *testing.T) {
 	}
 	if v := installedVersion(t, home); v != "" {
 		t.Errorf("a version was invented with none supplied: %q", v)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MEDIUM — the SUDO handed to the runner follows install.sh's own tty policy.
+// ---------------------------------------------------------------------------
+
+// TestMigrationGetsANonPromptingSudoWithoutATty: install.sh's own run_root uses
+// a prompting `sudo` only when a controlling tty exists and `sudo -n`
+// otherwise, but it handed the runner a bare `sudo` regardless. The documented
+// flow is `curl … | sh`, where stdin is the pipe: that bare sudo dies on "no
+// tty present and no askpass program" — AFTER the runner has stopped the
+// gateway, and with none of run_root's hint text.
+//
+// Setsid detaches the child from the controlling terminal, so /dev/tty is
+// genuinely unopenable and has_tty is false no matter where the suite runs.
+func TestMigrationGetsANonPromptingSudoWithoutATty(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	bundle := t.TempDir()
+	script := stageInstaller(t, bundle)
+	logPath := filepath.Join(t.TempDir(), "migration.log")
+	seedMigrateCapableCLI(t, home)
+	stageMigration(t, bundle, logPath, 0)
+
+	cmd := exec.Command("sh", script)
+	cmd.Dir = home
+	cmd.Env = installShEnv(home, stub, "BURROWEE_UNITS_ONLY=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
+	}
+
+	log := migrationLog(t, logPath)
+	if log == "" {
+		t.Fatal("the migration never ran")
+	}
+	assertContains(t, log, "SUDO=sudo -n")
+}
+
+// ---------------------------------------------------------------------------
+// MEDIUM — the first-run probe must test STATE, not a directory this script
+// itself created.
+// ---------------------------------------------------------------------------
+
+// TestFreshInstallPromptsSetupOnAVirginHost: keep_installer_copy creates
+// $GW_HOME and writes install.sh + migrations/ into it, and the old probe then
+// asked whether $GW_HOME was non-empty. It always is, by the time it is asked.
+// So a genuinely virgin host printed "gateway already set up — skipping setup"
+// and the blob + PIN step never ran: the operator installed a gateway that
+// silently never enrolled.
+//
+// With no usable /dev/tty the installer prints the next step instead of
+// prompting, so that line is what a virgin host must produce.
+func TestFreshInstallPromptsSetupOnAVirginHost(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	staging := t.TempDir()
+	seedDummyBins(t, staging)
+
+	cmd := exec.Command("sh", installShPath(t))
+	cmd.Dir = staging
+	cmd.Env = installShEnv(home, stub)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fresh install failed: %v\n%s", err, out)
+	}
+
+	if strings.Contains(string(out), "already set up") {
+		t.Errorf("virgin host reported as already set up — setup was skipped:\n%s", out)
+	}
+	assertContains(t, string(out), "next: burrowee gateway bootstrap")
+
+	// And the installer copy really is sitting in $GW_HOME: without it the test
+	// would pass simply because the directory was empty, which is the shape the
+	// bug needs to be reproduced against.
+	if _, statErr := os.Stat(filepath.Join(home, ".burrowee", "gateway", "install.sh")); statErr != nil {
+		t.Fatalf("the installer copy is missing, so this test is not exercising the bug: %v", statErr)
+	}
+}
+
+// TestFreshInstallSkipsSetupWhenStateExists is the half the probe must not
+// lose: an enrolled host must never be re-prompted for a setup blob. Both
+// layouts count — the pre-0.2.0 per-user tree, and the SYSTEM roots a migrated
+// or root-installed host keeps its identity in, where $GW_HOME holds nothing
+// but the installer copy.
+func TestFreshInstallSkipsSetupWhenStateExists(t *testing.T) {
+	seed := map[string]func(home string) string{
+		"legacy per-user identity": func(home string) string {
+			return filepath.Join(home, ".burrowee", "gateway", "identity", "relay_ed.key")
+		},
+		"legacy per-user keys": func(home string) string {
+			return filepath.Join(home, ".burrowee", "gateway", "keys", "relay_ed.key")
+		},
+		"legacy per-user store": func(home string) string {
+			return filepath.Join(home, ".burrowee", "gateway", "gateway.db")
+		},
+		"system config identity": func(home string) string {
+			return filepath.Join(sysConfigDir(home), "identity", "relay_ed.key")
+		},
+		"system data store": func(home string) string {
+			return filepath.Join(sysDataDir(home), "gateway.db")
+		},
+	}
+
+	for name, where := range seed {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			stub := stubInitSystem(t)
+			staging := t.TempDir()
+			seedDummyBins(t, staging)
+
+			p := where(home)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("state"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command("sh", installShPath(t))
+			cmd.Dir = staging
+			cmd.Env = installShEnv(home, stub)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("fresh install failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), "already set up") {
+				t.Errorf("enrolled host was not recognised — setup would be re-prompted:\n%s", out)
+			}
+		})
 	}
 }

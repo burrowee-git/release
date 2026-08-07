@@ -39,6 +39,10 @@ BIN_DIR="${PREFIX:-$HOME/.local}/bin"
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
+# The per-user component tree. Identical to $GW_HOME for this component, spelled
+# separately because the first-run bootstrap probe at the bottom is written in
+# terms of "this component's home" and reads better that way.
+COMP_HOME="$HOME/.burrowee/$COMP"
 # The invoking user. No longer rendered into any unit (the daemon runs as root)
 # — it is only compared against the owner a LEGACY per-user unit still records,
 # to decide whether taking over the slot needs consent.
@@ -247,6 +251,21 @@ assert_can_migrate() {
 }
 
 # ---------------------------------------------------------------------------
+# migration_sudo — the elevation command handed to the runner, following THIS
+# script's own root policy (run_root): a prompting `sudo` only when there is a
+# controlling tty to prompt on, `sudo -n` otherwise. An explicit SUDO from the
+# caller wins, so the updater's own seam still reaches the runner.
+#
+# The documented install flow is `curl … | sh`, where stdin is the pipe. A bare
+# `sudo` there fails with "no tty present and no askpass program" — and it fails
+# AFTER the runner has stopped the gateway, with none of run_root's hint text.
+# ---------------------------------------------------------------------------
+migration_sudo() {
+    if [ -n "${SUDO:-}" ]; then echo "$SUDO"; return 0; fi
+    if has_tty; then echo "sudo"; else echo "sudo -n"; fi
+}
+
+# ---------------------------------------------------------------------------
 # record_installed_version <version> — write the migration ladder's version
 # anchor at $GW_HOME/.installed-version.
 #
@@ -322,7 +341,7 @@ migrate_from_legacy() {
         PREFIX="${PREFIX:-$HOME/.local}" \
         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR" \
         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR" \
-        SUDO="${SUDO:-sudo}" \
+        SUDO="$(migration_sudo)" \
         sh "$_runner"
     _rc=$?
     set -e
@@ -818,15 +837,37 @@ if [ "$MIGRATE_UNRECORDED" = "0" ]; then
 fi
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------
-# Re-install short-circuit: if this component already has persisted state under
-# ~/.burrowee/<comp> (the gateway db/keys, cli/edge identity, …) it is already
-# set up — never re-prompt for a setup blob. Otherwise read blob+PIN from the
-# controlling terminal (stdin is the curl pipe, not a tty): prompt only if
-# /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
+# Re-install short-circuit: if this host already holds gateway STATE it is
+# already set up — never re-prompt for a setup blob. Otherwise read blob+PIN
+# from the controlling terminal (stdin is the curl pipe, not a tty): prompt only
+# if /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
 # next step. All tty I/O is fault-tolerant so it can never abort the install.
-COMP_HOME="$HOME/.burrowee/$COMP"
-if [ -d "$COMP_HOME" ] && [ -n "$(ls -A "$COMP_HOME" 2>/dev/null || true)" ]; then
-    echo "$COMP already set up ($COMP_HOME) — skipping setup."
+#
+# gateway_already_set_up probes for the state itself, never for a non-empty
+# $COMP_HOME. keep_installer_copy above creates that directory and writes
+# install.sh + migrations/ into it a few dozen lines earlier, so "non-empty" is
+# something THIS script guarantees: on a genuinely virgin host the old test
+# printed "already set up — skipping setup" and the blob + PIN prompt never ran.
+#
+# Both layouts count. Pre-0.2.0 state lives in the per-user tree; on a migrated
+# or root-installed host the identity and the store are under the SYSTEM roots
+# and $COMP_HOME holds nothing but the installer copy — so a probe that looked
+# only at $COMP_HOME would re-prompt a fully enrolled 0.2.x host.
+gateway_already_set_up() {
+    for _p in \
+        "$COMP_HOME/identity/relay_ed.key" \
+        "$COMP_HOME/keys/relay_ed.key" \
+        "$COMP_HOME/gateway.db" \
+        "$SYS_CONFIG_DIR/identity/relay_ed.key" \
+        "$SYS_DATA_DIR/gateway.db"
+    do
+        if [ -e "$_p" ]; then return 0; fi
+    done
+    return 1
+}
+
+if gateway_already_set_up; then
+    echo "$COMP already set up — skipping setup."
 elif { exec 3<>/dev/tty; } 2>/dev/null; then
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
     printf 'blob> ' >&3 2>/dev/null || true
