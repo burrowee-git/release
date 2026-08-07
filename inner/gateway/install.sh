@@ -12,15 +12,34 @@
 # bypasses the sha256 check and re-places every serve binary (the `--force`
 # full-reinstall path — the diff would otherwise skip an identical version).
 #
-# Service model: the BINARIES stay per-user (PREFIX/bin, default
-# ~/.local/bin), but the service units are SYSTEM-level and the daemon they
-# start runs as ROOT, so the gateway starts at boot without a GUI login:
+# Service model: the service units are SYSTEM-level and the daemon they start
+# runs as ROOT, so the gateway starts at boot without a GUI login:
 # /Library/LaunchDaemons on macOS, /etc/systemd/system on Linux. Its config and
 # data live under the SYSTEM roots ($SYS_CONFIG_DIR / $SYS_DATA_DIR), named
 # explicitly in the unit rather than left to resolve from whoever's environment
 # the daemon happens to inherit. System steps run via sudo (prompting on the
 # controlling tty; with no tty and no cached credentials the unit step aborts
 # with guidance).
+#
+# TWO BINARY LOCATIONS, AND THE DIFFERENCE IS THE WHOLE POINT.
+#
+#   $BIN_DIR      per-user, on PATH ($PREFIX/bin, default ~/.local/bin). Every
+#                 binary, exactly as before. This is what the operator types and
+#                 what an unprivileged install has.
+#   $LIBEXEC_DIR  root-owned, not on PATH. The subset that something running AS
+#                 ROOT execs with nobody watching: the daemon, the console child
+#                 it spawns, the updater agent, the cli the migration shells to —
+#                 plus this script and its migrations/.
+#
+# The units name $LIBEXEC_DIR, never $BIN_DIR. A root unit naming a per-user path
+# is a permanent uid-0 grant to that user: they overwrite the file after the one
+# install-time sudo and wait for a reboot, a KeepAlive cycle, or a pushed update.
+# That also made every permission inside $SYS_CONFIG_DIR decorative, because
+# whoever can rewrite the binary already owns identity/ and console.token.
+#
+# Nothing about the unprivileged flow changes: $BIN_DIR is still populated first
+# and in full, so a host that cannot reach root still gets working binaries — it
+# just gets no units, which was already true.
 #
 # Because a root-scheme unit runs as nobody in particular, it records no owner
 # and the single system slot is free for any installer to replace. Only a
@@ -58,6 +77,24 @@ SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
 SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
+# The PRIVILEGED EXECUTION SURFACE — the root-owned tree the system units and the
+# root updater run out of. Sibling of the system config/data roots so the whole
+# root-scheme install is one tree, and libexec because that is the conventional
+# home for programs invoked by other programs rather than typed, which is exactly
+# what an ExecStart is. Same test-seam caveat as the roots above; the Go side
+# holds the same constant as internal/gateway/root_exec.go's libexecDir.
+LIBEXEC_DIR="${BURROWEE_LIBEXEC_DIR:-/usr/local/libexec/burrowee/gateway}"
+# The binaries a ROOT process execs unattended, and therefore the ones that must
+# come from a tree no unprivileged user can rewrite:
+#   burrowee-gateway          the daemon named in the core unit
+#   burrowee-gateway-console  spawned + supervised by that daemon, from its own dir
+#   burrowee-gateway-updater  the daemon named in the updater unit
+#   burrowee-gateway-cli      execed as root by migrations/v1_to_v2.sh, which the
+#                             console-push path runs with no operator present
+# burrowee and burrowee-register are NOT here: nothing running as root execs
+# them, and keeping them out of the privileged tree keeps that tree honest about
+# what it is for.
+ROOT_BINS="burrowee-gateway burrowee-gateway-console burrowee-gateway-updater burrowee-gateway-cli"
 
 # ---------------------------------------------------------------------------
 # has_tty — whether a controlling terminal is available for prompts (stdin is
@@ -81,6 +118,180 @@ run_root() {
     echo "error: 'sudo $*' failed — no tty for a password prompt and no cached sudo credentials." >&2
     echo "hint: re-run from an interactive terminal, or pre-authorize with 'sudo -v', then retry ('burrowee gateway service install')." >&2
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# The privileged execution surface.
+#
+# have_real_root — whether elevation on this host actually yields uid 0.
+#
+# Everything below asserts OWNERSHIP, and ownership can only be asserted where
+# root was genuinely obtained. The sandboxed installer harness supplies a
+# pass-through `sudo` stub, so every file it "installs as root" is owned by the
+# test user: asserting uid 0 there would refuse every test run for a reason that
+# says nothing about a real host. Asking the elevation path who it is answers the
+# question directly, and keeps the production assertion strict without a second
+# env seam that nobody reading the code can see.
+#
+# Cached, because it costs a sudo round trip.
+# ---------------------------------------------------------------------------
+HAVE_REAL_ROOT=""
+have_real_root() {
+    if [ -z "$HAVE_REAL_ROOT" ]; then
+        if [ "$(run_root id -u 2>/dev/null || echo -)" = 0 ]; then
+            HAVE_REAL_ROOT=yes
+        else
+            HAVE_REAL_ROOT=no
+        fi
+    fi
+    [ "$HAVE_REAL_ROOT" = yes ]
+}
+
+# stat_uid / stat_mode <path> — owner uid and octal permission bits, on both
+# stat dialects (BSD/macOS `-f`, GNU `-c`). Empty output on failure.
+stat_uid() {
+    stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
+}
+stat_mode() {
+    stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+}
+
+# mode_allows_nonroot_write <octal> — true when the group or other digit carries
+# the write bit. The last two characters are those two digits for every width
+# stat emits ("755", "1777"), so no zero-padding assumption is needed.
+mode_allows_nonroot_write() {
+    _mm="$1"
+    [ "${#_mm}" -ge 2 ] || return 0    # unreadable mode: assume the worst
+    _mg=$(printf '%s' "$_mm" | cut -c "$((${#_mm} - 1))")
+    _mo=$(printf '%s' "$_mm" | cut -c "${#_mm}")
+    case "$_mg" in 2 | 3 | 6 | 7) return 0 ;; esac
+    case "$_mo" in 2 | 3 | 6 | 7) return 0 ;; esac
+    return 1
+}
+
+# path_is_root_secure <path> — the shell half of the same predicate the Go side
+# applies (internal/gateway/system_tool.IsRootSecure): a regular file owned by
+# uid 0, not group- or world-writable, reachable only through directories that
+# are themselves root-owned and unwritable by non-root, all the way to /.
+#
+# The ancestor walk is the load-bearing half. A root-owned binary inside a
+# user-writable directory can be unlinked and replaced by that user, after which
+# root execs their file — so checking the leaf alone proves nothing.
+path_is_root_secure() {
+    _rs_p="$1"
+    [ -f "$_rs_p" ] || return 1
+    [ "$(stat_uid "$_rs_p")" = 0 ] || return 1
+    if mode_allows_nonroot_write "$(stat_mode "$_rs_p")"; then return 1; fi
+    _rs_d="$(dirname "$_rs_p")"
+    while :; do
+        [ -d "$_rs_d" ] || return 1
+        [ "$(stat_uid "$_rs_d")" = 0 ] || return 1
+        if mode_allows_nonroot_write "$(stat_mode "$_rs_d")"; then return 1; fi
+        _rs_parent="$(dirname "$_rs_d")"
+        [ "$_rs_parent" != "$_rs_d" ] || break
+        _rs_d="$_rs_parent"
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# root_bin_source <name> — where this run's copy of a privileged binary comes
+# from: the unzipped bundle when there is one (fresh + update modes place
+# binaries), otherwise the per-user copy already on disk.
+#
+# The second source is what converges a host installed under 0.2.0: that host has
+# no bundle when `burrowee gateway service install` re-runs the kept installer,
+# but it does have the binaries in $BIN_DIR, and copying them into the root-owned
+# tree is exactly the repair. Falling back to a copy already in $LIBEXEC_DIR
+# keeps a units-only run started FROM that tree (the updater's offline reinstall)
+# from having nothing to name.
+# ---------------------------------------------------------------------------
+root_bin_source() {
+    for _rbs in "./$1" "$BIN_DIR/$1" "$LIBEXEC_DIR/$1"; do
+        if [ -f "$_rbs" ]; then echo "$_rbs"; return 0; fi
+    done
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# ensure_root_exec_surface — place every root-execed artifact under
+# $LIBEXEC_DIR, root-owned, and PROVE it before any unit is allowed to name it.
+# Non-zero means no unit may be written this run.
+#
+# Called from render_units rather than from each mode, so there is exactly one
+# place where "the units are about to name these paths" and "these paths are
+# safe" are decided together. Writing a unit and verifying its target in two
+# different functions is how the two drift apart.
+# ---------------------------------------------------------------------------
+ensure_root_exec_surface() {
+    run_root mkdir -p "$LIBEXEC_DIR" || return 1
+    # chown/chmod are best-effort: a tree root already established correctly
+    # needs neither, and re-tightening one somebody else owns is not this
+    # installer's call. The verification below is what decides, not these.
+    run_root chown 0:0 "$LIBEXEC_DIR" 2>/dev/null || true
+    run_root chmod 0755 "$LIBEXEC_DIR" 2>/dev/null || true
+
+    for _reb in $ROOT_BINS; do
+        _reb_src="$(root_bin_source "$_reb")"
+        if [ -z "$_reb_src" ]; then
+            echo "error: no copy of $_reb to place in $LIBEXEC_DIR — refusing to write a unit naming it." >&2
+            return 1
+        fi
+        # Identical content is a no-op, so a steady-state refresh needs no sudo
+        # at all — and it is also what keeps a run started FROM $LIBEXEC_DIR from
+        # asking `install` to copy a file onto itself.
+        if [ -f "$LIBEXEC_DIR/$_reb" ] && cmp -s "$_reb_src" "$LIBEXEC_DIR/$_reb"; then continue; fi
+        run_root /usr/bin/install -m 0755 "$_reb_src" "$LIBEXEC_DIR/$_reb" || return 1
+        if [ "$(uname -s)" = "Darwin" ]; then
+            run_root xattr -d com.apple.quarantine "$LIBEXEC_DIR/$_reb" 2>/dev/null || true
+        fi
+    done
+
+    # This script and its migrations, so the root updater's offline reinstall has
+    # a root-owned installer to exec. The per-user copy at $GW_HOME stays too
+    # (keep_installer_copy) — a host with no system install has nothing else to
+    # re-run — but root never runs that one.
+    if [ ! -f "$LIBEXEC_DIR/install.sh" ] || ! cmp -s "$0" "$LIBEXEC_DIR/install.sh"; then
+        run_root /usr/bin/install -m 0755 "$0" "$LIBEXEC_DIR/install.sh" || return 1
+    fi
+    _reb_migrations="$(dirname "$0")/migrations"
+    if [ -d "$_reb_migrations" ] && [ "$_reb_migrations" != "$LIBEXEC_DIR/migrations" ]; then
+        run_root mkdir -p "$LIBEXEC_DIR/migrations" || return 1
+        for _reb_m in "$_reb_migrations"/*.sh; do
+            [ -f "$_reb_m" ] || continue
+            run_root /usr/bin/install -m 0755 "$_reb_m" "$LIBEXEC_DIR/migrations/" || return 1
+        done
+    fi
+
+    verify_root_exec_surface
+}
+
+# ---------------------------------------------------------------------------
+# verify_root_exec_surface — refuse when anything a unit is about to name, or
+# that the root updater will exec, is not root-owned all the way to /.
+#
+# This is the check that makes the placement above meaningful rather than
+# decorative. /usr/local is root-owned on a modern macOS and on every Linux, but
+# it is not GUARANTEED to be: a host where a package manager chowned it would
+# otherwise get a root-scheme unit pointing into a tree its owner can rewrite —
+# the identical vulnerability, one directory over.
+# ---------------------------------------------------------------------------
+verify_root_exec_surface() {
+    if ! have_real_root; then
+        echo "note: this run never reached uid 0, so the ownership of $LIBEXEC_DIR" >&2
+        echo "note: cannot be asserted — skipping the root-secure check." >&2
+        return 0
+    fi
+    for _vre in $ROOT_BINS install.sh; do
+        if ! path_is_root_secure "$LIBEXEC_DIR/$_vre"; then
+            echo "error: $LIBEXEC_DIR/$_vre is not root-owned and unwritable all the way to /." >&2
+            echo "error: refusing to install a service that runs as root out of a path a" >&2
+            echo "error: non-root user could replace." >&2
+            echo "hint: check the ownership and modes of $LIBEXEC_DIR and every directory above it;" >&2
+            echo "hint: each must be owned by root and not group- or world-writable." >&2
+            return 1
+        fi
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -239,6 +450,18 @@ migration_runner() {
 # — the staged one in the bundle for the modes that place binaries (they place
 # the cli too, see BINS), the installed one for units-only, which places none.
 # ---------------------------------------------------------------------------
+#
+# migrate_cli_path — the cli the runner will actually probe, resolved in the
+# runner's own order: the privileged copy first, the per-user one otherwise. The
+# two must agree, or this pre-flight passes on one binary while the runner
+# refuses on another.
+migrate_cli_path() {
+    for _mcp in "$LIBEXEC_DIR/burrowee-gateway-cli" "$BIN_DIR/burrowee-gateway-cli"; do
+        if [ -x "$_mcp" ]; then echo "$_mcp"; return 0; fi
+    done
+    echo "$BIN_DIR/burrowee-gateway-cli"
+}
+
 assert_can_migrate() {
     if [ -z "$(migration_runner)" ]; then return 0; fi
     if [ -x "$1" ] && "$1" migrate --help >/dev/null 2>&1; then return 0; fi
@@ -287,11 +510,21 @@ migration_sudo() {
 # its last install.sh run left. That half belongs to the gateway repo — see the
 # platform review's H8.
 # ---------------------------------------------------------------------------
+#
+# It is written to BOTH trees, and they answer different questions. $GW_HOME's
+# copy is the migration ladder's anchor — run.sh reads it and it describes the
+# per-user tree the rungs migrate FROM. $LIBEXEC_DIR's copy is the updater's:
+# core's local-update path reads <component home>/.installed-version to decide
+# whether an install is already current, and on a root-scheme host that home is
+# now the privileged tree. One writer for both keeps them from disagreeing.
 record_installed_version() {
     _ver="${1##*/}"
     if [ -z "$_ver" ]; then return 0; fi
     mkdir -p "$GW_HOME"
     printf '%s\n' "$_ver" > "$GW_HOME/.installed-version"
+    if [ -d "$LIBEXEC_DIR" ]; then
+        printf '%s\n' "$_ver" | run_root tee "$LIBEXEC_DIR/.installed-version" >/dev/null || true
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -336,6 +569,18 @@ MIGRATE_UNRECORDED=0
 migrate_from_legacy() {
     _runner="$(migration_runner)"
     if [ -z "$_runner" ]; then return 0; fi
+    # The privileged copies go in BEFORE the runner, not with the units after it.
+    # The runner shells to burrowee-gateway-cli AS ROOT (v1_to_v2.sh's `elevate
+    # "$CLI" migrate`), and on the console-push path nobody is watching — so a
+    # migration that could only reach a per-user cli is the same escalation the
+    # per-user ExecStart was. Both the runner and this script resolve the cli out
+    # of $LIBEXEC_DIR first, which is what this call makes true.
+    if ! ensure_root_exec_surface; then
+        echo "error: could not establish the root-owned $LIBEXEC_DIR — refusing to run a" >&2
+        echo "error: state migration that would exec a per-user binary as root." >&2
+        echo "hint: nothing has been migrated; fix the cause reported above and re-run." >&2
+        exit 1
+    fi
     set +e
     GW_HOME="$GW_HOME" \
         PREFIX="${PREFIX:-$HOME/.local}" \
@@ -398,8 +643,17 @@ keep_installer_copy() {
 # system (as root, via place_unit). Does NOT start, stop, or reload any live
 # services. Call load_units after render_units when a live reload is desired
 # (fresh install / units-only).
+#
+# It places the PRIVILEGED BINARIES first and returns non-zero when it could not
+# prove them root-owned, because the alternative is worse than no units at all:
+# a unit is durable, the supervisor execs what it names as root at every boot,
+# and nothing rewrites it until an install runs again. There is no retry that
+# undoes a bad one. Every caller already handles a non-zero return — the two
+# install paths abort under `set -e`, update mode prints its "run service
+# install" note — so the refusal costs a host its units, never its identity.
 # ---------------------------------------------------------------------------
 render_units() {
+    ensure_root_exec_surface || return 1
     case "$(uname -s)" in
     Darwin)
         ensure_system_log_dir
@@ -415,11 +669,11 @@ render_units() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway</string><string>--no-open</string><string>--config-dir</string><string>$SYS_CONFIG_DIR</string><string>--data-dir</string><string>$SYS_DATA_DIR</string></array>
+  <key>ProgramArguments</key><array><string>$LIBEXEC_DIR/burrowee-gateway</string><string>--no-open</string><string>--config-dir</string><string>$SYS_CONFIG_DIR</string><string>--data-dir</string><string>$SYS_DATA_DIR</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$BIN_DIR/burrowee-gateway</key><true/></dict></dict>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$LIBEXEC_DIR/burrowee-gateway</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>$SYS_LOG_DIR/gateway.log</string>
   <key>StandardErrorPath</key><string>$SYS_LOG_DIR/gateway.err.log</string>
@@ -436,11 +690,11 @@ EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway.updater</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway-updater</string><string>run</string></array>
+  <key>ProgramArguments</key><array><string>$LIBEXEC_DIR/burrowee-gateway-updater</string><string>run</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$BIN_DIR/burrowee-gateway-updater</key><true/></dict></dict>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>$LIBEXEC_DIR/burrowee-gateway-updater</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>$SYS_LOG_DIR/updater.log</string>
   <key>StandardErrorPath</key><string>$SYS_LOG_DIR/updater.err.log</string>
@@ -463,7 +717,7 @@ Description=burrowee-gateway
 After=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/burrowee-gateway --no-open --config-dir $SYS_CONFIG_DIR --data-dir $SYS_DATA_DIR
+ExecStart=$LIBEXEC_DIR/burrowee-gateway --no-open --config-dir $SYS_CONFIG_DIR --data-dir $SYS_DATA_DIR
 Restart=always
 RestartSec=2
 TimeoutStopSec=330
@@ -483,7 +737,7 @@ Description=burrowee-gateway-updater
 After=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/burrowee-gateway-updater run
+ExecStart=$LIBEXEC_DIR/burrowee-gateway-updater run
 Restart=always
 RestartSec=2
 
@@ -574,7 +828,7 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # binaries at all, so the cli the runner will probe is the one already on
     # disk. If it cannot migrate, render_units below would leave root-scheme
     # units on a host whose state never moved.
-    assert_can_migrate "$BIN_DIR/burrowee-gateway-cli"
+    assert_can_migrate "$(migrate_cli_path)"
     check_service_override
     remove_legacy_user_units
     # Before render_units as well as before load_units. Before load_units because
@@ -766,6 +1020,17 @@ fi
 if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     for b in $BINS; do rm -f "$BIN_DIR/$b"; done
     echo "removed from $BIN_DIR: $BINS"
+
+    # The privileged copies too, or an uninstall leaves root-owned binaries and a
+    # root-owned installer behind for the next install to inherit without ever
+    # re-verifying them. Best-effort, like every other root step here.
+    if [ -d "$LIBEXEC_DIR" ]; then
+        if run_root rm -rf "$LIBEXEC_DIR"; then
+            echo "removed $LIBEXEC_DIR"
+        else
+            echo "note: could not remove $LIBEXEC_DIR (needs root) — remove it by hand" >&2
+        fi
+    fi
 
     # Remove the system service units (root) plus any legacy per-user units.
     # All best-effort: a missing unit or unavailable sudo must not stop uninstall.

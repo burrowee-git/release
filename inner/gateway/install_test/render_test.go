@@ -45,6 +45,21 @@ func sysConfigDir(home string) string {
 }
 func sysDataDir(home string) string { return filepath.Join(home, "system-var", "burrowee", "gateway") }
 
+// libexecDir is the sandboxed stand-in for the PRIVILEGED EXECUTION SURFACE
+// (/usr/local/libexec/burrowee/gateway) — the root-owned tree the system units
+// name and the root updater execs out of.
+//
+// The suite can prove PLACEMENT and unit CONTENT here; it cannot prove
+// OWNERSHIP, because the harness's `sudo` is a pass-through stub and every file
+// it "installs as root" belongs to the test user. install.sh knows this (see
+// have_real_root) and skips its own ownership assertion on exactly that
+// evidence. The ownership predicate itself is tested where it can drive real
+// filesystem state: core/binary's IsRootSecure suite and the gateway's
+// system_tool tests.
+func libexecDir(home string) string {
+	return filepath.Join(home, "system-libexec", "burrowee", "gateway")
+}
+
 // currentUsername is the user install.sh's `id -un` resolves while under test.
 func currentUsername(t *testing.T) string {
 	t.Helper()
@@ -96,6 +111,7 @@ func installShEnv(home, stubDir string, extraEnv ...string) []string {
 		"BURROWEE_SYSTEMD_DIR=" + systemdDir(home),
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
+		"BURROWEE_LIBEXEC_DIR=" + libexecDir(home),
 	}
 	return append(env, extraEnv...)
 }
@@ -185,20 +201,26 @@ func seedDummyBins(t *testing.T, dir string) {
 // TestInstallShWritesBothUnits verifies that BURROWEE_UNITS_ONLY=1 renders
 // both SYSTEM service unit files in the ROOT-SCHEME shape the gateway's own
 // renderer emits: no run-as user, no HOME, the two path roots passed
-// explicitly, and logs under the system data root.
+// explicitly, logs under the system data root — and, since the privileged-tree
+// change, an ExecStart naming $LIBEXEC_DIR rather than the per-user bin dir.
 //
 // The absence assertions carry as much weight as the presence ones. A unit
 // that still records a UserName runs the daemon as that user (which cannot
 // read the root-owned identity), and it also reads as legacy-owned to both
 // unit-writers' ownership guards — so leaving one behind would flap the
-// service between this installer and the Go side on every refresh.
+// service between this installer and the Go side on every refresh. The bin dir
+// is asserted absent for a harder reason: a unit that runs as root and names a
+// path inside somebody's home is a permanent uid-0 grant to that somebody, so
+// its presence is not a cosmetic regression but the vulnerability itself.
 func TestInstallShWritesBothUnits(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 
-	binDir := home + "/.local/bin"
+	binDir := libexecDir(home)
+	perUserBinDir := home + "/.local/bin"
 	username := currentUsername(t)
 	logDir := filepath.Join(sysDataDir(home), "logs")
 
@@ -224,6 +246,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 			"<key>InitGroups</key>",
 			"<key>HOME</key>",
 			home+"/.burrowee/gateway/logs",
+			perUserBinDir,
 		)
 		assertContains(t, upd,
 			"<string>com.burrowee.gateway.updater</string>",
@@ -240,6 +263,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 			// them would be a second place to keep in step for no gain.
 			"--config-dir",
 			home+"/.burrowee/gateway/logs",
+			perUserBinDir,
 		)
 		// The run-as user must not appear anywhere in either unit.
 		assertNotContains(t, core, ">"+username+"<")
@@ -260,6 +284,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 			"User=",
 			"Group=",
 			"Environment=HOME=",
+			perUserBinDir,
 		)
 		assertContains(t, upd,
 			"Description=burrowee-gateway-updater",
@@ -271,6 +296,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 			"User=",
 			"Environment=HOME=",
 			"--config-dir",
+			perUserBinDir,
 		)
 	}
 }
@@ -284,6 +310,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 func TestInstallShCreatesSystemLogDir(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 
@@ -379,6 +406,7 @@ func TestInstallShFreshInstall(t *testing.T) {
 func TestInstallShNoRestartStagesWithoutKicking(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 
 	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1", "BURROWEE_NO_RESTART=1")
 	assertContains(t, out, "BURROWEE_NO_RESTART set — units staged (not restarted)")
@@ -419,6 +447,7 @@ func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
 	}
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
@@ -580,6 +609,7 @@ func TestInstallShCrossUserOverrideAborts(t *testing.T) {
 func TestInstallShCrossUserOverrideForced(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 	path := seedForeignUnit(t, home)
 
 	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1", "BURROWEE_FORCE_SERVICE_OVERRIDE=1")
@@ -607,6 +637,7 @@ func TestInstallShCrossUserOverrideForced(t *testing.T) {
 func TestInstallShRootSchemeUnitIsAFreeSlot(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
@@ -623,6 +654,7 @@ func TestInstallShRootSchemeUnitIsAFreeSlot(t *testing.T) {
 func TestInstallShMigratesLegacyUserUnits(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 
 	var legacyPaths []string
 	if runtime.GOOS == "darwin" {
@@ -739,17 +771,21 @@ func runStagedArgs(t *testing.T, script, workDir, home, stubDir string, scriptAr
 	return string(out), err
 }
 
-// seedMigrateCapableCLI installs a burrowee-gateway-cli that answers
-// `migrate --help`, which units-only mode requires before it will write a unit:
-// it places no binaries, so the cli already on disk is the one the runner will
-// probe, and a host whose cli cannot migrate must be refused BEFORE the
-// root-scheme units are written (see assert_can_migrate).
+// seedMigrateCapableCLI stages an ALREADY-INSTALLED host for a units-only run:
+// every per-user binary present, and a burrowee-gateway-cli that answers
+// `migrate --help`.
+//
+// Both halves are preconditions of the mode, not conveniences. The cli, because
+// units-only places no binaries, so the one already on disk is what the runner
+// probes and a host that cannot migrate must be refused BEFORE the root-scheme
+// units are written (assert_can_migrate). Every other binary, because units-only
+// is now also the path that populates the privileged tree — it copies the
+// per-user binaries into $LIBEXEC_DIR so the units can name a root-owned path,
+// and with nothing to copy it correctly refuses to write a unit at all.
 func seedMigrateCapableCLI(t *testing.T, home string) {
 	t.Helper()
 	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	seedInstalled(t, binDir, allBinsContent("#!/bin/sh\nexit 0\n"))
 	if err := os.WriteFile(filepath.Join(binDir, "burrowee-gateway-cli"), []byte(cliWithMigrate), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -888,6 +924,7 @@ func TestInstallShAbortsWhenTheMigrationFails(t *testing.T) {
 func TestInstallShToleratesAMissingMigration(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
 	bundle := t.TempDir()
 	script := stageInstaller(t, bundle) // no stageMigration
 
