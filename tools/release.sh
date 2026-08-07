@@ -1502,6 +1502,11 @@ do_release() {
         # component is exactly how gateway/migrations went missing while
         # edge/covers three lines away was handled.
         for d in $(payload_dir_extras "${comp}"); do
+            # A declared member that was never staged would otherwise surface as
+            # `zip error: Nothing to do!` — an accurate abort with a message that
+            # names neither the component nor the missing directory.
+            [ -d "${assemble}/${d}" ] \
+                || { echo "✗ ${comp} payload member ${d}/ was never staged: ${assemble}/${d}" >&2; exit 1; }
             ( cd "${assemble}" && zip -r -q "${stage}/${asset}" "${d}/" )
         done
         # Gateway payload gate: prove the finished zip carries migrations/run.sh
