@@ -149,6 +149,49 @@ changing the scheme is not.
 
 ---
 
+## `--keep-version`: two releases can carry the same SEMVER
+
+The mirror image of the section above, and it is opt-in rather than accidental.
+`tools/release.sh <comp> --keep-version` leaves `versions/<comp>` exactly as it
+is — no bump of any kind, not even the default patch — and mints a fresh stamp
+over the component's current commit. It exists for one case: **a published
+release whose payload was wrong, where the version number must not move.**
+
+**What it costs.** Two published releases share a semver, distinguishable only
+by the stamp's date and source-SHA segments. Anything that keys on the semver
+alone — an operator reading `0.2.0` off a node, a pin written as a bare version,
+a changelog entry — no longer identifies one payload. That is accepted
+deliberately when the flag is used; it is not a bug to be reported later.
+
+**What the tooling does and does not prevent.**
+
+- It **refuses** when the resulting stamp already has a tag —
+  `assert_stamp_untagged()` in `release.sh`, checked in step (1) before anything
+  is built. Same semver **and** same UTC date **and** same source SHA is not a
+  re-cut, it is the release that is already live.
+- It **refuses** to combine with `--bump-minor`, `--bump-major`, `--force` or
+  `--distribute-only` (exit 2), because each of those either moves the version
+  this flag pins or never touches it at all.
+- It does **not** stop you republishing a live semver. That is the feature.
+  Every run says so in two places: a `→ … REPUBLISHING semver …` line from
+  `resolve_comp_stamp()` and the cut header's `Bump    : none — --keep-version
+  REPUBLISHES …`.
+
+**The trap you will actually hit.** The stamp's date is **UTC today**. Re-cutting
+the same component, from the same commit, on the same UTC day as the original cut
+produces the *identical* stamp and is refused — correctly, since there is nothing
+to distinguish the two tags. If the component source genuinely has not moved and
+the payload fault was in **this** repo (a packaging bug, a missing directory in
+the payload), `--keep-version` cannot help on that day: either wait for the UTC
+date to roll, land a commit in the component repo, or accept the patch bump.
+
+**Check before you run it.** `git tag -l "<comp>/v*" --sort=version:refname | tail`
+against `versions/<comp>` and the component worktree's `git HEAD`. The refusal
+only sees **local** tags — `git fetch --tags` first if this checkout may be behind
+origin.
+
+---
+
 ## `versions/burrowee.stamp` — the dispatcher-stamp freeze record
 
 Records the last dispatcher stamp actually used, so `resolve_disp_stamp()`
