@@ -389,12 +389,19 @@ func stagedUpdateBundle(t *testing.T, contents map[string]string, logPath string
 	return script, stageDir
 }
 
-// TestUpdateKeepsTheInstallerCopyBeforeMigrating: `service install` re-runs
+// TestUpdateKeepsTheInstallerCopyAfterMigrating: `service install` re-runs
 // $GW_HOME/install.sh, and the runner is resolved beside whichever install.sh is
-// executing. If the self-copy happened after the migration, the kept copy would be
-// the PREVIOUS version's installer — a stale unit-writer, and on a host whose only
-// contact with this release was update mode, a $GW_HOME with no migrations/ at all.
-func TestUpdateKeepsTheInstallerCopyBeforeMigrating(t *testing.T) {
+// executing — so a $GW_HOME left without a current install.sh + migrations/ is a
+// stale unit-writer that also cannot migrate. The copy must therefore still
+// happen on this path.
+//
+// It happens AFTER the migration, not before, and that ordering is CRITICAL 1:
+// keep_installer_copy mkdir -p's $GW_HOME, and the runner's "$GW_HOME does not
+// exist" guard is the only thing standing between `curl … | sudo sh` and a
+// silently mis-targeted migration under root's $HOME. This test's own probe
+// (KEPT_INSTALLER, recorded from inside the migration) is what pins the
+// direction; migration_ordering_test.go pins the consequence.
+func TestUpdateKeepsTheInstallerCopyAfterMigrating(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	binDir := home + "/.local/bin"
@@ -410,14 +417,24 @@ func TestUpdateKeepsTheInstallerCopyBeforeMigrating(t *testing.T) {
 		t.Fatalf("install.sh update failed: %v\n%s", err, out)
 	}
 
-	// Asserted from INSIDE the migration: it records whether the kept copy was
-	// already in place when it ran. Checking afterwards would pass just as happily
-	// with the copy written last, which is the bug.
+	// Recorded from INSIDE the migration: the copy must NOT have been in place
+	// yet, because putting it there is what creates $GW_HOME.
 	log := migrationLog(t, logPath)
 	if log == "" {
 		t.Fatal("the migration never ran")
 	}
-	assertContains(t, log, "KEPT_INSTALLER=yes")
+	assertContains(t, log, "KEPT_INSTALLER=no")
+
+	// And it must be in place by the end of the run, or `service install` has no
+	// current installer to re-run.
+	for _, p := range []string{
+		filepath.Join(home, ".burrowee", "gateway", "install.sh"),
+		filepath.Join(home, ".burrowee", "gateway", "migrations", "run.sh"),
+	} {
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Errorf("the installer copy was not kept: %s: %v", p, statErr)
+		}
+	}
 }
 
 // TestUpdateRecordsTheVersionOnlyAfterMigrating: recording it first means a failed

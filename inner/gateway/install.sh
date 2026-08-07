@@ -841,6 +841,19 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     render_units
     load_units
     report_unrecorded_migration
+    # The anchor, from the fourth and last entry point. Its absence here is a
+    # large part of why the ledger is effectively unwritten in the field: the
+    # runner falls back to a migration's own --applies probe only when NOTHING is
+    # recorded, and with two of the four entry points never writing, that
+    # exceptional path became the normal one on most hosts.
+    #
+    # Same guard as everywhere else: an unrecorded migration must not have its
+    # version written, or the receipt-gated re-runnable rung becomes a
+    # version-gated never-again one. And no version supplied still records
+    # nothing — inventing one is worse than leaving it absent.
+    if [ "$MIGRATE_UNRECORDED" = "0" ]; then
+        record_installed_version "${BURROWEE_VERSION:-}"
+    fi
     exit 0
 fi
 
@@ -955,12 +968,6 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         rm -f "$BIN_DIR/$b.bak-$$"
     done
 
-    # The kept copy FIRST, before the migration runs. `service install` re-runs
-    # $GW_HOME/install.sh, so a stale copy there is a stale unit-writer; and the
-    # runner is resolved beside whichever install.sh is executing, so the copy is
-    # also what makes a later `service install` able to migrate at all.
-    keep_installer_copy
-
     # Migrate, THEN refresh the system unit FILES only — never load/restart them
     # here (the updater restarts the kernel out-of-band; loading would bootout the
     # very process running this script), never touch another user's slot, and
@@ -1002,6 +1009,23 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         echo "note: not migrating either — 'burrowee gateway service install' takes the slot over first" >&2
         echo "note: and the installed version is not recorded, so the migration stays pending" >&2
     fi
+
+    # AFTER the migration, never before — and that ordering is the whole point.
+    # keep_installer_copy mkdir -p's $GW_HOME, and the runner's "$GW_HOME does
+    # not exist" guard is the only thing standing between `curl … | sudo sh` and
+    # a silently mis-targeted migration under ROOT's $HOME. Creating the
+    # directory the runner uses as its evidence, before the runner is allowed to
+    # look at it, made that guard unreachable from every entry point on this
+    # host: root's tree always existed by the time it was asked about.
+    #
+    # The copy still has to happen: `service install` re-runs $GW_HOME/install.sh
+    # and resolves migrations/ beside whichever install.sh is executing, so a
+    # stale copy is a stale unit-writer that also cannot migrate. It is simply
+    # not urgent — nothing between the top of this mode and here reads it, and a
+    # migration that fails exits the script, at which point leaving the PREVIOUS
+    # installer in place is the same "old is better than half-new" choice the
+    # unit ordering already makes.
+    keep_installer_copy
 
     report_unrecorded_migration
 
@@ -1087,10 +1111,6 @@ esac
 
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
-# Keep this installer + its migrations at $GW_HOME so subsequent `service install`
-# verbs can re-render units and run a pending migration without a new download.
-keep_installer_copy
-
 # Write and load both SYSTEM service units (single-slot consent first, then
 # migrate any legacy per-user units out of the way). The state migration runs
 # before render_units, not between it and load_units: a failed migration exits
@@ -1099,6 +1119,21 @@ keep_installer_copy
 check_service_override
 remove_legacy_user_units
 migrate_from_legacy
+
+# Keep this installer + its migrations at $GW_HOME so subsequent `service install`
+# verbs can re-render units and run a pending migration without a new download.
+#
+# AFTER migrate_from_legacy, never before. This function mkdir -p's $GW_HOME, and
+# the runner's "$GW_HOME does not exist" guard is the only thing standing between
+# `curl … | sudo sh` and a silently mis-targeted migration under ROOT's $HOME:
+# under sudo $GW_HOME is /var/root/.burrowee/gateway, a tree the enrolled user
+# never had. Running first, this created that tree — so the guard was asked a
+# question whose answer this script had already falsified, on every entry point.
+# The observed result was a clean-looking "no recorded version, and --applies
+# does not recognise …", root-scheme units written AND loaded, the version anchor
+# written into root's tree, exit 0, and a daemon that then refused to start.
+keep_installer_copy
+
 render_units
 load_units
 report_unrecorded_migration
