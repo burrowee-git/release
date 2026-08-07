@@ -574,3 +574,80 @@ func TestFreshInstallSkipsSetupWhenStateExists(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The general case: a migration that fails for ANY reason, not just the
+// capability precondition the pre-flight can check up front.
+// ---------------------------------------------------------------------------
+
+// TestNoUnitsSurviveAFailedMigration closes the half assert_can_migrate cannot.
+// The pre-flight answers one question — can the cli run `migrate` — and a
+// migration has many other ways to fail (no passwordless sudo after the daemon
+// is stopped, a torn copy, a full disk). A failed migration exits install.sh,
+// and the units it had already written stay on disk: launchd bootstraps a
+// LaunchDaemon at the next reboot whatever this run reported to its caller.
+//
+// So render_units moves behind the migration in every mode. Leaving the OLD
+// units in place is strictly better than leaving new ones: they point at a tree
+// that still holds the host's identity.
+func TestNoUnitsSurviveAFailedMigration(t *testing.T) {
+	t.Run("units-only", func(t *testing.T) {
+		home := t.TempDir()
+		stub := stubInitSystem(t)
+		bundle := t.TempDir()
+		script := stageInstaller(t, bundle)
+		logPath := filepath.Join(t.TempDir(), "migration.log")
+		seedMigrateCapableCLI(t, home)
+		stageMigration(t, bundle, logPath, 1) // the migration FAILS
+
+		out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
+		if err == nil {
+			t.Fatalf("install.sh succeeded despite a failing migration:\n%s", out)
+		}
+		if migrationLog(t, logPath) == "" {
+			t.Fatal("the migration never ran — this test is not exercising the failure")
+		}
+		assertNoUnitsWritten(t, home)
+	})
+
+	t.Run("fresh install", func(t *testing.T) {
+		home := t.TempDir()
+		stub := stubInitSystem(t)
+		bundle := t.TempDir()
+		seedDummyBins(t, bundle)
+		script := stageInstaller(t, bundle)
+		logPath := filepath.Join(t.TempDir(), "migration.log")
+		stageMigration(t, bundle, logPath, 1)
+
+		out, err := runStaged(t, script, bundle, home, stub)
+		if err == nil {
+			t.Fatalf("fresh install succeeded despite a failing migration:\n%s", out)
+		}
+		if migrationLog(t, logPath) == "" {
+			t.Fatal("the migration never ran — this test is not exercising the failure")
+		}
+		assertNoUnitsWritten(t, home)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		home := t.TempDir()
+		stub := stubInitSystem(t)
+		binDir := home + "/.local/bin"
+		logPath := filepath.Join(t.TempDir(), "migration.log")
+
+		seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
+		staged := withCLI(allBinsContent("v1-content"), cliWithMigrate)
+		staged["burrowee-gateway"] = "gw-v2-content"
+		script, stageDir := stagedUpdateBundle(t, staged, logPath, 1)
+
+		out, err := runStagedArgs(t, script, stageDir, home, stub,
+			[]string{"--version", "0.2.0"}, "BURROWEE_UPDATE=1")
+		if err == nil {
+			t.Fatalf("update succeeded despite a failing migration:\n%s", out)
+		}
+		if migrationLog(t, logPath) == "" {
+			t.Fatal("the migration never ran — this test is not exercising the failure")
+		}
+		assertNoUnitsWritten(t, home)
+	})
+}

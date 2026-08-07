@@ -577,10 +577,14 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     assert_can_migrate "$BIN_DIR/burrowee-gateway-cli"
     check_service_override
     remove_legacy_user_units
-    render_units
-    # Before load_units, never after: the migration stops the gateway to copy its
-    # store at rest, and load_units is what starts it again.
+    # Before render_units as well as before load_units. Before load_units because
+    # the migration stops the gateway to copy its store at rest and load_units is
+    # what starts it again; before render_units because a migration that fails for
+    # ANY reason exits this script — and a root-scheme unit left on disk by a run
+    # that then aborted is bootstrapped by launchd at the next reboot regardless,
+    # against a config root the migration never populated.
     migrate_from_legacy
+    render_units
     load_units
     report_unrecorded_migration
     exit 0
@@ -703,13 +707,18 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # also what makes a later `service install` able to migrate at all.
     keep_installer_copy
 
-    # Refresh the system unit FILES only — never load/restart them here (the
-    # updater restarts the kernel out-of-band; loading would bootout the very
-    # process running this script), never touch another user's slot, and never
-    # fail the binary swap for lack of sudo: a unit refresh can always happen
-    # later via 'burrowee gateway service install'.
+    # Migrate, THEN refresh the system unit FILES only — never load/restart them
+    # here (the updater restarts the kernel out-of-band; loading would bootout the
+    # very process running this script), never touch another user's slot, and
+    # never fail the binary swap for lack of sudo: a unit refresh can always
+    # happen later via 'burrowee gateway service install'.
+    #
+    # The migration comes first because a failed one exits this script, and a
+    # root-scheme unit already on disk is bootstrapped by launchd at the next
+    # reboot whatever this run reported — against a config root the migration
+    # never populated. Leaving the OLD units in place is strictly better: they
+    # point at a tree that still holds the host's identity.
     if [ "$_own_slot" = "1" ]; then
-        render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
         # Inside this branch, not beside it: a migration claims whose identity the
         # root daemon adopts, and on a slot belonging to someone else that claim
         # would be wrong in the one direction that cannot be undone — a
@@ -717,6 +726,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         # prompt to settle it (unlike the install paths, which run
         # check_service_override first), so it defers instead.
         migrate_from_legacy
+        render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
 
         # The version LAST, and only once everything above succeeded. Recording it
         # before the migration would mean a failed migration leaves the new version on
@@ -817,11 +827,14 @@ esac
 keep_installer_copy
 
 # Write and load both SYSTEM service units (single-slot consent first, then
-# migrate any legacy per-user units out of the way).
+# migrate any legacy per-user units out of the way). The state migration runs
+# before render_units, not between it and load_units: a failed migration exits
+# here, and a root-scheme unit left behind by an aborted run is bootstrapped by
+# launchd at the next reboot regardless of what this run reported.
 check_service_override
 remove_legacy_user_units
-render_units
 migrate_from_legacy
+render_units
 load_units
 report_unrecorded_migration
 
