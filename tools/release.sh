@@ -86,6 +86,8 @@ source "${REPO_ROOT}/tools/apple_sign.sh"
 source "${REPO_ROOT}/tools/updater_pin.sh"
 # shellcheck source=tools/cut_origin.sh
 source "${REPO_ROOT}/tools/cut_origin.sh"
+# shellcheck source=tools/payload.sh
+source "${REPO_ROOT}/tools/payload.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -784,10 +786,20 @@ distribute_only() {
         [ -f "${stage}/${f}" ] || { echo "✗ missing ${f} in ${stage} (rkit build must produce it)" >&2; exit 1; }
     done
 
-    local src semver
+    local src semver z
     src="$(src_for "${comp}")"                    # reuse SRC_<comp> resolution
     [ -d "${src}" ] || { echo "✗ ${comp} source worktree missing: ${src}" >&2; exit 1; }
     semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+
+    # The same gateway payload gate the full cut runs, applied to zips this path
+    # did NOT assemble (rkit build produced them). Whichever assembler ran, a
+    # gateway release without its migration ladder must not reach a tag, a
+    # GitHub Release or the static host. Runs ahead of the dry-run branch so a
+    # rehearsal fails on it too.
+    for z in "${stage}"/burrowee-"${comp}"-*.zip; do
+        [ -f "${z}" ] || continue
+        assert_payload_migrations "${comp}" "${z}" "${src}" || exit 1
+    done
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ would: gh release create ${comp}/${stamp} (GitHub Release, public) via ghp"
@@ -1403,7 +1415,7 @@ do_release() {
     mkdir -p "${stage}"
 
     # (3) per-target build + assemble + zip.
-    local zips=() pair os arch out_bins assemble asset b s update_scripts
+    local zips=() pair os arch out_bins assemble asset b s d update_scripts
     for pair in "${TARGETS[@]}"; do
         read -r os arch <<<"${pair}"
         out_bins="${stage}/.bins-${os}-${arch}"
@@ -1464,6 +1476,15 @@ do_release() {
             cp "${EDGE_WEB}/login.html" "${assemble}/covers/default.html"
         fi
 
+        # gateway migrations/: the ladder runner + every migration, copied from
+        # the gateway source. install.sh and update.sh invoke migrations/run.sh
+        # out of the unzipped bundle; a payload without it turns a state-moving
+        # upgrade into a daemon that comes back without its state.
+        # (Mirrors cmd/rkit/assemble.go extraPayload; see tools/payload.sh.)
+        if [ "${comp}" = gateway ]; then
+            stage_gateway_migrations "${src}" "${assemble}" || exit 1
+        fi
+
         # Pre-assembly signing gate — same assertion as the relay flow above; see
         # assert_payload_developer_id_signed in tools/apple_sign.sh. This is the
         # site that shipped the ad-hoc dispatcher Apple rejected.
@@ -1474,11 +1495,19 @@ do_release() {
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
-        # Edge payload carries covers/ — zip -j skips directories, so append them
-        # recursively to preserve the covers/ path inside the zip.
-        if [ "${comp}" = edge ]; then
-            ( cd "${assemble}" && zip -r -q "${stage}/${asset}" covers/ )
-        fi
+        # zip -j junks paths and SKIPS DIRECTORIES OUTRIGHT, so every
+        # directory-shaped payload member (edge covers/, gateway migrations/)
+        # needs a second recursive pass to keep its path inside the zip. The
+        # list is payload_dir_extras in tools/payload.sh — open-coding it per
+        # component is exactly how gateway/migrations went missing while
+        # edge/covers three lines away was handled.
+        for d in $(payload_dir_extras "${comp}"); do
+            ( cd "${assemble}" && zip -r -q "${stage}/${asset}" "${d}/" )
+        done
+        # Gateway payload gate: prove the finished zip carries migrations/run.sh
+        # and every script its ledger names, BEFORE anything is notarized,
+        # summed, signed, tagged or published. See tools/payload.sh.
+        assert_payload_migrations "${comp}" "${stage}/${asset}" "${src}" || exit 1
 
         # Apple-sign mode: notarize the darwin zips (binaries were Developer ID
         # signed by build.sh). Submitting doesn't alter the zip, so the later
