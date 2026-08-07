@@ -100,6 +100,8 @@ source "${REPO_ROOT}/tools/cut_origin.sh"
 source "${REPO_ROOT}/tools/payload.sh"
 # shellcheck source=tools/binmap.sh
 source "${REPO_ROOT}/tools/binmap.sh"
+# shellcheck source=tools/trustcomment.sh
+source "${REPO_ROOT}/tools/trustcomment.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -845,8 +847,9 @@ distribute_relay() {
             || { echo "✗ failed to decrypt ${AGE_KEY_AGE}" >&2; exit 1; }
         sign_key="${SHRED_FILE}"
     fi
+    local tcomment; tcomment="$(trusted_comment "${comp}" "${stamp}")"
     ( cd "${latest_stage}" && minisign -S -s "${sign_key}" -m SHA256SUMS.txt \
-        -t "burrowee relay ${stamp}" >/dev/null )
+        -t "${tcomment}" >/dev/null )
     shred_key
 
     echo "Relay latest.* set + SHA256SUMS.txt + .minisig staged under ${latest_stage}:"
@@ -1447,8 +1450,9 @@ do_release_relay() {
     # SHA256SUMS over the latest.* filenames (what the installer verifies).
     # shellcheck disable=SC2086
     ( cd "${latest_stage}" && ${SHA256} latest.*.zip | sort > SHA256SUMS.txt )
+    local tcomment; tcomment="$(trusted_comment "${comp}" "${stamp}")"
     ( cd "${latest_stage}" && minisign -S -s "${SIGN_KEY}" -m SHA256SUMS.txt \
-        -t "burrowee relay ${stamp}" >/dev/null )
+        -t "${tcomment}" >/dev/null )
 
     echo "Built ${#zips[@]} zips + latest.* set + SHA256SUMS.txt + SHA256SUMS.txt.minisig:"
     # shellcheck disable=SC2012
@@ -1666,9 +1670,13 @@ do_release() {
     # shellcheck disable=SC2086  # ${SHA256} is an intentional space-split command string ("shasum -a 256" | "sha256sum"); word-splitting is the point.
     ( cd "${stage}" && ${SHA256} burrowee-"${comp}"-*.zip | sort > SHA256SUMS.txt )
 
-    # (5) sign.
+    # (5) sign. The trusted comment is the release's only version-bearing
+    # verified field — see tools/trustcomment.sh, which owns the one shell
+    # spelling of it, and cmd/rkit/trusted_comment_test.go, which pins that
+    # spelling to rkit's and to the bootstrap's expectation.
+    local tcomment; tcomment="$(trusted_comment "${comp}" "${stamp}")"
     ( cd "${stage}" && minisign -S -s "${SIGN_KEY}" -m SHA256SUMS.txt \
-        -t "burrowee ${comp} ${stamp}" >/dev/null )
+        -t "${tcomment}" >/dev/null )
 
     echo "Built ${#zips[@]} zips + SHA256SUMS.txt + SHA256SUMS.txt.minisig:"
     # shellcheck disable=SC2012  # cosmetic listing of our own controlled asset names (no untrusted filenames); ls keeps the plain one-per-line format.
