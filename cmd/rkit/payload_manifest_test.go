@@ -129,6 +129,16 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		{"gateway", []string{"update.sh", "migrations/run.sh", "migrations/v1_to_v2.sh"}},
 		{"cli", []string{"update.sh"}},
 		{"edge", []string{"update.sh", "updater.update.sh"}},
+		// relay is PRIVATE and gated, and was the last component left out of
+		// this comparison: tools/release.sh's do_release_relay open-coded
+		// `install.sh update.sh updater.update.sh` instead of reading the
+		// manifest, because relay takes install.sh from its component source
+		// while the public components take theirs from inner/<comp>/. That is a
+		// difference in install.sh's PROVENANCE, which is not a manifest member
+		// on either side (build.go resolves it and passes it to assemble()
+		// separately), so the manifest applies to relay unchanged — and this row
+		// is what keeps the two sides of it pinned together.
+		{"relay", []string{"update.sh", "updater.update.sh"}},
 		{"agent", nil},
 	}
 	for _, tc := range cases {

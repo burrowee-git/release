@@ -76,6 +76,57 @@ check "manifest: edge"  "$(payload_manifest edge  "${TMP}/nope" | paste -sd, -)"
     "update.sh,updater.update.sh,covers/admin.html,covers/default.html"
 check "manifest: agent" "$(payload_manifest agent "${TMP}/nope" | paste -sd, -)" ""
 
+# --- stage_payload_extras ---------------------------------------------------
+# comp_src <name> <file...> — a component source tree holding the given files.
+comp_src() {
+    local dir="${TMP}/$1"; shift
+    mkdir -p "${dir}"
+    local f
+    for f in "$@"; do printf '%s\n' "${f}" > "${dir}/${f}"; done
+    printf '%s' "${dir}"
+}
+
+# staged <dir> — the staged bundle's members, comma-joined, sorted.
+staged() { ( cd "$1" && find . -type f | sed 's|^\./||' | sort | paste -sd, - ); }
+
+# relay is the reason this function exists: its assembly site in release.sh used
+# to open-code `install.sh update.sh updater.update.sh`, so it was the one
+# component whose payload contents were still stated twice. Staging must produce
+# the extras and NOT install.sh — whose provenance differs per component and so
+# stays with the caller.
+RELAY_SRC="$(comp_src relay-src install.sh update.sh updater.update.sh)"
+RELAY_ASM="${TMP}/relay-asm"; mkdir -p "${RELAY_ASM}"
+if stage_payload_extras relay "${RELAY_SRC}" "${RELAY_ASM}"; then
+    ok "stage extras: relay succeeds"
+else bad "stage extras: relay failed"; fi
+check "stage extras: relay stages the manifest, not install.sh" \
+    "$(staged "${RELAY_ASM}")" "update.sh,updater.update.sh"
+if [ -x "${RELAY_ASM}/update.sh" ] && [ -x "${RELAY_ASM}/updater.update.sh" ]; then
+    ok "stage extras: relay extras are executable"
+else bad "stage extras: relay extras not executable"; fi
+check "stage extras: relay copies content verbatim" \
+    "$(cat "${RELAY_ASM}/updater.update.sh")" "updater.update.sh"
+
+GW_SRC="$(comp_src gw-extras-src install.sh update.sh)"
+GW_ASM="${TMP}/gw-extras-asm"; mkdir -p "${GW_ASM}"
+stage_payload_extras gateway "${GW_SRC}" "${GW_ASM}"
+check "stage extras: gateway takes update.sh only" "$(staged "${GW_ASM}")" "update.sh"
+
+AGENT_ASM="${TMP}/agent-asm"; mkdir -p "${AGENT_ASM}"
+if stage_payload_extras agent "${TMP}/nope" "${AGENT_ASM}"; then
+    ok "stage extras: agent (no extras) succeeds without a source tree"
+else bad "stage extras: agent failed"; fi
+check "stage extras: agent stages nothing" "$(staged "${AGENT_ASM}")" ""
+
+# Fail closed. A relay source missing updater.update.sh must stop the cut: the
+# payload would extract and verify, then die on "cannot open ./updater.update.sh"
+# at self-update time — on the operator's node, not here.
+PARTIAL_SRC="$(comp_src relay-partial-src install.sh update.sh)"
+PARTIAL_ASM="${TMP}/relay-partial-asm"; mkdir -p "${PARTIAL_ASM}"
+if stage_payload_extras relay "${PARTIAL_SRC}" "${PARTIAL_ASM}" 2>/dev/null; then
+    bad "stage extras: accepted a source missing a declared extra"
+else ok "stage extras: rejects a source missing a declared extra"; fi
+
 # --- ledger_migrations ------------------------------------------------------
 write_ledger "${TMP}/ledger-one" "0.2.0 v1_to_v2.sh"
 check "ledger: one row" "$(ledger_migrations "${TMP}/ledger-one/migrations/run.sh" | paste -sd, -)" "v1_to_v2.sh"

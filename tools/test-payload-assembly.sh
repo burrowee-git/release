@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+# test-payload-assembly.sh — prove tools/release.sh's two assembly sites ship
+# exactly the shared manifest, by running release.sh's OWN TEXT.
+#
+# WHY THIS FILE EXISTS
+# cmd/rkit/payload_manifest_test.go pins tools/payload.sh's manifest to
+# cmd/rkit/assemble.go's. Neither of those is what a cut actually runs: every
+# release to date was assembled by tools/release.sh, and the gateway v0.2.0
+# defect lived precisely in the gap between the manifest and that orchestrator's
+# own open-coded copy of it. Two such copies survived the first fix — one per
+# assembly site: do_release's `case` for update_scripts, and do_release_relay's
+# `for s in install.sh update.sh updater.update.sh`, the latter kept because
+# relay takes install.sh from its component source while the public components
+# take theirs from inner/<comp>/install.sh.
+#
+# So this test does not re-state what a component carries and hope release.sh
+# agrees. It EXTRACTS each assembly block from tools/release.sh, runs it over a
+# fixture with stand-in binaries, and asserts the finished zip against:
+#
+#   1. a literal member list — the invariant, so mutating the manifest is caught
+#      even though the assembly followed it faithfully; and
+#   2. the manifest as computed at run time, with members INJECTED into it —
+#      so re-open-coding a list in release.sh (the actual regression) shows up
+#      as a member the manifest asked for and the zip does not have.
+#
+# It also asserts each member's PROVENANCE where two components differ (relay's
+# install.sh from its own source, the public components' from inner/<comp>/,
+# edge's covers from the edge.web tree), because provenance is the reason the
+# relay site was left out of the manifest in the first place.
+#
+# No builds, no network, no keys: the binaries are files with known bytes,
+# because what is under test is which members reach the archive, not what they
+# contain.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${HERE}/payload.sh"
+
+fail=0
+check() { # check <label> <got> <want>
+    if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1 — got '$2' want '$3'"; fail=1; fi
+}
+ok()  { echo "ok: $1"; }
+bad() { echo "FAIL: $1"; fail=1; }
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "${TMP}"' EXIT
+
+# --- the code under test ------------------------------------------------------
+# Each per-target assembly block: from the line that names the staging dir
+# through the last line before the zip is recorded. Pulled out of the shipped
+# file so this cannot drift from what an operator runs.
+PUBLIC_ASSEMBLY="$(awk '/^do_release\(\) \{/,/^\}/' "${HERE}/release.sh" \
+    | awk '/^        # assemble: component bins/,/^        zips\+=\(/' \
+    | grep -v '^        zips+=(')"
+RELAY_ASSEMBLY="$(awk '/^do_release_relay\(\) \{/,/^\}/' "${HERE}/release.sh" \
+    | awk '/^        assemble="\$\{stage\}/,/^        zips\+=\(/' \
+    | grep -v '^        zips+=(')"
+
+# Extraction is by pattern, so a rename in release.sh could silently yield an
+# empty block that "passes" every assertion below. Refuse that outright.
+for pair in "public:${PUBLIC_ASSEMBLY}" "relay:${RELAY_ASSEMBLY}"; do
+    if [ -z "${pair#*:}" ] || ! printf '%s\n' "${pair#*:}" | grep -q 'zip -j'; then
+        echo "FAIL: could not extract the ${pair%%:*} assembly block from release.sh" >&2
+        echo "      (the markers moved — fix this test's extraction, do not delete it)" >&2
+        exit 1
+    fi
+done
+
+# --- fixture ------------------------------------------------------------------
+# shellcheck disable=SC2034  # every name here is read (or assigned) by the EVAL'd assembly blocks; shellcheck cannot see through eval.
+{
+    os=darwin
+    arch=arm64
+    APPLE_SIGN=""
+    # Assigned by the blocks; declared so `set -u` is honest about what the
+    # extracted code owns.
+    comp=""
+    bins=""
+    src=""
+    out_bins=""
+    DISP_DIR=""
+    stage=""
+    REPO_ROOT=""
+    EDGE_WEB=""
+    assemble=""
+    asset=""
+    b=""
+    d=""
+}
+
+# fixture <comp> <bin...> — a clean source tree, built-binary dir, dispatcher
+# dir, stage dir and release-repo root for one component. The bins are files
+# with known bytes: what is under test is membership, not content.
+fixture() {
+    comp="$1"; shift
+    bins="$*"
+    src="${TMP}/${comp}/src"
+    out_bins="${TMP}/${comp}/bins"
+    DISP_DIR="${TMP}/${comp}/disp"
+    stage="${TMP}/${comp}/stage"
+    REPO_ROOT="${TMP}/${comp}/repo"
+    EDGE_WEB="${TMP}/${comp}/edge.web"
+    rm -rf "${TMP:?}/${comp}"
+    mkdir -p "${src}" "${out_bins}" "${DISP_DIR}/${os}-${arch}" "${stage}" \
+        "${REPO_ROOT}/inner/${comp}" "${EDGE_WEB}"
+    local f
+    # shellcheck disable=SC2086  # ${bins} is the same intentional space-list release.sh uses.
+    for f in ${bins}; do printf 'bin:%s\n' "${f}" > "${out_bins}/${f}"; done
+    printf 'bin:burrowee\n' > "${DISP_DIR}/${os}-${arch}/burrowee"
+}
+
+# members — the finished zip's file entries, comma-joined, sorted. Read out of
+# the ARCHIVE, never the staging dir: `zip -j` drops directory members after
+# they were correctly staged, which is exactly how the gateway shipped broken.
+members() { unzip -Z1 "$1" | grep -v '/$' | sort | paste -sd, -; }
+
+run_public() { eval "${PUBLIC_ASSEMBLY}"; }
+run_relay()  { eval "${RELAY_ASSEMBLY}"; }
+
+# =============================================================================
+# do_release — the four public components. This is the site that shipped
+# gateway v0.2.0 without migrations/.
+# =============================================================================
+
+# --- cli: extras only, install.sh from inner/<comp>/ -------------------------
+fixture cli burrowee-cli
+printf 'inner installer\n'     > "${REPO_ROOT}/inner/cli/install.sh"
+printf 'component installer\n' > "${src}/install.sh"
+printf 'update\n'              > "${src}/update.sh"
+printf 'updater self-update\n' > "${src}/updater.update.sh"
+if run_public; then ok "cli: assembly succeeds"; else bad "cli: assembly failed"; fi
+# updater.update.sh exists in this fixture's source and must NOT ship: cli
+# self-updates in-process, and the manifest is what decides that.
+check "cli payload members" "$(members "${stage}/${asset}")" \
+    "burrowee,burrowee-cli,install.sh,update.sh"
+check "cli install.sh comes from inner/cli/, not the component source" \
+    "$(unzip -p "${stage}/${asset}" install.sh)" "inner installer"
+
+# --- gateway: the regression, end to end through release.sh's own text -------
+fixture gateway burrowee-gateway
+printf 'inner installer\n' > "${REPO_ROOT}/inner/gateway/install.sh"
+printf 'update\n'          > "${src}/update.sh"
+mkdir -p "${src}/migrations"
+printf '#!/bin/sh\nMIGRATIONS="\n0.2.0 v1_to_v2.sh\n"\n' > "${src}/migrations/run.sh"
+printf '#!/bin/sh\n'                                     > "${src}/migrations/v1_to_v2.sh"
+if run_public; then ok "gateway: assembly succeeds"; else bad "gateway: assembly failed"; fi
+check "gateway payload members" "$(members "${stage}/${asset}")" \
+    "burrowee,burrowee-gateway,install.sh,migrations/run.sh,migrations/v1_to_v2.sh,update.sh"
+
+# --- edge: a directory member whose content comes from another tree ----------
+fixture edge burrowee-edge
+printf 'inner installer\n' > "${REPO_ROOT}/inner/edge/install.sh"
+printf 'update\n'          > "${src}/update.sh"
+printf 'updater self-update\n' > "${src}/updater.update.sh"
+printf 'admin cover\n' > "${EDGE_WEB}/admin.html"
+printf 'login cover\n' > "${EDGE_WEB}/login.html"
+if run_public; then ok "edge: assembly succeeds"; else bad "edge: assembly failed"; fi
+check "edge payload members" "$(members "${stage}/${asset}")" \
+    "burrowee,burrowee-edge,covers/admin.html,covers/default.html,install.sh,update.sh,updater.update.sh"
+check "edge covers come from the edge.web tree, renamed" \
+    "$(unzip -p "${stage}/${asset}" covers/default.html)" "login cover"
+
+# =============================================================================
+# do_release_relay — the PRIVATE, gated component, and the last site that
+# open-coded its own list.
+# =============================================================================
+
+# --- (1) the invariant: what a relay payload carries --------------------------
+# Stated literally, matching the published relay payload (3 relay bins + the
+# burrowee dispatcher + install.sh + update.sh + updater.update.sh). Deriving
+# this from payload_file_extras instead would make the assertion agree with the
+# manifest by construction and certify nothing about the manifest.
+fixture relay burrowee-relay burrowee-relay-cli burrowee-relay-updater
+for f in install.sh update.sh updater.update.sh; do printf '%s\n' "${f}" > "${src}/${f}"; done
+if run_relay; then ok "relay: assembly succeeds"; else bad "relay: assembly failed"; fi
+check "relay payload members" "$(members "${stage}/${asset}")" \
+    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,update.sh,updater.update.sh"
+
+# install.sh comes from the COMPONENT source on this path (the public components
+# take theirs from inner/<comp>/install.sh, asserted above) — the one provenance
+# difference that kept relay out of the shared manifest. Assert the bytes.
+check "relay install.sh comes from the component source" \
+    "$(unzip -p "${stage}/${asset}" install.sh)" "$(cat "${src}/install.sh")"
+
+# --- (2) the manifest is what release.sh actually reads -----------------------
+# Add a member to the manifest at run time and re-assemble. If release.sh reads
+# the manifest, the new member ships; if it has gone back to an open-coded list,
+# it does not — which is the regression this file exists to catch.
+printf 'injected\n' > "${src}/relay.extra.sh"
+payload_file_extras() {
+    case "$1" in
+        edge|relay)  printf '%s\n' update.sh updater.update.sh relay.extra.sh ;;
+        gateway|cli) printf '%s\n' update.sh ;;
+    esac
+}
+if run_relay; then ok "relay: assembly succeeds with an injected file member"; else bad "relay: assembly failed with an injected file member"; fi
+check "release.sh ships a file member the manifest declares" \
+    "$(members "${stage}/${asset}")" \
+    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,relay.extra.sh,update.sh,updater.update.sh"
+
+# A declared member the source does not have must stop the cut here, not on the
+# operator's node at self-update time.
+rm "${src}/relay.extra.sh"
+if ( run_relay ) >/dev/null 2>&1; then
+    bad "relay: accepted a declared member missing from the source"
+else ok "relay: refuses a declared member missing from the source"; fi
+printf 'injected\n' > "${src}/relay.extra.sh"
+
+# --- (3) directory members survive the archive --------------------------------
+# `zip -j` skips directories outright, so a directory member needs the second
+# recursive pass. relay declares none today, which is exactly why this is worth
+# asserting: the pass is unexercised code until a member appears, and an
+# unexercised pass is what gateway/migrations/ was missing.
+payload_dir_extras() {
+    case "$1" in
+        edge)          printf '%s\n' covers ;;
+        gateway|relay) printf '%s\n' migrations ;;
+    esac
+}
+mkdir -p "${TMP}/mig"
+printf '#!/bin/sh\n' > "${TMP}/mig/run.sh"
+# shellcheck disable=SC2329  # invoked indirectly, from the EVAL'd assembly block.
+stage_payload_extras() { # keep the file extras, and stage the directory member
+    local c="$1" s_="$2" d_="$3" n
+    for n in $(payload_file_extras "${c}"); do
+        [ -f "${s_}/${n}" ] || return 1
+        cp "${s_}/${n}" "${d_}/${n}"
+    done
+    mkdir -p "${d_}/migrations" && cp "${TMP}/mig/run.sh" "${d_}/migrations/run.sh"
+}
+if run_relay; then ok "relay: assembly succeeds with a directory member"; else bad "relay: assembly failed with a directory member"; fi
+check "release.sh keeps a directory member's path in the relay zip" \
+    "$(unzip -Z1 "${stage}/${asset}" | grep '^migrations/' | grep -v '/$' | sort | paste -sd, -)" \
+    "migrations/run.sh"
+
+# A declared directory member that was never staged is `zip error: Nothing to
+# do!` without this guard — an abort naming neither component nor member.
+# shellcheck disable=SC2329  # invoked indirectly, from the EVAL'd assembly block.
+stage_payload_extras() {
+    local c="$1" s_="$2" d_="$3" n
+    for n in $(payload_file_extras "${c}"); do
+        [ -f "${s_}/${n}" ] || return 1
+        cp "${s_}/${n}" "${d_}/${n}"
+    done
+}
+if ( run_relay ) >/dev/null 2>&1; then
+    bad "relay: accepted a declared directory member that was never staged"
+else ok "relay: refuses a declared directory member that was never staged"; fi
+
+if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi

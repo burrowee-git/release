@@ -1353,7 +1353,7 @@ do_release_relay() {
     mkdir -p "${stage}"
 
     # (2) per-target build + assemble + zip.
-    local zips=() pair os arch out_bins assemble asset b s
+    local zips=() pair os arch out_bins assemble asset b d
     for pair in "${TARGETS[@]}"; do
         read -r os arch <<<"${pair}"
         out_bins="${stage}/.bins-${os}-${arch}"
@@ -1370,20 +1370,29 @@ do_release_relay() {
             CONSOLE_PUB_HEX="$(console_pub_hex)" \
             bash "${REPO_ROOT}/tools/build.sh" >&2
 
-        # assemble: four binaries (3 relay-tree + dispatcher) + the three relay
-        # scripts copied from the relay source. The full installer install.sh is the
-        # zip's entrypoint; update.sh + updater.update.sh ride alongside it.
+        # assemble: four binaries (3 relay-tree + dispatcher) + install.sh + the
+        # manifest's extras (update.sh + updater.update.sh). The full installer
+        # install.sh is the zip's entrypoint; the extras ride alongside it.
+        #
+        # install.sh is the ONE member whose provenance is component-specific:
+        # relay's comes from its own source tree, the public components' from
+        # inner/<comp>/install.sh (do_release, below). That difference lives here at
+        # the call site — exactly where cmd/rkit/build.go keeps it — which is what
+        # lets everything else come from the shared manifest instead of the
+        # open-coded `for s in install.sh update.sh updater.update.sh` this
+        # replaces. That list was the last copy of the fact that shipped gateway
+        # v0.2.0 with no migrations/ in it.
         assemble="${stage}/burrowee-${comp}-${os}-${arch}"
         rm -rf "${assemble}"
         mkdir -p "${assemble}"
         # shellcheck disable=SC2086  # ${bins} is an intentional space-list from bins_for(); word-splitting is the point.
         for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
         cp "${DISP_DIR}/${os}-${arch}/burrowee" "${assemble}/burrowee"
-        for s in install.sh update.sh updater.update.sh; do
-            [ -f "${src}/${s}" ] || { echo "✗ relay script missing in source: ${src}/${s}" >&2; exit 1; }
-            cp "${src}/${s}" "${assemble}/${s}"
-            chmod 0755 "${assemble}/${s}"
-        done
+        [ -f "${src}/install.sh" ] \
+            || { echo "✗ relay script missing in source: ${src}/install.sh" >&2; exit 1; }
+        cp "${src}/install.sh" "${assemble}/install.sh"
+        chmod 0755 "${assemble}/install.sh"
+        stage_payload_extras "${comp}" "${src}" "${assemble}" || exit 1
 
         # Pre-assembly signing gate: prove every Mach-O in the payload is
         # Developer-ID signed BEFORE it is zipped. Notarization below catches the
@@ -1397,6 +1406,18 @@ do_release_relay() {
         asset="burrowee-${comp}-${os}-${arch}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
+        # zip -j junks paths and SKIPS DIRECTORIES OUTRIGHT, so every
+        # directory-shaped payload member needs a second recursive pass — the same
+        # loop do_release runs. payload_dir_extras relay is empty today, so this
+        # loop's body never executes; it is here rather than absent because its
+        # ABSENCE is the defect: gateway/migrations/ went missing precisely because
+        # one of two assembly sites had the recursive pass and the other did not.
+        # A relay directory member added to the manifest now ships from both sites.
+        for d in $(payload_dir_extras "${comp}"); do
+            [ -d "${assemble}/${d}" ] \
+                || { echo "✗ ${comp} payload member ${d}/ was never staged: ${assemble}/${d}" >&2; exit 1; }
+            ( cd "${assemble}" && zip -r -q "${stage}/${asset}" "${d}/" )
+        done
 
         # Apple-sign mode: notarize the darwin zips (binaries were Developer ID
         # signed by build.sh). Submitting doesn't alter the zip, so the latest.*
@@ -1535,7 +1556,7 @@ do_release() {
     mkdir -p "${stage}"
 
     # (3) per-target build + assemble + zip.
-    local zips=() pair os arch out_bins assemble asset b s d update_scripts
+    local zips=() pair os arch out_bins assemble asset b d
     for pair in "${TARGETS[@]}"; do
         read -r os arch <<<"${pair}"
         out_bins="${stage}/.bins-${os}-${arch}"
@@ -1571,20 +1592,15 @@ do_release() {
         # bundle, so update.sh MUST ride in the payload alongside the bins. edge +
         # relay additionally self-update via `sh ./updater.update.sh`; gateway + cli
         # self-update in-process (UpgradeSelf binary swap), so they ship update.sh
-        # ONLY — no updater.update.sh exists in their source. Copied from the
-        # component source; without them a pushed update extracts + verifies but then
-        # fails "cannot open ./update.sh". (Mirrors cmd/rkit/assemble.go extraPayload.)
-        case "${comp}" in
-            edge)        update_scripts="update.sh updater.update.sh" ;;
-            gateway|cli) update_scripts="update.sh" ;;
-            *)           update_scripts="" ;;
-        esac
-        # shellcheck disable=SC2086  # ${update_scripts} is an intentional space-list of script names; word-splitting is the point.
-        for s in ${update_scripts}; do
-            [ -f "${src}/${s}" ] || { echo "✗ ${comp} update script missing in source: ${src}/${s}" >&2; exit 1; }
-            cp "${src}/${s}" "${assemble}/${s}"
-            chmod 0755 "${assemble}/${s}"
-        done
+        # ONLY — no updater.update.sh exists in their source. Without them a pushed
+        # update extracts + verifies but then fails "cannot open ./update.sh".
+        #
+        # WHICH scripts, and the copy itself, are stage_payload_extras in
+        # tools/payload.sh — the same manifest cmd/rkit/assemble.go's extraPayload
+        # is pinned to by cmd/rkit/payload_manifest_test.go. This site used to
+        # restate the list as its own `case`, i.e. a third independent copy of the
+        # fact whose second copy shipped gateway v0.2.0 without migrations/.
+        stage_payload_extras "${comp}" "${src}" "${assemble}" || exit 1
 
         # edge decoy covers (copied from the edge.web repo at package time).
         # EDGE_WEB is resolved once, near the top of this file, beside the
