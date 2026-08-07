@@ -2,7 +2,7 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge | agent).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major] [--force]
+#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major|--keep-version] [--force]
 #
 # --force: bump + mint a fresh stamp even when the component's source is
 #   unchanged since its last cut (versions/<comp>.stamp's recorded sha8 +
@@ -10,6 +10,16 @@
 #   patch bump is REUSED verbatim (no bump, no date churn) — see
 #   resolve_comp_stamp() below. Rare use case: re-shipping a component whose
 #   bundled dispatcher changed but whose own source didn't.
+#
+# --keep-version: leave versions/<comp> EXACTLY as it is — no bump of any kind,
+#   not even the default patch — while still minting a FRESH stamp over the
+#   component's current commit. This deliberately REPUBLISHES a semver that is
+#   already public: the new tag differs from the old one only in the stamp's
+#   date/sha segments. Use it to re-cut a release whose PAYLOAD was wrong but
+#   whose version number must not move. It refuses when the resulting stamp
+#   already has a tag (semver + date + sha all equal — that is a real
+#   collision), and refuses to combine with --bump-minor/--bump-major/--force,
+#   every one of which moves the version this flag exists to pin.
 #
 # --apple: Developer ID sign the darwin binaries (modernech-sign, Modernech LLC)
 #   + notarize each darwin zip before publishing. WITHOUT it darwin bins are
@@ -236,6 +246,11 @@ WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
 FORCE_BUMP=0
+# --keep-version: pin versions/<comp>, mint a fresh stamp anyway. Deliberately a
+# separate variable rather than a fourth BUMP_KIND: BUMP_KIND selects WHICH bump
+# runs, and this flag's whole point is that none does — folding it in would make
+# `[ "${BUMP_KIND}" = patch ]` (the reuse gate below) silently true for it.
+KEEP_VERSION=0
 
 # Apple account resolution + the Developer-ID reachability predicates live in
 # tools/apple_sign.sh (sourced above) so tools/apple_sign.test.sh can exercise
@@ -269,14 +284,49 @@ for arg in "$@"; do
         --bump-minor)         BUMP_KIND="minor" ;;
         --bump-major)         BUMP_KIND="major" ;;
         --force)              FORCE_BUMP=1 ;;
-        -h|--help)            sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --keep-version)       KEEP_VERSION=1 ;;
+        -h|--help)            sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     [ -z "${WHAT}" ] || { echo "✗ --distribute-only takes <comp> <stamp> as its own args — drop the trailing '${WHAT}'" >&2; exit 2; }
 else
-    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major] [--force]" >&2; exit 2; }
+    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major|--keep-version] [--force]" >&2; exit 2; }
+fi
+
+# --keep-version pins versions/<comp>; --bump-minor/--bump-major/--force each
+# move it. Refuse the combination outright rather than letting one win: "keep
+# 0.2.0" and "go to 0.3.0" publish different version numbers, and nothing in the
+# cut's output would tell the operator which reading ran. Written as if/case
+# (never `[ … ] && var=…`): under `set -e` a failing test at the head of an
+# AND-list is the list's exit status, which aborts the script — the same trap
+# the load_apple_account block further down carries a comment about.
+if [ "${KEEP_VERSION}" = 1 ]; then
+    KV_CONFLICT=""
+    case "${BUMP_KIND}" in
+        minor) KV_CONFLICT="--bump-minor" ;;
+        major) KV_CONFLICT="--bump-major" ;;
+    esac
+    if [ "${FORCE_BUMP}" = 1 ]; then
+        if [ -n "${KV_CONFLICT}" ]; then KV_CONFLICT="${KV_CONFLICT} and --force"; else KV_CONFLICT="--force"; fi
+    fi
+    if [ -n "${KV_CONFLICT}" ]; then
+        echo "✗ --keep-version cannot be combined with ${KV_CONFLICT}: --keep-version pins versions/<comp>, ${KV_CONFLICT} would bump it." >&2
+        echo "  Pick one of:" >&2
+        echo "    --keep-version                republish the SAME semver over a fresh stamp (payload re-cut)" >&2
+        echo "    --bump-minor | --bump-major   move the semver" >&2
+        echo "    --force                       bump even when the source is unchanged" >&2
+        echo "    (no flag)                     default patch bump when the source changed" >&2
+        exit 2
+    fi
+    if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
+        echo "✗ --keep-version cannot be combined with --distribute-only: --distribute-only publishes an already-staged stamp and never touches versions/<comp>." >&2
+        echo "  Pick one of:" >&2
+        echo "    release.sh --distribute-only <cli|gateway|edge|agent> <stamp> [--dry-run]" >&2
+        echo "    release.sh <cli|gateway|edge|agent|relay|all> --keep-version [--dry-run]" >&2
+        exit 2
+    fi
 fi
 
 # When neither signing nor the CVE gate was requested and we're interactive,
@@ -347,6 +397,32 @@ resolve_disp_stamp() {
     printf '%s' "${fresh}"
 }
 
+# assert_stamp_untagged <comp> <stamp> — refuse a cut whose tag already exists.
+#
+# Only --keep-version can reach this: every other path either bumps the semver
+# (new tag by construction) or reuses a stamp whose tag is already published,
+# which the reuse gate treats as "nothing changed" rather than a re-cut.
+# --keep-version deliberately republishes a live semver, so the ONE thing that
+# still has to be unique — the full stamp, semver + date + source sha — has to be
+# checked, and checked HERE in step (1) where a refusal is free.
+# gh_release_publish carries the identical check, but it only fires after four
+# cross-compiles, a CVE scan and a notarization round-trip.
+#
+# Local tags only, matching gh_release_publish: a tag pushed from another machine
+# and not yet fetched is invisible to both. `git fetch --tags` before a cut if the
+# release repo's tag list may be behind origin.
+assert_stamp_untagged() {
+    local comp="$1" stamp="$2"
+    local tag="${comp}/${stamp}"
+    if git -C "${REPO_ROOT}" rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+        echo "✗ ${comp}: tag ${tag} already exists — that exact stamp (semver + date + source sha) is already published." >&2
+        echo "  --keep-version re-mints a stamp over the CURRENT source commit; today that lands on a tag already taken." >&2
+        echo "  Either cut from a newer ${comp} commit, or drop --keep-version and let the bump run." >&2
+        return 1
+    fi
+    return 0
+}
+
 # resolve_comp_stamp <comp> <src_dir> — generalizes resolve_disp_stamp (above)
 # from the dispatcher-only freeze to EVERY component. Reuses the recorded
 # versions/<comp>.stamp verbatim (semver + date + changeset all frozen) when
@@ -357,6 +433,10 @@ resolve_disp_stamp() {
 # dispatcher (which is NEVER auto-bumped), a routine per-component cut still
 # bumps on a real source change — only the needless churn on an UNCHANGED
 # component is eliminated.
+#
+# --keep-version (KEEP_VERSION=1) short-circuits all of the above: versions/<comp>
+# is never touched and a fresh stamp is minted over the current commit, guarded by
+# assert_stamp_untagged (above) so the re-cut cannot land on a published tag.
 #
 # --dry-run never bumps (matches pre-freeze behavior): echoes the recorded
 # stamp when unchanged, else a fresh stamp over the CURRENT (unbumped)
@@ -382,6 +462,35 @@ resolve_comp_stamp() {
         if [ "${rec_sha}" = "${cur_sha}" ] && [ "${rec_sv}" = "${semver}" ]; then
             unchanged=1
         fi
+    fi
+
+    # --keep-version: versions/<comp> is left byte-identical — no bump of any
+    # kind — and a fresh stamp is minted over the CURRENT commit. Deliberately
+    # ahead of BOTH the dry-run branch and the unchanged-source reuse gate:
+    #   * ahead of the reuse gate, because the entire point is a NEW stamp for a
+    #     semver that is already published — reusing the recorded stamp would
+    #     re-cut the exact release that is already live;
+    #   * ahead of the dry-run branch, because the semver never moves on this
+    #     path, so the stamp a dry-run prints is bit-for-bit the one a real run
+    #     would mint. That makes --dry-run genuinely predictive here (it is not,
+    #     on the bump paths, where dry-run reports the UNBUMPED semver) and lets
+    #     the collision guard fail the operator before anything is built.
+    # It writes nothing under --dry-run, so dry-run still never bumps and never
+    # mints a recorded stamp.
+    if [ "${KEEP_VERSION:-0}" = 1 ]; then
+        fresh="$(SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp | tr -d '[:space:]')"
+        assert_stamp_untagged "${comp}" "${fresh}" || exit 1
+        echo "→ ${comp}: --keep-version — REPUBLISHING semver ${semver}; versions/${comp} not bumped, fresh stamp ${fresh}" >&2
+        if [ "${DRY_RUN:-0}" != 1 ]; then
+            # Same record-and-stage as the bump path below, minus the bump. The
+            # caller's revert_version/revert_relay_version trap restores this
+            # staged write if the cut dies; versions/<comp> itself is never
+            # written here, so the trap's restore of it is a no-op.
+            printf '%s\n' "${fresh}" > "${stamp_file}"
+            ( cd "${REPO_ROOT}" && git add "versions/${comp}.stamp" )
+        fi
+        printf '%s' "${fresh}"
+        return 0
     fi
 
     if [ "${DRY_RUN:-0}" = 1 ]; then
@@ -1217,7 +1326,14 @@ do_release_relay() {
     # fires at actual process exit either way.
     trap 'revert_relay_version; shred_key' ERR INT TERM
 
-    if [ "${old_semver}" != "${new_semver}" ]; then
+    # --keep-version arm first: on that path old_semver == new_semver by
+    # construction, so without it the run would print "reuse (unchanged, no
+    # bump)" — which describes the opposite situation (nothing to ship) and
+    # hides the one fact the operator must see, that a live semver is being
+    # republished.
+    if [ "${KEEP_VERSION}" = 1 ]; then
+        echo "Bump    : none — --keep-version REPUBLISHES semver ${new_semver} (already published; only the stamp is new)"
+    elif [ "${old_semver}" != "${new_semver}" ]; then
         echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
     elif [ "${DRY_RUN}" = 1 ]; then
         # dry-run never bumps regardless of whether the source changed, so
@@ -1395,7 +1511,11 @@ do_release() {
     # fires at actual process exit either way.
     trap 'revert_version; shred_key' ERR INT TERM
 
-    if [ "${old_semver}" != "${new_semver}" ]; then
+    # --keep-version arm first — see the same block in do_release_relay for why
+    # the "reuse (unchanged, no bump)" wording must not be reached on this path.
+    if [ "${KEEP_VERSION}" = 1 ]; then
+        echo "Bump    : none — --keep-version REPUBLISHES semver ${new_semver} (already published; only the stamp is new)"
+    elif [ "${old_semver}" != "${new_semver}" ]; then
         echo "Bump    : ${BUMP_KIND} (${old_semver} → ${new_semver})"
     elif [ "${DRY_RUN}" = 1 ]; then
         # dry-run never bumps regardless of whether the source changed, so
