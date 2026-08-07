@@ -30,6 +30,40 @@ payload_file_extras() {
     esac
 }
 
+# stage_payload_extras <comp> <src-dir> <assemble-dir> — copy the component's
+# flat payload extras into the staged bundle, executable.
+#
+# The ONE staging implementation both assembly sites in tools/release.sh use:
+# do_release for the four public components, do_release_relay for the private
+# one. Relay used to open-code its own list — `for s in install.sh update.sh
+# updater.update.sh` — on the grounds that its install.sh comes from the
+# COMPONENT source while the public components take theirs from
+# inner/<comp>/install.sh, which makes the two loops look unmergeable.
+#
+# They are not. install.sh is not a manifest member on EITHER side: this file's
+# manifest is defined as what rides "beyond its binaries, the dispatcher and
+# install.sh", and cmd/rkit/build.go resolves install.sh per component (line
+# ~394: inner/<comp>/install.sh, or <src>/install.sh for relay) and hands it to
+# assemble() beside the extras, never inside them. Only the extras belong here;
+# each caller keeps ownership of where its own install.sh comes from. That is
+# what lets relay share the manifest without changing a byte of its payload.
+#
+# Every extra comes from the component source tree on both paths, so <src-dir>
+# is the whole provenance. A declared extra missing from the source is a hard
+# error: a payload whose updater then dies on "cannot open ./update.sh" is the
+# same class of defect as a gateway shipped without migrations/.
+stage_payload_extras() {
+    local comp="$1" src="$2" dest="$3" s
+    for s in $(payload_file_extras "${comp}"); do
+        if [ ! -f "${src}/${s}" ]; then
+            echo "✗ ${comp} update script missing in source: ${src}/${s}" >&2
+            return 1
+        fi
+        cp "${src}/${s}" "${dest}/${s}"
+        chmod 0755 "${dest}/${s}"
+    done
+}
+
 # payload_dir_extras <comp> — DIRECTORY-shaped payload members, one per line.
 #
 # These are the members `zip -j` cannot carry: it junks paths and skips
