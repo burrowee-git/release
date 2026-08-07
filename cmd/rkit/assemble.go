@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/burrowee-git/release-kit/build"
 	"github.com/burrowee-git/release-kit/pack"
@@ -48,6 +49,52 @@ func assemble(comp, stamp, outRoot, installSh string, extras []pack.Content, com
 		zips = append(zips, zp)
 	}
 	return zips, nil
+}
+
+// ledgerMigrations returns the migration script names named in the runner's
+// MIGRATIONS= ledger, in ledger order.
+//
+// The ledger is a shell here-string of "<version-this-upgrades-to> <script>"
+// rows, oldest first:
+//
+//	MIGRATIONS="
+//	0.2.0 v1_to_v2.sh
+//	"
+//
+// Parsed the same way the runner parses it — word-split into (version, script)
+// pairs — so the two cannot disagree about what the ledger says. Only an
+// assignment at column 0 counts, which is where the runner writes it and where
+// a commented-out copy never is.
+func ledgerMigrations(runSh string) ([]string, error) {
+	const key = `MIGRATIONS="`
+	lines := strings.Split(runSh, "\n")
+	start := -1
+	for i, line := range lines {
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		if start >= 0 {
+			return nil, fmt.Errorf(`more than one MIGRATIONS=" assignment`)
+		}
+		start = i
+	}
+	if start < 0 {
+		return nil, fmt.Errorf(`no MIGRATIONS=" assignment found — this is not the migration runner`)
+	}
+	rest := strings.Join(append([]string{strings.TrimPrefix(lines[start], key)}, lines[start+1:]...), "\n")
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return nil, fmt.Errorf(`unterminated MIGRATIONS=" assignment`)
+	}
+	fields := strings.Fields(rest[:end])
+	if len(fields)%2 != 0 {
+		return nil, fmt.Errorf("ledger holds %d words, want (version, script) pairs", len(fields))
+	}
+	scripts := make([]string, 0, len(fields)/2)
+	for i := 1; i < len(fields); i += 2 {
+		scripts = append(scripts, fields[i])
+	}
+	return scripts, nil
 }
 
 // extraPayload returns the component-specific files that ride in the zip beyond
@@ -108,18 +155,36 @@ func extraPayload(comp, srcDir string) ([]pack.Content, error) {
 			return nil, fmt.Errorf("gateway migrations glob %s: %w", mig, globErr)
 		}
 		sort.Strings(scripts)
-		haveRunner := false
+		shipped := map[string]bool{}
 		for _, p := range scripts {
 			base := filepath.Base(p)
-			if base == "run.sh" {
-				haveRunner = true
-			}
+			shipped[base] = true
 			// Zip member names are always "/"-separated; filepath.Join would be
 			// wrong the moment this is built anywhere non-unix.
 			extras = append(extras, pack.Content{Src: p, Name: "migrations/" + base})
 		}
-		if !haveRunner {
-			return nil, fmt.Errorf("gateway migration runner missing in source %s", filepath.Join(mig, "run.sh"))
+		runner := filepath.Join(mig, "run.sh")
+		if !shipped["run.sh"] {
+			return nil, fmt.Errorf("gateway migration runner missing in source %s", runner)
+		}
+		// The glob ships whatever is on disk; the LEDGER is what the runner will
+		// actually walk. A migration added to MIGRATIONS= but never committed as
+		// a file is a row the runner warns about and skips — after which the
+		// caller records the version and that rung is gated off on every host,
+		// permanently. Nothing downstream can recover it, so the build is the
+		// last place it can be caught.
+		body, readErr := os.ReadFile(runner)
+		if readErr != nil {
+			return nil, fmt.Errorf("read gateway migration runner %s: %w", runner, readErr)
+		}
+		named, ledgerErr := ledgerMigrations(string(body))
+		if ledgerErr != nil {
+			return nil, fmt.Errorf("gateway migration ledger in %s: %w", runner, ledgerErr)
+		}
+		for _, name := range named {
+			if !shipped[name] {
+				return nil, fmt.Errorf("gateway migration %q is named in the ledger of %s but no such file exists in %s", name, runner, mig)
+			}
 		}
 	}
 	if comp == "edge" {

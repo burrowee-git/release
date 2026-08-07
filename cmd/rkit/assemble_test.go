@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -176,6 +177,25 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		}
 		return dir
 	}
+	// writeLedger overwrites migrations/run.sh in dir with a runner whose
+	// MIGRATIONS= ledger names exactly these scripts. The runner is the source
+	// of truth for what will be walked at install time, so a fixture that ships
+	// a placeholder run.sh cannot exercise the ledger check at all.
+	writeLedger := func(t *testing.T, dir string, scripts ...string) {
+		t.Helper()
+		body := "#!/bin/sh\nset -eu\nMIGRATIONS=\"\n"
+		for i, s := range scripts {
+			body += fmt.Sprintf("0.%d.0 %s\n", i+2, s)
+		}
+		body += "\"\nexit 0\n"
+		p := filepath.Join(dir, "migrations", "run.sh")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// Every script in migrations/ ships, discovered by glob — adding a migration
 	// must not require a change here, or the runner's ledger could name a script
@@ -185,6 +205,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 			filepath.Join("migrations", "run.sh"),
 			filepath.Join("migrations", "v1_to_v2.sh"),
 			filepath.Join("migrations", "v2_to_v3.sh"))
+		writeLedger(t, src, "v1_to_v2.sh", "v2_to_v3.sh")
 		got, err := extraPayload("gateway", src)
 		if err != nil {
 			t.Fatal(err)
@@ -200,6 +221,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	// a backslash member the moment this is built anywhere non-unix.
 	t.Run("the migration's zip name is slash-separated", func(t *testing.T) {
 		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"), filepath.Join("migrations", "v1_to_v2.sh"))
+		writeLedger(t, src, "v1_to_v2.sh")
 		got, err := extraPayload("gateway", src)
 		if err != nil {
 			t.Fatal(err)
@@ -225,6 +247,50 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		src := writeSrc(t, "update.sh")
 		if _, err := extraPayload("gateway", src); err == nil {
 			t.Error("missing migrations/run.sh accepted, want a build error")
+		}
+	})
+
+	// The ledger, not the directory listing, is what the runner walks. A row
+	// added to MIGRATIONS= whose script was never committed makes the runner
+	// warn and skip — and the caller then records the version, gating that rung
+	// off on every host forever. The glob would ship the zip green, so the
+	// build is the last place it can be caught.
+	t.Run("a ledger row with no script is a build error", func(t *testing.T) {
+		src := writeSrc(t, "update.sh",
+			filepath.Join("migrations", "run.sh"),
+			filepath.Join("migrations", "v1_to_v2.sh"))
+		writeLedger(t, src, "v1_to_v2.sh", "v2_to_v3.sh") // v2_to_v3.sh not committed
+		_, err := extraPayload("gateway", src)
+		if err == nil {
+			t.Fatal("a ledger row naming a missing script was accepted, want a build error")
+		}
+		if !strings.Contains(err.Error(), "v2_to_v3.sh") {
+			t.Errorf("error does not name the missing migration: %v", err)
+		}
+	})
+
+	// A run.sh with no ledger at all is not the runner. Accepting it would mean
+	// the check silently passes on every future build.
+	t.Run("a runner with no ledger is a build error", func(t *testing.T) {
+		src := writeSrc(t, "update.sh",
+			filepath.Join("migrations", "run.sh"),
+			filepath.Join("migrations", "v1_to_v2.sh"))
+		if _, err := extraPayload("gateway", src); err == nil {
+			t.Error("a run.sh with no MIGRATIONS= ledger was accepted, want a build error")
+		}
+	})
+
+	// An empty ledger is legitimate: a release before the first migration was
+	// written ships a runner with nothing to walk.
+	t.Run("an empty ledger is fine", func(t *testing.T) {
+		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"))
+		writeLedger(t, src)
+		got, err := extraPayload("gateway", src)
+		if err != nil {
+			t.Fatalf("empty ledger rejected: %v", err)
+		}
+		if want := []string{"migrations/run.sh", "update.sh"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("gateway extras = %v, want %v", names(got), want)
 		}
 	})
 
@@ -284,6 +350,74 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		t.Run("missing update.sh is fail-loud: "+comp, func(t *testing.T) {
 			if _, err := extraPayload(comp, t.TempDir()); err == nil {
 				t.Errorf("%s: expected error for missing update.sh, got nil", comp)
+			}
+		})
+	}
+}
+
+// TestLedgerMigrations pins the parse against the shape migrations/run.sh
+// actually writes, and against the mangled runners a refactor there could
+// produce. It reads the ledger the same way the runner does — word-split into
+// (version, script) pairs — so the two cannot disagree about what it says.
+func TestLedgerMigrations(t *testing.T) {
+	const header = "#!/bin/sh\n" +
+		"# THE LEDGER — \"<version-this-upgrades-to> <script>\", oldest first.\n" +
+		"# Adding a migration means adding ONE row to the ledger below.\n"
+
+	t.Run("the canonical multi-row ledger", func(t *testing.T) {
+		got, err := ledgerMigrations(header + "MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n0.2.5 v2_to_v3.sh\n\"\n\nGW_HOME=x\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"v1_to_v2.sh", "v2_to_v3.sh"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("scripts = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a single-line ledger", func(t *testing.T) {
+		got, err := ledgerMigrations("MIGRATIONS=\"0.2.0 v1_to_v2.sh\"\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"v1_to_v2.sh"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("scripts = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("an empty ledger names nothing", func(t *testing.T) {
+		got, err := ledgerMigrations("MIGRATIONS=\"\n\"\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Errorf("scripts = %v, want none", got)
+		}
+	})
+
+	// The header quotes the assignment inside a comment. Matching that would
+	// read a documentation example as the ledger.
+	t.Run("a commented or indented assignment is not the ledger", func(t *testing.T) {
+		src := "# MIGRATIONS=\"0.9.9 not_real.sh\"\n" +
+			"    MIGRATIONS=\"0.9.8 also_not_real.sh\"\n" +
+			"MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n\"\n"
+		got, err := ledgerMigrations(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"v1_to_v2.sh"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("scripts = %v, want %v", got, want)
+		}
+	})
+
+	for name, src := range map[string]string{
+		"no ledger at all":       "#!/bin/sh\nGW_HOME=x\n",
+		"unterminated":           "MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n",
+		"a row missing a script": "MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n0.2.5\n\"\n",
+		"two assignments":        "MIGRATIONS=\"\n0.2.0 a.sh\n\"\nMIGRATIONS=\"\n0.3.0 b.sh\n\"\n",
+	} {
+		t.Run("refused: "+name, func(t *testing.T) {
+			if got, err := ledgerMigrations(src); err == nil {
+				t.Errorf("accepted a broken ledger, got %v", got)
 			}
 		})
 	}
