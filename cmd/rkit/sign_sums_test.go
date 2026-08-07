@@ -9,22 +9,10 @@ import (
 	"testing"
 )
 
-// TestTrustedCommentBindsTagToSignature pins the exact string the outer
-// bootstrap compares against. tools/bootstrap.template.sh resolves a tag
-// "<comp>/<stamp>" and builds its expectation as `burrowee $COMP ${TAG#*/}`;
-// if this format drifts, every install fails closed.
-func TestTrustedCommentBindsTagToSignature(t *testing.T) {
-	const tag = "cli/v0.1.65.2026.07.23.55e631a5"
-	comp, stamp, ok := strings.Cut(tag, "/")
-	if !ok {
-		t.Fatalf("malformed fixture tag %q", tag)
-	}
-	// The bootstrap's `burrowee $COMP ${TAG#*/}`.
-	want := "burrowee " + comp + " " + stamp
-	if got := trustedComment(comp, stamp); got != want {
-		t.Fatalf("trustedComment(%q, %q) = %q, want %q", comp, stamp, got, want)
-	}
-}
+// The tag-binding format itself is pinned in trusted_comment_test.go, which
+// executes the real verifier line out of tools/bootstrap.template.sh instead of
+// restating `burrowee $COMP ${TAG#*/}` as a Go literal here — a restatement
+// agrees with itself no matter what the template says.
 
 // TestSignSumsStampsTrustedComment proves a real `rkit build` signature carries
 // the version stamp, not minisign's default `timestamp:… file:…` comment.
