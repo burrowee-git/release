@@ -98,6 +98,8 @@ source "${REPO_ROOT}/tools/updater_pin.sh"
 source "${REPO_ROOT}/tools/cut_origin.sh"
 # shellcheck source=tools/payload.sh
 source "${REPO_ROOT}/tools/payload.sh"
+# shellcheck source=tools/binmap.sh
+source "${REPO_ROOT}/tools/binmap.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -534,15 +536,13 @@ TARGETS=(
 # src_for is defined earlier in this file, beside REG_*/SRC_*/assert_cut_origins.
 
 # binary list per component (the dispatcher `burrowee` is added at assembly time)
-bins_for() {
-    case "$1" in
-        cli)     printf '%s' "burrowee-cli burrowee-cli-updater" ;;
-        gateway) printf '%s' "burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater" ;;
-        edge)    printf '%s' "burrowee-edge burrowee-edge-cli burrowee-edge-updater" ;;
-        agent)   printf '%s' "burrowee-agent" ;;
-        relay)   printf '%s' "burrowee-relay burrowee-relay-cli burrowee-relay-updater" ;;
-    esac
-}
+# bins_for <comp> — which binaries this component's ZIP CARRIES — is defined in
+# tools/binmap.sh (sourced above), derived from the same table tools/build.sh
+# reads for what gets BUILT. It used to be an independent `case` here, i.e. a
+# second copy of a fact whose third copy (internal/relconfig.Bins) claimed by
+# comment to mirror the first. A binary present in the build list and absent
+# here is built, Developer-ID signed, notarized and silently NOT packaged; only
+# the reverse fails closed, on the assembly `cp` below.
 
 GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/bin/ghp")"
 

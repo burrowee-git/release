@@ -64,6 +64,8 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || { echo "✗ go not found on PATH or /o
 
 # shellcheck source=tools/updater_pin.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/updater_pin.sh"
+# shellcheck source=tools/binmap.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/binmap.sh"
 
 # assert_workspace_off <build-dir> <gowork-value> — refuse to build unless the
 # Go toolchain reports NO workspace in effect.
@@ -99,16 +101,18 @@ if [ -n "${APPLE_SIGN:-}" ]; then
         || { echo "✗ APPLE_SIGN set but modernech-sign not found on PATH or ~/bin" >&2; exit 1; }
 fi
 
-# binary -> package map (space-separated "bin:pkg" pairs per component)
-case "${COMP}" in
-    cli)      MAP="burrowee-cli:./cmd/burrowee-cli burrowee-cli-updater:./cmd/burrowee-cli-updater" ;;
-    gateway)  MAP="burrowee-gateway:./cmd/burrowee-gateway burrowee-gateway-cli:./cmd/burrowee-gateway-cli burrowee-gateway-console:./cmd/burrowee-gateway-console burrowee-register:./cmd/burrowee-register burrowee-gateway-updater:./cmd/burrowee-gateway-updater" ;;
-    edge)     MAP="burrowee-edge:./cmd/burrowee-edge burrowee-edge-cli:./cmd/burrowee-edge-cli burrowee-edge-updater:./cmd/burrowee-edge-updater" ;;
-    agent)    MAP="burrowee-agent:./cmd/burrowee-agent" ;;
-    relay)    MAP="burrowee-relay:./cmd/burrowee-relay burrowee-relay-cli:./cli burrowee-relay-updater:./cli/cmd/burrowee-relay-updater" ;;
-    burrowee) MAP="burrowee:." ;;   # dispatcher main package is the repo root
-    *)        echo "✗ unknown COMP: ${COMP}" >&2; exit 2 ;;
-esac
+# binary -> package map (space-separated "bin:pkg" pairs per component).
+#
+# The list itself lives in tools/binmap.sh — the ONE shell copy, shared with
+# tools/release.sh's bins_for (which selects, by name, what the zip carries out
+# of what this script builds) and cross-checked against internal/relconfig.Bins
+# by internal/relconfig/binmap_cross_check_test.go. This used to be an
+# independent `case` here: a binary added to it and not to bins_for was built,
+# signed, notarized and then silently left out of the payload.
+#
+# bin_map names the components it knows and exits 2 on any other, which is the
+# validation the old `*)` arm did.
+MAP="$(bin_map "${COMP}")" || exit 2
 
 # ldflags
 LDFLAGS="-X main.version=${STAMP}"
