@@ -147,13 +147,71 @@ have_real_root() {
     [ "$HAVE_REAL_ROOT" = yes ]
 }
 
-# stat_uid / stat_mode <path> — owner uid and octal permission bits, on both
-# stat dialects (BSD/macOS `-f`, GNU `-c`). Empty output on failure.
+# ---------------------------------------------------------------------------
+# The stat dialect, decided once.
+#
+# `stat` has two incompatible dialects, and the same letter means different
+# things in each: GNU coreutils takes the format as `-c FORMAT`, BSD/macOS as
+# `-f FORMAT` — and on GNU, `-f` is `--file-system`. So `stat -f '%u' PATH` on
+# Linux does not fail cleanly. It reads '%u' as a SECOND PATH: dumps PATH's
+# filesystem geometry to STDOUT, complains about '%u' on stderr, and exits 1.
+# A `stat -f … || stat -c …` chain therefore prints that dump CONCATENATED with
+# the real answer, so `[ "$(stat_uid p)" = 0 ]` is false for a file owned by
+# root. That shipped, and it made path_is_root_secure below answer "not secure"
+# for every path on every Linux host — refusing the install of a tree that was
+# already correct, and pointing the operator at permissions as the cause.
+#
+# Hence: probe ONCE against a path that certainly exists, then always use the
+# flag that was proved to work. Ordering `-c` first would also work today (BSD
+# stat rejects `-c` with a usage error on stderr and NOTHING on stdout — this is
+# verified by the suite, not assumed), but it leaves every call a speculative
+# failing exec whose correctness rests on that stdout/stderr split holding for
+# every stat any host might carry. Probing does not rest on anything.
+# ---------------------------------------------------------------------------
+
+# is_digits <s> — true when s is one or more decimal digits and nothing else.
+# Rejecting a MULTI-LINE blob is the entire point: every newline and every word
+# of a filesystem dump is a non-digit, so a concatenated answer can never be
+# mistaken for a value.
+is_digits() {
+    case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+STAT_FLAVOR=none
+if is_digits "$(stat -c '%u' / 2>/dev/null)"; then
+    STAT_FLAVOR=gnu
+elif is_digits "$(stat -f '%u' / 2>/dev/null)"; then
+    STAT_FLAVOR=bsd
+fi
+
+# stat_field <gnu-format> <bsd-format> <path> — one numeric field of one file,
+# in whichever dialect this host speaks.
+#
+# It prints exactly one line of digits, or it prints NOTHING and returns
+# non-zero. There is no third outcome, and callers depend on that: a helper that
+# can put junk on stdout turns every `[ "$(…)" = 0 ]` into a silent false, which
+# reads to an operator as "your permissions are wrong" rather than "I could not
+# look" — two problems with nothing in common.
+stat_field() {
+    case "$STAT_FLAVOR" in
+    gnu) _sf_v="$(stat -c "$1" "$3" 2>/dev/null)" || return 1 ;;
+    bsd) _sf_v="$(stat -f "$2" "$3" 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
+    esac
+    is_digits "$_sf_v" || return 1
+    printf '%s\n' "$_sf_v"
+}
+
+# stat_uid / stat_mode <path> — owner uid (decimal) and permission bits
+# (octal). No output and non-zero on any failure — never a partial answer.
 stat_uid() {
-    stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
+    stat_field '%u' '%u' "$1"
 }
 stat_mode() {
-    stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+    stat_field '%a' '%Lp' "$1"
 }
 
 # mode_allows_nonroot_write <octal> — true when the group or other digit carries
@@ -177,16 +235,31 @@ mode_allows_nonroot_write() {
 # The ancestor walk is the load-bearing half. A root-owned binary inside a
 # user-writable directory can be unlinked and replaced by that user, after which
 # root execs their file — so checking the leaf alone proves nothing.
+#
+# THREE return codes, not two:
+#   0  secure
+#   1  not secure — a real answer about a real path
+#   2  undecidable — stat did not answer, so nothing is known either way
+#
+# 1 and 2 are separated because they send an operator to completely different
+# places, and collapsing them is what the dialect bug above actually cost: a
+# host whose tree was already root:root 755 was told to go and check its
+# permissions. A predicate guarding a root exec must still REFUSE on 2 — but it
+# must refuse saying it could not look.
 path_is_root_secure() {
     _rs_p="$1"
     [ -f "$_rs_p" ] || return 1
-    [ "$(stat_uid "$_rs_p")" = 0 ] || return 1
-    if mode_allows_nonroot_write "$(stat_mode "$_rs_p")"; then return 1; fi
+    _rs_v="$(stat_uid "$_rs_p")" || return 2
+    [ "$_rs_v" = 0 ] || return 1
+    _rs_v="$(stat_mode "$_rs_p")" || return 2
+    if mode_allows_nonroot_write "$_rs_v"; then return 1; fi
     _rs_d="$(dirname "$_rs_p")"
     while :; do
         [ -d "$_rs_d" ] || return 1
-        [ "$(stat_uid "$_rs_d")" = 0 ] || return 1
-        if mode_allows_nonroot_write "$(stat_mode "$_rs_d")"; then return 1; fi
+        _rs_v="$(stat_uid "$_rs_d")" || return 2
+        [ "$_rs_v" = 0 ] || return 1
+        _rs_v="$(stat_mode "$_rs_d")" || return 2
+        if mode_allows_nonroot_write "$_rs_v"; then return 1; fi
         _rs_parent="$(dirname "$_rs_d")"
         [ "$_rs_parent" != "$_rs_d" ] || break
         _rs_d="$_rs_parent"
@@ -283,14 +356,29 @@ verify_root_exec_surface() {
         return 0
     fi
     for _vre in $ROOT_BINS install.sh; do
-        if ! path_is_root_secure "$LIBEXEC_DIR/$_vre"; then
+        _vre_rc=0
+        path_is_root_secure "$LIBEXEC_DIR/$_vre" || _vre_rc=$?
+        if [ "$_vre_rc" = 0 ]; then continue; fi
+        if [ "$_vre_rc" = 2 ]; then
+            # Undecidable, not insecure. Naming permissions here would be a lie,
+            # and an expensive one — it is a day spent re-checking a tree that
+            # was right the first time.
+            echo "error: could not read the owner and mode of $LIBEXEC_DIR/$_vre — this host's" >&2
+            echo "error: 'stat' answered neither the GNU form (stat -c '%u') nor the BSD form" >&2
+            echo "error: (stat -f '%u') with a plain number." >&2
+            echo "error: refusing to install a service that runs as root out of a path whose" >&2
+            echo "error: ownership could not be established." >&2
+            echo "hint: the permissions of $LIBEXEC_DIR are NOT implicated — reading them is." >&2
+            echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
+            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+        else
             echo "error: $LIBEXEC_DIR/$_vre is not root-owned and unwritable all the way to /." >&2
             echo "error: refusing to install a service that runs as root out of a path a" >&2
             echo "error: non-root user could replace." >&2
             echo "hint: check the ownership and modes of $LIBEXEC_DIR and every directory above it;" >&2
             echo "hint: each must be owned by root and not group- or world-writable." >&2
-            return 1
         fi
+        return 1
     done
 }
 
