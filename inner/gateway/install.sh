@@ -856,6 +856,20 @@ EOF
 # install onto a host with nothing running yet needs at least an initial
 # bootstrap/enable so the service can be started later; only the "kick a
 # possibly-already-running unit" steps are skipped.
+#
+# WHO REACHES THIS, and it is a short list — every restart below inherits it:
+#   fresh install (default mode)   an operator install; every binary was just
+#                                  re-placed unconditionally a few lines earlier
+#   BURROWEE_UNITS_ONLY            `gateway service install` / the offline
+#                                  LocalReinstall — an operator/console verb
+# and, decisively, who does NOT:
+#   BURROWEE_UPDATE                the updater's own push path. It calls
+#                                  render_units and never load_units, because
+#                                  the process running this script is the one
+#                                  a restart here would kill mid-update. That
+#                                  exclusion is structural, not a flag — do not
+#                                  add a load_units call to that branch.
+#   BURROWEE_UNINSTALL             tears units down on its own terms.
 # ---------------------------------------------------------------------------
 load_units() {
     case "$(uname -s)" in
@@ -884,6 +898,51 @@ load_units() {
             echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
         else
             run_root systemctl enable --now burrowee-gateway.service         2>/dev/null || true
+
+            # THE DAEMON, ADVANCED — the step this branch was missing, and the
+            # reason a Linux host kept executing its OLD ExecStart until the next
+            # reboot. `enable --now` no-ops a unit that is already running, so on
+            # every reinstall the privileged-tree unit was written correctly and
+            # then simply not obeyed: `doctor` reported installed-vs-running
+            # drift, and the security fix the rewrite exists for (a root unit
+            # naming a per-user path) silently did not take effect. Darwin's
+            # bootout+bootstrap pair above has always done this; the edge
+            # installer does it too (`systemctl restart burrowee-edge`). Gateway
+            # on Linux was the one component that stopped at "files on disk".
+            #
+            # `restart` is the systemd spelling of bootout+bootstrap: stop it if
+            # it is running, then start it. Not `try-restart`, which leaves a unit
+            # that is enabled-but-stopped stopped and still exits 0 — reporting
+            # success for the one state the operator most needs told about. Not
+            # `reload-or-restart` either: it prefers ExecReload, so the day this
+            # unit grows one, "the daemon now runs the new binary" would silently
+            # become "the old process re-read its config" — this exact bug, back,
+            # wearing the fix's name.
+            #
+            # UNCONDITIONAL, on purpose. The tempting guard — restart only when a
+            # binary or the unit body actually changed — cannot see the state that
+            # created this bug: files already converged, process still stale. A
+            # host in drift today reaches `burrowee gateway service install` with
+            # every byte already in place, so a change-detecting restart would
+            # decline exactly when the operator ran the documented remedy. It is
+            # also not a spontaneous bounce: nothing periodic reaches here (see
+            # which modes call load_units at all, below), and the two that do are
+            # operator-initiated install verbs.
+            #
+            # Loud on failure and not fatal. New binaries under an old daemon is
+            # the one outcome that looks like a clean install and is not, so it is
+            # never swallowed; but the units on disk are still the durable
+            # outcome, and a supervisor-less host (a container) must still finish
+            # the install — same contract as every other step here.
+            if ! run_root systemctl restart burrowee-gateway.service; then
+                echo "error: 'systemctl restart burrowee-gateway.service' failed — the newly" >&2
+                echo "error: installed binaries are on disk, but the daemon still running is the" >&2
+                echo "error: OLD one. 'burrowee gateway doctor' reports installed/running drift" >&2
+                echo "error: until it is restarted, and a unit rewritten to a new ExecStart has" >&2
+                echo "error: not taken effect." >&2
+                echo "hint: restart it by hand: sudo systemctl restart burrowee-gateway.service" >&2
+            fi
+
             run_root systemctl enable --now burrowee-gateway-updater.service 2>/dev/null || true
             # A reinstall over an already-running (possibly stale) updater must advance
             # it to the freshly-installed binary — `enable --now` no-ops a running unit,
