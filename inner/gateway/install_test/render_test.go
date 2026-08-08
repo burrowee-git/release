@@ -78,15 +78,78 @@ func stubInitSystem(t *testing.T) string {
 	t.Helper()
 	stub := t.TempDir()
 
-	for _, name := range []string{"launchctl", "systemctl"} {
-		p := filepath.Join(stub, name)
-		content := "#!/bin/sh\necho \"" + name + " $*\" >> \"$STUB_LOG\"\nexit 0\n"
-		if err := os.WriteFile(p, []byte(content), 0o755); err != nil {
-			t.Fatalf("write stub %s: %v", name, err)
-		}
+	p := filepath.Join(stub, "launchctl")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho \"launchctl $*\" >> \"$STUB_LOG\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub launchctl: %v", err)
+	}
+	// systemctl records like launchctl, but also models a host where one
+	// specific call FAILS: STUB_SYSTEMCTL_FAIL=<substring> makes any matching
+	// invocation exit non-zero. A supervisor that refuses is the interesting
+	// case for the daemon-advance step — new binaries on disk under an old
+	// running daemon is the one outcome that looks like a clean install.
+	systemctl := "#!/bin/sh\n" +
+		"echo \"systemctl $*\" >> \"$STUB_LOG\"\n" +
+		"if [ -n \"${STUB_SYSTEMCTL_FAIL:-}\" ]; then\n" +
+		"    case \"$*\" in *\"$STUB_SYSTEMCTL_FAIL\"*) echo \"stub: refusing systemctl $*\" >&2; exit 1 ;; esac\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(stub, "systemctl"), []byte(systemctl), 0o755); err != nil {
+		t.Fatalf("write stub systemctl: %v", err)
 	}
 	writeSudoStub(t, stub)
 	return stub
+}
+
+// forcedOSes are the two platform branches install.sh carries. A test that
+// ranges over this slice exercises BOTH of them on whatever host the suite runs
+// on — which is the whole point of stubInitSystemFor below.
+var forcedOSes = []string{"darwin", "linux"}
+
+// stubInitSystemFor is stubInitSystem with `uname -s` pinned to goos, so a test
+// drives the platform branch install.sh takes instead of inheriting the test
+// host's.
+//
+// This is the seam the suite was missing. Every other test here picks its
+// ASSERTIONS with runtime.GOOS while install.sh picks its BEHAVIOUR with
+// `uname -s`, so on a macOS release machine the entire Linux half of
+// render_units and load_units was unreachable: the systemd unit body, the
+// systemctl call sequence, and the Linux legacy-unit teardown all shipped
+// having never once been executed by the suite that "covers" them. That is the
+// same blindness that let the `stat -f` dialect bug reach every Linux host, and
+// it is how load_units went to production without a `systemctl restart` of the
+// gateway — a gap no assertion could catch because no assertion ran.
+//
+// The sibling edge suite has stubbed uname since its first render test
+// (inner/edge/install_test/render_test.go); this is that pattern, ported.
+func stubInitSystemFor(t *testing.T, goos string) string {
+	t.Helper()
+	stub := stubInitSystem(t)
+	stubUname(t, stub, goos)
+	// The Darwin branch strips the quarantine xattr; stub it so a forced-Darwin
+	// run is not silently different on a host that has no xattr at all.
+	if err := os.WriteFile(filepath.Join(stub, "xattr"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub xattr: %v", err)
+	}
+	return stub
+}
+
+// stubUname pins `uname -s` in dir to the kernel name matching goos, delegating
+// every other uname invocation to the real binary.
+func stubUname(t *testing.T, dir, goos string) {
+	t.Helper()
+	var kernel string
+	switch goos {
+	case "darwin":
+		kernel = "Darwin"
+	case "linux":
+		kernel = "Linux"
+	default:
+		t.Fatalf("stubUname: unsupported goos %q", goos)
+	}
+	body := "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo " + kernel + "; else /usr/bin/uname \"$@\"; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "uname"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write stub uname: %v", err)
+	}
 }
 
 // writeSudoStub drops a pass-through `sudo` into dir: it records the call,
@@ -212,9 +275,18 @@ func seedDummyBins(t *testing.T, dir string) {
 // is asserted absent for a harder reason: a unit that runs as root and names a
 // path inside somebody's home is a permanent uid-0 grant to that somebody, so
 // its presence is not a cosmetic regression but the vulnerability itself.
+//
+// Both platform branches run here, on every host: the systemd half used to be
+// dead code on this suite's macOS release machine (see stubInitSystemFor).
 func TestInstallShWritesBothUnits(t *testing.T) {
+	for _, goos := range forcedOSes {
+		t.Run(goos, func(t *testing.T) { testInstallShWritesBothUnits(t, goos) })
+	}
+}
+
+func testInstallShWritesBothUnits(t *testing.T, goos string) {
 	home := t.TempDir()
-	stub := stubInitSystem(t)
+	stub := stubInitSystemFor(t, goos)
 	seedMigrateCapableCLI(t, home)
 
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
@@ -224,7 +296,7 @@ func TestInstallShWritesBothUnits(t *testing.T) {
 	username := currentUsername(t)
 	logDir := filepath.Join(sysDataDir(home), "logs")
 
-	if runtime.GOOS == "darwin" {
+	if goos == "darwin" {
 		core := readFile(t, filepath.Join(launchdDir(home), "com.burrowee.gateway.plist"))
 		upd := readFile(t, filepath.Join(launchdDir(home), "com.burrowee.gateway.updater.plist"))
 
@@ -402,17 +474,25 @@ func TestInstallShFreshInstall(t *testing.T) {
 // verbs without --auto) leaves the units installed/enabled but skips the
 // "kick a possibly-already-running instance" calls: on Darwin, no
 // bootout+re-bootstrap of an already-loaded label; on Linux, plain `enable`
-// (no `--now`) and no explicit updater restart.
+// (no `--now`), no explicit updater restart — and, since the daemon-advancing
+// step was added, no `restart burrowee-gateway.service` either. Both branches
+// run on every host.
 func TestInstallShNoRestartStagesWithoutKicking(t *testing.T) {
+	for _, goos := range forcedOSes {
+		t.Run(goos, func(t *testing.T) { testInstallShNoRestartStagesWithoutKicking(t, goos) })
+	}
+}
+
+func testInstallShNoRestartStagesWithoutKicking(t *testing.T, goos string) {
 	home := t.TempDir()
-	stub := stubInitSystem(t)
+	stub := stubInitSystemFor(t, goos)
 	seedMigrateCapableCLI(t, home)
 
 	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1", "BURROWEE_NO_RESTART=1")
 	assertContains(t, out, "BURROWEE_NO_RESTART set — units staged (not restarted)")
 
 	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
-	if runtime.GOOS == "darwin" {
+	if goos == "darwin" {
 		// "bootout system/..." is load_units' own kick of an already-loaded
 		// label; "bootout gui/..." is remove_legacy_user_units tearing down
 		// legacy per-user units (unrelated to this guard) and must still fire.
@@ -424,7 +504,9 @@ func TestInstallShNoRestartStagesWithoutKicking(t *testing.T) {
 			"launchctl bootstrap system "+launchdDir(home)+"/com.burrowee.gateway.updater.plist",
 		)
 	} else {
-		if strings.Contains(calls, "enable --now") || strings.Contains(calls, "restart burrowee-gateway-updater.service") {
+		if strings.Contains(calls, "enable --now") ||
+			strings.Contains(calls, "restart burrowee-gateway.service") ||
+			strings.Contains(calls, "restart burrowee-gateway-updater.service") {
 			t.Errorf("BURROWEE_NO_RESTART=1: enable --now/restart called, want units staged without starting:\n%s", calls)
 		}
 		assertContains(t, calls,
