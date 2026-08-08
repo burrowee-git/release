@@ -152,7 +152,17 @@ say "binary installed at ${INSTALLED_BIN}"
 # Assert the operator key was stored at 0600
 STORED_KEY="${HAPPY_HOME}/.burrowee/relay/release_dl.key"
 [ -f "${STORED_KEY}" ] || die "stored key not found at ${STORED_KEY}"
-KEY_PERMS="$(stat -f '%OLp' "${STORED_KEY}" 2>/dev/null || stat -c '%a' "${STORED_KEY}")"
+# GNU form FIRST, and each branch gated on its own exit status rather than
+# chained with `||`. On GNU coreutils `-f` is --file-system, so `stat -f FMT P`
+# reads FMT as a second path: it prints P's filesystem geometry on STDOUT and
+# exits 1, and a `-f … || -c …` chain hands back that dump concatenated with the
+# real mode. Trying `-c` first means the `-f` branch is only ever reached on a
+# stat that has no `-c` (BSD/macOS, which rejects it with a usage error and no
+# stdout), so the dump is unreachable by construction.
+if KEY_PERMS="$(stat -c '%a' "${STORED_KEY}" 2>/dev/null)"; then :
+elif KEY_PERMS="$(stat -f '%OLp' "${STORED_KEY}" 2>/dev/null)"; then :
+else die "could not read the mode of ${STORED_KEY} — neither stat dialect answered"
+fi
 [ "${KEY_PERMS}" = "600" ] || die "stored key has mode ${KEY_PERMS}, expected 600"
 say "operator key stored at ${STORED_KEY} (mode 600)"
 
