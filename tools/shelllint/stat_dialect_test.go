@@ -31,7 +31,16 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// shellFiles is every *.sh in the tree, .git excluded.
+// shellFiles is every *.sh in the SOURCE tree — .git, and the build output under
+// dist/, excluded.
+//
+// dist/ is not source: it holds the staged payloads of past cuts, each carrying
+// the install.sh that shipped in it. Those copies are immutable history, and one
+// of them legitimately contains the very defect this lint exists to prevent
+// (the bug shipped, was found on a node, and was fixed here). Walking them makes
+// the lint fail on any machine that has ever cut a release — including, always,
+// immediately after a cut, since a cut writes dist/ before this test next runs.
+// A lint that fires on its own build output is a lint that gets disabled.
 func shellFiles(t *testing.T, root string) []string {
 	t.Helper()
 	var found []string
@@ -40,7 +49,7 @@ func shellFiles(t *testing.T, root string) []string {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			if d.Name() == ".git" || d.Name() == "dist" {
 				return filepath.SkipDir
 			}
 			return nil
