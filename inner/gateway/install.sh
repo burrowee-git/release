@@ -128,11 +128,14 @@ ROOT_BINS="burrowee-gateway burrowee-gateway-console burrowee-gateway-updater bu
 # rewritten either way, and it must still refuse to name a path that fails the
 # walk, whether this run placed that path or an earlier one did.
 ROOT_BIN_PLACE_EXCLUDE=""
-# The pre-collapse privileged tree. Fixed, not a $BURROWEE_*_DIR test seam: no
-# test may create or depend on this path, since the whole point of the fixture
-# below is that it is found ABSENT and removal is skipped. See
-# remove_stale_libexec_tree.
-OLD_ROOT_EXEC_DIR="/usr/local/libexec/burrowee/gateway"
+# The pre-collapse privileged tree. A $BURROWEE_*_DIR test seam like the other
+# root paths above, for the same reason and one more: remove_stale_libexec_tree
+# runs `rm -rf` through root elevation, and a test suite proving the
+# rewrite-then-remove ORDER has to be able to point this at a throwaway
+# directory it controls — this is real system state on a real host otherwise,
+# and this codebase's tests must never touch that (see the sibling roots'
+# BURROWEE_SYSTEM_CONFIG_DIR / BURROWEE_LAUNCHD_DIR seams for the same rule).
+OLD_ROOT_EXEC_DIR="${BURROWEE_OLD_ROOT_EXEC_DIR:-/usr/local/libexec/burrowee/gateway}"
 
 # ---------------------------------------------------------------------------
 # has_tty — whether a controlling terminal is available for prompts (stdin is
