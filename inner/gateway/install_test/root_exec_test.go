@@ -39,7 +39,10 @@ var rootExecedBins = []string{
 
 // TestInstallShPlacesTheRootExecedBinariesInBinDir checks the placement half:
 // every binary a root process execs unattended lands in $BIN_DIR, together
-// with the installer the root updater re-runs.
+// with the installer the root updater re-runs — GENUINELY placed, not merely
+// present beforehand: the fixture seeds at devBinDir(home) (the historical
+// per-user default), not binDir(home), so $BIN_DIR starts EMPTY and this
+// only passes if ensure_root_exec_surface actually copied everything there.
 //
 // UNPROVABLE HERE, AND DELIBERATELY NOT PRETENDED OTHERWISE: before the
 // collapse this test also asserted burrowee/burrowee-register were ABSENT
@@ -56,7 +59,7 @@ var rootExecedBins = []string{
 func TestInstallShPlacesTheRootExecedBinariesInBinDir(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	seedMigrateCapableCLI(t, home)
+	seedMigrateCapableCLIAtDevBinDir(t, home)
 
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 
@@ -70,18 +73,21 @@ func TestInstallShPlacesTheRootExecedBinariesInBinDir(t *testing.T) {
 // TestInstallShKeepsThePerUserBinDirComplete is the unprivileged-flow guard.
 // Every binary lands in $BIN_DIR, because it is what PATH resolves, what a
 // developer runs, and the only thing a host that cannot reach root ends up
-// with — root-owned by default now, but PREFIX still gets a per-user one in
-// full.
+// with — root-owned by DEFAULT now, but an explicit PREFIX still gets a
+// per-user one in full. PREFIX is passed explicitly, unlike the DEFAULT-flow
+// tests elsewhere in this file: this is the one test whose whole subject is
+// that flow, so it cannot rely on installShEnv's BURROWEE_BIN_DIR redirect
+// (which simulates the OTHER, root-owned path).
 func TestInstallShKeepsThePerUserBinDirComplete(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	staging := t.TempDir()
 	seedDummyBins(t, staging)
 
-	runInstallShFrom(t, staging, home, stub)
+	runInstallShFrom(t, staging, home, stub, "PREFIX="+home+"/.local")
 
 	for _, name := range allBins {
-		if _, err := os.Stat(filepath.Join(home, ".local", "bin", name)); err != nil {
+		if _, err := os.Stat(filepath.Join(devBinDir(home), name)); err != nil {
 			t.Errorf("%s missing from the per-user bin dir: %v", name, err)
 		}
 	}
@@ -246,7 +252,7 @@ func TestInstallShRefusesABinDirItCannotProveIsRootOwned(t *testing.T) {
 func TestInstallShPlacesThePrivilegedCLIBeforeRunningTheMigration(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	seedMigrateCapableCLI(t, home)
+	seedMigrateCapableCLIAtDevBinDir(t, home)
 	bundle := t.TempDir()
 	script := stageInstaller(t, bundle)
 	logPath := filepath.Join(t.TempDir(), "migration.log")

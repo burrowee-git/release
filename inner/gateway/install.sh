@@ -34,8 +34,9 @@
 # wait for a reboot or a pushed update). Now that $BIN_DIR's DEFAULT is itself
 # root-owned, a root-owned $BIN_DIR/burrowee-gateway passes the identical
 # root-secure ancestor walk the separate tree existed to guarantee — the split
-# had no job left, and /usr/local/libexec/burrowee/gateway is retired (see
-# remove_stale_libexec_tree for hosts converging off it).
+# had no job left, and /usr/local/libexec/burrowee/gateway is retired: a
+# pre-existing one is simply never written to again and is left for an
+# operator to remove by hand — this script does not touch it.
 #
 # THE SURVIVING INVARIANT (ensure_root_exec_surface / verify_root_exec_surface,
 # unchanged in kind): only a path that is root-owned and unwritable by non-root
@@ -70,7 +71,40 @@ set -eu
 # DEFAULT root-owned: this is what changed. An explicit PREFIX (the developer
 # flow, e.g. $HOME/.local) still overrides in full and never elevates — see
 # decide_bin_place_elevated below, which decides per run rather than assuming.
-BIN_DIR="${PREFIX:-/usr/local}/bin"
+#
+# BIN_DIR_IS_DEFAULT — whether $PREFIX was left unset (the DEFAULT, root-owned
+# $BIN_DIR) or given explicitly (the per-user developer flow). This is NOT the
+# same question decide_bin_place_elevated answers below: that one asks "can
+# this process write here", discovered by a real create — the right question
+# for PLACING binaries, where a developer's own writable $HOME/.local/bin must
+# never be treated as needing root just because $BIN_DIR happens to be
+# writable. This one asks "is $BIN_DIR the SYSTEM location at all" — the right
+# question for whether it is ever appropriate to CHOWN it, treat it as the
+# root-execed surface a unit may name, or migrate legacy state into it.
+# Getting this backwards is exactly the defect it exists to prevent: a
+# developer with sudo AND an explicit PREFIX=$HOME/.local would otherwise have
+# that directory — the one holding their own other tools — chowned to root,
+# because a real create there succeeds (it is writable) and nothing else asked
+# whether it was SUPPOSED to be treated as the privileged surface at all.
+# ensure_root_exec_surface, render_units, load_units, migrate_from_legacy and
+# record_installed_version all gate on this before touching $BIN_DIR as
+# anything other than a plain per-user PATH directory.
+#
+# PREFIX ALWAYS WINS when set — it is the one real knob a caller has, and an
+# explicit PREFIX is unconditionally the per-user flow, full stop.
+# BURROWEE_BIN_DIR is a SEPARATE, test-only seam that only ever applies when
+# PREFIX is unset: it redirects the DEFAULT itself (which a test suite must
+# never let resolve to the real /usr/local) without changing what "default"
+# MEANS — BIN_DIR_IS_DEFAULT is 1 either way. A test wanting the per-user
+# flow instead sets PREFIX, which overrides BURROWEE_BIN_DIR entirely, exactly
+# as it would a real caller's.
+if [ -n "${PREFIX:-}" ]; then
+    BIN_DIR="$PREFIX/bin"
+    BIN_DIR_IS_DEFAULT=0
+else
+    BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
+    BIN_DIR_IS_DEFAULT=1
+fi
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
@@ -96,9 +130,10 @@ SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 # THE PRIVILEGED EXECUTION SURFACE, collapsed into $BIN_DIR (formerly a separate
 # root-owned tree at /usr/local/libexec/burrowee/gateway, sibling of the system
 # config/data roots — retired now that $BIN_DIR's own default is root-owned; see
-# the header comment for why the split had no job left). OLD_ROOT_EXEC_DIR below
-# is kept ONLY so an existing 0.2.0 host's stale tree can be found and removed,
-# never written to again.
+# the header comment for why the split had no job left). A host that already
+# carries that tree keeps it, inert: nothing here ever writes to it again, and
+# nothing here removes it either — that is an operator's call, by hand, not
+# this script's.
 #
 # The binaries a ROOT process execs unattended, and therefore the ones that must
 # come from a path no unprivileged user can rewrite (verify_root_exec_surface):
@@ -128,14 +163,6 @@ ROOT_BINS="burrowee-gateway burrowee-gateway-console burrowee-gateway-updater bu
 # rewritten either way, and it must still refuse to name a path that fails the
 # walk, whether this run placed that path or an earlier one did.
 ROOT_BIN_PLACE_EXCLUDE=""
-# The pre-collapse privileged tree. A $BURROWEE_*_DIR test seam like the other
-# root paths above, for the same reason and one more: remove_stale_libexec_tree
-# runs `rm -rf` through root elevation, and a test suite proving the
-# rewrite-then-remove ORDER has to be able to point this at a throwaway
-# directory it controls — this is real system state on a real host otherwise,
-# and this codebase's tests must never touch that (see the sibling roots'
-# BURROWEE_SYSTEM_CONFIG_DIR / BURROWEE_LAUNCHD_DIR seams for the same rule).
-OLD_ROOT_EXEC_DIR="${BURROWEE_OLD_ROOT_EXEC_DIR:-/usr/local/libexec/burrowee/gateway}"
 
 # ---------------------------------------------------------------------------
 # has_tty — whether a controlling terminal is available for prompts (stdin is
@@ -277,19 +304,29 @@ mode_allows_nonroot_write() {
 # user-writable directory can be unlinked and replaced by that user, after which
 # root execs their file — so checking the leaf alone proves nothing.
 #
-# THREE return codes, not two:
+# FOUR return codes, not two:
 #   0  secure
-#   1  not secure — a real answer about a real path
+#   1  not secure — a real answer about a real path that EXISTS
 #   2  undecidable — stat did not answer, so nothing is known either way
+#   3  the leaf does not exist at all — a different question than 1, and one
+#      that must not be answered with 1's message. It is reachable, since
+#      ROOT_BIN_PLACE_EXCLUDE (BURROWEE_UPDATE mode) deliberately leaves
+#      burrowee-gateway-updater unplaced this run, verify_root_exec_surface
+#      checks it anyway (a unit is about to name it either way), and a host
+#      converging off the pre-collapse layout has never had one at $BIN_DIR —
+#      "not root-owned" would blame ownership on a path that was never
+#      created, sending an operator to check permissions on nothing.
 #
 # 1 and 2 are separated because they send an operator to completely different
 # places, and collapsing them is what the dialect bug above actually cost: a
 # host whose tree was already root:root 755 was told to go and check its
 # permissions. A predicate guarding a root exec must still REFUSE on 2 — but it
-# must refuse saying it could not look.
+# must refuse saying it could not look. 3 is separated from 1 for the same
+# reason: "insecure" and "absent" are different facts, and only one of them is
+# fixed by permissions.
 path_is_root_secure() {
     _rs_p="$1"
-    [ -f "$_rs_p" ] || return 1
+    [ -f "$_rs_p" ] || return 3
     _rs_v="$(stat_uid "$_rs_p")" || return 2
     [ "$_rs_v" = 0 ] || return 1
     _rs_v="$(stat_mode "$_rs_p")" || return 2
@@ -433,6 +470,18 @@ verify_root_exec_surface() {
             echo "hint: the permissions of $BIN_DIR are NOT implicated — reading them is." >&2
             echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
             echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+        elif [ "$_vre_rc" = 3 ]; then
+            # Absent, not insecure — a different fact, most often the update
+            # track excluding this exact name (ROOT_BIN_PLACE_EXCLUDE) on a
+            # host that has never had anything placed at $BIN_DIR/$_vre at
+            # all, e.g. converging off the pre-collapse layout. "Check its
+            # ownership" would send an operator to inspect a path that was
+            # never created.
+            echo "error: $BIN_DIR/$_vre does not exist — refusing to install a service that" >&2
+            echo "error: would run as root out of a path with nothing there." >&2
+            echo "hint: this host has never had a binary placed at that path. Run" >&2
+            echo "hint: 'burrowee gateway service install' to place it and converge the host;" >&2
+            echo "hint: an update alone does not create it." >&2
         else
             echo "error: $BIN_DIR/$_vre is not root-owned and unwritable all the way to /." >&2
             echo "error: refusing to install a service that runs as root out of a path a" >&2
@@ -442,37 +491,6 @@ verify_root_exec_surface() {
         fi
         return 1
     done
-}
-
-# ---------------------------------------------------------------------------
-# remove_stale_libexec_tree — best-effort cleanup of the pre-collapse privileged
-# tree ($OLD_ROOT_EXEC_DIR = /usr/local/libexec/burrowee/gateway), now superseded
-# by $BIN_DIR.
-#
-# ORDER IS THE WHOLE POINT, and it is why every caller of this function is
-# required to have ALREADY called render_units (which rewrites the unit to name
-# $BIN_DIR) and load_units (which actually reloads/bootstraps it into the live
-# supervisor) first. A host converging off the old layout still has its
-# supervisor holding the OLD in-memory ExecStart — the one naming
-# $OLD_ROOT_EXEC_DIR — until load_units's bootout+bootstrap (Darwin) or
-# daemon-reload+restart (Linux) replaces it. Removing the tree before that
-# reload happens would not be cleanup: the next KeepAlive/Restart respawn finds
-# no binary at the path the supervisor still remembers, and a host that was
-# running is now down. This is why BURROWEE_UPDATE mode, which refreshes the
-# unit FILE but deliberately never reloads it (see load_units's header), must
-# NEVER call this — its unit body may say $BIN_DIR while the running supervisor
-# has not been told yet.
-#
-# Best-effort throughout: a leftover tree is stale and harmless, never a reason
-# to fail an install that otherwise succeeded.
-# ---------------------------------------------------------------------------
-remove_stale_libexec_tree() {
-    [ -d "$OLD_ROOT_EXEC_DIR" ] || return 0
-    if run_root rm -rf "$OLD_ROOT_EXEC_DIR"; then
-        echo "removed the superseded $OLD_ROOT_EXEC_DIR (binaries now live in $BIN_DIR)"
-    else
-        echo "note: could not remove the superseded $OLD_ROOT_EXEC_DIR (needs root) — harmless, remove it by hand" >&2
-    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -506,6 +524,12 @@ unit_owner() {
 # DIFFERENT user, require consent before replacing it: the force env, or a
 # /dev/tty prompt defaulting to abort. Non-interactive without the env aborts.
 check_service_override() {
+    # An explicit PREFIX writes no units (render_units's own gate), so there is
+    # nothing here to take over and no reason to ask — this check is entirely
+    # about whether it is safe to write SYSTEM units, and a per-user developer
+    # install must never abort (or interactively prompt) over some OTHER
+    # user's unrelated system service.
+    [ "$BIN_DIR_IS_DEFAULT" = 1 ] || return 0
     _owner="$(unit_owner "$(core_unit_path)")"
     if [ -z "$_owner" ] || [ "$_owner" = "$SERVICE_USER" ]; then return 0; fi
     if [ -n "${BURROWEE_FORCE_SERVICE_OVERRIDE:-}" ]; then
@@ -632,12 +656,20 @@ migration_runner() {
 # the cli too, see BINS), the installed one for units-only, which places none.
 # ---------------------------------------------------------------------------
 #
-# migrate_cli_path — the cli the runner will actually probe. Both live in the
-# same $BIN_DIR now, so there is exactly one candidate — but it must still be
-# THIS function, not a literal at each call site, because it and the runner's
-# own resolution have to agree, or this pre-flight passes on one binary while
-# the runner refuses on another.
+# migrate_cli_path — the cli the runner will actually probe.
+#
+# THIS MUST SHARE root_bin_source's fallback chain, not just name $BIN_DIR —
+# a host still converging off the historical per-user default (root_bin_source's
+# third fallback) has no cli at $BIN_DIR yet on its FIRST `service install`,
+# and ensure_root_exec_surface is about to find and copy one from there
+# moments after this pre-flight runs. A version that checked only $BIN_DIR
+# refused every such host with "the cli does not provide 'migrate'" — true
+# of the empty path it checked, false of the real one root_bin_source would
+# have found — which is exactly the class of host this pre-flight exists to
+# let through, not block.
 migrate_cli_path() {
+    _mcp="$(root_bin_source burrowee-gateway-cli)"
+    if [ -n "$_mcp" ]; then echo "$_mcp"; return 0; fi
     echo "$BIN_DIR/burrowee-gateway-cli"
 }
 
@@ -695,17 +727,23 @@ migration_sudo() {
 # per-user tree the rungs migrate FROM. The $BIN_DIR copy is the updater's: on a
 # root-scheme host core's local-update path reads <component home>/.installed-
 # version to decide whether an install is already current, and that home is now
-# $BIN_DIR. One writer for both keeps them from disagreeing. Guarded on
-# $SYS_CONFIG_DIR, not on $BIN_DIR's existence — $BIN_DIR always exists by this
-# point on ANY install, root-scheme or not, so only the system-config marker
-# distinguishes "this host has a privileged copy to keep in step" from "this is
-# a per-user PREFIX install with nothing at $BIN_DIR for a root updater to read".
+# $BIN_DIR. One writer for both keeps them from disagreeing.
+#
+# Guarded on $BIN_DIR_IS_DEFAULT FIRST, and $SYS_CONFIG_DIR second — both must
+# hold. $BIN_DIR always exists on any install, root-scheme or not, so
+# $SYS_CONFIG_DIR alone is not enough: a developer running with an explicit
+# PREFIX on a host that ALSO happens to carry a real system config root (this
+# machine, say) would otherwise have this `run_root tee` into their own
+# $BIN_DIR — root-owning a file inside a directory this script has otherwise
+# gone out of its way not to touch. $BIN_DIR_IS_DEFAULT is what actually
+# answers "is $BIN_DIR the privileged copy's home", not the host's unrelated
+# root-scheme status.
 record_installed_version() {
     _ver="${1##*/}"
     if [ -z "$_ver" ]; then return 0; fi
     mkdir -p "$GW_HOME"
     printf '%s\n' "$_ver" > "$GW_HOME/.installed-version"
-    if [ -d "$SYS_CONFIG_DIR" ]; then
+    if [ "$BIN_DIR_IS_DEFAULT" = 1 ] && [ -d "$SYS_CONFIG_DIR" ]; then
         printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
     fi
 }
@@ -746,12 +784,21 @@ record_installed_version() {
 #
 # Not found is not an error: BURROWEE_UNITS_ONLY can run from $GW_HOME's
 # self-copy, and an install predating the migrations/ dir has none beside it.
+#
+# Also a no-op — deliberately, not "unconditionally" after all — when
+# $BIN_DIR_IS_DEFAULT is false: the ladder migrates PRE-0.2.0 state into the
+# SYSTEM roots, which is a root-scheme concern end to end. An explicit PREFIX
+# is the per-user developer flow and creates no system roots; running the
+# ladder there would mean the same wrong thing render_units's own gate exists
+# to stop — treating a developer's own PREFIX override as the privileged
+# surface.
 # ---------------------------------------------------------------------------
 MIGRATED=0
 MIGRATE_UNRECORDED=0
 migrate_from_legacy() {
     _runner="$(migration_runner)"
     if [ -z "$_runner" ]; then return 0; fi
+    if [ "$BIN_DIR_IS_DEFAULT" != 1 ]; then return 0; fi
     # The root-owned copies go in BEFORE the runner, not with the units after it.
     # The runner shells to burrowee-gateway-cli AS ROOT (v1_to_v2.sh's `elevate
     # "$CLI" migrate`), and on the console-push path nobody is watching — so a
@@ -765,8 +812,16 @@ migrate_from_legacy() {
         exit 1
     fi
     set +e
+    # PREFIX is derived from $BIN_DIR (its parent), not reconstructed from a
+    # stale fallback: this call is only reached when BIN_DIR_IS_DEFAULT=1, so
+    # $PREFIX itself is unset here, and a hardcoded "${PREFIX:-$HOME/.local}"
+    # would hand the runner the OLD pre-collapse default regardless of what
+    # $BIN_DIR actually resolved to (the real /usr/local, or a test's
+    # BURROWEE_BIN_DIR redirect) — the runner would then compute a DIFFERENT
+    # BIN_DIR than this script just placed everything into. dirname(BIN_DIR)
+    # round-trips through the runner's own "${PREFIX:-...}/bin" exactly.
     GW_HOME="$GW_HOME" \
-        PREFIX="${PREFIX:-$HOME/.local}" \
+        PREFIX="$(dirname "$BIN_DIR")" \
         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR" \
         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR" \
         SUDO="$(migration_sudo)" \
@@ -834,8 +889,19 @@ keep_installer_copy() {
 # undoes a bad one. Every caller already handles a non-zero return — the two
 # install paths abort under `set -e`, update mode prints its "run service
 # install" note — so the refusal costs a host its units, never its identity.
+#
+# GATED ON $BIN_DIR_IS_DEFAULT, first thing: an explicit PREFIX is the
+# per-user developer flow, which "has to keep working" means installs fully
+# and UNELEVATED — it must never be chowned to root or have a unit written
+# naming it. This is a quiet, successful no-op, not a refusal: the developer
+# flow was always meant to end with binaries in $BIN_DIR and no units, and
+# still does.
 # ---------------------------------------------------------------------------
 render_units() {
+    if [ "$BIN_DIR_IS_DEFAULT" != 1 ]; then
+        echo "note: PREFIX is set — \$BIN_DIR ($BIN_DIR) is a per-user install, not the root-owned default; no service units written." >&2
+        return 0
+    fi
     ensure_root_exec_surface || return 1
     case "$(uname -s)" in
     Darwin)
@@ -965,8 +1031,14 @@ EOF
 #                                  exclusion is structural, not a flag — do not
 #                                  add a load_units call to that branch.
 #   BURROWEE_UNINSTALL             tears units down on its own terms.
+#
+# GATED ON $BIN_DIR_IS_DEFAULT, same as render_units: an explicit PREFIX wrote
+# no units, so there is nothing here to load, and every rung below elevates —
+# a per-user developer install must never be asked for sudo just to reload a
+# unit that render_units correctly declined to write.
 # ---------------------------------------------------------------------------
 load_units() {
+    [ "$BIN_DIR_IS_DEFAULT" = 1 ] || return 0
     case "$(uname -s)" in
     Darwin)
         if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
@@ -1189,12 +1261,6 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     migrate_from_legacy
     render_units
     load_units
-    # AFTER load_units, never before — see remove_stale_libexec_tree's own
-    # comment. This is the mode `burrowee gateway service install` runs, and it
-    # is the one that converges a host still carrying the pre-collapse tree: by
-    # this point the unit has been rewritten to name $BIN_DIR AND reloaded into
-    # the live supervisor, so the old tree is genuinely unreferenced.
-    remove_stale_libexec_tree
     report_unrecorded_migration
     # The anchor, from the fourth and last entry point. Its absence here is a
     # large part of why the ledger is effectively unwritten in the field: the
@@ -1437,11 +1503,9 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         echo "note: could not remove from $BIN_DIR (needs root): $_uninstall_failed — remove by hand" >&2
     fi
 
-    # The pre-collapse tree too, or an uninstall leaves a root-owned tree behind
-    # for nothing to ever clean up again. Order does not matter here the way it
-    # does for a converging install: the units are about to be torn down below,
-    # so there is no live supervisor reference left to race.
-    remove_stale_libexec_tree
+    # A pre-existing /usr/local/libexec/burrowee/gateway tree, if this host has
+    # one, is left in place — this script never wrote to it and does not clean
+    # it up; that is an operator's call, by hand.
 
     # Remove the system service units (root) plus any legacy per-user units.
     # All best-effort: a missing unit or unavailable sudo must not stop uninstall.
@@ -1515,10 +1579,6 @@ keep_installer_copy
 
 render_units
 load_units
-# AFTER load_units, never before — see remove_stale_libexec_tree's own comment:
-# the unit must already be rewritten to name $BIN_DIR AND reloaded into the
-# live supervisor before the pre-collapse tree it used to name can safely go.
-remove_stale_libexec_tree
 report_unrecorded_migration
 
 # Record the ladder's version anchor here too. Fresh mode never did, which left

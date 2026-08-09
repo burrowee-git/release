@@ -185,14 +185,16 @@ func runInstallShUnder(t *testing.T, shell, home, stubDir string, extraEnv ...st
 
 // seedNodeShapedHost builds the fixture the affected node presented: an
 // already-enrolled 0.2.x host whose identity has moved to the SYSTEM config
-// root and whose per-user binaries (seedMigrateCapableCLI, at $BIN_DIR) are
-// all present — the ownership walk under test is run against exactly that
-// content, re-verified in place rather than placed fresh (see
-// TestInstallShPlacesTheRootExecedBinariesInBinDir's comment for why there is
-// no longer a separate, initially-empty privileged tree to assert against).
+// root and whose per-user binaries sit at devBinDir(home) (the historical
+// per-user default) — NOT yet at $BIN_DIR, which is the point: this test's
+// ownership walk must be exercised against binaries ensure_root_exec_surface
+// actually PLACES during this run, or a broken placement would look
+// identical to a working one from the outside (see
+// TestInstallShPlacesTheRootExecedBinariesInBinDir's comment for the same
+// reasoning).
 func seedNodeShapedHost(t *testing.T, home string) {
 	t.Helper()
-	seedMigrateCapableCLI(t, home)
+	seedMigrateCapableCLIAtDevBinDir(t, home)
 	identity := filepath.Join(sysConfigDir(home), "identity")
 	if err := os.MkdirAll(identity, 0o755); err != nil {
 		t.Fatal(err)

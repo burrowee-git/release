@@ -85,7 +85,7 @@ func TestFreshInstallDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 func TestUpdateDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
@@ -122,7 +122,7 @@ func TestUpdateDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 func TestUpdateKeepsTheInstallerCopyOnADeferredSlot(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedForeignUnit(t, home)

@@ -115,7 +115,7 @@ func installedVersion(t *testing.T, home string) string {
 func TestUpdateRefusesBeforeAnyWriteWhenTheCLICannotMigrate(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	// The live 0.1.115 host: every binary at 0.1.115, and its cli refuses
@@ -187,7 +187,7 @@ func TestUnitsOnlyRefusesBeforeAnyWriteWhenTheCLICannotMigrate(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 	stageMigration(t, bundle, logPath, 0)
 
-	binDir := filepath.Join(home, ".local", "bin")
+	binDir := binDir(home)
 	seedInstalled(t, binDir, map[string]string{"burrowee-gateway-cli": cliWithoutMigrate})
 
 	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
@@ -226,7 +226,7 @@ func TestFreshInstallRefusesBeforeAnyWriteWhenTheCLICannotMigrate(t *testing.T) 
 		t.Fatalf("fresh install succeeded with a cli that cannot migrate:\n%s", out)
 	}
 	assertNoUnitsWritten(t, home)
-	if _, statErr := os.Stat(filepath.Join(home, ".local", "bin", "burrowee-gateway")); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(binDir(home), "burrowee-gateway")); statErr == nil {
 		t.Errorf("a binary was installed despite the refusal")
 	}
 	if got := migrationLog(t, logPath); got != "" {
@@ -242,7 +242,7 @@ func TestFreshInstallRefusesBeforeAnyWriteWhenTheCLICannotMigrate(t *testing.T) 
 func TestUpdateProceedsWhenTheStagedCLICarriesTheVerb(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedInstalled(t, binDir, withCLI(allBinsContent("v0.1.115"), cliWithoutMigrate))
@@ -281,7 +281,7 @@ func TestUpdateProceedsWhenTheStagedCLICarriesTheVerb(t *testing.T) {
 func TestUpdateDoesNotRecordTheVersionWhenTheMigrationIsDeferred(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedForeignUnit(t, home)
@@ -326,7 +326,7 @@ func TestUpdateDoesNotRecordTheVersionWhenTheMigrationIsDeferred(t *testing.T) {
 func TestUpdateDoesNotRecordTheVersionOnAnUnrecordedMigration(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
@@ -400,7 +400,7 @@ func TestUpdateFallsBackToTheBootstrapVersion(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			stub := stubInitSystem(t)
-			binDir := home + "/.local/bin"
+			binDir := binDir(home)
 
 			seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
 			staged := withCLI(allBinsContent("v1-content"), cliWithMigrate)
@@ -632,7 +632,7 @@ func TestNoUnitsSurviveAFailedMigration(t *testing.T) {
 	t.Run("update", func(t *testing.T) {
 		home := t.TempDir()
 		stub := stubInitSystem(t)
-		binDir := home + "/.local/bin"
+		binDir := binDir(home)
 		logPath := filepath.Join(t.TempDir(), "migration.log")
 
 		seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
