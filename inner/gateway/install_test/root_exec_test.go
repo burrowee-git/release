@@ -1,11 +1,23 @@
-// root_exec_test.go — the PRIVILEGED EXECUTION SURFACE ($LIBEXEC_DIR).
+// root_exec_test.go — the PRIVILEGED EXECUTION SURFACE ($BIN_DIR).
 //
 // 0.2.0 moved the gateway's services to root but left the binaries they name in
 // ${PREFIX:-$HOME/.local}/bin, which made every one of those units a standing
 // uid-0 grant to the installing user: overwrite the file, wait for a reboot, a
-// KeepAlive cycle or a pushed update. These tests are about the tree that
-// replaces it and, just as much, about the refusals that keep a unit from ever
+// KeepAlive cycle or a pushed update. These tests are about the directory that
+// fixes it and, just as much, about the refusals that keep a unit from ever
 // naming anything else.
+//
+// SINCE THE LIBEXEC-TO-$BIN_DIR COLLAPSE (2026-08-08) this is one directory,
+// not two: $BIN_DIR is now root-owned by DEFAULT (PREFIX unset), and an
+// explicit PREFIX still gets a per-user, unelevated one — there is no longer a
+// separate privileged tree these tests stage independently of PREFIX. Every
+// test in this file therefore runs under installShEnv's fixed sandbox PREFIX
+// (home+"/.local") and asserts against binDir(home), exactly like the
+// per-user placement tests elsewhere in this suite — the root-secure ANCESTOR
+// WALK, not a second directory, is what makes that safe in production, and
+// this file proves the walk's placement/refusal behavior, not its ownership
+// verdict (bin_dir_elevation_test.go and core/binary's IsRootSecure suite own
+// that).
 package install_test
 
 import (
@@ -25,16 +37,23 @@ var rootExecedBins = []string{
 	"burrowee-gateway-cli",
 }
 
-// TestInstallShPlacesTheRootExecedBinariesInThePrivilegedTree checks the
-// placement half: every binary a root process execs unattended lands in
-// $LIBEXEC_DIR, together with the installer the root updater re-runs.
+// TestInstallShPlacesTheRootExecedBinariesInBinDir checks the placement half:
+// every binary a root process execs unattended lands in $BIN_DIR, together
+// with the installer the root updater re-runs.
 //
-// The absence half is asserted too, and it is not tidiness. burrowee and
-// burrowee-register are operator tools that nothing running as root execs;
-// copying them in anyway would make the tree's membership rule "everything",
-// and a rule that admits everything stops being a rule the next reviewer can
-// apply to a new binary.
-func TestInstallShPlacesTheRootExecedBinariesInThePrivilegedTree(t *testing.T) {
+// UNPROVABLE HERE, AND DELIBERATELY NOT PRETENDED OTHERWISE: before the
+// collapse this test also asserted burrowee/burrowee-register were ABSENT
+// from the privileged tree — a real property back when that tree was
+// separate from $BIN_DIR. Now every one of the six BINS, root-execed or not,
+// correctly shares $BIN_DIR (see install.sh's ROOT_BINS comment), so an
+// absence-from-directory check would be actively wrong to assert: this exact
+// fixture (BURROWEE_UNITS_ONLY, no bundle) happens not to place burrowee/
+// burrowee-register at all (ensure_root_exec_surface only ever touches
+// ROOT_BINS), but a fresh install legitimately puts them right beside the
+// four checked here. What survives, and is worth proving, is narrower: which
+// paths the root-secure walk GATES before a unit may name them — asserted
+// directly in TestInstallShRefusesAPrivilegedTreeItCannotProveIsRootOwned.
+func TestInstallShPlacesTheRootExecedBinariesInBinDir(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	seedMigrateCapableCLI(t, home)
@@ -42,21 +61,17 @@ func TestInstallShPlacesTheRootExecedBinariesInThePrivilegedTree(t *testing.T) {
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 
 	for _, name := range append(rootExecedBins, "install.sh") {
-		if _, err := os.Stat(filepath.Join(libexecDir(home), name)); err != nil {
-			t.Errorf("%s missing from the privileged tree: %v", name, err)
-		}
-	}
-	for _, name := range []string{"burrowee", "burrowee-register"} {
-		if _, err := os.Stat(filepath.Join(libexecDir(home), name)); err == nil {
-			t.Errorf("%s was placed in the privileged tree, but nothing execs it as root", name)
+		if _, err := os.Stat(filepath.Join(binDir(home), name)); err != nil {
+			t.Errorf("%s missing from $BIN_DIR: %v", name, err)
 		}
 	}
 }
 
 // TestInstallShKeepsThePerUserBinDirComplete is the unprivileged-flow guard.
-// The privileged tree is an ADDITION: $BIN_DIR keeps every binary, because it
-// is what PATH resolves, what a developer runs, and the only thing a host that
-// cannot reach root ends up with.
+// Every binary lands in $BIN_DIR, because it is what PATH resolves, what a
+// developer runs, and the only thing a host that cannot reach root ends up
+// with — root-owned by default now, but PREFIX still gets a per-user one in
+// full.
 func TestInstallShKeepsThePerUserBinDirComplete(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -87,8 +102,8 @@ func TestInstallShRefusesToWriteAUnitItCannotBackWithARootOwnedBinary(t *testing
 
 	out := runInstallShExpectFail(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 
-	if !strings.Contains(out, "burrowee-gateway") || !strings.Contains(out, libexecDir(home)) {
-		t.Errorf("the refusal does not name the binary and the tree it was missing from:\n%s", out)
+	if !strings.Contains(out, "burrowee-gateway") || !strings.Contains(out, binDir(home)) {
+		t.Errorf("the refusal does not name the binary and the directory it was missing from:\n%s", out)
 	}
 	if _, err := os.Stat(coreUnitPath(home)); err == nil {
 		t.Errorf("a system unit was written anyway at %s — the refusal came too late to matter", coreUnitPath(home))
@@ -97,29 +112,35 @@ func TestInstallShRefusesToWriteAUnitItCannotBackWithARootOwnedBinary(t *testing
 
 // TestInstallShConvergesAHostWhoseUnitNamesThePerUserBinDir is the migration.
 //
-// Hosts already on 0.2.0 carry a unit pointing at ~<installer>/.local/bin, and
-// refusing to write NEW bad units does nothing for them — nothing rewrites a
-// unit until an install runs. This is that install: `burrowee gateway service
-// install` re-runs the kept installer in units-only mode, which copies the
-// per-user binaries into the root-owned tree and rewrites the unit to name it.
-// Every update path reaches the same code, so convergence needs no ladder rung
-// of its own and repeats idempotently instead of happening once.
+// Hosts already on 0.2.0 carry a unit pointing at ~<installer>/.local/bin
+// (this suite's fixed PREFIX also resolves there, so the fixture and today's
+// DEFAULT both land at the same path — the point under test is that a STALE
+// unit gets rewritten, not which literal path it is rewritten to). Refusing
+// to write NEW bad units does nothing for such a host, because nothing
+// rewrites a unit until an install runs. This is that install: `burrowee
+// gateway service install` re-runs the kept installer in units-only mode,
+// which re-verifies the binaries at $BIN_DIR and rewrites the unit to name
+// it. Every update path reaches the same code, so convergence needs no
+// ladder rung of its own and repeats idempotently instead of happening once.
 func TestInstallShConvergesAHostWhoseUnitNamesThePerUserBinDir(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	seedMigrateCapableCLI(t, home)
 
-	perUserBin := filepath.Join(home, ".local", "bin", "burrowee-gateway")
+	// A unit shaped like it names some OTHER, unrelated per-user path — not
+	// today's $BIN_DIR — so a rewrite is genuinely observable rather than a
+	// no-op that happens to already agree.
+	stalePath := filepath.Join(home, "some-other-user", ".local", "bin", "burrowee-gateway")
 	unit := coreUnitPath(home)
 	if err := os.MkdirAll(filepath.Dir(unit), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// A 0.2.0-shaped unit: root scheme (no UserName / User=, so the slot is
 	// free and no consent prompt fires) naming a per-user ExecStart.
-	stale := "[Unit]\nDescription=burrowee-gateway\n\n[Service]\nExecStart=" + perUserBin + " --no-open\nRestart=always\n"
+	stale := "[Unit]\nDescription=burrowee-gateway\n\n[Service]\nExecStart=" + stalePath + " --no-open\nRestart=always\n"
 	if runtime.GOOS == "darwin" {
 		stale = "<plist version=\"1.0\"><dict>\n  <key>Label</key><string>com.burrowee.gateway</string>\n" +
-			"  <key>ProgramArguments</key><array><string>" + perUserBin + "</string><string>--no-open</string></array>\n</dict></plist>\n"
+			"  <key>ProgramArguments</key><array><string>" + stalePath + "</string><string>--no-open</string></array>\n</dict></plist>\n"
 	}
 	if err := os.WriteFile(unit, []byte(stale), 0o644); err != nil {
 		t.Fatal(err)
@@ -128,30 +149,35 @@ func TestInstallShConvergesAHostWhoseUnitNamesThePerUserBinDir(t *testing.T) {
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 
 	got := readFile(t, unit)
-	if strings.Contains(got, perUserBin) {
-		t.Errorf("the unit still names the per-user binary after a repair run:\n%s", got)
+	if strings.Contains(got, stalePath) {
+		t.Errorf("the unit still names the stale per-user binary after a repair run:\n%s", got)
 	}
-	assertContains(t, got, filepath.Join(libexecDir(home), "burrowee-gateway"))
+	assertContains(t, got, filepath.Join(binDir(home), "burrowee-gateway"))
 }
 
-// TestInstallShUninstallRemovesThePrivilegedTree: leaving a root-owned tree of
-// binaries and a root-owned installer behind means the next install inherits
-// them without ever re-verifying them.
-func TestInstallShUninstallRemovesThePrivilegedTree(t *testing.T) {
+// TestInstallShUninstallRemovesTheBinaries: leaving root-owned binaries and a
+// root-owned installer behind means the next install inherits them without
+// ever re-verifying them.
+func TestInstallShUninstallRemovesTheBinaries(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	staging := t.TempDir()
 	seedDummyBins(t, staging)
 
 	runInstallShFrom(t, staging, home, stub)
-	if _, err := os.Stat(filepath.Join(libexecDir(home), "burrowee-gateway")); err != nil {
-		t.Fatalf("test is not discriminating — the privileged tree was never populated: %v", err)
+	if _, err := os.Stat(filepath.Join(binDir(home), "burrowee-gateway")); err != nil {
+		t.Fatalf("test is not discriminating — $BIN_DIR was never populated: %v", err)
 	}
 
 	runInstallSh(t, home, stub, "BURROWEE_UNINSTALL=1")
 
-	if _, err := os.Stat(libexecDir(home)); err == nil {
-		t.Errorf("%s survived the uninstall", libexecDir(home))
+	for _, b := range allBins {
+		if _, err := os.Stat(filepath.Join(binDir(home), b)); err == nil {
+			t.Errorf("%s survived the uninstall", filepath.Join(binDir(home), b))
+		}
+	}
+	if _, err := os.Stat(filepath.Join(binDir(home), "install.sh")); err == nil {
+		t.Errorf("the kept installer copy survived the uninstall at %s", binDir(home))
 	}
 }
 
@@ -174,7 +200,7 @@ func runInstallShFrom(t *testing.T, bundleDir, home, stubDir string, extraEnv ..
 // the ownership walk is normally skipped here and could be deleted unnoticed.
 // This makes the script believe it IS root while every file it places is still
 // owned by the test user, which is exactly the state the walk has to catch: a
-// privileged tree that a non-root user can rewrite.
+// $BIN_DIR a non-root user can rewrite.
 func fakeRootUID(t *testing.T, stubDir string) {
 	t.Helper()
 	stub := "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo 0; exit 0; fi\nexec /usr/bin/id \"$@\"\n"
@@ -183,15 +209,14 @@ func fakeRootUID(t *testing.T, stubDir string) {
 	}
 }
 
-// TestInstallShRefusesAPrivilegedTreeItCannotProveIsRootOwned drives the shell
-// ownership walk against REAL filesystem state: the tree is placed, and it is
+// TestInstallShRefusesABinDirItCannotProveIsRootOwned drives the shell
+// ownership walk against REAL filesystem state: $BIN_DIR is placed, and it is
 // owned by this unprivileged user.
 //
 // /usr/local is root-owned on a modern macOS and on every Linux, but it is not
 // guaranteed to be — a host where a package manager chowned it would otherwise
-// get a root-scheme unit pointing into a tree its owner can rewrite, which is
-// the identical vulnerability one directory over.
-func TestInstallShRefusesAPrivilegedTreeItCannotProveIsRootOwned(t *testing.T) {
+// get a root-scheme unit pointing into a directory its owner can rewrite.
+func TestInstallShRefusesABinDirItCannotProveIsRootOwned(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: the files this test places would really be root-owned, so the refusal is unreachable")
 	}
@@ -206,18 +231,18 @@ func TestInstallShRefusesAPrivilegedTreeItCannotProveIsRootOwned(t *testing.T) {
 		t.Errorf("the refusal does not say what failed:\n%s", out)
 	}
 	if _, err := os.Stat(coreUnitPath(home)); err == nil {
-		t.Errorf("a system unit was written naming a tree the installer could not prove root-owned: %s", coreUnitPath(home))
+		t.Errorf("a system unit was written naming a directory the installer could not prove root-owned: %s", coreUnitPath(home))
 	}
 }
 
 // TestInstallShPlacesThePrivilegedCLIBeforeRunningTheMigration is about
 // ORDERING, which no placement assertion can catch.
 //
-// migrations/v1_to_v2.sh runs `elevate "$CLI" migrate`, resolving $CLI from the
-// privileged tree first and the per-user one otherwise. If the tree were only
-// populated with the units — after the migration — then every upgrading host
-// would exec a per-user cli as root exactly once, on the console-push path,
-// with no operator present. Populating it first is what closes that.
+// migrations/v1_to_v2.sh runs `elevate "$CLI" migrate`, resolving $CLI from
+// $BIN_DIR. If $BIN_DIR were only populated with the units — after the
+// migration — then every upgrading host would exec a per-user cli as root
+// exactly once, on the console-push path, with no operator present.
+// Populating it first is what closes that.
 func TestInstallShPlacesThePrivilegedCLIBeforeRunningTheMigration(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -225,11 +250,11 @@ func TestInstallShPlacesThePrivilegedCLIBeforeRunningTheMigration(t *testing.T) 
 	bundle := t.TempDir()
 	script := stageInstaller(t, bundle)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
-	// The observation has to be made FROM INSIDE the migration. Stat-ing the
-	// tree after the run proves nothing: render_units populates it too, so a
-	// version that placed nothing until the units were written would look
+	// The observation has to be made FROM INSIDE the migration. Stat-ing
+	// $BIN_DIR after the run proves nothing: render_units populates it too, so
+	// a version that placed nothing until the units were written would look
 	// identical from the outside.
-	stageMigrationRecordingPrivilegedCLI(t, bundle, logPath, libexecDir(home))
+	stageMigrationRecordingPrivilegedCLI(t, bundle, logPath, binDir(home))
 
 	out, err := runStaged(t, script, home, home, stub, "BURROWEE_UNITS_ONLY=1")
 	if err != nil {
@@ -240,21 +265,21 @@ func TestInstallShPlacesThePrivilegedCLIBeforeRunningTheMigration(t *testing.T) 
 		t.Fatalf("the migration never ran, so this test proves nothing:\n%s", out)
 	}
 	if !strings.Contains(got, "PRIVILEGED_CLI=present") {
-		t.Errorf("the migration ran before the privileged cli existed — it would have shelled to the per-user copy as root; it saw: %q", strings.TrimSpace(got))
+		t.Errorf("the migration ran before the cli existed at $BIN_DIR — it would have shelled to a per-user copy as root; it saw: %q", strings.TrimSpace(got))
 	}
 }
 
 // stageMigrationRecordingPrivilegedCLI plants a fake migrations/run.sh beside a
 // staged installer that records, at the moment it runs, whether the root-owned
 // cli is already in place.
-func stageMigrationRecordingPrivilegedCLI(t *testing.T, dir, logPath, libexec string) {
+func stageMigrationRecordingPrivilegedCLI(t *testing.T, dir, logPath, bin string) {
 	t.Helper()
 	mig := filepath.Join(dir, "migrations")
 	if err := os.MkdirAll(mig, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	script := "#!/bin/sh\n" +
-		"_p=absent; [ -x " + shQuote(filepath.Join(libexec, "burrowee-gateway-cli")) + " ] && _p=present\n" +
+		"_p=absent; [ -x " + shQuote(filepath.Join(bin, "burrowee-gateway-cli")) + " ] && _p=present\n" +
 		"echo \"PRIVILEGED_CLI=$_p\" >> " + shQuote(logPath) + "\n" +
 		"echo migration-ran\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(mig, "run.sh"), []byte(script), 0o755); err != nil {

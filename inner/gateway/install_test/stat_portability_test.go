@@ -185,9 +185,11 @@ func runInstallShUnder(t *testing.T, shell, home, stubDir string, extraEnv ...st
 
 // seedNodeShapedHost builds the fixture the affected node presented: an
 // already-enrolled 0.2.x host whose identity has moved to the SYSTEM config
-// root, whose per-user binaries are all present, and whose PRIVILEGED TREE does
-// not exist yet. That last part is the normal state, not a broken one — placing
-// the tree is what this run is for.
+// root and whose per-user binaries (seedMigrateCapableCLI, at $BIN_DIR) are
+// all present — the ownership walk under test is run against exactly that
+// content, re-verified in place rather than placed fresh (see
+// TestInstallShPlacesTheRootExecedBinariesInBinDir's comment for why there is
+// no longer a separate, initially-empty privileged tree to assert against).
 func seedNodeShapedHost(t *testing.T, home string) {
 	t.Helper()
 	seedMigrateCapableCLI(t, home)
@@ -197,9 +199,6 @@ func seedNodeShapedHost(t *testing.T, home string) {
 	}
 	if err := os.WriteFile(filepath.Join(identity, "relay_ed.key"), []byte("fixture-key\n"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(libexecDir(home)); err == nil {
-		t.Fatalf("fixture is wrong: %s already exists, so this run would not have to place it", libexecDir(home))
 	}
 }
 
@@ -248,14 +247,13 @@ func TestInstallShConvergesANodeShapedHostUnderEitherStatDialect(t *testing.T) {
 
 				// 1. binaries in the correct folder
 				for _, name := range append(rootExecedBins, "install.sh") {
-					if _, err := os.Stat(filepath.Join(libexecDir(home), name)); err != nil {
-						t.Errorf("%s was not placed in the privileged tree: %v", name, err)
+					if _, err := os.Stat(filepath.Join(binDir(home), name)); err != nil {
+						t.Errorf("%s was not placed in $BIN_DIR: %v", name, err)
 					}
 				}
-				// 2. the unit names that folder and not the per-user one
+				// 2. the unit names $BIN_DIR
 				unit := readFile(t, coreUnitPath(home))
-				assertContains(t, unit, filepath.Join(libexecDir(home), "burrowee-gateway"))
-				assertNotContains(t, unit, filepath.Join(home, ".local", "bin"))
+				assertContains(t, unit, filepath.Join(binDir(home), "burrowee-gateway"))
 				// 3. the service was handed to the init system
 				assertContains(t, readFile(t, filepath.Join(home, "stub-calls.log")), serviceStartCall())
 			})

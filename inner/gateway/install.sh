@@ -112,6 +112,22 @@ SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 # this list is which paths the root-secure walk gates BEFORE a unit may name
 # them, not which directory they live in.
 ROOT_BINS="burrowee-gateway burrowee-gateway-console burrowee-gateway-updater burrowee-gateway-cli"
+# ROOT_BIN_PLACE_EXCLUDE names one entry of $ROOT_BINS that ensure_root_exec_surface
+# must verify but never (re)PLACE from the bundle — set by BURROWEE_UPDATE mode to
+# "burrowee-gateway-updater" before it calls migrate_from_legacy/render_units.
+#
+# THE COLLAPSE MADE THIS NECESSARY. Before it, ensure_root_exec_surface placed
+# ROOT_BINS into the separate $LIBEXEC_DIR — never into $BIN_DIR, the one
+# directory update mode's own BINS loop already excludes the updater from — so
+# the two could never collide. Now that ensure_root_exec_surface places into
+# $BIN_DIR too, calling it unconditionally from update mode's migrate_from_legacy
+# would silently overwrite the running updater's own binary with whatever this
+# bundle staged — exactly the hazard the BINS loop's own exclusion exists to
+# prevent, reintroduced one function over. Verification still covers it
+# (verify_root_exec_surface never reads this var): a unit is about to be
+# rewritten either way, and it must still refuse to name a path that fails the
+# walk, whether this run placed that path or an earlier one did.
+ROOT_BIN_PLACE_EXCLUDE=""
 # The pre-collapse privileged tree. Fixed, not a $BURROWEE_*_DIR test seam: no
 # test may create or depend on this path, since the whole point of the fixture
 # below is that it is found ABSENT and removal is skipped. See
@@ -340,6 +356,9 @@ ensure_root_exec_surface() {
     run_root chmod 0755 "$BIN_DIR" 2>/dev/null || true
 
     for _reb in $ROOT_BINS; do
+        if [ -n "$ROOT_BIN_PLACE_EXCLUDE" ] && [ "$_reb" = "$ROOT_BIN_PLACE_EXCLUDE" ]; then
+            continue
+        fi
         _reb_src="$(root_bin_source "$_reb")"
         if [ -z "$_reb_src" ]; then
             echo "error: no copy of $_reb to place in $BIN_DIR — refusing to write a unit naming it." >&2
@@ -1326,6 +1345,15 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         # re-registered node under the wrong identity. Update mode has no consent
         # prompt to settle it (unlike the install paths, which run
         # check_service_override first), so it defers instead.
+        #
+        # ROOT_BIN_PLACE_EXCLUDE, before either call below: migrate_from_legacy
+        # and render_units both reach ensure_root_exec_surface, which places
+        # every name in $ROOT_BINS — and burrowee-gateway-updater is one of
+        # them, but this mode's own binary placement above deliberately never
+        # touches it (BINS' own exclusion). Without this it would still get
+        # silently overwritten from the bundle here, one function past the
+        # exclusion meant to stop exactly that.
+        ROOT_BIN_PLACE_EXCLUDE="burrowee-gateway-updater"
         migrate_from_legacy
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
 
