@@ -860,6 +860,7 @@ func stageMigration(t *testing.T, dir, logPath string, exitCode int) {
 		"_kept=no; [ -f \"$GW_HOME/install.sh\" ] && [ -f \"$GW_HOME/migrations/run.sh\" ] && _kept=yes\n" +
 		"{ echo \"GW_HOME=$GW_HOME\"\n" +
 		"  echo \"KEPT_INSTALLER=$_kept\"\n" +
+		"  echo \"PREFIX=${PREFIX:-}\"\n" +
 		"  echo \"BURROWEE_SYSTEM_CONFIG_DIR=$BURROWEE_SYSTEM_CONFIG_DIR\"\n" +
 		"  echo \"BURROWEE_SYSTEM_DATA_DIR=$BURROWEE_SYSTEM_DATA_DIR\"\n" +
 		"  echo \"SUDO=${SUDO:-}\"\n" +
@@ -987,6 +988,17 @@ func TestInstallShRunsTheMigrationBeforeLoadingUnits(t *testing.T) {
 // roots the units name. Letting it fall back to its own euid-based defaults
 // would migrate into a different tree than the daemon reads, and under the test
 // seams it would escape the sandbox entirely.
+//
+// PREFIX is asserted too, and it is not the same claim as the others: it must
+// be dirname($BIN_DIR), NOT reconstructed from a hardcoded fallback
+// (migrate_from_legacy used to pass PREFIX="${PREFIX:-$HOME/.local}"
+// regardless of what $BIN_DIR actually resolved to — the real /usr/local, or
+// this test's BURROWEE_BIN_DIR redirect — so the migration runner would
+// compute a DIFFERENT $BIN_DIR than this run just placed everything into).
+// dirname($BIN_DIR) round-trips through the runner's own
+// "${PREFIX:-...}/bin" exactly, which is what makes this assertion able to
+// fail: a stale hardcoded fallback would still log SOME PREFIX value, just
+// the wrong one.
 func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -1002,6 +1014,7 @@ func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
 
 	assertContains(t, migrationLog(t, logPath),
 		"GW_HOME="+filepath.Join(home, ".burrowee", "gateway"),
+		"PREFIX="+filepath.Dir(binDir(home)),
 		"BURROWEE_SYSTEM_CONFIG_DIR="+sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR="+sysDataDir(home),
 	)
