@@ -19,7 +19,7 @@ import (
 func TestUpdateReplacesOnlyChangedBinaries(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 
 	// Pre-install v1 of all 5 bins.
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
@@ -71,7 +71,7 @@ func TestUpdateReplacesOnlyChangedBinaries(t *testing.T) {
 func TestUpdateAllIdenticalIsNoop(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 
 	same := allBinsContent("identical-content")
 	seedInstalled(t, binDir, same)
@@ -109,7 +109,7 @@ func TestUpdateAllIdenticalIsNoop(t *testing.T) {
 func TestUpdateModeExcludesOnlyTheUpdaterBinary(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 
 	// Pre-install: the cli and the updater are OLD, all others at v1.
 	installed := allBinsContent("v1-content")
@@ -152,6 +152,63 @@ func TestUpdateModeExcludesOnlyTheUpdaterBinary(t *testing.T) {
 	}
 }
 
+// TestUpdateModeRefusesAMissingUpdaterWithAnAccurateMessage is
+// ROOT_BIN_PLACE_EXCLUDE's own consequence: BURROWEE_UPDATE mode never
+// places burrowee-gateway-updater (it is on its own track), but
+// render_units still verifies it before naming it in the updater unit — and
+// on a host converging off the pre-collapse layout, which has NEVER had
+// anything placed at $BIN_DIR/burrowee-gateway-updater, that verification
+// finds an ABSENT path, not an insecure one. The refusal must say so:
+// neither the stat-dialect diagnostic (which is about a stat CALL failing,
+// not a file being missing) nor the generic "not root-owned" one (which
+// sends an operator to check permissions on a path that was never created)
+// is the right answer here.
+func TestUpdateModeRefusesAMissingUpdaterWithAnAccurateMessage(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	binDir := binDir(home)
+	fakeRootUID(t, stub)          // have_real_root => true, so verify_root_exec_surface actually runs
+	writeStatStub(t, stub, statStubGNU) // every REAL file answers root-owned/0755; the missing updater never reaches stat at all ([ -f ] catches it first)
+
+	// Every OTHER bin already at $BIN_DIR — the updater is the ONE name
+	// genuinely absent, exactly root_bin_source/ROOT_BIN_PLACE_EXCLUDE's
+	// documented converging-host case.
+	installed := allBinsContent("v1-content")
+	installed["burrowee-gateway-cli"] = cliWithMigrate
+	delete(installed, "burrowee-gateway-updater")
+	seedInstalled(t, binDir, installed)
+
+	staged := allBinsContent("v1-content")
+	staged["burrowee-gateway-cli"] = cliWithMigrate
+	staged["burrowee-gateway"] = "v2-content"
+	delete(staged, "burrowee-gateway-updater")
+	stageDir := stageBundle(t, staged)
+
+	out := runUpdate(t, stageDir, home, stub,
+		[]string{"BURROWEE_UPDATE=1"},
+		"--version", "v2",
+	)
+
+	if strings.Contains(out, "answered neither the GNU form") {
+		t.Errorf("blamed the stat dialect for a file that was never there:\n%s", out)
+	}
+	if strings.Contains(out, "not root-owned and unwritable all the way to /") {
+		t.Errorf("blamed ownership/permissions for a file that was never there:\n%s", out)
+	}
+	if !strings.Contains(out, filepath.Join(binDir, "burrowee-gateway-updater")+" does not exist") {
+		t.Errorf("did not name the missing path accurately:\n%s", out)
+	}
+	if !strings.Contains(out, "service install") {
+		t.Errorf("did not point at the command that converges the host:\n%s", out)
+	}
+	// The binary swap itself must still have succeeded — this is a units
+	// refresh refusal, not a placement one (update mode's own note branch
+	// already covers "service units not refreshed" for exactly this shape).
+	if got := readInstalled(t, binDir, "burrowee-gateway"); got != "v2-content" {
+		t.Errorf("burrowee-gateway not updated despite the units refusal: got %q", got)
+	}
+}
+
 // TestUpdateModeDoesNotRestartServices verifies that update mode refreshes
 // unit FILES but issues no launchctl/systemctl service operations at all —
 // no bootout/bootstrap/enable/restart, and no legacy-unit migration (the
@@ -170,7 +227,7 @@ func TestUpdateModeDoesNotRestartServices(t *testing.T) {
 	}
 	writeSudoStub(t, stubDir)
 
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
 
 	// Stage one changed binary so the script does real work.
@@ -215,7 +272,7 @@ func TestUpdateModeDoesNotRestartServices(t *testing.T) {
 func TestUpdateRollsBackOnFailure(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 
 	// Pre-install v1 of all 5 bins.
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
@@ -268,7 +325,7 @@ func TestUpdateRollsBackOnFailure(t *testing.T) {
 func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
 	staged := allBinsContent("v1-content")
@@ -318,7 +375,7 @@ func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
 func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 
 	// Installed and staged content are IDENTICAL for every binary — without
 	// FORCE this is the no-op case (TestUpdateAllIdenticalIsNoop).
@@ -404,7 +461,7 @@ func stagedUpdateBundle(t *testing.T, contents map[string]string, logPath string
 func TestUpdateKeepsTheInstallerCopyAfterMigrating(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
@@ -443,7 +500,7 @@ func TestUpdateKeepsTheInstallerCopyAfterMigrating(t *testing.T) {
 func TestUpdateRecordsTheVersionOnlyAfterMigrating(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
@@ -470,7 +527,7 @@ func TestUpdateRecordsTheVersionOnlyAfterMigrating(t *testing.T) {
 func TestUpdateReportsAStoppedGatewayAfterMigrating(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
@@ -500,7 +557,7 @@ func TestUpdateReportsAStoppedGatewayAfterMigrating(t *testing.T) {
 func TestUpdateSkipsTheMigrationForForeignSlot(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedForeignUnit(t, home)

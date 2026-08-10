@@ -85,7 +85,7 @@ func TestFreshInstallDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 func TestUpdateDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedInstalled(t, binDir, withCLI(allBinsContent("v1-content"), cliWithMigrate))
@@ -122,7 +122,7 @@ func TestUpdateDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 func TestUpdateKeepsTheInstallerCopyOnADeferredSlot(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	logPath := filepath.Join(t.TempDir(), "migration.log")
 
 	seedForeignUnit(t, home)
@@ -215,4 +215,53 @@ func TestUnitsOnlyDoesNotRecordTheVersionOnAnUnrecordedMigration(t *testing.T) {
 		t.Errorf("version recorded for an unrecorded migration: %q", v)
 	}
 	assertContains(t, out, "receipt could not be written")
+}
+
+// TestRecordInstalledVersionNeverWritesUnderAnExplicitPREFIX is C1's M2
+// sub-case: record_installed_version must gate its root-owned $BIN_DIR copy
+// on $BIN_DIR_IS_DEFAULT, not on $SYS_CONFIG_DIR presence alone.
+//
+// The fixture is the exact scenario record_installed_version's own comment
+// names: a developer running with an explicit PREFIX on a machine that ALSO
+// happens to carry a real system config root — unrelated to this install,
+// but present. Guarding on $SYS_CONFIG_DIR alone (the pre-fix form) would
+// `run_root tee` a root-owned marker into the developer's own per-user
+// $BIN_DIR for no reason connected to that real system install at all. The
+// ordinary $GW_HOME anchor must still be written — this guard is about the
+// $BIN_DIR copy specifically, not the whole function.
+func TestRecordInstalledVersionNeverWritesUnderAnExplicitPREFIX(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	// A REAL system config root present — nothing else in this run needs it:
+	// with PREFIX set, check_service_override/render_units/load_units/
+	// migrate_from_legacy are all gated off regardless of this directory.
+	// record_installed_version is the one function whose pre-fix guard
+	// ([ -d "$SYS_CONFIG_DIR" ] alone) would still fire here.
+	if err := os.MkdirAll(sysConfigDir(home), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// $BIN_DIR (the per-user PREFIX/bin) must EXIST and be WRITABLE, or a
+	// `tee` into it fails on ENOENT regardless of which guard is in force —
+	// which would make this test pass unconditionally, catching nothing.
+	// BURROWEE_UNITS_ONLY places no binaries, so nothing upstream creates
+	// this directory; it has to be staged here for the write this test is
+	// about to allow-or-forbid to be a real possibility either way.
+	if err := os.MkdirAll(devBinDir(home), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runInstallSh(t, home, stub,
+		"PREFIX="+home+"/.local",
+		"BURROWEE_UNITS_ONLY=1",
+		"BURROWEE_VERSION=gateway/v0.2.0.2026.08.07.4f1c3ec8",
+	)
+
+	if _, statErr := os.Stat(filepath.Join(devBinDir(home), ".installed-version")); statErr == nil {
+		t.Errorf("record_installed_version wrote a root-owned marker into the per-user "+
+			"$BIN_DIR (%s) despite an explicit PREFIX, because a real $SYS_CONFIG_DIR "+
+			"happens to exist on this host", devBinDir(home))
+	}
+	if got, want := installedVersion(t, home), "v0.2.0.2026.08.07.4f1c3ec8"; got != want {
+		t.Errorf("the ordinary $GW_HOME anchor was not written: got %q, want %q", got, want)
+	}
 }

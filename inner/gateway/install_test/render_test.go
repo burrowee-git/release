@@ -45,9 +45,15 @@ func sysConfigDir(home string) string {
 }
 func sysDataDir(home string) string { return filepath.Join(home, "system-var", "burrowee", "gateway") }
 
-// libexecDir is the sandboxed stand-in for the PRIVILEGED EXECUTION SURFACE
-// (/usr/local/libexec/burrowee/gateway) — the root-owned tree the system units
-// name and the root updater execs out of.
+// binDir is $BIN_DIR as this suite's DEFAULT sandbox (installShEnv's
+// "BURROWEE_BIN_DIR="+binDir(home)) resolves it — the ONE location,
+// root-execed or not, since the libexec-to-$BIN_DIR collapse. It stands in
+// for the real, root-owned production default (/usr/local/bin), redirected so
+// this suite never touches that real directory — NOT the per-user PREFIX
+// override path, which is a different, genuinely different directory now
+// that install.sh gates root-exec-surface work on whether PREFIX was set at
+// all (see devBinDir, used by the small number of tests that specifically
+// exercise that flow).
 //
 // The suite can prove PLACEMENT and unit CONTENT here; it cannot prove
 // OWNERSHIP, because the harness's `sudo` is a pass-through stub and every file
@@ -55,9 +61,26 @@ func sysDataDir(home string) string { return filepath.Join(home, "system-var", "
 // have_real_root) and skips its own ownership assertion on exactly that
 // evidence. The ownership predicate itself is tested where it can drive real
 // filesystem state: core/binary's IsRootSecure suite and the gateway's
-// system_tool tests.
-func libexecDir(home string) string {
-	return filepath.Join(home, "system-libexec", "burrowee", "gateway")
+// system_tool tests — and, for the DEFAULT (root-owned) $BIN_DIR path
+// specifically, bin_dir_elevation_test.go's chmod-0500 fixtures here.
+func binDir(home string) string {
+	// Ends in "bin", like every real shape $BIN_DIR takes (/usr/local/bin,
+	// $PREFIX/bin): install.sh's migrate_from_legacy hands the migration
+	// runner PREFIX="$(dirname "$BIN_DIR")", which only round-trips back to
+	// this exact path through the runner's own "${PREFIX:-...}/bin" when the
+	// last path component really is "bin".
+	return filepath.Join(home, "system", "bin")
+}
+
+// devBinDir is $BIN_DIR under an EXPLICIT PREFIX override — the per-user
+// developer flow, which since C1's fix is a genuinely different code path
+// from binDir's DEFAULT simulation above: PREFIX set at all means no chown,
+// no units, no migration, regardless of root/sudo availability. Tests that
+// need this flow specifically set "PREFIX="+home+"/.local" themselves (which
+// overrides installShEnv's BURROWEE_BIN_DIR — PREFIX always wins in the
+// script) and assert against this path.
+func devBinDir(home string) string {
+	return filepath.Join(home, ".local", "bin")
 }
 
 // currentUsername is the user install.sh's `id -un` resolves while under test.
@@ -163,18 +186,30 @@ func writeSudoStub(t *testing.T, dir string) {
 }
 
 // installShEnv is the base environment for running install.sh in a sandbox:
-// HOME/PREFIX/PATH plus the system-unit dir seams and the stub call log.
+// HOME/PATH plus the system-unit dir seams, the DEFAULT $BIN_DIR redirect,
+// and the stub call log.
+//
+// BURROWEE_BIN_DIR, not PREFIX: this suite's default posture is the DEFAULT,
+// root-owned install path (units, migration, root-secure verification —
+// what most of this suite exercises), redirected away from the real
+// /usr/local/bin. Setting PREFIX here instead would make every test that
+// does not override it look like an explicit per-user PREFIX flow, which
+// since C1's fix gets no units and no migration at all — that was exactly
+// the defect this fixture shape used to hide (see bin_dir_default_test.go's
+// and prefix_override_test.go's headers). Tests exercising the developer
+// PREFIX flow specifically pass "PREFIX="+home+"/.local" as extraEnv, which
+// overrides BURROWEE_BIN_DIR entirely — install.sh's own PREFIX-always-wins
+// rule, not a Go-side precedence trick.
 func installShEnv(home, stubDir string, extraEnv ...string) []string {
 	env := []string{
 		"HOME=" + home,
-		"PREFIX=" + home + "/.local",
+		"BURROWEE_BIN_DIR=" + binDir(home),
 		"PATH=" + stubDir + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
 		"BURROWEE_LAUNCHD_DIR=" + launchdDir(home),
 		"BURROWEE_SYSTEMD_DIR=" + systemdDir(home),
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
-		"BURROWEE_LIBEXEC_DIR=" + libexecDir(home),
 	}
 	return append(env, extraEnv...)
 }
@@ -264,17 +299,26 @@ func seedDummyBins(t *testing.T, dir string) {
 // TestInstallShWritesBothUnits verifies that BURROWEE_UNITS_ONLY=1 renders
 // both SYSTEM service unit files in the ROOT-SCHEME shape the gateway's own
 // renderer emits: no run-as user, no HOME, the two path roots passed
-// explicitly, logs under the system data root — and, since the privileged-tree
-// change, an ExecStart naming $LIBEXEC_DIR rather than the per-user bin dir.
+// explicitly, logs under the system data root, and an ExecStart naming
+// $BIN_DIR.
 //
-// The absence assertions carry as much weight as the presence ones. A unit
-// that still records a UserName runs the daemon as that user (which cannot
-// read the root-owned identity), and it also reads as legacy-owned to both
-// unit-writers' ownership guards — so leaving one behind would flap the
-// service between this installer and the Go side on every refresh. The bin dir
-// is asserted absent for a harder reason: a unit that runs as root and names a
-// path inside somebody's home is a permanent uid-0 grant to that somebody, so
-// its presence is not a cosmetic regression but the vulnerability itself.
+// SINCE THE LIBEXEC-TO-$BIN_DIR COLLAPSE this suite's fixed PREFIX
+// (installShEnv: home+"/.local") means $BIN_DIR and what used to be the
+// SEPARATE per-user bin dir are the identical path — this file no longer has
+// two directories to assert one against the other from inside one run. That
+// is not a coverage gap this test can paper over: production's real
+// separation (a root-owned DEFAULT vs an explicit per-user PREFIX override)
+// is proven elsewhere — the static default-pin test (both scripts agree on
+// "/usr/local") and bin_dir_elevation_test.go's chmod-0500 fixtures, which
+// drive install.sh's actual elevation decision against a $BIN_DIR this
+// process genuinely cannot write, the nearest an unprivileged test can get to
+// "root-owned" without touching a real system directory.
+//
+// The remaining UserName/HOME/logs absence assertions still carry real
+// weight: a unit that records a UserName runs the daemon as that user (which
+// cannot read the root-owned identity) and reads as legacy-owned to both
+// unit-writers' ownership guards, flapping the service between installers on
+// every refresh.
 //
 // Both platform branches run here, on every host: the systemd half used to be
 // dead code on this suite's macOS release machine (see stubInitSystemFor).
@@ -291,8 +335,7 @@ func testInstallShWritesBothUnits(t *testing.T, goos string) {
 
 	runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
 
-	binDir := libexecDir(home)
-	perUserBinDir := home + "/.local/bin"
+	bin := binDir(home)
 	username := currentUsername(t)
 	logDir := filepath.Join(sysDataDir(home), "logs")
 
@@ -302,13 +345,13 @@ func testInstallShWritesBothUnits(t *testing.T, goos string) {
 
 		assertContains(t, core,
 			"<string>com.burrowee.gateway</string>",
-			"<string>"+binDir+"/burrowee-gateway</string>",
+			"<string>"+bin+"/burrowee-gateway</string>",
 			"<string>--no-open</string>",
 			"<string>--config-dir</string><string>"+sysConfigDir(home)+"</string>",
 			"<string>--data-dir</string><string>"+sysDataDir(home)+"</string>",
 			"<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>",
 			"<key>WorkingDirectory</key><string>/tmp</string>",
-			"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+binDir+"/burrowee-gateway</key><true/></dict></dict>",
+			"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+bin+"/burrowee-gateway</key><true/></dict></dict>",
 			"<string>"+filepath.Join(logDir, "gateway.log")+"</string>",
 			"<string>"+filepath.Join(logDir, "gateway.err.log")+"</string>",
 		)
@@ -318,13 +361,12 @@ func testInstallShWritesBothUnits(t *testing.T, goos string) {
 			"<key>InitGroups</key>",
 			"<key>HOME</key>",
 			home+"/.burrowee/gateway/logs",
-			perUserBinDir,
 		)
 		assertContains(t, upd,
 			"<string>com.burrowee.gateway.updater</string>",
-			"<string>"+binDir+"/burrowee-gateway-updater</string>",
+			"<string>"+bin+"/burrowee-gateway-updater</string>",
 			"<string>run</string>",
-			"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+binDir+"/burrowee-gateway-updater</key><true/></dict></dict>",
+			"<key>KeepAlive</key><dict><key>PathState</key><dict><key>"+bin+"/burrowee-gateway-updater</key><true/></dict></dict>",
 			"<string>"+filepath.Join(logDir, "updater.log")+"</string>",
 			"<string>"+filepath.Join(logDir, "updater.err.log")+"</string>",
 		)
@@ -335,7 +377,6 @@ func testInstallShWritesBothUnits(t *testing.T, goos string) {
 			// them would be a second place to keep in step for no gain.
 			"--config-dir",
 			home+"/.burrowee/gateway/logs",
-			perUserBinDir,
 		)
 		// The run-as user must not appear anywhere in either unit.
 		assertNotContains(t, core, ">"+username+"<")
@@ -346,7 +387,7 @@ func testInstallShWritesBothUnits(t *testing.T, goos string) {
 
 		assertContains(t, core,
 			"Description=burrowee-gateway",
-			"ExecStart="+binDir+"/burrowee-gateway --no-open --config-dir "+sysConfigDir(home)+" --data-dir "+sysDataDir(home),
+			"ExecStart="+bin+"/burrowee-gateway --no-open --config-dir "+sysConfigDir(home)+" --data-dir "+sysDataDir(home),
 			"Restart=always",
 			"RestartSec=2",
 			"TimeoutStopSec=330",
@@ -356,11 +397,10 @@ func testInstallShWritesBothUnits(t *testing.T, goos string) {
 			"User=",
 			"Group=",
 			"Environment=HOME=",
-			perUserBinDir,
 		)
 		assertContains(t, upd,
 			"Description=burrowee-gateway-updater",
-			"ExecStart="+binDir+"/burrowee-gateway-updater run",
+			"ExecStart="+bin+"/burrowee-gateway-updater run",
 			"Restart=always",
 			"WantedBy=multi-user.target",
 		)
@@ -368,7 +408,6 @@ func testInstallShWritesBothUnits(t *testing.T, goos string) {
 			"User=",
 			"Environment=HOME=",
 			"--config-dir",
-			perUserBinDir,
 		)
 	}
 }
@@ -432,7 +471,7 @@ func TestInstallShFreshInstall(t *testing.T) {
 		t.Fatalf("install.sh failed: %v", err)
 	}
 
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	for _, b := range []string{
 		"burrowee",
 		"burrowee-gateway",
@@ -604,7 +643,7 @@ func TestInstallShUninstall(t *testing.T) {
 		t.Fatalf("uninstall failed: %v", err)
 	}
 
-	binDir := home + "/.local/bin"
+	binDir := binDir(home)
 	for _, b := range []string{
 		"burrowee",
 		"burrowee-gateway",
@@ -821,6 +860,7 @@ func stageMigration(t *testing.T, dir, logPath string, exitCode int) {
 		"_kept=no; [ -f \"$GW_HOME/install.sh\" ] && [ -f \"$GW_HOME/migrations/run.sh\" ] && _kept=yes\n" +
 		"{ echo \"GW_HOME=$GW_HOME\"\n" +
 		"  echo \"KEPT_INSTALLER=$_kept\"\n" +
+		"  echo \"PREFIX=${PREFIX:-}\"\n" +
 		"  echo \"BURROWEE_SYSTEM_CONFIG_DIR=$BURROWEE_SYSTEM_CONFIG_DIR\"\n" +
 		"  echo \"BURROWEE_SYSTEM_DATA_DIR=$BURROWEE_SYSTEM_DATA_DIR\"\n" +
 		"  echo \"SUDO=${SUDO:-}\"\n" +
@@ -854,21 +894,43 @@ func runStagedArgs(t *testing.T, script, workDir, home, stubDir string, scriptAr
 }
 
 // seedMigrateCapableCLI stages an ALREADY-INSTALLED host for a units-only run:
-// every per-user binary present, and a burrowee-gateway-cli that answers
-// `migrate --help`.
+// every binary present AT $BIN_DIR ALREADY, and a burrowee-gateway-cli that
+// answers `migrate --help`.
 //
 // Both halves are preconditions of the mode, not conveniences. The cli, because
 // units-only places no binaries, so the one already on disk is what the runner
 // probes and a host that cannot migrate must be refused BEFORE the root-scheme
-// units are written (assert_can_migrate). Every other binary, because units-only
-// is now also the path that populates the privileged tree — it copies the
-// per-user binaries into $LIBEXEC_DIR so the units can name a root-owned path,
-// and with nothing to copy it correctly refuses to write a unit at all.
+// units are written (assert_can_migrate).
+//
+// USE THIS when the test's subject is something OTHER than the copy itself
+// (unit content, ownership refusal, stale-unit rewrite) — it deliberately
+// starts from a $BIN_DIR that is already correct, so ensure_root_exec_surface
+// has nothing to DO, and a test that needs to observe the copy happening
+// would pass even if that copy were deleted. For that, use
+// seedMigrateCapableCLIAtDevBinDir below instead.
 func seedMigrateCapableCLI(t *testing.T, home string) {
 	t.Helper()
-	binDir := filepath.Join(home, ".local", "bin")
-	seedInstalled(t, binDir, allBinsContent("#!/bin/sh\nexit 0\n"))
-	if err := os.WriteFile(filepath.Join(binDir, "burrowee-gateway-cli"), []byte(cliWithMigrate), 0o755); err != nil {
+	dir := binDir(home)
+	seedInstalled(t, dir, allBinsContent("#!/bin/sh\nexit 0\n"))
+	if err := os.WriteFile(filepath.Join(dir, "burrowee-gateway-cli"), []byte(cliWithMigrate), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedMigrateCapableCLIAtDevBinDir is seedMigrateCapableCLI's fixture staged
+// at devBinDir(home) (root_bin_source's third fallback, the historical
+// per-user default) instead of binDir(home) ($BIN_DIR itself).
+//
+// USE THIS when the test's subject IS ensure_root_exec_surface's copy: with
+// nothing sitting at $BIN_DIR beforehand, a units-only run can only pass by
+// genuinely reading root_bin_source's fallback and copying from it — seeding
+// directly at $BIN_DIR would make that placement a no-op before the run even
+// starts, which is exactly the vacuity this exists to avoid.
+func seedMigrateCapableCLIAtDevBinDir(t *testing.T, home string) {
+	t.Helper()
+	dir := devBinDir(home)
+	seedInstalled(t, dir, allBinsContent("#!/bin/sh\nexit 0\n"))
+	if err := os.WriteFile(filepath.Join(dir, "burrowee-gateway-cli"), []byte(cliWithMigrate), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -926,6 +988,17 @@ func TestInstallShRunsTheMigrationBeforeLoadingUnits(t *testing.T) {
 // roots the units name. Letting it fall back to its own euid-based defaults
 // would migrate into a different tree than the daemon reads, and under the test
 // seams it would escape the sandbox entirely.
+//
+// PREFIX is asserted too, and it is not the same claim as the others: it must
+// be dirname($BIN_DIR), NOT reconstructed from a hardcoded fallback
+// (migrate_from_legacy used to pass PREFIX="${PREFIX:-$HOME/.local}"
+// regardless of what $BIN_DIR actually resolved to — the real /usr/local, or
+// this test's BURROWEE_BIN_DIR redirect — so the migration runner would
+// compute a DIFFERENT $BIN_DIR than this run just placed everything into).
+// dirname($BIN_DIR) round-trips through the runner's own
+// "${PREFIX:-...}/bin" exactly, which is what makes this assertion able to
+// fail: a stale hardcoded fallback would still log SOME PREFIX value, just
+// the wrong one.
 func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -941,6 +1014,7 @@ func TestInstallShHandsTheMigrationItsRoots(t *testing.T) {
 
 	assertContains(t, migrationLog(t, logPath),
 		"GW_HOME="+filepath.Join(home, ".burrowee", "gateway"),
+		"PREFIX="+filepath.Dir(binDir(home)),
 		"BURROWEE_SYSTEM_CONFIG_DIR="+sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR="+sysDataDir(home),
 	)
