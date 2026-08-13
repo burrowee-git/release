@@ -55,7 +55,19 @@ esac
 # next step. All tty I/O is fault-tolerant so it can never abort the install.
 if [ -d "$COMP_HOME" ] && [ -n "$(ls -A "$COMP_HOME" 2>/dev/null || true)" ]; then
     echo "$COMP already set up ($COMP_HOME) — skipping setup."
-elif { exec 3<>/dev/tty; } 2>/dev/null; then
+elif ( exec 3<>/dev/tty ) 2>/dev/null; then
+    # PROBED IN A SUBSHELL, then opened for real. dash treats a FAILED `exec`
+    # redirection as fatal and exits the script — status 2, and the `2>/dev/null`
+    # swallows the only message — even inside a guarded `{ …; }` used as an `if`
+    # condition, because a brace group is not a subshell and so does not contain
+    # the exit. /bin/sh IS dash on every Debian-family host, and this block is
+    # the LAST step of an otherwise complete install, so on exactly the hosts
+    # that matter the shape it replaces turned every non-interactive install
+    # (CI, a console push, `curl … | sh` under a supervisor) into a fully
+    # installed cli reporting failure — and skipped the self-copy below, which
+    # LocalReinstall needs. A subshell contains the fatal exit, so the parent
+    # survives to answer the question and then open fd 3 for real.
+    exec 3<>/dev/tty
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
     printf 'blob> ' >&3 2>/dev/null || true
     blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''
