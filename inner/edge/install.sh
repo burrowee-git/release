@@ -5,18 +5,36 @@
 # bootstrap verifies the zip (minisign + sha256) and ONLY THEN execs this with
 # cwd = the unzipped dir, so the binaries sit alongside this script.
 #
-# ROOT-AWARE: when run as root (`curl ... | sudo sh`, the console-minted system
-# install), it installs the binaries to /usr/local/bin and sets up a MANAGED
-# ROOT SERVICE — a systemd system unit on Linux, a launchd LaunchDaemon on macOS
-# — running `burrowee-edge run`, then enables + (re)starts it. The service's
-# config home is root's home + /.burrowee/edge — /root on Linux, /var/root on
-# macOS (NOT /root, which sits on the sealed system volume) — and HOME is set
-# to it in the unit/plist so the daemon resolves the same dir. When run
-# unprivileged it keeps the historical behavior: a user-path binary drop under
-# $HOME/.local/bin with no service, plus a note that a managed system service
-# needs sudo. A ROOT install additionally sweeps the copies an earlier
-# unprivileged install left in that per-user directory, which would otherwise
-# shadow /usr/local/bin on PATH — remove_stale_user_bins.
+# ROOT-ONLY, ONE DESTINATION. The binaries go to $BIN_DIR — /usr/local/bin,
+# root-owned, ALWAYS — and the run sets up a MANAGED ROOT SERVICE: a systemd
+# system unit on Linux, a launchd LaunchDaemon on macOS, running
+# `burrowee-edge run`, enabled and (re)started. The service's config home is
+# root's home + /.burrowee/edge — /root on Linux, /var/root on macOS (NOT /root,
+# which sits on the sealed system volume) — and HOME is set to it in the
+# unit/plist so the daemon resolves the same dir. The documented entry point is
+# therefore `curl ... | sudo sh`, which is what the console mints.
+#
+# THE PER-USER FLOW IS GONE, not de-defaulted. A set PREFIX is REFUSED, loudly,
+# and so is a run that never reached uid 0 — both before anything is placed,
+# never silently redirected. This mirrors the gateway's 0.2.0 collapse
+# (inner/gateway/install.sh, whose header carries the full reasoning) and exists
+# for the same failure: a per-user install is invisible to every root-scheme
+# consumer. The dispatcher resolves gateway/edge/register at the ABSOLUTE
+# /usr/local/bin, and a root daemon's unit pins
+# PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a PATH lookup from one can reach
+# nothing under $HOME. Observed on a production node, 2026-08-13: a consumer's
+# root daemon crash-looped 50 times unable to find a component that had
+# "successfully installed" into /home/ubuntu/.local/bin. A component that
+# installs where its consumers cannot look has not installed, however cleanly it
+# exits.
+#
+# Removing the flow does not remove what it left behind, and the leftovers keep
+# winning: $HOME/.local/bin PRECEDES /usr/local/bin on a normal PATH. So an
+# install also sweeps the stale per-user copies of its own binaries, by exact
+# name, after the units naming $BIN_DIR are loaded — remove_stale_user_bins.
+# What it does NOT sweep is the per-user CONFIG tree an earlier unprivileged
+# install paired: that holds this edge's identity, so it is reported, never
+# touched — note_orphaned_user_state.
 #
 # The system [Service] block mirrors the relay system unit (Restart / RestartSec
 # / TimeoutStopSec / HOME); ExecStart is `<bin> run` (the edge daemon verb).
@@ -32,10 +50,33 @@ set -eu
 BINS="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater"
 COMP=edge
 
-# ── system (root) install paths ──────────────────────────────────────────────
+# A SET PREFIX IS REFUSED, not honoured and not silently overridden, and it is
+# refused HERE — before a directory is created, a binary placed or a unit
+# written. Refusing is the point: an operator who typed PREFIX=$HOME/.local and
+# got a root-owned /usr/local/bin would be handed exactly the class of surprise
+# this collapse exists to remove, one direction reversed. They get told instead,
+# and the process that set it (a shell profile, an outer bootstrap, a wrapper)
+# is the thing that has to change. The version is named because the operator
+# hitting this needs to know since when; it is asserted by the suite
+# (install_test/root_only_test.go), so it cannot drift away from the release it
+# describes without a test failing.
+if [ -n "${PREFIX:-}" ]; then
+    echo "install: PREFIX is set to '$PREFIX', but as of edge 0.2.0 this installer" >&2
+    echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
+    echo "install: flow is gone — edge's service units run as root and name the binaries" >&2
+    echo "install: absolutely, and other components resolve /usr/local/bin/burrowee by" >&2
+    echo "install: absolute path, so a per-user copy is invisible to both." >&2
+    echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
+    exit 1
+fi
+
+# ── system install paths ─────────────────────────────────────────────────────
 # SYS_BIN_DIR + SYSTEMD_UNIT_DIR + LAUNCHD_PLIST_DIR default to the real system
 # locations; they are overridable only so the Go install-test harness can
-# exercise the root branch in a sandbox without actually being root.
+# exercise this script in a sandbox without actually being root — never set them
+# on a real host. SYS_BIN_DIR is this component's equivalent of the gateway's
+# BURROWEE_BIN_DIR seam; it keeps its name because the rendered units, and every
+# caller that already sets it, are written in terms of it.
 SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
@@ -64,11 +105,11 @@ is_root() { [ "$(id -u)" = 0 ]; }
 # ---------------------------------------------------------------------------
 # Stale per-user binaries, left by an UNPRIVILEGED install of this component.
 #
-# The non-root branch below still drops the binaries in $HOME/.local/bin, and
-# before the managed root service existed that was the only shape an edge
-# install took. A host that later installs as root gets everything in
-# /usr/local/bin and keeps the old copies — and $HOME/.local/bin PRECEDES
-# /usr/local/bin on a normal PATH, so every unqualified `burrowee` or
+# Until this collapse the unprivileged branch dropped the binaries in
+# $HOME/.local/bin, and before the managed root service existed that was the
+# only shape an edge install took. A host converging onto the root scheme gets
+# everything in /usr/local/bin and keeps the old copies — and $HOME/.local/bin
+# PRECEDES /usr/local/bin on a normal PATH, so every unqualified `burrowee` or
 # `burrowee-edge-cli` an operator types resolves to the OLD binary while the
 # system unit runs the new one. The gateway's sibling installer carries the
 # same sweep, for the same reason, with the same ordering rule.
@@ -80,6 +121,13 @@ is_root() { [ "$(id -u)" = 0 ]; }
 # runs only after the new binaries are in $SYS_BIN_DIR and the units naming
 # them have been rendered and (re)loaded, and it refuses outright when a unit
 # file on this host still names the old directory.
+#
+# THE BINARIES ARE ALL IT TOUCHES. The per-user CONFIG tree beside them
+# (~/.burrowee/edge: this edge's identity, console.json, covers) is this host's
+# pairing, and the root daemon reads a different one — so it is REPORTED and
+# left exactly where it is (note_orphaned_user_state). Deleting it would throw
+# away the only copy of an identity; moving it would silently re-point a paired
+# edge, from an installer, with no operator in the loop.
 # ---------------------------------------------------------------------------
 
 # LEGACY_HOME_PARENTS — where an account's home may live on a host with neither
@@ -204,16 +252,24 @@ remove_one_stale_bin() {
 }
 
 # remove_stale_user_bins — sweep the per-user copies of THIS component's
-# binaries, by exact name out of $BINS and never by glob. Root-only caller:
-# an unprivileged install's $BIN_DIR IS that directory, and the guard below
-# refuses that case a second time rather than relying on the call site.
+# binaries, by exact name out of $BINS and never by glob.
 remove_stale_user_bins() {
     _rsb_home="$(operator_home)"
     [ -n "$_rsb_home" ] || return 0
     _rsb_dir="$_rsb_home/.local/bin"
     [ -d "$_rsb_dir" ] || return 0
-    if [ "$_rsb_dir" = "$BIN_DIR" ]; then return 0; fi
 
+    # The one thing this must never do is delete the install it just made.
+    # There WAS an explicit `[ "$_rsb_dir" = "$BIN_DIR" ] && return 0` here,
+    # written when the unprivileged branch installed INTO $_rsb_dir. It is gone,
+    # because with that branch removed nothing could ever reach it: this run has
+    # already rendered AND loaded units naming $BIN_DIR by the time it is
+    # called, so the refusal below — a unit on this host still names that
+    # directory — fires first in every state, including the redirected
+    # $SYS_BIN_DIR the suite uses to point the destination at a per-user dir on
+    # purpose. Deleting an unreachable guard was the choice over keeping one no
+    # test could ever fail on; the property it protected is now asserted through
+    # the check that actually enforces it.
     _rsb_unit=""
     _rsb_unit="$(unit_naming_dir "$_rsb_dir" "$_rsb_home")" || _rsb_unit=""
     if [ -n "$_rsb_unit" ]; then
@@ -238,27 +294,58 @@ remove_stale_user_bins() {
     fi
 }
 
-# ── install target depends on privilege ──────────────────────────────────────
-# Root → /usr/local/bin + the root service's config home (root's home +
-# /.burrowee/edge). Root's home is /root on Linux but /var/root on macOS — /root
+# note_orphaned_user_state — REPORT, and never touch, the per-user config tree an
+# earlier unprivileged install paired.
+#
+# The managed daemon reads $COMP_HOME under ROOT's home. A pre-collapse install's
+# identity sits under the OPERATOR's ~/.burrowee/edge and does not travel with
+# the binaries, so a host converging onto the root scheme comes up as a healthy,
+# running, UNPAIRED edge. Silence is the worst outcome available here: the
+# install exits 0, the service is up, and nothing gives the operator a reason to
+# look for the identity that already exists a directory away.
+#
+# Says nothing when there is no per-user state. That the ROOT tree is unpaired is
+# the CALLER's condition — this is only reached from the "next: pair this edge"
+# branch — and it is not re-tested here: a second copy of a condition its only
+# call site already decided cannot fail independently, it can only drift.
+note_orphaned_user_state() {
+    _nos_home="$(operator_home)"
+    [ -n "$_nos_home" ] || return 0
+    _nos_dir="$_nos_home/.burrowee/$COMP"
+    if [ "$_nos_dir" = "$COMP_HOME" ]; then return 0; fi
+    if [ ! -d "$_nos_dir/identity" ] && [ ! -f "$_nos_dir/console.json" ]; then return 0; fi
+    echo "note: $_nos_dir holds a paired edge identity from an earlier per-user install," >&2
+    echo "note: but the managed service reads $COMP_HOME — this edge starts UNPAIRED." >&2
+    echo "hint: pair it again (burrowee $COMP cli bootstrap <blob> <pin>), or stop the" >&2
+    echo "hint: service and move that state across by hand. Nothing was removed." >&2
+}
+
+# ── the one install target ───────────────────────────────────────────────────
+# $BIN_DIR and the service's config home, decided here and nowhere else — there
+# is no branch left to take, so every step below that only made sense for a root
+# install (setup_root_service, the unit teardown on uninstall, the stale-bin
+# sweep, the version marker under root's home) now runs on EVERY install.
+#
+# BIN_DIR and SYS_BIN_DIR are one destination under two names: the units and the
+# test harness spell it SYS_BIN_DIR, the placement/uninstall code below spells it
+# BIN_DIR, and since the collapse they can never differ.
+#
+# The config home is root's home + /.burrowee/edge, because the daemon that reads
+# it runs as root. Root's home is /root on Linux but /var/root on macOS — /root
 # sits on the sealed read-only system volume there, so any mkdir under it fails.
 # Resolve it robustly (tilde expansion), falling back to the well-known
 # /var/root; ROOT_HOME is overridable only for the Go install-test harness
-# (like SYS_BIN_DIR).
-# Non-root → $HOME/.local/bin + the invoking user's ~/.burrowee/edge (unchanged).
-if is_root; then
-    BIN_DIR="$SYS_BIN_DIR"
-    if [ "$(uname -s)" = "Darwin" ]; then
-        ROOT_HOME="${ROOT_HOME:-$(eval echo ~root)}"
-        case "$ROOT_HOME" in /*) ;; *) ROOT_HOME=/var/root ;; esac
-    else
-        ROOT_HOME="${ROOT_HOME:-/root}"
-    fi
-    COMP_HOME="$ROOT_HOME/.burrowee/$COMP"
+# (like SYS_BIN_DIR). It is resolved from ~root rather than from $HOME because
+# under `sudo sh` $HOME is not reliably root's — macOS sudo keeps the invoking
+# user's by default.
+BIN_DIR="$SYS_BIN_DIR"
+if [ "$(uname -s)" = "Darwin" ]; then
+    ROOT_HOME="${ROOT_HOME:-$(eval echo ~root)}"
+    case "$ROOT_HOME" in /*) ;; *) ROOT_HOME=/var/root ;; esac
 else
-    BIN_DIR="${PREFIX:-$HOME/.local}/bin"
-    COMP_HOME="$HOME/.burrowee/$COMP"
+    ROOT_HOME="${ROOT_HOME:-/root}"
 fi
+COMP_HOME="$ROOT_HOME/.burrowee/$COMP"
 VERSION_MARKER="$COMP_HOME/installed-version"
 
 # ver_lt A B — true (exit 0) when version A < B, comparing the vMAJOR.MINOR.PATCH
@@ -443,35 +530,54 @@ EOF
 if [ -n "${BURROWEE_INSTALLER_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || exit 0; fi
 
 # ---------------------------------------------------------------------------
+# ROOT IS REQUIRED, and refused here — still before anything is placed, and
+# before every mode below, because every one of them writes somewhere only root
+# may write: /usr/local/bin, /etc/systemd/system, /Library/LaunchDaemons.
+#
+# The alternative is worse than an error. /usr/local is group-writable on an
+# Intel Mac with Homebrew, so an unprivileged run would place the binaries, fail
+# at the first unit write, and leave a half-installed edge with no service — and
+# the binaries it did place would sit in a directory a non-root user can rewrite,
+# which is exactly the standing uid-0 grant the root-owned destination exists to
+# close.
+#
+# The refusal comes AFTER the source-only seam above: sourcing this file defines
+# functions and places nothing, and tools/test-config-migrate.sh drives them as
+# an ordinary user.
+# ---------------------------------------------------------------------------
+if ! is_root; then
+    echo "install: this installer must run as root — it installs to /usr/local/bin and" >&2
+    echo "install: manages a system service (systemd unit / launchd LaunchDaemon)." >&2
+    echo "install: as of edge 0.2.0 there is no per-user install; nothing has been installed." >&2
+    echo "hint: re-run with sudo, e.g." >&2
+    echo "hint:   curl -fsSL https://release.burrowee.com/$COMP/install.sh | sudo sh" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Units-only mode (BURROWEE_UNITS_ONLY=1): the offline reinstall entrypoint run
 # by edge's LocalReinstall. Re-render + reload the managed service units WITHOUT
-# placing binaries or touching the network. A root install has a managed system
-# service, so re-render it; an unprivileged install has no service, so this is a
-# successful no-op (mirrors cli).
+# placing binaries or touching the network.
 # ---------------------------------------------------------------------------
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
-    if is_root; then
-        setup_root_service
-        echo "edge units-only reinstall: service units re-rendered + reloaded."
-    else
-        echo "edge units-only reinstall: no user-level service (edge service is root-managed) — nothing to do."
-    fi
+    setup_root_service
+    echo "edge units-only reinstall: service units re-rendered + reloaded."
     exit 0
 fi
 
 if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
-    if is_root; then
-        if [ "$(uname -s)" = "Darwin" ]; then
-            launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
-            launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
-            rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
-            remove_legacy_launchd_units
-        else
-            systemctl disable --now burrowee-edge 2>/dev/null || true
-            systemctl disable --now burrowee-edge-updater 2>/dev/null || true
-            rm -f "$SYSTEMD_UNIT" "$SYSTEMD_UPDATER_UNIT"
-            systemctl daemon-reload 2>/dev/null || true
-        fi
+    # Unconditional, like every other mode: there is one install shape left, and
+    # it always has the managed system service.
+    if [ "$(uname -s)" = "Darwin" ]; then
+        launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
+        launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+        rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
+        remove_legacy_launchd_units
+    else
+        systemctl disable --now burrowee-edge 2>/dev/null || true
+        systemctl disable --now burrowee-edge-updater 2>/dev/null || true
+        rm -f "$SYSTEMD_UNIT" "$SYSTEMD_UPDATER_UNIT"
+        systemctl daemon-reload 2>/dev/null || true
     fi
     removed=""
     for b in $BINS; do
@@ -545,74 +651,25 @@ fi
 mkdir -p "$COMP_HOME" 2>/dev/null || true
 cp "$0" "$COMP_HOME/install.sh" 2>/dev/null || true
 
-# ---- ROOT: managed system service ------------------------------------------
-# A root install sets up a managed root service running `burrowee-edge run` and
+# ---- the managed system service --------------------------------------------
+# Every install sets up the managed root service running `burrowee-edge run` and
 # (re)starts it, so the same one-liner is a fresh install AND an in-place update.
-# Non-root installs skip this and fall through to the user-path note + first-run
-# bootstrap below.
-if is_root; then
-    setup_root_service
-    # Only now: the binaries are in $SYS_BIN_DIR and the units naming them are
-    # not merely written but loaded. Deliberately NOT in BURROWEE_UNITS_ONLY
-    # mode above — that path places no binaries at all, so the precondition
-    # this sweep's safety rests on ("the new copies are already in place") is
-    # not something that mode establishes.
-    remove_stale_user_bins
-    "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
-    echo "edge system install complete."
-    # The managed service runs the daemon; pairing is a separate operator step:
-    #   burrowee edge cli bootstrap <blob> <pin>   (or via the console)
-    if [ ! -d "$COMP_HOME/identity" ] && [ ! -f "$COMP_HOME/console.json" ]; then
-        echo "next: pair this edge — burrowee edge cli bootstrap <blob> <pin>"
-    fi
-    exit 0
-fi
-
-# ---- NON-ROOT: user-path note ----------------------------------------------
-echo "note: installed to $BIN_DIR (user path, no managed service);"
-echo "      for a managed system service re-run with sudo."
-
-# ---- first-run bootstrap (interactive only, fresh installs) -------------------
-# Re-install short-circuit: if this component already has persisted state under
-# ~/.burrowee/<comp> (the gateway db/keys, cli/edge identity, …) it is already
-# set up — never re-prompt for a setup blob. Otherwise read blob+PIN from the
-# controlling terminal (stdin is the curl pipe, not a tty): prompt only if
-# /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
-# next step. All tty I/O is fault-tolerant so it can never abort the install.
-# An ENROLLED install has an identity (and usually console.json). Test that
-# artifact specifically — NOT a non-empty COMP_HOME, which now also holds the
-# config + installed-version marker written by the migration step above.
-if [ -d "$COMP_HOME/identity" ] || [ -f "$COMP_HOME/console.json" ]; then
-    echo "$COMP already set up ($COMP_HOME) — skipping setup."
-elif ( exec 3<>/dev/tty ) 2>/dev/null; then
-    # PROBED IN A SUBSHELL, then opened for real. dash treats a FAILED `exec`
-    # redirection as fatal and exits the script — status 2, and the `2>/dev/null`
-    # swallows the only message — even inside a guarded `{ …; }` used as an `if`
-    # condition, because a brace group is not a subshell and so does not contain
-    # the exit. /bin/sh IS dash on every Debian-family host, and this block ends
-    # the NON-ROOT path, so on exactly the hosts that matter the shape it
-    # replaces turned every unprivileged non-interactive install (CI, a console
-    # push, `curl … | sh` under a supervisor) into a fully installed edge
-    # reporting failure. The root path returns above and never reaches here,
-    # which is why the suite saw none of it until a non-root case was added.
-    # A subshell contains the fatal exit, so the parent survives to answer the
-    # question and then open fd 3 for real.
-    exec 3<>/dev/tty
-    printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
-    printf 'blob> ' >&3 2>/dev/null || true
-    blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''
-    if [ -n "$blob" ]; then
-        printf 'pin>  ' >&3 2>/dev/null || true
-        pin=''; IFS= read -r pin <&3 2>/dev/null || pin=''
-        if [ -n "$pin" ]; then
-            "$BIN_DIR/burrowee" "$COMP" cli bootstrap "$blob" "$pin" <&3 || true
-        else
-            printf 'No PIN — skipped. Run later: burrowee %s cli bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
-        fi
-    else
-        printf 'Skipped. Run later: burrowee %s cli bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
-    fi
-    exec 3>&- 2>/dev/null || true
-else
-    echo "next: burrowee $COMP cli bootstrap <blob> <pin>"
+# There is no other install shape to fall through to: an unprivileged run was
+# refused at the top, with nothing placed.
+setup_root_service
+# Only now: the binaries are in $SYS_BIN_DIR and the units naming them are
+# not merely written but loaded. Deliberately NOT in BURROWEE_UNITS_ONLY
+# mode above — that path places no binaries at all, so the precondition
+# this sweep's safety rests on ("the new copies are already in place") is
+# not something that mode establishes.
+remove_stale_user_bins
+"$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
+echo "edge system install complete."
+# The managed service runs the daemon; pairing is a separate operator step:
+#   burrowee edge cli bootstrap <blob> <pin>   (or via the console)
+if [ ! -d "$COMP_HOME/identity" ] && [ ! -f "$COMP_HOME/console.json" ]; then
+    # A host converging off the pre-collapse per-user layout may already own an
+    # identity — under the operator's home, which this daemon does not read.
+    note_orphaned_user_state
+    echo "next: pair this edge — burrowee edge cli bootstrap <blob> <pin>"
 fi

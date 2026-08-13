@@ -1,13 +1,16 @@
 // bootstrap_prefix_test.go — what the outer bootstrap hands the inner
 // installer as PREFIX, per component.
 //
-// The gateway installs to /usr/local/bin, root-owned, and its inner installer
-// REFUSES a set PREFIX rather than overriding it (inner/gateway/install.sh).
+// The gateway and the edge install to /usr/local/bin, root-owned, and their
+// inner installers REFUSE a set PREFIX rather than overriding it
+// (inner/gateway/install.sh, inner/edge/install.sh).
 // tools/bootstrap.template.sh is shared by cli, gateway, edge and agent, and it
 // used to default PREFIX to $HOME/.local and pass it unconditionally — so every
 // `curl … | sh` gateway install took the per-user branch, which also switched
 // off unit rendering, migration and version recording. That is the defect these
-// tests exist to keep out.
+// tests exist to keep out. Each root-only component joins this list in the same
+// change that collapses its inner installer, or its bootstrap manufactures a
+// PREFIX its installer will refuse and every `curl … | sh` fails.
 //
 // They RUN the rendered bootstraps' own code rather than matching text, because
 // the branch is on $COMP at runtime: cli/install.sh and gateway/install.sh are
@@ -28,6 +31,11 @@ import (
 // publicComponents are the four components tools/bootstrap.template.sh serves.
 // relay has its own template and no per-user prefix question.
 var publicComponents = []string{"cli", "gateway", "edge", "agent"}
+
+// rootOnly are the components whose inner installer has ONE destination
+// (/usr/local/bin, root-owned) and refuses a set PREFIX. Their bootstrap must
+// hand PREFIX through untouched — never defaulted — and must not edit a shell rc.
+var rootOnly = map[string]bool{"gateway": true, "edge": true}
 
 // bakedComp reads the COMP="<name>" literal gen-bootstraps.sh substituted into
 // a rendered bootstrap. The tests below bind the component from the file itself
@@ -84,7 +92,7 @@ func TestRenderedBootstrapsResolvePrefixPerComponent(t *testing.T) {
 			}, "\n"))
 
 			want := home + "/.local"
-			if comp == "gateway" {
+			if rootOnly[comp] {
 				want = ""
 			}
 			if got != want {
@@ -143,19 +151,20 @@ if [ -n "${PREFIX+set}" ]; then echo "PREFIX=[$PREFIX]"; else echo "PREFIX-UNSET
 
 			// (a) operator set nothing.
 			got := run("")
-			if comp == "gateway" {
+			if rootOnly[comp] {
 				if got != "PREFIX-UNSET" {
 					t.Errorf("%s handed the inner installer %s with no PREFIX set; it must arrive UNSET, "+
-						"or the gateway's root-only installer refuses an install nobody asked to redirect", rel, got)
+						"or this component's root-only installer refuses an install nobody asked to redirect", rel, got)
 				}
 			} else if !strings.HasPrefix(got, "PREFIX=[") || strings.HasSuffix(got, "[]") {
 				t.Errorf("%s handed the inner installer %s with no PREFIX set; it must still get the per-user default", rel, got)
 			}
 
 			// (b) operator set one explicitly — always forwarded, for every
-			// component. For the gateway that is what makes the refusal
-			// reachable; a bootstrap that swallowed it would turn a loud
-			// rejection into the silent override this whole change rejects.
+			// component. For a root-only component that is what makes the
+			// refusal reachable; a bootstrap that swallowed it would turn a
+			// loud rejection into the silent override this whole change
+			// rejects.
 			if got, want := run("/opt/burrowee-explicit"), "PREFIX=[/opt/burrowee-explicit]"; got != want {
 				t.Errorf("%s dropped an explicitly set PREFIX: got %s, want %s", rel, got, want)
 			}
@@ -163,20 +172,20 @@ if [ -n "${PREFIX+set}" ]; then echo "PREFIX=[$PREFIX]"; else echo "PREFIX-UNSET
 	}
 }
 
-// TestGatewayBootstrapWritesNoPathMarker: the PATH-persistence block appends
-// `export PATH="$PREFIX/bin:$PATH"` to the operator's shell rc. For the gateway
-// $PREFIX is empty, so that block would write /bin — and it has nothing to do
-// anyway, since /usr/local/bin is on every PATH already. Pinned as a text
-// assertion on the guard itself: the block's body is a 30-line rc-file walk
-// whose only observable output is a mutated $HOME, and this is the condition
-// that stops it being entered at all.
-func TestGatewayBootstrapWritesNoPathMarker(t *testing.T) {
-	const guard = `if [ "$COMP" != gateway ] && [ -z "${BURROWEE_UNINSTALL:-}" ]`
+// TestRootOnlyBootstrapsWriteNoPathMarker: the PATH-persistence block appends
+// `export PATH="$PREFIX/bin:$PATH"` to the operator's shell rc. For a root-only
+// component $PREFIX is empty, so that block would write /bin — and it has
+// nothing to do anyway, since /usr/local/bin is on every PATH already. Pinned as
+// a text assertion on the guard itself: the block's body is a 30-line rc-file
+// walk whose only observable output is a mutated $HOME, and this is the
+// condition that stops it being entered at all.
+func TestRootOnlyBootstrapsWriteNoPathMarker(t *testing.T) {
+	const guard = `if [ "$COMP" != gateway ] && [ "$COMP" != edge ] && [ -z "${BURROWEE_UNINSTALL:-}" ]`
 	for _, comp := range publicComponents {
 		rel := comp + "/install.sh"
 		if !strings.Contains(readRepoFile(t, rel), guard) {
 			t.Errorf("%s does not guard its PATH-persistence block with %q — "+
-				"the gateway would append \"/bin\" to a shell rc", rel, guard)
+				"a root-only component would append \"/bin\" to a shell rc", rel, guard)
 		}
 	}
 }

@@ -1,11 +1,12 @@
 // stale_user_bins_test.go — the sweep of the per-user binaries an EARLIER,
 // unprivileged edge install left behind (install.sh: remove_stale_user_bins).
 //
-// Edge is the harder half of this change and these fixtures say why: unlike the
-// gateway, its unprivileged branch STILL installs into $HOME/.local/bin. The
-// same directory is therefore a stale tree to sweep on one path and this run's
-// own destination on the other, so "never delete what this install just made"
-// is a claim that has to be tested, not argued.
+// The unprivileged branch that filled $HOME/.local/bin is gone (root_only_test.go),
+// so on a production host that directory can only ever be a stale tree. The
+// "never delete what this install just made" property still has to hold — the
+// SYS_BIN_DIR seam can point the destination anywhere, including there — and the
+// last test in this file arranges exactly that and requires the freshly placed
+// binaries to survive.
 //
 // EVERY PATH HERE IS A FIXTURE TREE under t.TempDir(). Nothing in this file may
 // resolve to a real $HOME/.local/bin — the machines this suite runs on have
@@ -102,56 +103,67 @@ func TestEdgeRootInstallSweepsStalePerUserBinaries(t *testing.T) {
 	}
 }
 
-// TestEdgeUnprivilegedInstallNeverSweepsItsOwnDestination — the one outcome
-// that would be unforgivable. An unprivileged install's $BIN_DIR IS
-// $HOME/.local/bin, so a sweep that ran on that path would delete the binaries
-// the same run had just placed, and the failure would look like a successful
-// install of nothing.
-func TestEdgeUnprivilegedInstallNeverSweepsItsOwnDestination(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: install.sh would take the system branch, not the per-user one")
-	}
+// TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled — the one outcome that
+// would be unforgivable: a sweep that ran on its own destination would delete
+// the binaries the same run had just placed, and the failure would look like a
+// successful install of nothing.
+//
+// It cannot happen with the PRODUCTION destination (/usr/local/bin is nobody's
+// ~/.local/bin), so this points $BIN_DIR AT the per-user dir through the
+// SYS_BIN_DIR seam — the worst arrangement available — and requires the
+// binaries to survive.
+//
+// What stops it is NOT a `$_rsb_dir = $BIN_DIR` special case (that guard was
+// removed in the collapse; nothing could reach it). It is the ordering: this run
+// rendered and loaded units naming $BIN_DIR before the sweep, and the sweep
+// refuses any directory a unit on this host still names. Mutating that refusal
+// out is what fails this test, which is the point — it asserts the property
+// through the check that enforces it.
+//
+// NOT seedEdgeBins for the staging tree: its stubs are shell scripts carrying no
+// build stamp, so is_burrowee_binary would decline them and this test would pass
+// on the strength of a check that has nothing to do with what it claims. On a
+// real host the binaries being placed ARE ours, and the destination guard is the
+// only thing between them and the sweep — so the bundle has to look ours.
+func TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
-	// NOT seedEdgeBins: its stubs are shell scripts carrying no build stamp, so
-	// is_burrowee_binary would decline them and this test would pass on the
-	// strength of a check that has nothing to do with what it claims. On a real
-	// host the binaries being placed ARE ours, and the destination guard is the
-	// only thing between them and the sweep — so the bundle has to look ours.
 	seedStale(t, staging, staleOursSet())
 
-	stub := t.TempDir()
-	// Real `id` (so is_root is false), forced-Linux `uname` so the branch under
-	// test does not depend on the suite's host, and a systemctl recorder in case
-	// anything reaches for one.
-	stubBin(t, stub, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo Linux; else /usr/bin/uname \"$@\"; fi\n")
-	stubBin(t, stub, "systemctl", "#!/bin/sh\necho \"systemctl $*\" >> \"$STUB_LOG\"\nexit 0\n")
-
+	// The destination IS the per-user dir for this run.
+	dest := staleDir(home)
+	stub := stubRootEnv(t)
+	unitDir := filepath.Join(home, "systemd-system")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("sh", installShPath(t))
 	cmd.Dir = staging
 	cmd.Env = []string{
 		"HOME=" + home,
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
-		"SYSTEMD_UNIT_DIR=" + filepath.Join(home, "systemd-system"),
+		"SYS_BIN_DIR=" + dest,
+		"SYSTEMD_UNIT_DIR=" + unitDir,
+		"ROOT_HOME=" + filepath.Join(home, "root-home"),
 		sandboxLaunchd(home),
 	}
-	// The exit STATUS is deliberately not asserted. inner/edge/install.sh's
-	// final tty probe still has the `elif { exec 3<>/dev/tty; } 2>/dev/null`
-	// shape that dash treats as fatal (status 2, no message) — the same
-	// pre-existing defect that makes inner/cli/install_test red on any
-	// Debian-family host, fixed in inner/gateway/install.sh and not in this
-	// one. It fires AFTER everything this test is about, and asserting the
-	// status here would tie this claim to a bug it does not own.
-	out, _ := cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
 
 	for _, b := range edgeBins {
-		assertPresent(t, filepath.Join(staleDir(home), b),
-			"an unprivileged install deleted its own freshly-placed binary")
+		assertPresent(t, filepath.Join(dest, b),
+			"the sweep deleted a binary this very run had just placed")
 	}
 	if strings.Contains(string(out), "removed stale per-user binary") {
-		t.Errorf("the sweep ran on an unprivileged install, whose destination IS the per-user dir:\n%s", out)
+		t.Errorf("the sweep ran on this run's own destination:\n%s", out)
 	}
+	// Named, not merely observed: the survival above is produced by the
+	// unit-still-names-it refusal, and a test that only checked the files would
+	// pass equally if the sweep had never been reached at all.
+	assertContains(t, string(out), "still names "+dest)
 }
 
 // TestEdgeStaleSweepUsesTheOperatorHomeNotDollarHome — the trap: the documented
