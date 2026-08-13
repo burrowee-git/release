@@ -16,12 +16,17 @@
 # Env vars:
 #   BURROWEE_<COMP>_VERSION      pin a release tag (e.g. edge/v0.1.0.…); default: latest
 #                                (<COMP> = the component name upper-cased, e.g. BURROWEE_CLI_VERSION)
-#   PREFIX                       install root (default $HOME/.local; bins at PREFIX/bin)
+#   PREFIX                       install root (bins at PREFIX/bin). cli/edge/agent:
+#                                default $HOME/.local. GATEWAY: not defaulted and not
+#                                accepted — since 0.2.0 the gateway installs only to the
+#                                root-owned /usr/local/bin, and its inner installer
+#                                REFUSES a set PREFIX rather than quietly overriding it.
 #   BURROWEE_UNINSTALL=1         pass through to the inner installer to remove bins
 #   BURROWEE_RELEASE_REPO        GitHub repo serving releases (default burrowee-git/release)
 #   BURROWEE_SKIP_PREFLIGHT=1    skip the OS-dependency preflight (manage deps yourself)
 #   BURROWEE_SKIP_NGINX=1        (edge) skip nginx + stream module in the preflight
-#   BURROWEE_NO_PATH_EDIT=1      do not persist PREFIX/bin to your shell rc
+#   BURROWEE_NO_PATH_EDIT=1      do not persist PREFIX/bin to your shell rc (no effect for
+#                                the gateway, which edits no rc — /usr/local/bin is on PATH)
 #   BURROWEE_CHANNEL_BASE        base URL for the static channel (preflight.sh lives here)
 #   BURROWEE_DL_BASE             (test hook) download assets from this base instead of GitHub
 #   CONSOLE_URL                  Burrowee console base URL; used by the R2 fallback when
@@ -52,7 +57,27 @@ PREFLIGHT_SHA256="20aff889401bbf192b378941923f58fd934f459b930436a3f225ba199b539e
 # and no download source gets to choose it.
 MIN_VERSION="v0.1.111.2026.08.04.024ab996"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
-PREFIX="${PREFIX:-$HOME/.local}"
+
+# resolve_prefix — the install root this bootstrap hands the inner installer.
+#
+# PER COMPONENT, because this template is shared and they no longer agree. The
+# gateway installs to /usr/local/bin, root-owned, and nowhere else (0.2.0): its
+# inner installer REFUSES a set PREFIX outright, so manufacturing one here would
+# make every `curl … | sh` fail — and, before that refusal existed, manufacturing
+# one is precisely what sent every bootstrap install down the per-user branch,
+# which also switched off unit rendering, migration and version recording. A
+# gateway PREFIX therefore stays EMPTY unless the operator set one, and an
+# operator who did set one gets the refusal they earned rather than a silent
+# override. cli/edge/agent keep the per-user default until that is decided
+# separately. $COMP is a literal baked at render time.
+resolve_prefix() {
+    if [ "$COMP" = gateway ]; then
+        printf '%s' "${PREFIX:-}"
+    else
+        printf '%s' "${PREFIX:-$HOME/.local}"
+    fi
+}
+PREFIX="$(resolve_prefix)"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)
 # Static channel base (where preflight.sh lives — a sibling static file, NOT a
 # GitHub release asset). $COMP is a baked literal, safe to interpolate.
@@ -583,9 +608,21 @@ unzip -q -o "$TMP/$ZIP" -d "$TMP/x" || fail "zip extraction failed — corrupt d
 [ -f "$TMP/x/install.sh" ] || fail "release zip missing inner install.sh — aborting"
 
 ok "verified — running inner installer"
-# Run with cwd = the unzipped dir: the inner installer resolves the binaries
-# relative to its own location (./burrowee, ./burrowee-cli, …).
-( cd "$TMP/x" && PREFIX="$PREFIX" BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" BURROWEE_VERSION="$TAG" sh ./install.sh )
+# run_inner — exec the verified inner installer with cwd = the unzipped dir, so
+# it resolves the binaries relative to its own location (./burrowee,
+# ./burrowee-cli, …).
+#
+# PREFIX is exported only when it has a value. The difference between "unset"
+# and "set to empty" is load-bearing for the gateway: its installer branches on
+# `[ -n "${PREFIX:-}" ]` to refuse a per-user install, and passing an empty
+# PREFIX would read as an operator who set nothing — which is right — while
+# passing a defaulted one would refuse every ordinary install. Every other
+# component always has a value here, so nothing changes for them.
+run_inner() {
+    if [ -n "$PREFIX" ]; then export PREFIX; fi
+    ( cd "$TMP/x" && BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" BURROWEE_VERSION="$TAG" sh ./install.sh )
+}
+run_inner
 
 # ---- PATH persistence ---------------------------------------------------
 # On a real install, idempotently add PREFIX/bin to the operator's shell rc so a
@@ -595,9 +632,20 @@ ok "verified — running inner installer"
 # — so write to both the interactive rc and the login file, else PATH is missing
 # over ssh. An unset/unknown $SHELL defaults to the bash files. Fault-tolerant:
 # an unwritable rc must never abort the script (the bins are already installed).
-# Skipped as root: a root install lands in /usr/local/bin (already on PATH), so
-# appending a $PREFIX/bin marker to root's rc would be wrong and useless.
-if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ] && [ "$(id -u)" != 0 ]; then
+#
+# SKIPPED ENTIRELY FOR THE GATEWAY: it installs to /usr/local/bin, which is
+# already on every PATH, and $PREFIX is empty for it — "$PREFIX/bin" would
+# expand to "/bin", a directory this script has no business writing into
+# anyone's rc.
+#
+# Skipped as root, for all components: this script does not edit root's shell
+# rc. Note what that means for cli/edge/agent and is not papered over here — a
+# root install of those lands in $PREFIX/bin, i.e. /root/.local/bin under root's
+# $HOME, which root's PATH does not include, and no marker is written to say so.
+# That gap predates this comment; the previous version of it claimed such an
+# install "lands in /usr/local/bin (already on PATH)", which no code has ever
+# implemented.
+if [ "$COMP" != gateway ] && [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ] && [ "$(id -u)" != 0 ]; then
     BIN_DIR="$PREFIX/bin"
     case ":$PATH:" in
         *":$BIN_DIR:"*) : ;;   # already on PATH this shell

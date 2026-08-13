@@ -57,8 +57,15 @@ This bootstrap is the trust anchor: it downloads the platform-matched release zi
 plus `SHA256SUMS.txt` and its minisign signature, verifies the signature against a
 baked-in public key, verifies the zip's sha256 against the now-trusted sums, and
 ONLY THEN unzips and runs the inner installer. The inner installer copies
-`burrowee` + `burrowee-gateway` + `burrowee-register` into `$HOME/.local/bin`
-(override with `PREFIX`). On macOS it clears the quarantine xattr on each binary.
+`burrowee` + `burrowee-gateway` + `burrowee-register` into `/usr/local/bin`,
+root-owned — since 0.2.0 that is the gateway's only destination, and the
+installer elevates via `sudo` to place them (it prompts on the terminal, or
+needs cached `sudo` credentials when run non-interactively). The gateway's
+service units run as root and name these paths absolutely, and other components
+resolve `/usr/local/bin/burrowee` by absolute path, so a per-user copy would be
+invisible to both: setting `PREFIX` does not move the install, it is **refused**
+with a non-zero exit and nothing is written. On macOS the installer clears the
+quarantine xattr on each binary.
 
 If the bootstrap fails before install (signature/sha mismatch, download error), it
 aborts without writing anything — surface the raw output and stop.
@@ -71,8 +78,8 @@ aborts without writing anything — surface the raw output and stop.
 # Preferred:
 burrowee gateway version
 
-# Fallback if PATH isn't refreshed yet:
-"$HOME/.local/bin/burrowee" gateway version
+# Fallback by full path:
+/usr/local/bin/burrowee gateway version
 ```
 
 `burrowee gateway version` prints `burrowee-gateway <version>`. That is the real,
@@ -86,12 +93,9 @@ line prints.**
 > subcommand, and `burrowee-register` takes `-sock`/`-name`/`-target` flags. Do not
 > run a bare `burrowee gateway` here (it would try to start with missing env).
 
-If the bin dir isn't on PATH, tell the operator to add this to their shell rc
-(`~/.zshrc`, `~/.bashrc`, …) and open a new shell:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+`/usr/local/bin` is on the default PATH of every supported shell, so no rc edit
+is needed and the installer makes none. If `burrowee` is still not found there,
+the install did not land — do not work around it with a PATH edit.
 
 Anything else (missing binary, "command not found" even by full path, wrong-arch
 error) means the install didn't land — surface the output and stop.
@@ -102,7 +106,7 @@ error) means the install didn't land — surface the output and stop.
 
 Once `burrowee gateway version` succeeds, **stop**. Tell the operator:
 
-> burrowee gateway is installed at `$HOME/.local/bin` (`burrowee` +
+> burrowee gateway is installed at `/usr/local/bin` (`burrowee` +
 > `burrowee-gateway` + `burrowee-register`). To configure its keys/PSK/relay and
 > bring it up, run the **burrowee-gateway-setup** skill next (or paste
 > `https://release.burrowee.com/skills/burrowee-gateway-setup/SKILL.md` into your
@@ -123,20 +127,19 @@ Do not run `burrowee gateway` from this skill — it expects required environmen
   error.
 - **(macOS) Gatekeeper blocks a binary.** The inner installer already strips
   `com.apple.quarantine`; if a copy was moved by hand, clear it manually:
-  `xattr -d com.apple.quarantine "$HOME/.local/bin/burrowee" "$HOME/.local/bin/burrowee-gateway" "$HOME/.local/bin/burrowee-register"`.
+  `sudo xattr -d com.apple.quarantine /usr/local/bin/burrowee /usr/local/bin/burrowee-gateway /usr/local/bin/burrowee-register`.
 - **Pin a specific version.** Re-run with `BURROWEE_GATEWAY_VERSION` set to a
   release tag:
   ```bash
   BURROWEE_GATEWAY_VERSION=gateway/v0.1.0.<stamp> \
     sh -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh)"
   ```
-- **Install to a different prefix.** Set `PREFIX` (bins land at `PREFIX/bin`):
-  ```bash
-  PREFIX=/usr/local \
-    sh -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh)"
-  ```
+- **Install somewhere else.** Not supported, and not silently ignored: the
+  gateway installs to `/usr/local/bin` and a set `PREFIX` aborts the install
+  with a message saying so. If `PREFIX` is exported in the operator's shell
+  profile for other tools, unset it for this command.
 - **Uninstall.** Pass `BURROWEE_UNINSTALL=1` through the bootstrap; it removes
-  `burrowee` + `burrowee-gateway` + `burrowee-register` from `PREFIX/bin`:
+  `burrowee` + `burrowee-gateway` + `burrowee-register` from `/usr/local/bin`:
   ```bash
   BURROWEE_UNINSTALL=1 \
     sh -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh)"

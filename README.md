@@ -31,7 +31,11 @@ Each installer detects your OS/arch, resolves the latest published release for
 that component, downloads the zip + `SHA256SUMS.txt` + `SHA256SUMS.txt.minisig`,
 **verifies the minisign signature against the baked public key**, checks the
 SHA-256, then unzips and runs the inner installer. Binaries land in
-`$HOME/.local/bin` (override with `PREFIX`).
+`$HOME/.local/bin` (override with `PREFIX`) — **except the gateway**, which
+since 0.2.0 installs to the root-owned `/usr/local/bin` and nowhere else: its
+service units run as root and name the binaries absolutely, and other
+components resolve `/usr/local/bin/burrowee` by absolute path. A `PREFIX` set
+for the gateway is refused rather than honoured or silently overridden.
 
 ## Verify by hand
 
