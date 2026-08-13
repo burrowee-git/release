@@ -258,15 +258,18 @@ remove_stale_user_bins() {
     [ -n "$_rsb_home" ] || return 0
     _rsb_dir="$_rsb_home/.local/bin"
     [ -d "$_rsb_dir" ] || return 0
-    # The one thing this must never do is delete the install it just made.
-    # With the per-user branch gone that cannot happen at the PRODUCTION
-    # $BIN_DIR (/usr/local/bin is nobody's ~/.local/bin) — but SYS_BIN_DIR
-    # redirects $BIN_DIR for the test harness, which is the same knob that
-    # makes this sweep testable at all, so the guard is written rather than
-    # argued. It is kept alive by a test that points $BIN_DIR AT the per-user
-    # dir and requires the freshly placed binaries to survive.
-    if [ "$_rsb_dir" = "$BIN_DIR" ]; then return 0; fi
 
+    # The one thing this must never do is delete the install it just made.
+    # There WAS an explicit `[ "$_rsb_dir" = "$BIN_DIR" ] && return 0` here,
+    # written when the unprivileged branch installed INTO $_rsb_dir. It is gone,
+    # because with that branch removed nothing could ever reach it: this run has
+    # already rendered AND loaded units naming $BIN_DIR by the time it is
+    # called, so the refusal below — a unit on this host still names that
+    # directory — fires first in every state, including the redirected
+    # $SYS_BIN_DIR the suite uses to point the destination at a per-user dir on
+    # purpose. Deleting an unreachable guard was the choice over keeping one no
+    # test could ever fail on; the property it protected is now asserted through
+    # the check that actually enforces it.
     _rsb_unit=""
     _rsb_unit="$(unit_naming_dir "$_rsb_dir" "$_rsb_home")" || _rsb_unit=""
     if [ -n "$_rsb_unit" ]; then
@@ -299,16 +302,18 @@ remove_stale_user_bins() {
 # the binaries, so a host converging onto the root scheme comes up as a healthy,
 # running, UNPAIRED edge. Silence is the worst outcome available here: the
 # install exits 0, the service is up, and nothing gives the operator a reason to
-# look for the identity that already exists a directory away. Says nothing when
-# the root tree is already paired (a re-install, where the per-user tree is
-# merely history) or when there is no per-user state at all.
+# look for the identity that already exists a directory away.
+#
+# Says nothing when there is no per-user state. That the ROOT tree is unpaired is
+# the CALLER's condition — this is only reached from the "next: pair this edge"
+# branch — and it is not re-tested here: a second copy of a condition its only
+# call site already decided cannot fail independently, it can only drift.
 note_orphaned_user_state() {
     _nos_home="$(operator_home)"
     [ -n "$_nos_home" ] || return 0
     _nos_dir="$_nos_home/.burrowee/$COMP"
     if [ "$_nos_dir" = "$COMP_HOME" ]; then return 0; fi
     if [ ! -d "$_nos_dir/identity" ] && [ ! -f "$_nos_dir/console.json" ]; then return 0; fi
-    if [ -d "$COMP_HOME/identity" ] || [ -f "$COMP_HOME/console.json" ]; then return 0; fi
     echo "note: $_nos_dir holds a paired edge identity from an earlier per-user install," >&2
     echo "note: but the managed service reads $COMP_HOME — this edge starts UNPAIRED." >&2
     echo "hint: pair it again (burrowee $COMP cli bootstrap <blob> <pin>), or stop the" >&2

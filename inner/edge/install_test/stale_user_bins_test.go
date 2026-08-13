@@ -2,12 +2,11 @@
 // unprivileged edge install left behind (install.sh: remove_stale_user_bins).
 //
 // The unprivileged branch that filled $HOME/.local/bin is gone (root_only_test.go),
-// so on a production host that directory can only ever be a stale tree — but the
-// sweep's "never delete what this install just made" guard is still live code,
-// because SYS_BIN_DIR redirects the destination and that redirect is the only
-// reason this sweep is testable at all. A guard nothing exercises is a guard
-// nobody knows still works, so the last test in this file points the destination
-// AT the per-user dir and requires the freshly placed binaries to survive.
+// so on a production host that directory can only ever be a stale tree. The
+// "never delete what this install just made" property still has to hold — the
+// SYS_BIN_DIR seam can point the destination anywhere, including there — and the
+// last test in this file arranges exactly that and requires the freshly placed
+// binaries to survive.
 //
 // EVERY PATH HERE IS A FIXTURE TREE under t.TempDir(). Nothing in this file may
 // resolve to a real $HOME/.local/bin — the machines this suite runs on have
@@ -105,14 +104,21 @@ func TestEdgeRootInstallSweepsStalePerUserBinaries(t *testing.T) {
 }
 
 // TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled — the one outcome that
-// would be unforgivable, and the reason install.sh's `$_rsb_dir = $BIN_DIR`
-// guard survived the collapse rather than being deleted as dead.
+// would be unforgivable: a sweep that ran on its own destination would delete
+// the binaries the same run had just placed, and the failure would look like a
+// successful install of nothing.
 //
-// It cannot be reached with the PRODUCTION destination (/usr/local/bin is
-// nobody's ~/.local/bin) — but SYS_BIN_DIR redirects it, every test in this file
-// depends on that redirect, and a sweep that ran on its own destination would
-// delete the binaries the same run had just placed. The failure would look like
-// a successful install of nothing.
+// It cannot happen with the PRODUCTION destination (/usr/local/bin is nobody's
+// ~/.local/bin), so this points $BIN_DIR AT the per-user dir through the
+// SYS_BIN_DIR seam — the worst arrangement available — and requires the
+// binaries to survive.
+//
+// What stops it is NOT a `$_rsb_dir = $BIN_DIR` special case (that guard was
+// removed in the collapse; nothing could reach it). It is the ordering: this run
+// rendered and loaded units naming $BIN_DIR before the sweep, and the sweep
+// refuses any directory a unit on this host still names. Mutating that refusal
+// out is what fails this test, which is the point — it asserts the property
+// through the check that enforces it.
 //
 // NOT seedEdgeBins for the staging tree: its stubs are shell scripts carrying no
 // build stamp, so is_burrowee_binary would decline them and this test would pass
@@ -154,6 +160,10 @@ func TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled(t *testing.T) {
 	if strings.Contains(string(out), "removed stale per-user binary") {
 		t.Errorf("the sweep ran on this run's own destination:\n%s", out)
 	}
+	// Named, not merely observed: the survival above is produced by the
+	// unit-still-names-it refusal, and a test that only checked the files would
+	// pass equally if the sweep had never been reached at all.
+	assertContains(t, string(out), "still names "+dest)
 }
 
 // TestEdgeStaleSweepUsesTheOperatorHomeNotDollarHome — the trap: the documented
