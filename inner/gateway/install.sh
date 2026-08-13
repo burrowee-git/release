@@ -1602,7 +1602,17 @@ gateway_already_set_up() {
 
 if gateway_already_set_up; then
     echo "$COMP already set up — skipping setup."
-elif { exec 3<>/dev/tty; } 2>/dev/null; then
+elif ( exec 3<>/dev/tty ) 2>/dev/null; then
+    # PROBED IN A SUBSHELL, then opened for real. dash treats a FAILED `exec`
+    # redirection as fatal and exits the script — status 2, no message the
+    # `2>/dev/null` did not swallow — even inside a guarded `{ …; }` used as an
+    # `if` condition. /bin/sh IS dash on every Debian-family host, and this is
+    # the LAST step of an otherwise complete install, so on exactly the hosts
+    # that matter the shape it replaces turned every non-interactive install
+    # (CI, a console push, `curl … | sh` under a supervisor) into a fully
+    # installed gateway reporting failure. has_tty above already probes this
+    # way, for this reason.
+    exec 3<>/dev/tty
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
     printf 'blob> ' >&3 2>/dev/null || true
     blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''
