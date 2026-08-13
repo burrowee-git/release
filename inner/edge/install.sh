@@ -14,7 +14,9 @@
 # to it in the unit/plist so the daemon resolves the same dir. When run
 # unprivileged it keeps the historical behavior: a user-path binary drop under
 # $HOME/.local/bin with no service, plus a note that a managed system service
-# needs sudo.
+# needs sudo. A ROOT install additionally sweeps the copies an earlier
+# unprivileged install left in that per-user directory, which would otherwise
+# shadow /usr/local/bin on PATH — remove_stale_user_bins.
 #
 # The system [Service] block mirrors the relay system unit (Restart / RestartSec
 # / TimeoutStopSec / HOME); ExecStart is `<bin> run` (the edge daemon verb).
@@ -58,6 +60,183 @@ remove_legacy_launchd_units() {
 }
 
 is_root() { [ "$(id -u)" = 0 ]; }
+
+# ---------------------------------------------------------------------------
+# Stale per-user binaries, left by an UNPRIVILEGED install of this component.
+#
+# The non-root branch below still drops the binaries in $HOME/.local/bin, and
+# before the managed root service existed that was the only shape an edge
+# install took. A host that later installs as root gets everything in
+# /usr/local/bin and keeps the old copies — and $HOME/.local/bin PRECEDES
+# /usr/local/bin on a normal PATH, so every unqualified `burrowee` or
+# `burrowee-edge-cli` an operator types resolves to the OLD binary while the
+# system unit runs the new one. The gateway's sibling installer carries the
+# same sweep, for the same reason, with the same ordering rule.
+#
+# THE ORDERING IS A SAFETY PROPERTY. A host arriving here may still be running
+# a unit whose ExecStart names the per-user path; the macOS LaunchDaemons this
+# script writes gate KeepAlive on PathState, so unlinking the binary does not
+# stale a future restart — it stops the running daemon. The sweep therefore
+# runs only after the new binaries are in $SYS_BIN_DIR and the units naming
+# them have been rendered and (re)loaded, and it refuses outright when a unit
+# file on this host still names the old directory.
+# ---------------------------------------------------------------------------
+
+# LEGACY_HOME_PARENTS — where an account's home may live on a host with neither
+# getent nor dscl. Same name and default as the gateway's installer and the
+# gateway repo's migrations/run.sh, so one override covers all of them.
+LEGACY_HOME_PARENTS="${BURROWEE_LEGACY_HOME_PARENTS:-/Users /home}"
+
+# home_of_user <name> — that account's home directory, or empty + non-zero:
+# getent on Linux, dscl on macOS, a parent-directory guess for a slim image.
+home_of_user() {
+    _hu=""
+    if command -v getent >/dev/null 2>&1; then
+        _hu="$(getent passwd "$1" 2>/dev/null | cut -d: -f6)"
+    fi
+    if [ -z "$_hu" ] && command -v dscl >/dev/null 2>&1; then
+        _hu="$(dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
+    fi
+    if [ -z "$_hu" ]; then
+        for _hu_p in $LEGACY_HOME_PARENTS; do
+            if [ -d "$_hu_p/$1" ]; then _hu="$_hu_p/$1"; break; fi
+        done
+    fi
+    [ -n "$_hu" ] || return 1
+    echo "$_hu"
+}
+
+# operator_home — the home of the account whose per-user tree an earlier
+# unprivileged install wrote to, which is NOT $HOME on the path that matters:
+# the documented flow is `curl … | sudo sh`, and under sudo $HOME is root's
+# (/root, or /var/root on macOS). A sweep aimed at $HOME/.local/bin would look
+# in a tree no unprivileged install ever wrote to, find nothing, and report
+# success — a check whose scope is narrower than its claim. $SUDO_USER is who
+# invoked sudo; it is unset for a genuine root login, where $HOME is already
+# the right answer.
+operator_home() {
+    case "${SUDO_USER:-}" in
+    '' | root) ;;
+    *)
+        if _oh="$(home_of_user "$SUDO_USER")" && [ -n "$_oh" ]; then
+            echo "$_oh"
+            return 0
+        fi
+        echo "note: \$SUDO_USER='$SUDO_USER' has no resolvable home — the stale per-user" >&2
+        echo "note: binary sweep falls back to \$HOME." >&2
+        ;;
+    esac
+    echo "${HOME:-}"
+}
+
+# unit_naming_dir <dir> <operator-home> — the first service unit file on this
+# host that still names <dir>, or empty + non-zero when none does. It reads the
+# unit FILES rather than asking the supervisor and treats one on disk as
+# possibly loaded: the two outcomes are "skip a cleanup" and "stop a running
+# daemon", and only one of them is undone by running the installer again.
+unit_naming_dir() {
+    for _und_d in "$LAUNCHD_PLIST_DIR" "$SYSTEMD_UNIT_DIR" \
+        "$2/Library/LaunchAgents" "$2/.config/systemd/user"; do
+        [ -d "$_und_d" ] || continue
+        for _und_f in "$_und_d"/*; do
+            [ -f "$_und_f" ] || continue
+            if grep -qF "$1/" "$_und_f" 2>/dev/null; then
+                echo "$_und_f"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# is_burrowee_binary <file> — whether <file> is one of OURS, decided by reading
+# it and never by running it.
+#
+# Every burrowee binary is a Go binary built from a github.com/burrowee-git/*
+# module, and the toolchain stamps that module path into the executable's
+# build-info blob (the bytes `go version -m` reads back). It survives -trimpath
+# and -ldflags "-s -w", so a release build carries it too.
+#
+# NOT `"$file" --version`. This installer runs as root on the path that
+# matters, and the directory being swept is writable by the very user whose
+# files are in question — executing one of them to ask what it is would hand
+# uid 0 to whoever can drop a file there. Reading a file grants it nothing.
+is_burrowee_binary() {
+    LC_ALL=C grep -qF 'github.com/burrowee-git/' "$1" 2>/dev/null
+}
+
+# stale_dir_has_other_burrowee_bin <dir> — whether any burrowee-* binary of
+# OURS remains in <dir> after this component's own names have been swept. The
+# glob is a DETECTION over what is left, never a removal target: nothing is ever
+# deleted by pattern here, only by exact name out of $BINS. Each candidate is
+# put to is_burrowee_binary so an operator's own `burrowee-notes` script cannot
+# stand in for an installed component and pin the shadowing dispatcher forever.
+stale_dir_has_other_burrowee_bin() {
+    for _sdo_f in "$1"/burrowee-*; do
+        [ -f "$_sdo_f" ] || continue
+        if is_burrowee_binary "$_sdo_f"; then return 0; fi
+    done
+    return 1
+}
+
+# remove_one_stale_bin <path> — remove ONE stale per-user copy, and only when it
+# is provably ours. Absent is success, not a warning.
+remove_one_stale_bin() {
+    _ros_p="$1"
+    if [ -h "$_ros_p" ]; then
+        echo "note: $_ros_p is a symlink, not a binary this installer placed — left in place." >&2
+        return 0
+    fi
+    [ -e "$_ros_p" ] || return 0
+    if [ ! -f "$_ros_p" ]; then
+        echo "note: $_ros_p is not a regular file — left in place." >&2
+        return 0
+    fi
+    if ! is_burrowee_binary "$_ros_p"; then
+        echo "note: $_ros_p carries no burrowee build stamp — it is not ours, left in place." >&2
+        return 0
+    fi
+    if rm -f "$_ros_p"; then
+        echo "removed stale per-user binary: $_ros_p"
+    else
+        echo "note: could not remove $_ros_p — it shadows $BIN_DIR on PATH; remove it by hand." >&2
+    fi
+}
+
+# remove_stale_user_bins — sweep the per-user copies of THIS component's
+# binaries, by exact name out of $BINS and never by glob. Root-only caller:
+# an unprivileged install's $BIN_DIR IS that directory, and the guard below
+# refuses that case a second time rather than relying on the call site.
+remove_stale_user_bins() {
+    _rsb_home="$(operator_home)"
+    [ -n "$_rsb_home" ] || return 0
+    _rsb_dir="$_rsb_home/.local/bin"
+    [ -d "$_rsb_dir" ] || return 0
+    if [ "$_rsb_dir" = "$BIN_DIR" ]; then return 0; fi
+
+    _rsb_unit=""
+    _rsb_unit="$(unit_naming_dir "$_rsb_dir" "$_rsb_home")" || _rsb_unit=""
+    if [ -n "$_rsb_unit" ]; then
+        echo "note: $_rsb_unit still names $_rsb_dir, so a supervisor may be running a" >&2
+        echo "note: binary from there — the stale per-user copies are left in place." >&2
+        echo "hint: remove them by hand once nothing points at that directory." >&2
+        return 0
+    fi
+
+    for _rsb_b in $BINS; do
+        # The bare `burrowee` dispatcher is SHARED across co-installed
+        # components (cli still installs per-user by design), so it is handled
+        # after this component's own names and only when nothing else remains —
+        # the same rule the uninstall path below applies to $BIN_DIR.
+        case "$_rsb_b" in burrowee) continue ;; esac
+        remove_one_stale_bin "$_rsb_dir/$_rsb_b"
+    done
+    if stale_dir_has_other_burrowee_bin "$_rsb_dir"; then
+        echo "kept $_rsb_dir/burrowee (dispatcher) — another burrowee component is still installed there"
+    else
+        remove_one_stale_bin "$_rsb_dir/burrowee"
+    fi
+}
 
 # ── install target depends on privilege ──────────────────────────────────────
 # Root → /usr/local/bin + the root service's config home (root's home +
@@ -373,6 +552,12 @@ cp "$0" "$COMP_HOME/install.sh" 2>/dev/null || true
 # bootstrap below.
 if is_root; then
     setup_root_service
+    # Only now: the binaries are in $SYS_BIN_DIR and the units naming them are
+    # not merely written but loaded. Deliberately NOT in BURROWEE_UNITS_ONLY
+    # mode above — that path places no binaries at all, so the precondition
+    # this sweep's safety rests on ("the new copies are already in place") is
+    # not something that mode establishes.
+    remove_stale_user_bins
     "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
     echo "edge system install complete."
     # The managed service runs the daemon; pairing is a separate operator step:
