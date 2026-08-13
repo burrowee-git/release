@@ -584,7 +584,20 @@ echo "      for a managed system service re-run with sudo."
 # config + installed-version marker written by the migration step above.
 if [ -d "$COMP_HOME/identity" ] || [ -f "$COMP_HOME/console.json" ]; then
     echo "$COMP already set up ($COMP_HOME) — skipping setup."
-elif { exec 3<>/dev/tty; } 2>/dev/null; then
+elif ( exec 3<>/dev/tty ) 2>/dev/null; then
+    # PROBED IN A SUBSHELL, then opened for real. dash treats a FAILED `exec`
+    # redirection as fatal and exits the script — status 2, and the `2>/dev/null`
+    # swallows the only message — even inside a guarded `{ …; }` used as an `if`
+    # condition, because a brace group is not a subshell and so does not contain
+    # the exit. /bin/sh IS dash on every Debian-family host, and this block ends
+    # the NON-ROOT path, so on exactly the hosts that matter the shape it
+    # replaces turned every unprivileged non-interactive install (CI, a console
+    # push, `curl … | sh` under a supervisor) into a fully installed edge
+    # reporting failure. The root path returns above and never reaches here,
+    # which is why the suite saw none of it until a non-root case was added.
+    # A subshell contains the fatal exit, so the parent survives to answer the
+    # question and then open fd 3 for real.
+    exec 3<>/dev/tty
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
     printf 'blob> ' >&3 2>/dev/null || true
     blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''

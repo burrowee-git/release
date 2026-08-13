@@ -6,10 +6,8 @@ package install_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -40,26 +38,13 @@ func seedCliBins(t *testing.T, dir string) {
 	}
 }
 
-// runInstall runs install.sh from cwd=staging in a sandbox HOME. Setsid detaches
-// the child from any controlling terminal so the fresh-install first-run prompt
-// (`exec 3<>/dev/tty`) fails fast into its non-interactive branch instead of
-// blocking on a tty read. Returns combined output.
+// runInstall runs install.sh from cwd=staging in a sandbox HOME under the host's
+// /bin/sh. Returns combined output. See runInstallUnder (tty_probe_test.go) for
+// the shell seam and for why the child is detached from the controlling
+// terminal.
 func runInstall(t *testing.T, home, staging string, extraEnv ...string) string {
 	t.Helper()
-	cmd := exec.Command("sh", installShPath(t))
-	cmd.Dir = staging
-	cmd.Env = append([]string{
-		"HOME=" + home,
-		"PREFIX=" + filepath.Join(home, ".local"),
-		"PATH=/usr/bin:/bin",
-	}, extraEnv...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("install.sh output:\n%s", out)
-		t.Fatalf("install.sh failed: %v", err)
-	}
-	return string(out)
+	return runInstallUnder(t, "sh", home, staging, extraEnv...)
 }
 
 // TestCliUnitsOnlyIsNoop verifies that BURROWEE_UNITS_ONLY=1 is a successful
