@@ -45,15 +45,13 @@ func sysConfigDir(home string) string {
 }
 func sysDataDir(home string) string { return filepath.Join(home, "system-var", "burrowee", "gateway") }
 
-// binDir is $BIN_DIR as this suite's DEFAULT sandbox (installShEnv's
+// binDir is $BIN_DIR as this suite's sandbox (installShEnv's
 // "BURROWEE_BIN_DIR="+binDir(home)) resolves it — the ONE location,
-// root-execed or not, since the libexec-to-$BIN_DIR collapse. It stands in
-// for the real, root-owned production default (/usr/local/bin), redirected so
-// this suite never touches that real directory — NOT the per-user PREFIX
-// override path, which is a different, genuinely different directory now
-// that install.sh gates root-exec-surface work on whether PREFIX was set at
-// all (see devBinDir, used by the small number of tests that specifically
-// exercise that flow).
+// root-execed or not, since the libexec-to-$BIN_DIR collapse, and the ONLY one
+// since the prefix collapse. It stands in for the real, root-owned production
+// destination (/usr/local/bin), redirected so this suite never touches that
+// real directory. There is no second, per-user directory an install can choose
+// any more: a set PREFIX is refused (bin_dir_default_test.go).
 //
 // The suite can prove PLACEMENT and unit CONTENT here; it cannot prove
 // OWNERSHIP, because the harness's `sudo` is a pass-through stub and every file
@@ -72,13 +70,12 @@ func binDir(home string) string {
 	return filepath.Join(home, "system", "bin")
 }
 
-// devBinDir is $BIN_DIR under an EXPLICIT PREFIX override — the per-user
-// developer flow, which since C1's fix is a genuinely different code path
-// from binDir's DEFAULT simulation above: PREFIX set at all means no chown,
-// no units, no migration, regardless of root/sudo availability. Tests that
-// need this flow specifically set "PREFIX="+home+"/.local" themselves (which
-// overrides installShEnv's BURROWEE_BIN_DIR — PREFIX always wins in the
-// script) and assert against this path.
+// devBinDir is the HISTORICAL per-user bin dir ($HOME/.local/bin) — where
+// pre-collapse installs put everything, and so where a host arriving at a
+// current installer still has its old binaries and its old unit's ExecStart
+// pointing. No install writes here any more; it is a fixture location for the
+// convergence and root_bin_source-fallback tests, and for asserting that the
+// refusal of an explicit PREFIX places nothing.
 func devBinDir(home string) string {
 	return filepath.Join(home, ".local", "bin")
 }
@@ -186,20 +183,18 @@ func writeSudoStub(t *testing.T, dir string) {
 }
 
 // installShEnv is the base environment for running install.sh in a sandbox:
-// HOME/PATH plus the system-unit dir seams, the DEFAULT $BIN_DIR redirect,
-// and the stub call log.
+// HOME/PATH plus the system-unit dir seams, the $BIN_DIR redirect, and the
+// stub call log.
 //
-// BURROWEE_BIN_DIR, not PREFIX: this suite's default posture is the DEFAULT,
-// root-owned install path (units, migration, root-secure verification —
-// what most of this suite exercises), redirected away from the real
-// /usr/local/bin. Setting PREFIX here instead would make every test that
-// does not override it look like an explicit per-user PREFIX flow, which
-// since C1's fix gets no units and no migration at all — that was exactly
-// the defect this fixture shape used to hide (see bin_dir_default_test.go's
-// and prefix_override_test.go's headers). Tests exercising the developer
-// PREFIX flow specifically pass "PREFIX="+home+"/.local" as extraEnv, which
-// overrides BURROWEE_BIN_DIR entirely — install.sh's own PREFIX-always-wins
-// rule, not a Go-side precedence trick.
+// BURROWEE_BIN_DIR, and NEVER PREFIX: install.sh refuses outright when PREFIX
+// is set, so a fixture that set it would not be exercising a different install
+// flow — it would be exercising the refusal, in every test at once. The redirect
+// is the seam that keeps the real /usr/local/bin untouched without changing what
+// the install means (bin_dir_default_test.go pins both halves of that).
+//
+// Note the environment handed to install.sh is built from this list ALONE, not
+// inherited: a PREFIX exported in the developer's own shell would otherwise
+// reach the script and turn this whole package red.
 func installShEnv(home, stubDir string, extraEnv ...string) []string {
 	env := []string{
 		"HOME=" + home,

@@ -8,16 +8,14 @@
 // naming anything else.
 //
 // SINCE THE LIBEXEC-TO-$BIN_DIR COLLAPSE (2026-08-08) this is one directory,
-// not two: $BIN_DIR is now root-owned by DEFAULT (PREFIX unset), and an
-// explicit PREFIX still gets a per-user, unelevated one — there is no longer a
-// separate privileged tree these tests stage independently of PREFIX. Every
-// test in this file therefore runs under installShEnv's fixed sandbox PREFIX
-// (home+"/.local") and asserts against binDir(home), exactly like the
-// per-user placement tests elsewhere in this suite — the root-secure ANCESTOR
-// WALK, not a second directory, is what makes that safe in production, and
-// this file proves the walk's placement/refusal behavior, not its ownership
-// verdict (bin_dir_elevation_test.go and core/binary's IsRootSecure suite own
-// that).
+// not two, and since the prefix collapse (2026-08-13) there is one flow into
+// it, not two: $BIN_DIR is root-owned, always, and a set PREFIX is refused
+// outright. Every test in this file therefore runs under installShEnv's
+// BURROWEE_BIN_DIR redirect and asserts against binDir(home) — the root-secure
+// ANCESTOR WALK, not a second directory, is what makes that safe in
+// production, and this file proves the walk's placement/refusal behavior, not
+// its ownership verdict (bin_dir_elevation_test.go and core/binary's
+// IsRootSecure suite own that).
 package install_test
 
 import (
@@ -70,25 +68,25 @@ func TestInstallShPlacesTheRootExecedBinariesInBinDir(t *testing.T) {
 	}
 }
 
-// TestInstallShKeepsThePerUserBinDirComplete is the unprivileged-flow guard.
-// Every binary lands in $BIN_DIR, because it is what PATH resolves, what a
-// developer runs, and the only thing a host that cannot reach root ends up
-// with — root-owned by DEFAULT now, but an explicit PREFIX still gets a
-// per-user one in full. PREFIX is passed explicitly, unlike the DEFAULT-flow
-// tests elsewhere in this file: this is the one test whose whole subject is
-// that flow, so it cannot rely on installShEnv's BURROWEE_BIN_DIR redirect
-// (which simulates the OTHER, root-owned path).
-func TestInstallShKeepsThePerUserBinDirComplete(t *testing.T) {
+// TestInstallShKeepsTheBinDirComplete: every binary lands in $BIN_DIR — it is
+// what PATH resolves, what an operator runs, and what a root consumer names
+// absolutely. All six or none; a partial set is what the unit-writing steps
+// immediately after placement would mistake for a complete install.
+//
+// This used to be the per-user-flow guard, run with an explicit PREFIX. That
+// flow is gone (bin_dir_default_test.go), so the same completeness claim is now
+// made about the one destination there is.
+func TestInstallShKeepsTheBinDirComplete(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	staging := t.TempDir()
 	seedDummyBins(t, staging)
 
-	runInstallShFrom(t, staging, home, stub, "PREFIX="+home+"/.local")
+	runInstallShFrom(t, staging, home, stub)
 
 	for _, name := range allBins {
-		if _, err := os.Stat(filepath.Join(devBinDir(home), name)); err != nil {
-			t.Errorf("%s missing from the per-user bin dir: %v", name, err)
+		if _, err := os.Stat(filepath.Join(binDir(home), name)); err != nil {
+			t.Errorf("%s missing from $BIN_DIR: %v", name, err)
 		}
 	}
 }
@@ -119,9 +117,9 @@ func TestInstallShRefusesToWriteAUnitItCannotBackWithARootOwnedBinary(t *testing
 // TestInstallShConvergesAHostWhoseUnitNamesThePerUserBinDir is the migration.
 //
 // Hosts already on 0.2.0 carry a unit pointing at ~<installer>/.local/bin
-// (this suite's fixed PREFIX also resolves there, so the fixture and today's
-// DEFAULT both land at the same path — the point under test is that a STALE
-// unit gets rewritten, not which literal path it is rewritten to). Refusing
+// (devBinDir here — the historical per-user default, deliberately NOT the
+// directory this run installs into, so the assertion is about a STALE unit
+// being rewritten rather than one that happened to be right). Refusing
 // to write NEW bad units does nothing for such a host, because nothing
 // rewrites a unit until an install runs. This is that install: `burrowee
 // gateway service install` re-runs the kept installer in units-only mode,

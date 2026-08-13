@@ -4,10 +4,10 @@
 # Ships at the ROOT of the verified release zip as `install.sh`. The outer
 # bootstrap verifies the zip (minisign + sha256) and ONLY THEN execs this with
 # cwd = the unzipped dir, so the binaries sit alongside this script. It installs
-# them into PREFIX/bin — DEFAULT /usr/local/bin, root-owned, placement elevated
-# via run_root the same way a root-owned tree always required. Set PREFIX
-# (e.g. $HOME/.local) for the unprivileged developer install, which still
-# installs every binary unelevated. Set BURROWEE_UNINSTALL to remove them
+# them into $BIN_DIR — /usr/local/bin, root-owned, ALWAYS — with the placement
+# elevated via run_root the same way a root-owned tree always required. As of
+# 0.2.0 there is no per-user prefix flow at all: a set PREFIX is REFUSED, loudly
+# (see below), never silently redirected. Set BURROWEE_UNINSTALL to remove them
 # instead. Set BURROWEE_UNITS_ONLY=1 to write+load both service units without
 # touching binaries or running bootstrap. Set BURROWEE_UPDATE=1 to run update
 # mode: per-binary sha256 change detection, transactional swap, and a final
@@ -31,7 +31,7 @@
 # two directories: a per-user $BIN_DIR and a root-owned $LIBEXEC_DIR, kept apart
 # because $BIN_DIR's default was $HOME/.local/bin, and a root unit naming a
 # per-user path is a permanent uid-0 grant to that user (overwrite the binary,
-# wait for a reboot or a pushed update). Now that $BIN_DIR's DEFAULT is itself
+# wait for a reboot or a pushed update). Now that $BIN_DIR is always
 # root-owned, a root-owned $BIN_DIR/burrowee-gateway passes the identical
 # root-secure ancestor walk the separate tree existed to guarantee — the split
 # had no job left, and /usr/local/libexec/burrowee/gateway is retired: a
@@ -51,9 +51,20 @@
 # whoever owns it, even though no burrowee UNIT ever execs it as root. A
 # root-owned $BIN_DIR is what makes that PATH lookup safe to trust.
 #
-# Nothing about the unprivileged developer flow changes: an explicit PREFIX
-# still gets every binary in full, unelevated — it simply gets no units, which
-# was already true.
+# WHY THE PER-USER FLOW IS GONE, not merely de-defaulted. The PREFIX branch did
+# not only put binaries somewhere else: it switched OFF the entire privileged
+# surface — ensure_root_exec_surface, render_units, load_units,
+# migrate_from_legacy and record_installed_version all gated on it — and the
+# outer bootstrap defaulted PREFIX to $HOME/.local on every `curl … | sh`, so
+# that branch was not the exception, it was the only path anyone took.
+# Observed on a production node, 2026-08-13: burrowee sat at
+# /home/ubuntu/.local/bin/burrowee while a consumer's ROOT daemon resolved the
+# absolute /usr/local/bin/burrowee — correctly, since its unit pins
+# PATH=/usr/bin:/bin:/usr/sbin:/sbin and a PATH lookup can reach nothing else.
+# That daemon crash-looped 50 times on "resolve register socket" while
+# `burrowee gateway doctor` reported a perfectly healthy gateway with 109h
+# uptime. A component that installs where its consumers cannot look has not
+# installed, however cleanly it exits.
 #
 # Because a root-scheme unit runs as nobody in particular, it records no owner
 # and the single system slot is free for any installer to replace. Only a
@@ -68,43 +79,34 @@
 # writers fight, booting the daemon out on every refresh.
 set -eu
 
-# DEFAULT root-owned: this is what changed. An explicit PREFIX (the developer
-# flow, e.g. $HOME/.local) still overrides in full and never elevates — see
-# decide_bin_place_elevated below, which decides per run rather than assuming.
+# ONE DESTINATION, decided here and nowhere else: /usr/local/bin, root-owned.
+# There is no branch left to take — every step below that treats $BIN_DIR as the
+# privileged surface (ensure_root_exec_surface, render_units, load_units,
+# migrate_from_legacy, record_installed_version) now runs on EVERY install,
+# because there is no longer an install shape for which it would be wrong.
 #
-# BIN_DIR_IS_DEFAULT — whether $PREFIX was left unset (the DEFAULT, root-owned
-# $BIN_DIR) or given explicitly (the per-user developer flow). This is NOT the
-# same question decide_bin_place_elevated answers below: that one asks "can
-# this process write here", discovered by a real create — the right question
-# for PLACING binaries, where a developer's own writable $HOME/.local/bin must
-# never be treated as needing root just because $BIN_DIR happens to be
-# writable. This one asks "is $BIN_DIR the SYSTEM location at all" — the right
-# question for whether it is ever appropriate to CHOWN it, treat it as the
-# root-execed surface a unit may name, or migrate legacy state into it.
-# Getting this backwards is exactly the defect it exists to prevent: a
-# developer with sudo AND an explicit PREFIX=$HOME/.local would otherwise have
-# that directory — the one holding their own other tools — chowned to root,
-# because a real create there succeeds (it is writable) and nothing else asked
-# whether it was SUPPOSED to be treated as the privileged surface at all.
-# ensure_root_exec_surface, render_units, load_units, migrate_from_legacy and
-# record_installed_version all gate on this before touching $BIN_DIR as
-# anything other than a plain per-user PATH directory.
+# A SET PREFIX IS REFUSED, not honoured and not silently overridden. Refusing is
+# the point: an operator who typed PREFIX=$HOME/.local and got a root-owned
+# /usr/local/bin would be handed exactly the class of surprise this collapse
+# exists to remove, one direction reversed. They get told instead, and the
+# process that set it (a shell profile, an outer bootstrap, a wrapper) is the
+# thing that has to change.
 #
-# PREFIX ALWAYS WINS when set — it is the one real knob a caller has, and an
-# explicit PREFIX is unconditionally the per-user flow, full stop.
-# BURROWEE_BIN_DIR is a SEPARATE, test-only seam that only ever applies when
-# PREFIX is unset: it redirects the DEFAULT itself (which a test suite must
-# never let resolve to the real /usr/local) without changing what "default"
-# MEANS — BIN_DIR_IS_DEFAULT is 1 either way. A test wanting the per-user
-# flow instead sets PREFIX, which overrides BURROWEE_BIN_DIR entirely, exactly
-# as it would a real caller's.
+# BURROWEE_BIN_DIR is the surviving TEST-ONLY seam, and the only one: it
+# redirects this destination so the suite never writes into the real
+# /usr/local/bin. Never set it on a real host — nothing about the install's
+# meaning changes when it is set, which is exactly why it is safe for tests and
+# useless as a user-facing knob.
 if [ -n "${PREFIX:-}" ]; then
-    BIN_DIR="$PREFIX/bin"
-    BIN_DIR_IS_DEFAULT=0
-else
-    BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
-    BIN_DIR_IS_DEFAULT=1
+    echo "install: PREFIX is set to '$PREFIX', but as of gateway 0.2.0 this installer" >&2
+    echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
+    echo "install: flow is gone — the gateway's service units run as root and name the" >&2
+    echo "install: binaries absolutely, and other components resolve /usr/local/bin/burrowee" >&2
+    echo "install: by absolute path, so a per-user copy is invisible to both." >&2
+    echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
+    exit 1
 fi
+BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
@@ -524,12 +526,6 @@ unit_owner() {
 # DIFFERENT user, require consent before replacing it: the force env, or a
 # /dev/tty prompt defaulting to abort. Non-interactive without the env aborts.
 check_service_override() {
-    # An explicit PREFIX writes no units (render_units's own gate), so there is
-    # nothing here to take over and no reason to ask — this check is entirely
-    # about whether it is safe to write SYSTEM units, and a per-user developer
-    # install must never abort (or interactively prompt) over some OTHER
-    # user's unrelated system service.
-    [ "$BIN_DIR_IS_DEFAULT" = 1 ] || return 0
     _owner="$(unit_owner "$(core_unit_path)")"
     if [ -z "$_owner" ] || [ "$_owner" = "$SERVICE_USER" ]; then return 0; fi
     if [ -n "${BURROWEE_FORCE_SERVICE_OVERRIDE:-}" ]; then
@@ -729,21 +725,18 @@ migration_sudo() {
 # version to decide whether an install is already current, and that home is now
 # $BIN_DIR. One writer for both keeps them from disagreeing.
 #
-# Guarded on $BIN_DIR_IS_DEFAULT FIRST, and $SYS_CONFIG_DIR second — both must
-# hold. $BIN_DIR always exists on any install, root-scheme or not, so
-# $SYS_CONFIG_DIR alone is not enough: a developer running with an explicit
-# PREFIX on a host that ALSO happens to carry a real system config root (this
-# machine, say) would otherwise have this `run_root tee` into their own
-# $BIN_DIR — root-owning a file inside a directory this script has otherwise
-# gone out of its way not to touch. $BIN_DIR_IS_DEFAULT is what actually
-# answers "is $BIN_DIR the privileged copy's home", not the host's unrelated
-# root-scheme status.
+# The $BIN_DIR copy is guarded on $SYS_CONFIG_DIR, which since the prefix flow
+# was removed is the whole question: $BIN_DIR is the system location on every
+# install, so what is left to ask is whether this host has actually been
+# converged to the root scheme yet. A host with no system config root has no
+# root-scheme updater reading that copy, and writing it would root-own a file in
+# a tree nothing on this host consults.
 record_installed_version() {
     _ver="${1##*/}"
     if [ -z "$_ver" ]; then return 0; fi
     mkdir -p "$GW_HOME"
     printf '%s\n' "$_ver" > "$GW_HOME/.installed-version"
-    if [ "$BIN_DIR_IS_DEFAULT" = 1 ] && [ -d "$SYS_CONFIG_DIR" ]; then
+    if [ -d "$SYS_CONFIG_DIR" ]; then
         printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
     fi
 }
@@ -784,21 +777,12 @@ record_installed_version() {
 #
 # Not found is not an error: BURROWEE_UNITS_ONLY can run from $GW_HOME's
 # self-copy, and an install predating the migrations/ dir has none beside it.
-#
-# Also a no-op — deliberately, not "unconditionally" after all — when
-# $BIN_DIR_IS_DEFAULT is false: the ladder migrates PRE-0.2.0 state into the
-# SYSTEM roots, which is a root-scheme concern end to end. An explicit PREFIX
-# is the per-user developer flow and creates no system roots; running the
-# ladder there would mean the same wrong thing render_units's own gate exists
-# to stop — treating a developer's own PREFIX override as the privileged
-# surface.
 # ---------------------------------------------------------------------------
 MIGRATED=0
 MIGRATE_UNRECORDED=0
 migrate_from_legacy() {
     _runner="$(migration_runner)"
     if [ -z "$_runner" ]; then return 0; fi
-    if [ "$BIN_DIR_IS_DEFAULT" != 1 ]; then return 0; fi
     # The root-owned copies go in BEFORE the runner, not with the units after it.
     # The runner shells to burrowee-gateway-cli AS ROOT (v1_to_v2.sh's `elevate
     # "$CLI" migrate`), and on the console-push path nobody is watching — so a
@@ -812,9 +796,10 @@ migrate_from_legacy() {
         exit 1
     fi
     set +e
-    # PREFIX is derived from $BIN_DIR (its parent), not reconstructed from a
-    # stale fallback: this call is only reached when BIN_DIR_IS_DEFAULT=1, so
-    # $PREFIX itself is unset here, and a hardcoded "${PREFIX:-$HOME/.local}"
+    # The runner's own PREFIX is derived from $BIN_DIR (its parent), not
+    # reconstructed from a stale fallback. $PREFIX is always unset in THIS
+    # script (a set one is refused at the top), and a hardcoded
+    # "${PREFIX:-$HOME/.local}"
     # would hand the runner the OLD pre-collapse default regardless of what
     # $BIN_DIR actually resolved to (the real /usr/local, or a test's
     # BURROWEE_BIN_DIR redirect) — the runner would then compute a DIFFERENT
@@ -890,18 +875,12 @@ keep_installer_copy() {
 # install paths abort under `set -e`, update mode prints its "run service
 # install" note — so the refusal costs a host its units, never its identity.
 #
-# GATED ON $BIN_DIR_IS_DEFAULT, first thing: an explicit PREFIX is the
-# per-user developer flow, which "has to keep working" means installs fully
-# and UNELEVATED — it must never be chowned to root or have a unit written
-# naming it. This is a quiet, successful no-op, not a refusal: the developer
-# flow was always meant to end with binaries in $BIN_DIR and no units, and
-# still does.
+# UNGATED since the per-user prefix flow was removed. It used to no-op whenever
+# PREFIX was set — which, because the outer bootstrap always set it, meant a
+# `curl … | sh` install silently wrote no units at all. There is now exactly one
+# install shape and it always gets its units, or it fails saying why.
 # ---------------------------------------------------------------------------
 render_units() {
-    if [ "$BIN_DIR_IS_DEFAULT" != 1 ]; then
-        echo "note: PREFIX is set — \$BIN_DIR ($BIN_DIR) is a per-user install, not the root-owned default; no service units written." >&2
-        return 0
-    fi
     ensure_root_exec_surface || return 1
     case "$(uname -s)" in
     Darwin)
@@ -1032,13 +1011,11 @@ EOF
 #                                  add a load_units call to that branch.
 #   BURROWEE_UNINSTALL             tears units down on its own terms.
 #
-# GATED ON $BIN_DIR_IS_DEFAULT, same as render_units: an explicit PREFIX wrote
-# no units, so there is nothing here to load, and every rung below elevates —
-# a per-user developer install must never be asked for sudo just to reload a
-# unit that render_units correctly declined to write.
+# UNGATED, same as render_units and for the same reason: the units it loads are
+# now written on every install, so declining to load them would leave a host
+# with correct unit files and an old daemon still running.
 # ---------------------------------------------------------------------------
 load_units() {
-    [ "$BIN_DIR_IS_DEFAULT" = 1 ] || return 0
     case "$(uname -s)" in
     Darwin)
         if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
@@ -1141,10 +1118,10 @@ sha256_of() {
 # ($HOME/.local/bin); it is root-owned under the new one (/usr/local/bin), so
 # placing straight onto the final names with a bare `install` would die on the
 # first binary for anyone who is not already root. The elevation is decided
-# ONCE per mode, by a real create rather than assumed, so an explicit PREFIX
-# into a writable tree never pays for a sudo call it does not need — and every
-# write of one placement goes through the SAME decision, so a set can never end
-# up half-elevated.
+# ONCE per mode, by a real create rather than assumed — a run already at uid 0,
+# or a host whose /usr/local is writable by the invoking user, never pays for a
+# sudo call it does not need — and every write of one placement goes through the
+# SAME decision, so a set can never end up half-elevated.
 # ---------------------------------------------------------------------------
 BIN_PLACE_ELEVATED=0
 
@@ -1217,8 +1194,8 @@ place_all_bins() {
     if ! bin_place_run mkdir -p "$BIN_STAGE_DIR"; then
         BIN_STAGE_DIR=""
         echo "install: cannot write $BIN_DIR — no binary was placed." >&2
-        echo "install: this install's PREFIX is root-owned; re-run as root, grant this user" >&2
-        echo "install: sudo, or set PREFIX to an unprivileged location for a developer install." >&2
+        echo "install: the gateway installs there and nowhere else; re-run as root, or grant" >&2
+        echo "install: this user sudo." >&2
         exit 1
     fi
     for b in $BINS; do
@@ -1317,7 +1294,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     decide_bin_place_elevated
     if [ "$BIN_PLACE_ELEVATED" = 1 ] && ! bin_place_run mkdir -p "$BIN_DIR"; then
         echo "update: cannot write $BIN_DIR — no binary was replaced." >&2
-        echo "update: this install's PREFIX is root-owned; re-run as root, or grant this" >&2
+        echo "update: $BIN_DIR is root-owned; re-run as root, or grant this" >&2
         echo "update: user sudo." >&2
         exit 1
     fi
@@ -1479,9 +1456,10 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
 fi
 
 if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
-    # $BIN_DIR may be root-owned (the default) or per-user (an explicit
-    # PREFIX) — decide elevation once, the same way every other placement in
-    # this script does, rather than assuming either.
+    # $BIN_DIR is root-owned on a converged host, but an uninstall also runs on
+    # hosts whose /usr/local this user happens to own — decide elevation once,
+    # the same way every other placement in this script does, rather than
+    # assuming either.
     _uninstall_failed=""
     if [ -d "$BIN_DIR" ]; then
         decide_bin_place_elevated
@@ -1624,7 +1602,17 @@ gateway_already_set_up() {
 
 if gateway_already_set_up; then
     echo "$COMP already set up — skipping setup."
-elif { exec 3<>/dev/tty; } 2>/dev/null; then
+elif ( exec 3<>/dev/tty ) 2>/dev/null; then
+    # PROBED IN A SUBSHELL, then opened for real. dash treats a FAILED `exec`
+    # redirection as fatal and exits the script — status 2, no message the
+    # `2>/dev/null` did not swallow — even inside a guarded `{ …; }` used as an
+    # `if` condition. /bin/sh IS dash on every Debian-family host, and this is
+    # the LAST step of an otherwise complete install, so on exactly the hosts
+    # that matter the shape it replaces turned every non-interactive install
+    # (CI, a console push, `curl … | sh` under a supervisor) into a fully
+    # installed gateway reporting failure. has_tty above already probes this
+    # way, for this reason.
+    exec 3<>/dev/tty
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
     printf 'blob> ' >&3 2>/dev/null || true
     blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''

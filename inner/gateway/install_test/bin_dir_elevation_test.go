@@ -139,25 +139,38 @@ func TestInstallShElevatesPlacementIntoARootOwnedBinDir(t *testing.T) {
 	}
 }
 
-// TestInstallShDoesNotElevateAWritableBinDir: the fix must not put a sudo
-// call on the ordinary developer PREFIX path, where $BIN_DIR is a plain
-// writable directory and nothing needs elevation. The `sudo` on PATH here
-// exits non-zero if it is ever reached, so a placement that elevated
-// blindly fails the run outright.
+// TestInstallShDoesNotElevateAWritableBinDir: decide_bin_place_elevated must
+// ask whether THIS process can write $BIN_DIR, discovered by a real create, and
+// not assume elevation just because the destination is the system one. A host
+// whose /usr/local this user owns (a Homebrew Intel Mac, a container running as
+// its own user) is the ordinary case for that.
+//
+// The `sudo` on PATH here always refuses, which is what makes the assertion
+// able to fail: had placement elevated blindly, place_all_bins would have died
+// on its very first write — the staging mkdir — with "cannot write $BIN_DIR —
+// no binary was placed", and none of the six would exist.
+//
+// The run as a whole still fails, and that is correct rather than incidental:
+// past placement comes the privileged surface (ensure_root_exec_surface), which
+// genuinely cannot be established without root and refuses rather than writing
+// a unit it cannot back. Since the prefix collapse there is no install shape
+// that skips it, so "placed but not unit-installed" is the honest outcome for a
+// host with no elevation at all.
 func TestInstallShDoesNotElevateAWritableBinDir(t *testing.T) {
+	requireUnprivilegedForElevation(t)
 	staging := t.TempDir()
 	seedDummyBins(t, staging)
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	installFailingSudo(t, stub)
 
-	out, err := runStaged(t, installShPath(t), staging, home, stub, "PREFIX="+home+"/.local")
-	if err != nil {
-		t.Fatalf("install.sh failed on a writable PREFIX: %v\n%s", err, out)
+	out, err := runStaged(t, installShPath(t), staging, home, stub)
+	if err == nil {
+		t.Fatalf("install.sh succeeded with no elevation available; the unit surface cannot have been reached:\n%s", out)
 	}
 	for _, b := range allBins {
-		if _, statErr := os.Stat(filepath.Join(devBinDir(home), b)); statErr != nil {
-			t.Errorf("%s missing from the per-user bin dir: %v", b, statErr)
+		if _, statErr := os.Stat(filepath.Join(binDir(home), b)); statErr != nil {
+			t.Errorf("%s missing from a WRITABLE $BIN_DIR: %v — placement elevated when it did not need to\n%s", b, statErr, out)
 		}
 	}
 }
