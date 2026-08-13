@@ -1,8 +1,10 @@
 // Package install_test is a Go test harness that runs the edge install.sh in a
-// sandbox with stubbed id/systemctl/launchctl. It exercises the ROOT (system)
-// branch — the topology the release bootstrap actually deploys — without being
-// root, by stubbing `id -u` to 0 and redirecting the system install paths
-// (SYS_BIN_DIR / SYSTEMD_UNIT_DIR) into the sandbox.
+// sandbox with stubbed id/systemctl/launchctl. Since the collapse there is one
+// install shape — root, /usr/local/bin, managed system service — and the suite
+// exercises it without being root by stubbing `id -u` to 0 and redirecting the
+// system paths (SYS_BIN_DIR / SYSTEMD_UNIT_DIR / LAUNCHD_PLIST_DIR / ROOT_HOME)
+// into the sandbox. Nothing here may resolve to a real system path: the machines
+// this runs on carry live burrowee installs.
 package install_test
 
 import (

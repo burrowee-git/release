@@ -2,6 +2,11 @@
 # Tests the edge inner installer's version-gated config migration in isolation.
 # Sources install.sh with the source-only seam, points BIN_DIR at a stub
 # burrowee-edge-cli, and drives migrate_config across version scenarios.
+#
+# The destination is redirected with SYS_BIN_DIR, the installer's test seam —
+# NOT with PREFIX, which the collapsed installer refuses outright (its one
+# destination is the root-owned /usr/local/bin). Sourcing places nothing and
+# needs no privilege: the root requirement sits below the source-only seam.
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -11,8 +16,8 @@ INSTALLER="$ROOT/inner/edge/install.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 export HOME="$WORK/home"
-export PREFIX="$WORK/local"          # install.sh sets BIN_DIR="$PREFIX/bin"
-BIN="$PREFIX/bin"
+export SYS_BIN_DIR="$WORK/local/bin"  # install.sh sets BIN_DIR="$SYS_BIN_DIR"
+BIN="$SYS_BIN_DIR"
 mkdir -p "$BIN" "$HOME"
 CFG="$HOME/.burrowee/edge/config"
 

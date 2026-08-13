@@ -21,8 +21,8 @@ Four components are published here:
 curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/install.sh | sh
 # Gateway
 curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh | sh
-# Edge relay
-curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sh
+# Edge relay  (root-only: manages a system service)
+curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sudo sh
 # Agent
 curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh
 ```
@@ -31,11 +31,13 @@ Each installer detects your OS/arch, resolves the latest published release for
 that component, downloads the zip + `SHA256SUMS.txt` + `SHA256SUMS.txt.minisig`,
 **verifies the minisign signature against the baked public key**, checks the
 SHA-256, then unzips and runs the inner installer. Binaries land in
-`$HOME/.local/bin` (override with `PREFIX`) — **except the gateway**, which
-since 0.2.0 installs to the root-owned `/usr/local/bin` and nowhere else: its
-service units run as root and name the binaries absolutely, and other
+`$HOME/.local/bin` (override with `PREFIX`) — **except the gateway and the
+edge**, which install to the root-owned `/usr/local/bin` and nowhere else:
+their service units run as root and name the binaries absolutely, and other
 components resolve `/usr/local/bin/burrowee` by absolute path. A `PREFIX` set
-for the gateway is refused rather than honoured or silently overridden.
+for either is refused rather than honoured or silently overridden. The edge
+additionally requires root — it manages a system service, so run it with
+`sudo` (as the one-liner above does).
 
 ## Verify by hand
 
