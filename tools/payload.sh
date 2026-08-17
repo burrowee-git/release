@@ -204,6 +204,21 @@ assert_payload_migrations() {
         return 1
     fi
 
+    # install.sh SOURCES migrations/lib_stale_user_bins.sh — it is not merely a
+    # rung's dependency, it is the installer's own sweep, and the gateway's
+    # 0.2.0 ladder rung loads the same file. A zip carrying install.sh without
+    # it installs cleanly and silently stops sweeping the per-user copies that
+    # shadow /usr/local/bin on PATH, which is precisely the defect that made the
+    # sweep a rung in the first place. Named explicitly rather than left to the
+    # ledger check below: the library is deliberately NOT a ledger row, so
+    # nothing else would ever ask for it.
+    if ! printf '%s\n' "${members}" | grep -qxF 'migrations/lib_stale_user_bins.sh'; then
+        echo "✗ gateway payload has no migrations/lib_stale_user_bins.sh: ${zip_path}" >&2
+        echo "  install.sh sources it for its stale per-user binary sweep, and the 0.2.0" >&2
+        echo "  ladder rung sources the same file. Without it both stop sweeping, quietly." >&2
+        return 1
+    fi
+
     local runner="${src}/migrations/run.sh"
     if [ ! -f "${runner}" ]; then
         echo "✗ gateway migration runner missing in source: ${runner}" >&2

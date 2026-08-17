@@ -69,7 +69,9 @@
 # Removing the flow did not remove what it left behind, and the leftovers keep
 # winning: $HOME/.local/bin precedes /usr/local/bin on a normal PATH. So an
 # install now also sweeps the stale per-user copies of its own binaries, by
-# exact name, after the units naming $BIN_DIR are loaded — remove_stale_user_bins.
+# exact name, after the units naming $BIN_DIR are loaded — sweep_stale_user_bins,
+# which loads the sweep out of migrations/lib_stale_user_bins.sh, the one
+# implementation the gateway's 0.2.0 ladder rung uses too.
 #
 # Because a root-scheme unit runs as nobody in particular, it records no owner
 # and the single system slot is free for any installer to replace. Only a
@@ -370,7 +372,7 @@ path_is_root_secure() {
 # install` would find nothing to place at the new default at all — the ladder
 # this script climbs cannot climb past a rung it cannot see.
 #
-# That third source is also the one remove_stale_user_bins later deletes, and
+# That third source is also the one sweep_stale_user_bins later deletes, and
 # the order below is what makes both correct: $BIN_DIR is consulted FIRST, so
 # by the time a sweep has run there is nothing left for the fallback to answer
 # and nothing that needs it to.
@@ -604,183 +606,82 @@ remove_legacy_user_units() {
 # refuses when a unit file on this host still names the old directory.
 # ---------------------------------------------------------------------------
 
-# LEGACY_HOME_PARENTS — where an account's home may live on a host with neither
-# getent nor dscl. Same name and same default as the migration runner's seam
-# (the gateway repo's migrations/run.sh) and the Go side's
-# defaultLegacyScanRoots, so a host that overrides one overrides all of them.
-LEGACY_HOME_PARENTS="${BURROWEE_LEGACY_HOME_PARENTS:-/Users /home}"
+# WHERE THE SWEEP ITSELF LIVES: migrations/lib_stale_user_bins.sh, inside this
+# same bundle, sourced below and sourced by the gateway's 0.2.0 rung
+# (migrations/v2_stale_user_bins.sh) out of the same directory.
+#
+# IT USED TO BE OPEN-CODED HERE, and that is exactly why the sweep never ran on
+# the host that needed it most. install.sh runs only when somebody runs the
+# installer, and THE UPDATER NEVER DOES — it swaps binaries and restarts the
+# daemon. So a host updated in place kept its stale per-user copies forever
+# (admin-kr, 2026-08-17: daemon at v0.2.0.2026.08.17, ~/.local/bin/burrowee-gateway
+# still on the Aug 8 build, and a drift row whose recommended `restart` provably
+# could not clear it). Making it a ladder rung is what reaches those hosts.
+#
+# THE CALL STAYS HERE TOO, and that is deliberate rather than redundant: a
+# FRESH install must not depend on the ladder being coherent, the ladder is a
+# no-op on a fresh host by construction, and the sweep is idempotent — running
+# it twice on one host costs a stat per name.
+#
+# ONE FILE, TWO CALLERS, no second implementation. Every guard in that library
+# fails silently in the safe-looking direction (a sweep pointed at the wrong
+# home finds nothing and reports success; a "provably ours" check that admits
+# too much deletes an operator's own file and reports success too), so a copy
+# that drifted would look exactly like the original right up to the deletion it
+# got wrong.
 
-# home_of_user <name> — that account's home directory, or empty + non-zero.
-# Read in shape from migrations/run.sh's function of the same name (gateway
-# repo): getent is the portable answer on Linux, dscl on macOS, and the
-# parent-directory guess is the last resort for a slim container image.
-home_of_user() {
-    _hu=""
-    if command -v getent >/dev/null 2>&1; then
-        _hu="$(getent passwd "$1" 2>/dev/null | cut -d: -f6)"
+# stale_sweep_lib — the library shipped beside this installer, or empty when
+# this bundle carries no migrations/ at all (a $GW_HOME self-copy from an
+# install that predates the directory). Same shape and same tolerance as
+# migration_runner: a bundle with no migrations/ is an OLD bundle, not a broken
+# one, and it stays silent — while a bundle that HAS migrations/ and is missing
+# this file is a mis-assembled release, which this project has shipped once and
+# must never ship quietly again.
+STALE_SWEEP_LOADED=0
+stale_sweep_lib() {
+    _ssl_dir="$(dirname "$0")/migrations"
+    [ -d "$_ssl_dir" ] || return 0
+    if [ -f "$_ssl_dir/lib_stale_user_bins.sh" ]; then
+        echo "$_ssl_dir/lib_stale_user_bins.sh"
+        return 0
     fi
-    if [ -z "$_hu" ] && command -v dscl >/dev/null 2>&1; then
-        _hu="$(dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
-    fi
-    if [ -z "$_hu" ]; then
-        for _hu_p in $LEGACY_HOME_PARENTS; do
-            if [ -d "$_hu_p/$1" ]; then _hu="$_hu_p/$1"; break; fi
-        done
-    fi
-    [ -n "$_hu" ] || return 1
-    echo "$_hu"
+    echo "note: $_ssl_dir carries no lib_stale_user_bins.sh — THIS RELEASE IS INCOMPLETE." >&2
+    echo "note: the pre-0.2.0 per-user copies of these binaries are NOT being swept, and" >&2
+    echo "note: they precede $BIN_DIR on a normal PATH. Remove them by hand, or re-run a" >&2
+    echo "note: complete release." >&2
+    return 0
 }
 
-# operator_home — the home of the account whose per-user tree the pre-0.2.0
-# install actually wrote to, which is NOT $HOME on the path that matters.
+# sweep_stale_user_bins — load the library and run its sweep. Named differently
+# from the library's own remove_stale_user_bins on purpose: sourcing a file from
+# inside a function that shared its name would leave two definitions of one name
+# in one shell, and which one a later call reached would depend on whether the
+# source had happened yet.
 #
-# The documented flow is `curl … | sudo sh`, and under sudo $HOME is root's
-# (/root, or /var/root on macOS). A sweep aimed at $HOME/.local/bin would
-# therefore look in a tree no pre-0.2.0 install ever wrote to, find nothing,
-# report success, and leave every shadowing copy in place — a check whose scope
-# is narrower than its claim, passing for the one reason that makes it useless.
-# $SUDO_USER is who invoked sudo; it is unset for a genuine root login, where
-# $HOME is already the right answer.
-operator_home() {
-    case "${SUDO_USER:-}" in
-    '' | root) ;;
-    *)
-        if _oh="$(home_of_user "$SUDO_USER")" && [ -n "$_oh" ]; then
-            echo "$_oh"
-            return 0
+# Sourcing happens HERE rather than at the top of the file so a bundle without
+# the library still installs: the sweep is a cleanup, not a precondition.
+sweep_stale_user_bins() {
+    _ssub_lib="$(stale_sweep_lib)"
+    [ -n "$_ssub_lib" ] || return 0
+    if [ "$STALE_SWEEP_LOADED" != 1 ]; then
+        # shellcheck source=/dev/null
+        . "$_ssub_lib"
+        STALE_SWEEP_LOADED=1
+        # THE TWO LISTS MUST AGREE. $BINS is what this installer PLACES; the
+        # library's $STALE_USER_BINS is what the sweep removes, and it is the
+        # one the ladder rung uses too. A name added to one and not the other is
+        # a binary that is installed and never swept — a shadowing copy left on
+        # PATH, which is this whole defect — or one swept and never installed.
+        # Neither is visible without saying so out loud, because the sweep's
+        # normal output on a converged host is nothing at all.
+        if [ "$BINS" != "$STALE_USER_BINS" ]; then
+            echo "note: this installer places [$BINS]" >&2
+            echo "note: but $_ssub_lib sweeps [$STALE_USER_BINS]." >&2
+            echo "note: the two lists disagree, so some name is installed and never swept" >&2
+            echo "note: (it keeps shadowing $BIN_DIR on PATH) or swept and never installed." >&2
         fi
-        echo "note: \$SUDO_USER='$SUDO_USER' has no resolvable home — the stale per-user" >&2
-        echo "note: binary sweep falls back to \$HOME." >&2
-        ;;
-    esac
-    echo "${HOME:-}"
-}
-
-# unit_naming_dir <dir> <operator-home> — the first service unit file on this
-# host that still names <dir>, or empty + non-zero when none does.
-#
-# It scans the unit FILES rather than asking the supervisor, and treats a file
-# on disk as "possibly loaded". That is deliberately the conservative
-# direction: the two outcomes are "skip a cleanup" and "stop a running
-# daemon", and only one of them is recoverable by running the installer again.
-# The system dirs cover another component's units too (a co-installed edge or
-# relay still pointing at the per-user tree), which is the case this installer's
-# own re-render cannot speak for.
-unit_naming_dir() {
-    for _und_d in "$LAUNCHD_DIR" "$SYSTEMD_DIR" \
-        "$2/Library/LaunchAgents" "$2/.config/systemd/user"; do
-        [ -d "$_und_d" ] || continue
-        for _und_f in "$_und_d"/*; do
-            [ -f "$_und_f" ] || continue
-            if grep -qF "$1/" "$_und_f" 2>/dev/null; then
-                echo "$_und_f"
-                return 0
-            fi
-        done
-    done
-    return 1
-}
-
-# is_burrowee_binary <file> — whether <file> is one of OURS, decided by reading
-# it and never by running it.
-#
-# Every burrowee binary is a Go binary built from a github.com/burrowee-git/*
-# module, and the toolchain stamps that module path into the build-info blob of
-# the executable (the same bytes `go version -m` reads back). It survives
-# -trimpath and -ldflags "-s -w", so a release build carries it exactly as a
-# local one does.
-#
-# NOT `"$file" --version`. This installer runs elevated, and the directory being
-# swept is writable by the very user whose files are in question — executing one
-# of them as root to ask what it is would hand uid 0 to anyone who can drop a
-# file there, which is the precise escalation path_is_root_secure exists to
-# refuse. Reading a file grants it nothing.
-#
-# The claim this supports is narrow and that is the point: combined with an
-# EXACT name from $BINS (never a glob) and a regular-file test, a file that also
-# carries our module path is ours or vendors us. An operator's own script that
-# happens to share the name does not carry it, and is left alone.
-is_burrowee_binary() {
-    LC_ALL=C grep -qF 'github.com/burrowee-git/' "$1" 2>/dev/null
-}
-
-# stale_dir_has_other_burrowee_bin <dir> — whether any burrowee-* binary of
-# OURS remains in <dir> after this component's own names have been swept.
-#
-# The glob is a DETECTION over what is left, never a removal target: nothing is
-# ever deleted by pattern here, only by exact name out of $BINS. And it asks
-# is_burrowee_binary about each candidate for the same reason the removal does
-# — an operator's own `burrowee-notes` script must not be evidence that a
-# burrowee component is installed, or it would pin the shadowing dispatcher in
-# place forever.
-stale_dir_has_other_burrowee_bin() {
-    for _sdo_f in "$1"/burrowee-*; do
-        [ -f "$_sdo_f" ] || continue
-        if is_burrowee_binary "$_sdo_f"; then return 0; fi
-    done
-    return 1
-}
-
-# remove_one_stale_bin <path> — remove ONE stale per-user copy, and only when it
-# is provably ours. Absent is success, not a warning: this runs on every install,
-# and a host that never had a per-user layout must say nothing at all.
-remove_one_stale_bin() {
-    _ros_p="$1"
-    if [ -h "$_ros_p" ]; then
-        echo "note: $_ros_p is a symlink, not a binary this installer placed — left in place." >&2
-        return 0
     fi
-    [ -e "$_ros_p" ] || return 0
-    if [ ! -f "$_ros_p" ]; then
-        echo "note: $_ros_p is not a regular file — left in place." >&2
-        return 0
-    fi
-    if ! is_burrowee_binary "$_ros_p"; then
-        echo "note: $_ros_p carries no burrowee build stamp — it is not ours, left in place." >&2
-        return 0
-    fi
-    if rm -f "$_ros_p"; then
-        echo "removed stale per-user binary: $_ros_p"
-    else
-        echo "note: could not remove $_ros_p — it shadows $BIN_DIR on PATH; remove it by hand." >&2
-    fi
-}
-
-# remove_stale_user_bins — sweep the pre-0.2.0 per-user copies of THIS
-# component's binaries, by exact name, after everything above has converged.
-remove_stale_user_bins() {
-    _rsb_home="$(operator_home)"
-    [ -n "$_rsb_home" ] || return 0
-    _rsb_dir="$_rsb_home/.local/bin"
-    [ -d "$_rsb_dir" ] || return 0
-    # The one thing this must never do is delete the install it just made. It
-    # cannot happen with the production $BIN_DIR, but BURROWEE_BIN_DIR redirects
-    # it and the sibling components still install per-user, so the guard is
-    # written rather than argued.
-    if [ "$_rsb_dir" = "$BIN_DIR" ]; then return 0; fi
-
-    _rsb_unit=""
-    _rsb_unit="$(unit_naming_dir "$_rsb_dir" "$_rsb_home")" || _rsb_unit=""
-    if [ -n "$_rsb_unit" ]; then
-        echo "note: $_rsb_unit still names $_rsb_dir, so a supervisor may be running a" >&2
-        echo "note: binary from there — the stale per-user copies are left in place." >&2
-        echo "hint: remove them by hand once nothing points at that directory." >&2
-        return 0
-    fi
-
-    for _rsb_b in $BINS; do
-        # The bare `burrowee` dispatcher is SHARED across co-installed
-        # components, and cli STILL installs per-user by design — so it is
-        # handled below, after the names that are unambiguously this
-        # component's, and only when nothing else is left there.
-        case "$_rsb_b" in burrowee) continue ;; esac
-        remove_one_stale_bin "$_rsb_dir/$_rsb_b"
-    done
-    if stale_dir_has_other_burrowee_bin "$_rsb_dir"; then
-        echo "kept $_rsb_dir/burrowee (dispatcher) — another burrowee component is still installed there"
-    else
-        remove_one_stale_bin "$_rsb_dir/burrowee"
-    fi
+    remove_stale_user_bins
 }
 
 # ---------------------------------------------------------------------------
@@ -1454,9 +1355,9 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     render_units
     load_units
     # Only now: the units naming $BIN_DIR are not merely written, they are the
-    # ones the supervisor is running. See remove_stale_user_bins' header for why
+    # ones the supervisor is running. See sweep_stale_user_bins' header for why
     # this cannot move earlier.
-    remove_stale_user_bins
+    sweep_stale_user_bins
     report_unrecorded_migration
     # The anchor, from the fourth and last entry point. Its absence here is a
     # large part of why the ledger is effectively unwritten in the field: the
@@ -1780,8 +1681,8 @@ load_units
 # deliberately never loads them (the updater restarts the kernel out-of-band),
 # so the daemon still running there may still be executing the per-user
 # ExecStart its LOADED unit names — which is exactly the state this sweep must
-# not delete out from under. See remove_stale_user_bins' header.
-remove_stale_user_bins
+# not delete out from under. See sweep_stale_user_bins' header.
+sweep_stale_user_bins
 report_unrecorded_migration
 
 # Record the ladder's version anchor here too. Fresh mode never did, which left

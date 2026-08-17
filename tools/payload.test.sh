@@ -188,7 +188,7 @@ pack() {
     fi
 }
 
-SRC="$(gateway_src zip-gw v1_to_v2.sh)"
+SRC="$(gateway_src zip-gw v1_to_v2.sh lib_stale_user_bins.sh)"
 ASM="${TMP}/zip-asm"; mkdir -p "${ASM}"
 : > "${ASM}/burrowee-gateway"; : > "${ASM}/install.sh"; : > "${ASM}/update.sh"
 stage_gateway_migrations "${SRC}" "${ASM}" >/dev/null
@@ -206,15 +206,29 @@ pack "${TMP}/good.zip" "${ASM}" yes
 # (zip -r also records a bare "migrations/" directory entry; only the files matter)
 check "zip -r keeps the migrations/ path" \
     "$(unzip -Z1 "${TMP}/good.zip" | grep '^migrations/' | grep -v '/$' | sort | paste -sd, -)" \
-    "migrations/run.sh,migrations/v1_to_v2.sh"
+    "migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v1_to_v2.sh"
 if assert_payload_migrations gateway "${TMP}/good.zip" "${SRC}"; then
     ok "gate: accepts a complete payload"
 else bad "gate: rejected a complete payload"; fi
 
+# THE SWEEP LIBRARY IS NOT A LEDGER ROW, so the ledger check below can never ask
+# for it — and install.sh SOURCES it. A zip without it installs cleanly and
+# silently stops removing the per-user copies that shadow /usr/local/bin on
+# PATH, which is the defect that made the sweep a ladder rung in the first
+# place. Its own assertion, or nothing asserts it at all.
+NOLIB_ASM="${TMP}/nolib-asm"; mkdir -p "${NOLIB_ASM}"
+: > "${NOLIB_ASM}/install.sh"
+stage_gateway_migrations "${SRC}" "${NOLIB_ASM}" >/dev/null
+rm "${NOLIB_ASM}/migrations/lib_stale_user_bins.sh"
+pack "${TMP}/nolib.zip" "${NOLIB_ASM}" yes
+if assert_payload_migrations gateway "${TMP}/nolib.zip" "${SRC}" 2>/dev/null; then
+    bad "gate: accepted a payload with no stale-user-bin sweep library"
+else ok "gate: rejects a payload with no stale-user-bin sweep library"; fi
+
 # A ledger row whose script never made it into the zip: the subtler failure, and
 # an unrecoverable one downstream (the runner skips it and the version is
 # recorded anyway).
-LEDGER_SRC="$(gateway_src ledger-gap-gw v1_to_v2.sh)"
+LEDGER_SRC="$(gateway_src ledger-gap-gw v1_to_v2.sh lib_stale_user_bins.sh)"
 LEDGER_ASM="${TMP}/ledger-gap-asm"; mkdir -p "${LEDGER_ASM}"
 : > "${LEDGER_ASM}/install.sh"
 stage_gateway_migrations "${LEDGER_SRC}" "${LEDGER_ASM}" >/dev/null
