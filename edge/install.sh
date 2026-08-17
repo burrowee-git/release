@@ -57,7 +57,7 @@ PREFLIGHT_SHA256="20aff889401bbf192b378941923f58fd934f459b930436a3f225ba199b539e
 # It rides the same first-party static channel, over the same TLS fetch, that
 # delivered $PUBKEY, so it costs no trust the installer did not already require;
 # and no download source gets to choose it.
-MIN_VERSION="v0.2.0.2026.08.13.024ab996"
+MIN_VERSION="v0.2.0.2026.08.17.024ab996"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 
 # resolve_prefix — the install root this bootstrap hands the inner installer.
