@@ -915,8 +915,8 @@ distribute_only() {
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ would: gh release create ${comp}/${stamp} (GitHub Release, public) via ghp"
-        echo "→ would: gen-bootstraps.sh (regenerate ${comp}/install.sh + ${comp}/preflight.sh)"
-        echo "→ would: scp install.sh/preflight.sh/burrowee-release.pub/site/index.html/skills to ${RELEASE_HOST}:${STATIC_DIR}/${comp}/ (self-hosting upload)"
+        echo "→ would: gen-bootstraps.sh (regenerate ${comp}/install.sh + ${comp}/upgrade.sh + ${comp}/preflight.sh)"
+        echo "→ would: scp install.sh/upgrade.sh/preflight.sh/burrowee-release.pub/site/index.html/skills to ${RELEASE_HOST}:${STATIC_DIR}/${comp}/ (self-hosting upload)"
         echo "→ would: marker commit [RELEASED: ${comp}] ${stamp}"
         echo "→ would: register_staged ${comp} ${stamp} (console catalog)"
         echo "→ would: GitHub release retention report (prune-releases.sh, dry-run)"
@@ -975,6 +975,14 @@ distribute_only() {
     # shellcheck disable=SC2029  # ${STATIC_DIR}/${comp} are local, controlled values — expanding client-side into the remote command is intended.
     ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
     scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
+    # upgrade.sh is install.sh's second mode, rendered from the same template by
+    # gen-bootstraps.sh: same pubkey, same preflight pin, same version floor, plus
+    # the forced migration pass. It is served from the same directory and MUST be
+    # uploaded beside install.sh — a rendered artifact nobody publishes is a 404
+    # at a URL we advertise, which is this month's repeated defect in another
+    # shape. cmd/rkit's TestReleasePublishesEveryRenderedArtifact pins all four
+    # sites (scp + git add, here and in the distribute-only path).
+    scp -q "${REPO_ROOT}/${comp}/upgrade.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/upgrade.sh"
     # preflight.sh is a sibling static file the installer fetches before the trust
     # gate (sha256-pinned in install.sh). Ship it alongside install.sh.
     if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
@@ -996,7 +1004,7 @@ distribute_only() {
     done
 
     # (3) marker commit.
-    git add "versions/${comp}" "${comp}/install.sh" "${comp}/preflight.sh"
+    git add "versions/${comp}" "${comp}/install.sh" "${comp}/upgrade.sh" "${comp}/preflight.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
@@ -1730,6 +1738,14 @@ do_release() {
     # shellcheck disable=SC2029  # ${STATIC_DIR}/${comp} are local, controlled values — expanding client-side into the remote command is intended.
     ssh "${RELEASE_HOST}" "mkdir -p '${STATIC_DIR}/${comp}'"
     scp -q "${REPO_ROOT}/${comp}/install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/install.sh"
+    # upgrade.sh is install.sh's second mode, rendered from the same template by
+    # gen-bootstraps.sh: same pubkey, same preflight pin, same version floor, plus
+    # the forced migration pass. It is served from the same directory and MUST be
+    # uploaded beside install.sh — a rendered artifact nobody publishes is a 404
+    # at a URL we advertise, which is this month's repeated defect in another
+    # shape. cmd/rkit's TestReleasePublishesEveryRenderedArtifact pins all four
+    # sites (scp + git add, here and in the distribute-only path).
+    scp -q "${REPO_ROOT}/${comp}/upgrade.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/upgrade.sh"
     # preflight.sh is a sibling static file the installer fetches before the trust
     # gate (sha256-pinned in install.sh). Ship it alongside install.sh.
     if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
@@ -1751,7 +1767,7 @@ do_release() {
     done
 
     # (8) marker commit.
-    git add "versions/${comp}" "${comp}/install.sh" "${comp}/preflight.sh"
+    git add "versions/${comp}" "${comp}/install.sh" "${comp}/upgrade.sh" "${comp}/preflight.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 

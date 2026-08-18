@@ -11,7 +11,7 @@
 # against the now-trusted sums file, and ONLY THEN unzips and execs the inner
 # per-release install.sh. Any failure aborts before anything is installed.
 #
-# TWO MODES, ONE TEMPLATE. install is substituted at render time and decides
+# TWO MODES, ONE TEMPLATE. upgrade is substituted at render time and decides
 # whether this file stops after the inner installer (install.sh) or goes on to
 # run `migrations/upgrade.sh <line>` out of the SAME verified kit (upgrade.sh):
 #
@@ -94,7 +94,7 @@ COMP="gateway"
 # "install" or "upgrade" — see the two-modes note in the header. Baked, never
 # read from the environment: the mode is a property of the URL the operator
 # curl'd, and a runtime override would make one file behave as the other.
-MODE="install"
+MODE="upgrade"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
 PREFLIGHT_SHA256="2d91551afebe0819061120d138d80d365dc438e16ee47a4d952a2c64e638450d"
 # The version floor: the stamp this component was at when THIS installer was
@@ -383,7 +383,7 @@ esac
 
 # ---- guard against an unbaked mode --------------------------------------
 # Fails closed for the same reason the pubkey guard does: an unsubstituted
-# install would fall through every `[ "$MODE" = upgrade ]` test below, so an
+# upgrade would fall through every `[ "$MODE" = upgrade ]` test below, so an
 # upgrade.sh rendered by a broken generator would install and then silently skip
 # the migration half it exists for — the one failure this file must never have.
 case "$MODE" in

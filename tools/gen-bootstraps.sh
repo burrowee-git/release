@@ -1,9 +1,17 @@
 #!/bin/sh
-# gen-bootstraps.sh — generate the five self-contained outer bootstraps
-# (cli/install.sh, gateway/install.sh, edge/install.sh, agent/install.sh,
-# relay/install.sh) from their respective templates, plus the per-component
-# OS-dependency preflight (cli/preflight.sh, gateway/preflight.sh,
-# edge/preflight.sh, agent/preflight.sh).
+# gen-bootstraps.sh — generate the self-contained outer bootstraps from their
+# respective templates, plus the per-component OS-dependency preflight.
+#
+# For each of cli/gateway/edge/agent, THREE files:
+#   <comp>/install.sh    resolve + verify + unzip + run the inner installer
+#   <comp>/upgrade.sh    the same, then migrations/upgrade.sh out of the same kit
+#   <comp>/preflight.sh  the OS-dependency installer both of the above sha256-pin
+# plus relay/install.sh, from the private gated-channel template.
+#
+# install.sh and upgrade.sh are ONE template under a @MODE@ substitution, not
+# two files: the pinned preflight sha256, the baked pubkey, the version floor
+# and the minisign gate are what make it the trust anchor, and a second copy of
+# those is a copy that drifts.
 #
 # cli/gateway/edge/agent use tools/bootstrap.template.sh (public GitHub-release
 # channel) + tools/preflight.template.sh (OS-dep installer). relay uses
@@ -133,17 +141,31 @@ for comp in cli gateway edge agent; do
     pf_sha="$(sha256_of "$pf_out")"
     echo "✓ wrote $pf_out  (sha256 $pf_sha)"
 
-    # (2) install.sh — bake @COMP@, @PUBKEY@, the preflight's @PREFLIGHT_SHA256@,
-    # and the @MIN_VERSION@ version floor. None of these values contains
-    # another's placeholder. tmp-then-mv atomic.
+    # (2) install.sh AND upgrade.sh — the same template under @MODE@, baking
+    # @COMP@, @PUBKEY@, the preflight's @PREFLIGHT_SHA256@ and the
+    # @MIN_VERSION@ version floor identically into both. None of these values
+    # contains another's placeholder. tmp-then-mv atomic.
+    #
+    # BOTH MODES FOR EVERY PUBLIC COMPONENT, not only for those whose release
+    # zip ships a migrations/ ladder. Which kits carry one is decided in the
+    # COMPONENT repos at their cut; this generator runs at THIS repo's cut and
+    # writes a static file served from a URL we advertise. A conditional render
+    # would encode a "does <comp> have a ladder" belief here that nothing keeps
+    # in step with the zips, and the first time it was wrong the URL would 404 —
+    # a 404 being strictly worse than the shipped bootstrap's own refusal, which
+    # names the component and the version it just installed. cmd/rkit's
+    # TestUpgradeBootstrapsAreExactlyThePublicComponents pins the set.
     min_version="$(min_version_of "$comp")"
-    out="$ROOT/$comp/install.sh"
-    tmp="$out.tmp.$$"
-    sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" \
-        -e "s|@MIN_VERSION@|$min_version|g" "$TEMPLATE" > "$tmp"
-    chmod +x "$tmp"
-    mv -f "$tmp" "$out"
-    echo "✓ wrote $out  (version floor $min_version)"
+    for mode in install upgrade; do
+        out="$ROOT/$comp/$mode.sh"
+        tmp="$out.tmp.$$"
+        sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+            -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
+            "$TEMPLATE" > "$tmp"
+        chmod +x "$tmp"
+        mv -f "$tmp" "$out"
+        echo "✓ wrote $out  (mode $mode, version floor $min_version)"
+    done
 done
 
 # ---- generate relay (private gated channel) -----------------------------

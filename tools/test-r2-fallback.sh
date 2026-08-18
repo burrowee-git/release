@@ -34,15 +34,37 @@ W="$(mktemp -d "${TMPDIR:-/tmp}/test-r2-fallback-XXXXXX")"
 SERVER_PID=""
 CATALOG_PID=""
 
+# Restore ALL regenerated bootstraps so the worktree stays clean —
+# gen-bootstraps.sh rewrites every one of them, relay included, with the
+# ephemeral key.
+#
+# BY COPYING BACK SAVED BYTES, not by `git checkout --`, which this used to do
+# and which fails two ways. It restores from the INDEX, so it silently discards
+# a contributor's uncommitted work — the reason tools/test-version-floor.sh and
+# tools/test-tag-binding.sh both spell out that they do not use it. And it
+# refuses the WHOLE invocation if any listed path is untracked, which behind the
+# `2>/dev/null || true` here meant one new-but-uncommitted artifact in the list
+# silently cancelled the restore of all the others: a failed run then left every
+# bootstrap carrying an ephemeral key that verifies nothing we sign, staged by
+# whoever committed next.
+GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
+cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
+cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh"
+
+mkdir -p "${W}/orig"
+for f in ${GENERATED}; do
+    [ -f "${REPO_ROOT}/${f}" ] || continue
+    mkdir -p "${W}/orig/$(dirname "${f}")"
+    cp "${REPO_ROOT}/${f}" "${W}/orig/${f}"
+done
+
 cleanup() {
     [ -n "${SERVER_PID}"  ] && kill "${SERVER_PID}"  2>/dev/null || true
     [ -n "${CATALOG_PID}" ] && kill "${CATALOG_PID}" 2>/dev/null || true
+    for g in ${GENERATED}; do
+        if [ -f "${W}/orig/${g}" ]; then cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"; fi
+    done
     rm -rf "${W}"
-    # Restore ALL regenerated bootstraps so the worktree stays clean —
-    # gen-bootstraps.sh also rewrites relay/install.sh with the ephemeral key.
-    /usr/bin/git -C "${REPO_ROOT}" checkout -- \
-        cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh \
-        2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 

@@ -1,17 +1,17 @@
 #!/bin/sh
 # Burrowee outer bootstrap — THE TRUST ANCHOR (POSIX sh, macOS + Linux).
 #
-#   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/install.sh | sh
-#   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/gateway/upgrade.sh | sh -s -- 0.2.0
+#   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/install.sh | sh
+#   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/edge/upgrade.sh | sh -s -- 0.2.0
 #
-# This is the stable, curl'd-alone entry point for the `gateway` component
+# This is the stable, curl'd-alone entry point for the `edge` component
 # (which bundles the `burrowee` dispatcher). It NEVER runs an unverified byte:
 # it downloads the release zip + SHA256SUMS.txt + its minisig, verifies the
 # minisign signature with a baked-in PUBLIC key, verifies the zip's sha256
 # against the now-trusted sums file, and ONLY THEN unzips and execs the inner
 # per-release install.sh. Any failure aborts before anything is installed.
 #
-# TWO MODES, ONE TEMPLATE. install is substituted at render time and decides
+# TWO MODES, ONE TEMPLATE. upgrade is substituted at render time and decides
 # whether this file stops after the inner installer (install.sh) or goes on to
 # run `migrations/upgrade.sh <line>` out of the SAME verified kit (upgrade.sh):
 #
@@ -22,7 +22,7 @@
 # the migration script grows a second job: install.sh is still the only thing
 # that places binaries, and migrations/upgrade.sh is still migrations-only. And
 # it is the SAME FILE, not a fork: everything that makes this script a trust
-# anchor — the pinned preflight sha256, the baked pubkey, the v0.2.0.2026.08.17.c05b4759
+# anchor — the pinned preflight sha256, the baked pubkey, the v0.2.0.2026.08.17.024ab996
 # floor, the SHA256SUMS.txt minisign gate — is the same lines for both modes,
 # because a copy of a trust anchor is a copy that drifts from it.
 #
@@ -35,13 +35,13 @@
 # IT IS RENDERED FOR EVERY PUBLIC COMPONENT, not only for those shipping a
 # ladder today. Which kits carry migrations/ is decided in the COMPONENT repos
 # at their cut; this repo renders a static file at ITS cut and serves it from a
-# URL we advertise. A conditional render would put a "does gateway have a ladder"
+# URL we advertise. A conditional render would put a "does edge have a ladder"
 # belief in this repo that nothing keeps in step with the zips, and the first
 # time it was wrong the URL would 404. So the file always exists, and a kit with
 # no migrations/upgrade.sh is a RUNTIME refusal naming the component and the
 # version just installed — a message an operator can act on.
 #
-# DO NOT EDIT generated copies (gateway/install.sh, gateway/upgrade.sh) by hand —
+# DO NOT EDIT generated copies (edge/install.sh, edge/upgrade.sh) by hand —
 # they are produced from tools/bootstrap.template.sh by tools/gen-bootstraps.sh.
 #
 # Arguments (upgrade.sh only; install.sh takes none and REJECTS any):
@@ -59,7 +59,7 @@
 #  64   the command line was wrong, or the ladder rejected the one built for it
 #
 # Env vars:
-#   BURROWEE_<COMP>_VERSION      pin a release tag (e.g. gateway/v0.1.0.…); default: latest
+#   BURROWEE_<COMP>_VERSION      pin a release tag (e.g. edge/v0.1.0.…); default: latest
 #                                (<COMP> = the component name upper-cased, e.g. BURROWEE_CLI_VERSION)
 #   PREFIX                       install root (bins at PREFIX/bin). cli/agent: default
 #                                $HOME/.local. GATEWAY and EDGE: not defaulted and not
@@ -90,13 +90,13 @@
 set -eu
 
 # ---- knobs --------------------------------------------------------------
-COMP="gateway"
+COMP="edge"
 # "install" or "upgrade" — see the two-modes note in the header. Baked, never
 # read from the environment: the mode is a property of the URL the operator
 # curl'd, and a runtime override would make one file behave as the other.
-MODE="install"
+MODE="upgrade"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
-PREFLIGHT_SHA256="2d91551afebe0819061120d138d80d365dc438e16ee47a4d952a2c64e638450d"
+PREFLIGHT_SHA256="20aff889401bbf192b378941923f58fd934f459b930436a3f225ba199b539e18"
 # The version floor: the stamp this component was at when THIS installer was
 # generated and published (baked from versions/<comp>.stamp by
 # tools/gen-bootstraps.sh, which release.sh re-runs on every cut). A tag
@@ -106,7 +106,7 @@ PREFLIGHT_SHA256="2d91551afebe0819061120d138d80d365dc438e16ee47a4d952a2c64e63845
 # It rides the same first-party static channel, over the same TLS fetch, that
 # delivered $PUBKEY, so it costs no trust the installer did not already require;
 # and no download source gets to choose it.
-MIN_VERSION="v0.2.0.2026.08.17.c05b4759"
+MIN_VERSION="v0.2.0.2026.08.17.024ab996"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 
 # resolve_prefix — the install root this bootstrap hands the inner installer.
@@ -383,7 +383,7 @@ esac
 
 # ---- guard against an unbaked mode --------------------------------------
 # Fails closed for the same reason the pubkey guard does: an unsubstituted
-# install would fall through every `[ "$MODE" = upgrade ]` test below, so an
+# upgrade would fall through every `[ "$MODE" = upgrade ]` test below, so an
 # upgrade.sh rendered by a broken generator would install and then silently skip
 # the migration half it exists for — the one failure this file must never have.
 case "$MODE" in
@@ -561,11 +561,11 @@ else
     if [ -z "$TAG" ]; then
         TAG_SOURCE=catalog
         # GitHub unreachable or no releases published. Try the console catalog
-        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/gateway/current.
+        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/edge/current.
         # This is the R2 fallback path — assets are served via `burrowee download-url`
         # (see the dl() function below), which requires a device grant.
-        info "GitHub unreachable — trying console catalog for latest gateway version"
-        catalog_url="${CONSOLE_URL}/api/v1/releases/gateway/current"
+        info "GitHub unreachable — trying console catalog for latest edge version"
+        catalog_url="${CONSOLE_URL}/api/v1/releases/edge/current"
         # Use plain curl (no TLS-only flags) when DL_BASE is set for tests, else
         # standard hardened curl.
         # shellcheck disable=SC2086  # intentional word-split of $CURL flags
@@ -574,7 +574,7 @@ else
         # (structural — reads only the top-level "version" field). Without jq,
         # split the body on field boundaries FIRST (tr , and { → newlines): the
         # console serves MINIFIED single-line JSON, so a line-anchored grep
-        # would never match it. The field-anchored grep plus the gateway/v… shape
+        # would never match it. The field-anchored grep plus the edge/v… shape
         # check below keep a "version":"…" substring buried in notes or nested
         # metadata from spoofing the tag. (Bytes are still minisign+sha256
         # verified downstream; this closes a downgrade / wrong-version vector
@@ -593,7 +593,7 @@ else
             *) TAG="" ;;
         esac
         [ -n "$TAG" ] \
-            || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest gateway version; retry when either is available"
+            || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest edge version; retry when either is available"
         info "console catalog: $TAG"
     fi
     info "latest: $TAG"
@@ -702,7 +702,7 @@ dl() {
     # Primary + mirrors failed. Attempt R2 fallback only when `burrowee` is on PATH.
     if command -v burrowee >/dev/null 2>&1; then
         info "primary download failed for $_asset; trying R2 fallback via burrowee"
-        _r2url="$(burrowee download-url gateway "$TAG" "$_asset" 2>/dev/null)" || true
+        _r2url="$(burrowee download-url edge "$TAG" "$_asset" 2>/dev/null)" || true
         if [ -n "$_r2url" ]; then
             # Scheme guard: the resolved URL MUST be https:// in production, or
             # https:// / http:// in test mode (BURROWEE_DL_BASE set). This prevents
