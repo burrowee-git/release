@@ -102,6 +102,10 @@ source "${REPO_ROOT}/tools/payload.sh"
 source "${REPO_ROOT}/tools/binmap.sh"
 # shellcheck source=tools/trustcomment.sh
 source "${REPO_ROOT}/tools/trustcomment.sh"
+# shellcheck source=tools/marker_commit.sh
+source "${REPO_ROOT}/tools/marker_commit.sh"
+# shellcheck source=tools/batch.sh
+source "${REPO_ROOT}/tools/batch.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -875,7 +879,7 @@ distribute_relay() {
     "${REGISTER_BIN}" prune --comp relay || true
     # (4) marker commit (private — no gh release / no git tag).
     git add "versions/${comp}"
-    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+    marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
     # (5) console catalog row (LAST) — relay uses R2 keys, not GitHub URLs.
     # register_staged records the dispatcher stamp bundled into the zip; resolve
     # it here (the public distribute_only sets DISP_STAMP the same way).
@@ -1006,7 +1010,7 @@ distribute_only() {
     # (3) marker commit.
     git add "versions/${comp}" "${comp}/install.sh" "${comp}/upgrade.sh" "${comp}/preflight.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
-    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
+    marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
     # (4) register staged row in the console catalog — LAST, only after the
     # GitHub Release + self-hosting upload + marker commit all succeeded, so
@@ -1208,7 +1212,7 @@ revert_dispatcher_version() {
         git -C "${REPO_ROOT}" checkout -- versions/burrowee.stamp 2>/dev/null || true
     }
 }
-trap 'shred_key; revert_dispatcher_version' EXIT INT TERM
+trap 'shred_key; revert_dispatcher_version; batch_summary' EXIT INT TERM
 
 # ---- resolve the signing key ------------------------------------------------
 # Sets SIGN_KEY. For the real key we age-decrypt into the chmod-600 ${SHRED_FILE}
@@ -1501,7 +1505,7 @@ do_release_relay() {
 
     # marker commit (no gh release / no git tag)
     git add "versions/${comp}"
-    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+    marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
 
     # (9) register staged row in the console catalog.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
@@ -1769,7 +1773,7 @@ do_release() {
     # (8) marker commit.
     git add "versions/${comp}" "${comp}/install.sh" "${comp}/upgrade.sh" "${comp}/preflight.sh"
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
-    git commit -m "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
+    marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
     # (9) register staged row in the console catalog.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}"
@@ -1784,12 +1788,20 @@ do_release() {
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${tag}"
 }
 
+# The batch_* calls record what this run got through, so the EXIT trap can say
+# which components never ran when a cut dies mid-loop (tools/batch.sh). The
+# do_release calls stay BARE on purpose — wrapping them in `if` would suspend
+# `set -e` for their whole body and stop unchecked failures inside them from
+# aborting the cut.
+batch_begin "${COMPONENTS[@]}"
 for comp in "${COMPONENTS[@]}"; do
+    batch_start "${comp}"
     if [ "${comp}" = relay ]; then
         do_release_relay
     else
         do_release "${comp}"
     fi
+    batch_ok "${comp}"
 done
 
 # leave dispatcher build cache for inspection on dry-run; clean on real release

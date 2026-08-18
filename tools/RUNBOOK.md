@@ -252,6 +252,37 @@ requirement, and reading it as removed is the trap. See
 (`burrowee-git/resources`) for why the flow batches the push instead of doing
 it here.
 
+**Residual 3 — a re-cut at an identical stamp leaves NOTHING to push.** When a
+component is re-cut at the same semver and the same stamp (its tag deleted so
+the stamp can be republished), `versions/<comp>`, `versions/<comp>.stamp` and
+the regenerated bootstraps come out byte-identical to `HEAD`, so the index is
+empty and there is no marker commit to make. `marker_commit()`
+(`tools/marker_commit.sh`) detects exactly that, prints `→ marker: nothing to
+record …`, and lets the cut finish 0 — it does **not** make an empty commit,
+so unlike every other cut this one leaves the repo *in sync* with
+`origin/main` and Residual 2's "push before the next cut" step has nothing to
+push. That is correct, not a missed step: the marker for that stamp is already
+in history, put there by the cut that first published it. Every *other*
+non-zero from `git commit` — a rejecting hook, a held `index.lock`, a bad
+committer identity — still aborts the cut exactly as before; the tolerance is
+for the empty index and nothing else. Before 2026-08-18 this case exited 1
+after the build, signature, notarization, GitHub Release and scp had all
+succeeded, and inside `release.sh all` it silently dropped every component
+queued behind it.
+
+**A batch says what it skipped.** `release.sh all` still stops at the first
+component that fails — a failure is usually in something the later components
+share — but it now ends with a summary naming what was released, what failed,
+and what never ran, and still exits non-zero (`tools/batch.sh`):
+
+```
+── batch summary ──
+   released: cli
+   failed: gateway
+   never ran: edge agent
+   the cut stopped at the first failure — the components above were NOT cut
+```
+
 **If you write shell for `release.sh`/`tools/*.sh`: `mapfile`/`readarray` do
 not exist here.** `/usr/bin/env bash` on this machine resolves to macOS's
 system bash, 3.2.57 — there is no Homebrew bash on `PATH`, hooked or not — and
