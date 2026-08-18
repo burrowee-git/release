@@ -369,6 +369,11 @@ remove_one_stale_bin() {
     esac
     if rm -f "$_ros_p"; then
         echo "removed stale per-user binary: $_ros_p"
+        # The counter the shell hint keys on. Incremented HERE, on the one
+        # branch where a path stopped existing — not per candidate and not
+        # per run, because every other outcome leaves the operator's shell
+        # resolving exactly what it resolved before.
+        STALE_BINS_REMOVED=$((${STALE_BINS_REMOVED:-0} + 1))
     else
         echo "note: could not remove $_ros_p — it shadows $BIN_DIR on PATH; remove it by hand." >&2
     fi
@@ -421,6 +426,118 @@ stale_user_bins_pending() {
 }
 
 # ---------------------------------------------------------------------------
+# login_shell_of_user <name> — that account's LOGIN SHELL on stdout, or empty
+# and non-zero.
+#
+# FIELD 7 OF THE PASSWD ENTRY, NEVER $SHELL. This runs under
+# `curl … | sudo sh`, where $SHELL describes the environment that INVOKED sudo
+# — sudo does not reset it, and `sudo -i` or a cron context sets it to root's —
+# while the account that will hit a stale command hash is $SUDO_USER. The two
+# are routinely different shells, and only the passwd entry answers the
+# question actually being asked.
+#
+# Three sources, each authoritative where the one before it does not exist:
+# getent (portable on Linux, and it reads NSS so LDAP/SSS accounts resolve),
+# dscl (macOS, which has no getent), and a plain read of /etc/passwd for a slim
+# container image that ships neither. The last is a `while read` over the colon
+# fields rather than sed or awk: the account name would otherwise be spliced
+# into a regex, where a metacharacter in it matches the wrong line or none.
+# ---------------------------------------------------------------------------
+login_shell_of_user() {
+    _lsu=""
+    if command -v getent >/dev/null 2>&1; then
+        _lsu="$(getent passwd "$1" 2>/dev/null | cut -d: -f7)"
+    fi
+    if [ -z "$_lsu" ] && command -v dscl >/dev/null 2>&1; then
+        _lsu="$(dscl . -read "/Users/$1" UserShell 2>/dev/null | sed -n 's/^UserShell: //p')"
+    fi
+    if [ -z "$_lsu" ] && [ -r /etc/passwd ]; then
+        _lsu="$(while IFS=: read -r _lsu_n _lsu_x _lsu_u _lsu_g _lsu_c _lsu_h _lsu_s; do
+            if [ "$_lsu_n" = "$1" ]; then echo "$_lsu_s"; break; fi
+        done </etc/passwd)"
+    fi
+    [ -n "$_lsu" ] || return 1
+    echo "$_lsu"
+}
+
+# ---------------------------------------------------------------------------
+# stale_bin_shell_hint — say that the files just removed are what an
+# ALREADY-RUNNING shell may still be pointing at, and name the one command that
+# clears it.
+#
+# THE COST THIS EXISTS TO PAY. Observed on a production node 2026-08-18,
+# immediately after the sweep did its job:
+#
+#   ✓ gateway gateway/v0.2.0.2026.08.18.9cbda158 installed and its 0.2.0 migrations forced
+#   $ burrowee gateway doctor
+#   -bash: /home/ubuntu/.local/bin/burrowee: No such file or directory
+#
+# bash caches an executed command's absolute path and re-execs THAT path; the
+# operator's shell predated the sweep, so it still held the path of a file that
+# had just been removed. `. ~/.bashrc` cleared it only incidentally — bash
+# discards the hash table on any PATH assignment. A successful cleanup whose
+# next command fails reads as a broken install, and it lands on exactly the
+# operator who did the right thing.
+#
+# IT CANNOT RELOAD THE CALLER'S SHELL AND MUST NOT TRY. The sweep is a child of
+# `sudo sh` under `curl … | sudo sh`; a child cannot touch its parent's hash
+# table, environment or rc state. Nothing here execs anything, and nothing here
+# writes to an rc file — the rc-editing block was deliberately removed for
+# root-installed components and must not come back through this door. One
+# accurate sentence is the whole deliverable.
+#
+# WHAT EACH SHELL NEEDS WAS MEASURED, NOT ASSUMED. Each shell was given a
+# command in directory A with a second copy in directory B further along PATH,
+# ran it, had A's copy removed, and ran it again — interactively, on a pty,
+# because that is the operator's situation:
+#
+#   bash 5.3   re-execs the cached path and fails with "No such file or
+#              directory". It does NOT fall back to a re-search. `hash -r`
+#              clears it, and this is the reported symptom.
+#   zsh 5.9    cache the path too, but were observed to re-search PATH once it
+#   dash       has vanished, so they self-heal. They are still told `hash -r`:
+#   ash        it is POSIX, valid and harmless in every one of them, and the
+#   sh         self-heal is one shell option away from being off.
+#   fish 4.0.6 HAS NO `hash` BUILTIN AT ALL — `hash -r` is "Unknown command:
+#              hash", exit 127, and `type hash` finds nothing — and it
+#              re-resolved the command by itself. So it is told what happened
+#              and given NO command: answering a confusing failure with a
+#              second confusing failure is worse than saying nothing.
+#
+# An unrecognised shell — and an account whose passwd entry cannot be read —
+# gets the POSIX form plus "open a new shell", which is true of every shell
+# there is. It is never a guess about which shell the operator has.
+#
+# IT CAN NEVER FAIL THE MIGRATION. By the time it runs the binaries are placed
+# and the state is migrated; a message is not worth an exit code, so every path
+# through it ends at `return 0`.
+# ---------------------------------------------------------------------------
+stale_bin_shell_hint() {
+    _sbsh_shell=""
+    case "${SUDO_USER:-}" in
+    '' | root) ;;
+    *) _sbsh_shell="$(login_shell_of_user "$SUDO_USER" 2>/dev/null || true)" ;;
+    esac
+
+    echo "a shell that is ALREADY RUNNING still remembers the removed path in its"
+    echo "command-hash table, so its next \`burrowee\` command can fail with \"No such"
+    echo "file or directory\". Nothing is broken — only that one shell's cache is stale."
+    case "${_sbsh_shell##*/}" in
+    bash | zsh | dash | ash | sh)
+        echo "clear it in ${_sbsh_shell##*/}: hash -r"
+        ;;
+    fish)
+        echo "your login shell is $_sbsh_shell — fish has no \`hash\` builtin and"
+        echo "re-resolves a removed command by itself, so there is nothing to run."
+        ;;
+    *)
+        echo "clear it with \`hash -r\` (bash, zsh, dash, ash) — or just open a new shell."
+        ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # remove_stale_user_bins — sweep the per-user copies of THIS component's
 # binaries, by exact name, after everything else has converged.
 #
@@ -449,8 +566,21 @@ remove_stale_user_bins() {
     _rsb_dir="$(stale_user_bin_dir "$_rsb_home")"
     [ -n "$_rsb_dir" ] || return 0
 
+    STALE_BINS_REMOVED=0
     for _rsb_b in $STALE_USER_BINS; do
         remove_one_stale_bin "$_rsb_dir" "$_rsb_b" "$_rsb_home"
     done
+
+    # ONLY WHEN A REMOVAL ACTUALLY HAPPENED. A sweep that removed nothing
+    # must stay silent: the hint would be false on that host — no path went
+    # away — and an operator who sees it on every converged run stops
+    # reading it on the one run where it is true. This is also every run of
+    # install.sh on an already-clean host, which is most of them.
+    if [ "${STALE_BINS_REMOVED:-0}" -gt 0 ]; then
+        stale_bin_shell_hint
+    fi
+    # The sweep's callers run under `set -e` and this is the last thing they
+    # call; an advisory message must not be able to end a migration.
+    return 0
 }
 # === SHARED SWEEP CONTRACT END ===

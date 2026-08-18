@@ -109,6 +109,36 @@ mutate exact-names-become-glob lib_stale_user_bins.sh \
     "s|^    for _rsb_b in \$STALE_USER_BINS; do|    for _rsb_b in \$STALE_USER_BINS burrowee-edge-notes; do|" \
     "removal is by exact name only — a name outside \$STALE_USER_BINS survives (case 8)"
 
+# --- the post-removal shell hint -------------------------------------------
+#
+# $SHELL is the mutant that matters here. Under sudo it names the shell of the
+# environment that INVOKED sudo, not the account whose running shell holds the
+# stale path, and the two are routinely different — so this mutation is not a
+# hypothetical simplification, it is the implementation anyone would write first.
+# It is only killable because the fixtures set the two variables to DIFFERENT
+# shells.
+
+mutate hint-reads-SHELL lib_stale_user_bins.sh \
+    "s@^    \*) _sbsh_shell=.*@    *) _sbsh_shell=\"\${SHELL:-}\" ;;@" \
+    "the hint names \$SUDO_USER's LOGIN SHELL, never \$SHELL (cases 20a, 20b)"
+
+# Field 6 is the home directory and field 7 is the shell. An off-by-one here
+# yields a plausible-looking absolute path, so the hint still prints — it just
+# names a directory instead of a shell and silently falls to the generic branch.
+mutate hint-reads-passwd-field-6 lib_stale_user_bins.sh \
+    "s@cut -d: -f7@cut -d: -f6@" \
+    "the login shell is field 7 of the passwd entry (case 20a)"
+
+mutate hint-printed-unconditionally lib_stale_user_bins.sh \
+    "s@^    if \[ \"\${STALE_BINS_REMOVED:-0}\" -gt 0 \]; then@    if true; then@" \
+    "a sweep that removed NOTHING prints no shell hint at all (case 20c)"
+
+# With fish out of the case list it falls through to the generic branch and is
+# handed `hash -r` — which fish answers with "Unknown command: hash", exit 127.
+mutate fish-told-to-run-hash-r lib_stale_user_bins.sh \
+    "s@^    fish)@    fish-is-never-matched)@" \
+    "fish is never handed \`hash -r\`, which is not a fish command (case 20b)"
+
 # --- the runner's gate, receipts and exit contract --------------------------
 
 # The FIRST attempt at this one was `s/if [ "$_x" -gt "$_y" ]; then return 1; fi/:/`

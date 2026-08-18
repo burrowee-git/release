@@ -64,6 +64,20 @@ $1
 --- end ---" ;;
     esac
 }
+# assert_lacks is not assert_contains inverted for the sake of symmetry: the
+# shell hint has to be ABSENT on a run that removed nothing, and "the wrong
+# branch was printed" is a claim only an absence can make. Written as its own
+# helper so the failure message still shows the output, which is the whole
+# reason the negative case is hard to debug otherwise.
+assert_lacks() {
+    CASES=$((CASES + 1))
+    case "$1" in
+    *"$2"*) fail "$3: output should not contain [$2]
+--- output ---
+$1
+--- end ---" ;;
+    esac
+}
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -724,7 +738,137 @@ assert_present "$h19/.local/bin/burrowee-gateway" "not one of edge's names — r
 assert_present "$h19/.local/bin/burrowee-gateway-cli" "same"
 
 # ---------------------------------------------------------------------------
-# 20. THE TWO-COPY GUARD.
+# 20. AFTER A REMOVAL, THE RUN SAYS HOW TO CLEAR THE OPERATOR'S SHELL CACHE
+#
+#     Observed on a production node 2026-08-18, immediately after the sweep did
+#     exactly the right thing:
+#
+#       ✓ gateway … installed and its 0.2.0 migrations forced
+#       $ burrowee gateway doctor
+#       -bash: /home/ubuntu/.local/bin/burrowee: No such file or directory
+#
+#     bash re-execs the absolute path it cached; the operator's shell predated
+#     the sweep, so it still held a path that had just been removed. A
+#     successful cleanup whose next command fails reads as a broken install.
+#     The installer cannot reload the caller's shell — it is a child of
+#     `sudo sh` — so the deliverable is a precise sentence, printed only when a
+#     removal actually happened.
+# ---------------------------------------------------------------------------
+
+# passwd_stub <dir> <user> <home> <shell> — a `getent` that answers for exactly
+# ONE account, with the home and LOGIN SHELL this fixture chose.
+#
+# A STUB RATHER THAN THE HOST'S OWN passwd, because the claim under test is
+# WHICH field of WHICH account's entry is read. Answering from the machine's
+# real passwd file makes the fixture's shell whatever the CI image gives its
+# build account — the same shell for the right answer and the wrong one, which
+# is an assertion that cannot fail. Every other name is delegated to the real
+# getent: run.sh resolves `root` through it too, and a stub that refused
+# everything would change behaviour this section is not about.
+passwd_stub() {
+    mkdir -p "$1"
+    {
+        echo '#!/bin/sh'
+        echo "if [ \"\$1\" = passwd ] && [ \"\$2\" = '$2' ]; then"
+        echo "    echo '$2:x:1000:1000:fixture:$3:$4'"
+        echo '    exit 0'
+        echo 'fi'
+        echo '[ -x /usr/bin/getent ] || exit 2'
+        echo 'exec /usr/bin/getent "$@"'
+    } > "$1/getent"
+    chmod 0755 "$1/getent"
+}
+
+# run_hint_ladder <home> <comp-home> <bin-dir> <kit> <stub-dir> <sudo-user>
+#                 <SHELL-value> [args…]
+#
+# $SUDO_USER AND $SHELL ARE ALWAYS SET TO DIFFERENT SHELLS BY EVERY CALLER
+# BELOW. That is the whole discipline of this section: with both naming the
+# same shell the assertion passes whichever variable the code reads.
+run_hint_ladder() {
+    _rh_home="$1"; _rh_ch="$2"; _rh_bin="$3"; _rh_kit="$4"
+    _rh_stub="$5"; _rh_user="$6"; _rh_shell="$7"; shift 7
+    OUT="$(
+        HOME="$_rh_home" COMP_HOME="$_rh_ch" BIN_DIR="$_rh_bin" \
+        LAUNCHD_DIR="$_rh_home/no-launchd" SYSTEMD_DIR="$_rh_home/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$_rh_home/nowhere" SUDO=/nonexistent-sudo \
+        PATH="$_rh_stub:$PATH" SUDO_USER="$_rh_user" SHELL="$_rh_shell" \
+        sh "$_rh_kit/migrations/run.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+
+# 20a. the operator's login shell is bash and $SHELL says fish. bash is the one
+#      that actually strands — it re-execs the cached path and does not
+#      re-search — so this is the reported case, named by name.
+t20="$TMP/t20"; kit "$t20" edge root installed-version $EDGE_BINS
+h20="$t20/home"; ch20="$h20/root-home/.burrowee/edge"; mkdir -p "$ch20"
+seed_ours "$h20/.local/bin" $EDGE_BINS
+seed_twins "$h20/usr-local-bin" $EDGE_BINS
+passwd_stub "$TMP/stub-bash" fixtureop "$h20" /bin/bash
+run_hint_ladder "$h20" "$ch20" "$h20/usr-local-bin" "$t20" "$TMP/stub-bash" fixtureop /usr/bin/fish
+assert_eq "$RC" 2 "the rung must run and sweep"
+assert_gone "$h20/.local/bin/burrowee" "precondition: something must have been removed for a hint to be due"
+assert_contains "$OUT" "command-hash table" "a run that removed a shadowing binary must say why the next command can fail"
+assert_contains "$OUT" "clear it in bash: hash -r" "the hint must name \$SUDO_USER's shell and its command"
+assert_lacks "$OUT" "fish has no" "the hint followed \$SHELL instead of \$SUDO_USER's passwd entry"
+
+# 20b. the mirror, and the reason $SHELL cannot be the source: same host, the
+#      two variables swapped. fish 4.0.6 has NO `hash` builtin (`hash -r` is
+#      "Unknown command: hash", exit 127) and re-resolves a removed command by
+#      itself, so it must be told what happened and given no command at all.
+t20b="$TMP/t20b"; kit "$t20b" edge root installed-version $EDGE_BINS
+h20b="$t20b/home"; ch20b="$h20b/root-home/.burrowee/edge"; mkdir -p "$ch20b"
+seed_ours "$h20b/.local/bin" $EDGE_BINS
+seed_twins "$h20b/usr-local-bin" $EDGE_BINS
+passwd_stub "$TMP/stub-fish" fixtureop "$h20b" /usr/bin/fish
+run_hint_ladder "$h20b" "$ch20b" "$h20b/usr-local-bin" "$t20b" "$TMP/stub-fish" fixtureop /bin/bash
+assert_eq "$RC" 2 "the rung must run and sweep"
+assert_contains "$OUT" "command-hash table" "the hint is still due — a removal happened"
+assert_contains "$OUT" "fish has no \`hash\` builtin" "fish must be told why there is nothing to run"
+assert_lacks "$OUT" "hash -r" "fish was handed a command that is not a fish command"
+
+# 20c. A SWEEP THAT REMOVED NOTHING SAYS NOTHING ABOUT SHELLS. No root twins, so
+#      every candidate is decided no-twin: the sweep runs in full, names what it
+#      kept, and removes nothing. A hint here would be false — no path went away
+#      — and an operator who sees it on every converged run stops reading it on
+#      the run where it is true. The gate is forced with --installed-version
+#      because with nothing to remove the --applies probe would not select the
+#      rung at all, and a rung that never ran proves nothing about its output.
+t20c="$TMP/t20c"; kit "$t20c" edge root installed-version $EDGE_BINS
+h20c="$t20c/home"; ch20c="$h20c/root-home/.burrowee/edge"; mkdir -p "$ch20c"
+seed_ours "$h20c/.local/bin" $EDGE_BINS
+# ITS OWN STUB, because the stub carries the HOME as well as the shell. Reusing
+# 20a's pointed the sweep at 20a's already-emptied tree, where "no hint" was true
+# for the wrong reason — a fixture in which the right and the wrong behaviour
+# produce identical output is not evidence about either.
+passwd_stub "$TMP/stub-bash-c" fixtureop "$h20c" /bin/bash
+run_hint_ladder "$h20c" "$ch20c" "$h20c/usr-local-bin" "$t20c" "$TMP/stub-bash-c" fixtureop /usr/bin/fish \
+    --installed-version 0.1.111
+assert_eq "$RC" 2 "the forced gate must run the rung"
+assert_contains "$OUT" "kept $h20c/.local/bin/burrowee-edge" "precondition: the sweep must have reached every candidate"
+assert_lacks "$OUT" "command-hash table" "a sweep that removed nothing printed the shell hint"
+assert_lacks "$OUT" "hash -r" "a sweep that removed nothing named a rehash command"
+
+# 20d. A $SUDO_USER WITH NO PASSWD ENTRY still gets usable output, and does not
+#      cost the migration its exit code: by the time the hint prints, the
+#      binaries are placed and the state is migrated, and a message is not worth
+#      an exit code. The generic form is the POSIX command plus the escape hatch
+#      that is true of every shell there is — never a guess at which one.
+t20d="$TMP/t20d"; kit "$t20d" edge root installed-version $EDGE_BINS
+h20d="$t20d/home"; ch20d="$h20d/root-home/.burrowee/edge"; mkdir -p "$ch20d"
+seed_ours "$h20d/.local/bin" $EDGE_BINS
+seed_twins "$h20d/usr-local-bin" $EDGE_BINS
+mkdir -p "$TMP/stub-none"
+run_hint_ladder "$h20d" "$ch20d" "$h20d/usr-local-bin" "$t20d" "$TMP/stub-none" no-such-burrowee-op-9x /bin/bash
+assert_eq "$RC" 2 "an unresolvable login shell must not fail the migration"
+assert_gone "$h20d/.local/bin/burrowee" "the sweep itself must still have run"
+assert_contains "$OUT" "command-hash table" "the hint is due whether or not the shell could be named"
+assert_contains "$OUT" "or just open a new shell" "an unnameable shell gets the escape hatch"
+assert_contains "$OUT" "hash -r" "and the POSIX form"
+
+# ---------------------------------------------------------------------------
+# 21. THE TWO-COPY GUARD.
 #
 #     lib_stale_user_bins.sh exists TWICE: here, staged into the edge and cli
 #     kits, and in the gateway repo, whose ladder tools/payload.sh assembles
@@ -751,7 +895,7 @@ assert_present "$h19/.local/bin/burrowee-gateway-cli" "same"
 #     noticed. A guard that answers for claims it never made is exactly the
 #     defect this suite exists to catch, so it only speaks for the checked-in
 #     file.
-SWEEP_CONTRACT_DIGEST="0b3ec871afa6df2844f47c01ad56f3de5bd19d2d0e8ab23453780526560f60df"
+SWEEP_CONTRACT_DIGEST="089d7aaf663ca78e9d945b0d9d5d6b0bbc54d2787752a478e026e45b7fbf1ce0"
 
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
