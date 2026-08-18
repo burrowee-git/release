@@ -91,6 +91,7 @@ func TestEdgeRootInstallSweepsStalePerUserBinaries(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
+	stageMigrations(t, staging)
 	stale := staleDir(home)
 	seedStale(t, stale, staleOursSet())
 
@@ -113,12 +114,14 @@ func TestEdgeRootInstallSweepsStalePerUserBinaries(t *testing.T) {
 // SYS_BIN_DIR seam — the worst arrangement available — and requires the
 // binaries to survive.
 //
-// What stops it is NOT a `$_rsb_dir = $BIN_DIR` special case (that guard was
-// removed in the collapse; nothing could reach it). It is the ordering: this run
-// rendered and loaded units naming $BIN_DIR before the sweep, and the sweep
-// refuses any directory a unit on this host still names. Mutating that refusal
-// out is what fails this test, which is the point — it asserts the property
-// through the check that enforces it.
+// TWO independent guards stop it now, and the test asserts the outcome of both.
+// The shared library's stale_user_bin_dir returns EMPTY when the directory it
+// would sweep IS $BIN_DIR — the explicit destination guard, back after the
+// collapse removed edge's unreachable copy of it, and reachable here because the
+// cli's ordinary install is exactly that arrangement. Behind it, the ordering:
+// this run rendered and loaded units naming $BIN_DIR before the sweep, and the
+// sweep refuses any directory a unit on this host still names. Mutating either
+// out is what fails this test.
 //
 // NOT seedEdgeBins for the staging tree: its stubs are shell scripts carrying no
 // build stamp, so is_burrowee_binary would decline them and this test would pass
@@ -129,6 +132,7 @@ func TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedStale(t, staging, staleOursSet())
+	stageMigrations(t, staging)
 
 	// The destination IS the per-user dir for this run.
 	dest := staleDir(home)
@@ -137,7 +141,7 @@ func TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled(t *testing.T) {
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("sh", installShPath(t))
+	cmd := exec.Command("sh", stagedInstaller(t, staging))
 	cmd.Dir = staging
 	cmd.Env = []string{
 		"HOME=" + home,
@@ -160,10 +164,12 @@ func TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled(t *testing.T) {
 	if strings.Contains(string(out), "removed stale per-user binary") {
 		t.Errorf("the sweep ran on this run's own destination:\n%s", out)
 	}
-	// Named, not merely observed: the survival above is produced by the
-	// unit-still-names-it refusal, and a test that only checked the files would
-	// pass equally if the sweep had never been reached at all.
-	assertContains(t, string(out), "still names "+dest)
+	// AND THE LADDER'S RUNG DID NOT DO IT EITHER. The sweep is reachable by two
+	// paths now — install.sh's own call and migrations/stale_user_bins.sh — and a
+	// destination guard that held for one of them would be no guard at all.
+	// "nothing applied" is the runner's own words for a rung whose --applies
+	// probe declined, which is the same decision the sweep makes.
+	assertContains(t, string(out), "migrate: nothing applied")
 }
 
 // TestEdgeStaleSweepUsesTheOperatorHomeNotDollarHome — the trap: the documented
@@ -174,6 +180,7 @@ func TestEdgeStaleSweepUsesTheOperatorHomeNotDollarHome(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
+	stageMigrations(t, staging)
 
 	// An account resolvable ONLY through the LEGACY_HOME_PARENTS fallback, so
 	// this test can never reach a real account's home.
@@ -208,6 +215,7 @@ func TestEdgeStaleSweepSkipsWhenAUnitStillNamesThePerUserDir(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
+	stageMigrations(t, staging)
 	stale := staleDir(home)
 	seedStale(t, stale, staleOursSet())
 
@@ -241,6 +249,7 @@ func TestEdgeStaleSweepLeavesWhatIsNotOurs(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
+	stageMigrations(t, staging)
 	stale := staleDir(home)
 	seedStale(t, stale, map[string][]byte{
 		"burrowee-edge":     staleBinFixture("burrowee-edge"),
@@ -265,6 +274,7 @@ func TestEdgeStaleSweepKeepsTheDispatcherWhileAnotherComponentIsInstalledThere(t
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
+	stageMigrations(t, staging)
 	stale := staleDir(home)
 	files := staleOursSet()
 	files["burrowee-cli"] = staleBinFixture("burrowee-cli")

@@ -62,6 +62,20 @@ stage_payload_extras() {
         cp "${src}/${s}" "${dest}/${s}"
         chmod 0755 "${dest}/${s}"
     done
+    # The SHARED ladder is staged HERE, from the one function both of release.sh's
+    # assembly sites already call, rather than as a third open-coded copy beside
+    # them — the open-coded copy is exactly what shipped a gateway with no
+    # migrations/ in it.
+    #
+    # The gateway is not staged here, and that is not an oversight: it has its
+    # own explicit stage_gateway_migrations call site, which predates this and
+    # delegates to the same implementation. Staging it twice would be harmless
+    # but would also change what a bare stage_payload_extras gateway means, and
+    # the one thing worth keeping stable about this function is what a caller
+    # can assume from calling it.
+    if takes_shared_ladder "${comp}"; then
+        stage_component_migrations "${comp}" "${src}" "${dest}" || return 1
+    fi
 }
 
 # payload_dir_extras <comp> — DIRECTORY-shaped payload members, one per line.
@@ -73,8 +87,61 @@ stage_payload_extras() {
 # extra pass, gateway/migrations did not, and nothing connected the two.
 payload_dir_extras() {
     case "$1" in
-        edge)    printf '%s\n' covers ;;
+        edge)    printf '%s\n' covers migrations ;;
         gateway) printf '%s\n' migrations ;;
+        cli)     printf '%s\n' migrations ;;
+    esac
+}
+
+# SHARED_MIGRATIONS_DIR — inner/_shared/migrations, the ONE authored copy of the
+# migration runner, the sweep library and the rungs that edge and cli both take.
+#
+# THIS IS THE POINT OF THE DIRECTORY. run.sh is ~450 lines of gating logic whose
+# every branch fails quietly in a plausible direction; two components each
+# carrying their own copy would look identical right up to the release where one
+# of them did not. So the shared half is authored once, here, and STAGED into
+# each kit at assembly time, while the component half — its ledger and its
+# component.conf — stays in the component's own repo, where a new rung belongs.
+#
+# The gateway is deliberately NOT on this path: its runner lives in the gateway
+# repo, has shipped, and does three things no other component needs (stopping a
+# daemon so a SQLite store is at rest, pre-flighting the cli's `migrate` verb,
+# and resolving which ACCOUNT's pre-split tree holds the host's identity).
+#
+# Resolved from this file's own location so a caller does not have to know it,
+# and overridable only for the suite.
+SHARED_MIGRATIONS_DIR="${SHARED_MIGRATIONS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/inner/_shared/migrations}"
+
+# shared_migration_scripts — the shared files staged into every kit that takes
+# the shared ladder, one basename per line, sorted. Discovered by glob rather
+# than listed, so adding one stays a one-file change; mirrors sharedMigration
+# Scripts in cmd/rkit/assemble.go.
+shared_migration_scripts() {
+    local p
+    for p in "${SHARED_MIGRATIONS_DIR}"/*.sh; do
+        [ -f "${p}" ] || continue
+        printf '%s\n' "$(basename "${p}")"
+    done | sort
+}
+
+# component_migration_files <src-dir> — the component's OWN half of its ladder,
+# one basename per line, sorted: component.conf, ledger, and any rung the
+# component authored for itself. Mirrors componentMigrationFiles in
+# cmd/rkit/assemble.go.
+component_migration_files() {
+    local p
+    for p in "$1"/migrations/*; do
+        [ -f "${p}" ] || continue
+        printf '%s\n' "$(basename "${p}")"
+    done | sort
+}
+
+# takes_shared_ladder <comp> — whether this component's migrations/ is assembled
+# from inner/_shared plus its own repo, rather than wholly from its own repo.
+takes_shared_ladder() {
+    case "$1" in
+        edge|cli) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -101,6 +168,20 @@ payload_manifest() {
             printf '%s\n' covers/admin.html covers/default.html
             ;;
     esac
+    # The SHARED ladder's members, for the components assembled from two
+    # sources. Emitted after the per-component block above and in the same
+    # order stage_component_migrations copies them — shared first, then the
+    # component's own — because cmd/rkit/payload_manifest_test.go compares this
+    # list name-for-name against extraPayload's, and an order that differed
+    # would be a red test rather than a real defect.
+    if takes_shared_ladder "${comp}"; then
+        for s in $(shared_migration_scripts); do
+            printf 'migrations/%s\n' "${s}"
+        done
+        for s in $(component_migration_files "${src}"); do
+            printf 'migrations/%s\n' "${s}"
+        done
+    fi
 }
 
 # stage_gateway_migrations <src-dir> <assemble-dir> — copy the gateway's whole
@@ -112,8 +193,54 @@ payload_manifest() {
 # is a hard error: shipping the gateway without it is what this file exists to
 # prevent.
 stage_gateway_migrations() {
-    local src="$1" dest="$2" p base found=0
+    stage_component_migrations gateway "$1" "$2"
+}
+
+# stage_component_migrations <comp> <src-dir> <assemble-dir> — copy this
+# component's whole migrations/ tree into the staged payload dir.
+#
+# TWO SHAPES, one function. The gateway's ladder is wholly its own: every file
+# comes from its source worktree. edge's and cli's are assembled from two
+# sources — the shared runner + library + rungs from inner/_shared/migrations,
+# and the component's own component.conf + ledger (+ any rung it authored) from
+# its source worktree. Keeping both shapes here rather than in two functions is
+# what stops the second one from quietly missing a check the first one has: an
+# empty result is a hard error either way, because shipping a component whose
+# install.sh invokes a ladder that is not in the zip is exactly the defect this
+# file exists to prevent.
+stage_component_migrations() {
+    local comp="$1" src="$2" dest="$3" p base found=0
     mkdir -p "${dest}/migrations"
+    if takes_shared_ladder "${comp}"; then
+        for base in $(shared_migration_scripts); do
+            cp "${SHARED_MIGRATIONS_DIR}/${base}" "${dest}/migrations/${base}"
+            chmod 0755 "${dest}/migrations/${base}"
+            found=1
+        done
+        if [ "${found}" != 1 ]; then
+            echo "✗ shared migrations missing: ${SHARED_MIGRATIONS_DIR}" >&2
+            return 1
+        fi
+        # The component's own half. component.conf and ledger are REQUIRED: the
+        # shared runner carries no component defaults and refuses without them,
+        # so a kit missing either is a component whose every install ends in a
+        # refusal — caught here, at the cut, rather than on a host.
+        found=0
+        for base in $(component_migration_files "${src}"); do
+            cp "${src}/migrations/${base}" "${dest}/migrations/${base}"
+            case "${base}" in *.sh) chmod 0755 "${dest}/migrations/${base}" ;; esac
+            found=1
+        done
+        for base in component.conf ledger; do
+            if [ ! -f "${dest}/migrations/${base}" ]; then
+                echo "✗ ${comp} migrations/${base} missing in source: ${src}/migrations/${base}" >&2
+                echo "  the shared runner has no component defaults — without it every install" >&2
+                echo "  of this release refuses before it can migrate anything." >&2
+                return 1
+            fi
+        done
+        return 0
+    fi
     for p in "${src}"/migrations/*.sh; do
         [ -f "${p}" ] || continue
         base="$(basename "${p}")"
@@ -122,7 +249,7 @@ stage_gateway_migrations() {
         found=1
     done
     if [ "${found}" != 1 ]; then
-        echo "✗ gateway migrations missing in source: ${src}/migrations" >&2
+        echo "✗ ${comp} migrations missing in source: ${src}/migrations" >&2
         return 1
     fi
 }
@@ -141,6 +268,14 @@ stage_gateway_migrations() {
 # the two cannot disagree about what the ledger says. Only an assignment at
 # column 0 counts — that is where the runner writes it and where a commented-out
 # copy never is. Mirrors ledgerMigrations in cmd/rkit/assemble.go.
+# ledger_migrations <run.sh> — the migration script names the GATEWAY runner's
+# MIGRATIONS= ledger declares, in ledger order, one per line.
+#
+# Only the gateway's runner keeps its ledger inside itself. The shared runner
+# reads a migrations/ledger data FILE instead, because one runner is copied
+# byte-identical into several kits and a per-component list cannot live inside
+# it; ledger_file_migrations below reads that shape.
+#
 ledger_migrations() {
     awk '
         { line[NR] = $0 }
@@ -182,9 +317,31 @@ ledger_migrations() {
 #
 # No-op for every component but gateway. Fails closed on a missing unzip: a cut
 # that cannot verify its own payload must not proceed to sign one.
+# ledger_file_migrations <ledger> — the script names a migrations/ledger data
+# file declares, in ledger order, one per line.
+#
+# The file is "<version-this-upgrades-to> <script>" rows with `#` comments,
+# word-split into pairs EXACTLY as the shared runner splits it, so the two
+# cannot disagree about what a ledger says. An odd word count is an error rather
+# than a truncation: a dangling word means a row has a target and no script (or
+# the reverse), and the runner refuses on it, so a cut that shipped one would
+# refuse on every host.
+ledger_file_migrations() {
+    awk '
+        { sub(/#.*$/, ""); for (i = 1; i <= NF; i++) word[++c] = $i }
+        END {
+            if (c == 0 || c % 2 != 0) {
+                print "ledger holds " c+0 " words, want (version, script) pairs" > "/dev/stderr"
+                exit 1
+            }
+            for (i = 2; i <= c; i += 2) print word[i]
+        }
+    ' "$1"
+}
+
 assert_payload_migrations() {
     local comp="$1" zip_path="$2" src="$3"
-    [ "${comp}" = gateway ] || return 0
+    case "${comp}" in gateway|edge|cli) ;; *) return 0 ;; esac
 
     if ! command -v unzip >/dev/null 2>&1; then
         echo "✗ unzip not found — cannot verify the gateway payload carries migrations/" >&2
@@ -194,6 +351,45 @@ assert_payload_migrations() {
     if ! members="$(unzip -Z1 "${zip_path}")"; then
         echo "✗ cannot list gateway payload: ${zip_path}" >&2
         return 1
+    fi
+
+    # THE SHARED-LADDER COMPONENTS ARE GATED ON THEIR OWN SHAPE. Their runner is
+    # useless without lib_paths.sh (home resolution) and component.conf (the
+    # component's name, tree and binary list), and their install.sh SOURCES
+    # lib_stale_user_bins.sh for its own sweep. A zip missing any of them
+    # installs cleanly and silently stops migrating or sweeping — which is
+    # precisely the class of defect the gateway's gate below already exists for.
+    if takes_shared_ladder "${comp}"; then
+        local want ledger
+        for want in run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh component.conf ledger; do
+            if ! printf '%s\n' "${members}" | grep -qxF "migrations/${want}"; then
+                echo "✗ ${comp} payload has no migrations/${want}: ${zip_path}" >&2
+                echo "  install.sh runs the ladder out of the unzipped bundle and sources the sweep" >&2
+                echo "  from the same directory; without every one of these it installs cleanly and" >&2
+                echo "  silently stops migrating. upgrade.sh is in the list because the HOSTED" >&2
+                echo "  release.burrowee.com/${comp}/upgrade.sh one-liner execs it out of this same" >&2
+                echo "  kit and refuses at runtime when it is absent." >&2
+                return 1
+            fi
+        done
+        ledger="${src}/migrations/ledger"
+        if [ ! -f "${ledger}" ]; then
+            echo "✗ ${comp} migration ledger missing in source: ${ledger}" >&2
+            return 1
+        fi
+        local named name
+        if ! named="$(ledger_file_migrations "${ledger}")"; then
+            echo "✗ unparseable ${comp} migration ledger in ${ledger}" >&2
+            return 1
+        fi
+        # shellcheck disable=SC2086  # ${named} is an intentional newline-list of script names; word-splitting is the point.
+        for name in ${named}; do
+            if ! printf '%s\n' "${members}" | grep -qxF "migrations/${name}"; then
+                echo "✗ ${comp} migration \"${name}\" is named in the ledger of ${ledger} but is not in ${zip_path}" >&2
+                return 1
+            fi
+        done
+        return 0
     fi
 
     if ! printf '%s\n' "${members}" | grep -qxF 'migrations/run.sh'; then

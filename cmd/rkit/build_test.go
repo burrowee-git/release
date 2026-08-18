@@ -46,7 +46,17 @@ func TestOrchestrateBuildsMatrixIntoScratch(t *testing.T) {
 	if len(res.Zips) != len(relconfig.Targets()) {
 		t.Fatalf("got %d zips, want %d: %v", len(res.Zips), len(relconfig.Targets()), res.Zips)
 	}
-	wantEntries := []string{"burrowee", "burrowee-cli", "burrowee-cli-updater", "install.sh", "update.sh"}
+	// The migrations/ members are named EXPLICITLY, not globbed off the fixture:
+	// this is the assertion that the ladder actually lands INSIDE the zip. The
+	// defect it guards is not hypothetical — gateway v0.2.0.2026.08.07 was
+	// signed, notarized and published with migrations/ staged and then dropped
+	// on the floor by the packaging step, and nothing compared the two.
+	wantEntries := []string{
+		"burrowee", "burrowee-cli", "burrowee-cli-updater", "install.sh", "update.sh",
+		"migrations/run.sh", "migrations/upgrade.sh", "migrations/lib_paths.sh",
+		"migrations/lib_stale_user_bins.sh", "migrations/stale_user_bins.sh",
+		"migrations/component.conf", "migrations/ledger",
+	}
 	sort.Strings(wantEntries)
 	for _, zp := range res.Zips {
 		r, err := zip.OpenReader(zp)
@@ -99,6 +109,17 @@ func writeFixtureModule(t *testing.T, repo string) {
 	// cli ships update.sh (only) at its source root — core's Phase-0 routing
 	// execs it on a non-force update. extraPayload requires it present.
 	write("update.sh", "#!/bin/sh\necho fixture-update\n")
+	// The SHARED migration ladder, which the cli takes. extraPayload stages the
+	// runner + library + rungs out of the RELEASE repo and component.conf +
+	// ledger out of the component source; in this fixture both roles are played
+	// by the same directory, so the two halves land beside each other. Every one
+	// is required — a kit missing any of them installs cleanly and silently
+	// stops migrating, which is what the gate exists to make impossible.
+	for _, f := range []string{"run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh"} {
+		write("inner/_shared/migrations/"+f, "#!/bin/sh\n: fixture "+f+"\n")
+	}
+	write("migrations/component.conf", "COMP=cli\nCOMP_HOME_SCHEME=user\n")
+	write("migrations/ledger", "0.2.0 stale_user_bins.sh\n")
 
 	git := func(args ...string) {
 		t.Helper()

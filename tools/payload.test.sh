@@ -57,8 +57,11 @@ check "file extras: agent"   "$(payload_file_extras agent   | paste -sd, -)" ""
 # caught the v0.2.0 cut: without a dir-extras entry, release.sh's zip -j pass is
 # the only one that runs and the directory is dropped.
 check "dir extras: gateway"  "$(payload_dir_extras gateway | paste -sd, -)" "migrations"
-check "dir extras: edge"     "$(payload_dir_extras edge    | paste -sd, -)" "covers"
-check "dir extras: cli"      "$(payload_dir_extras cli     | paste -sd, -)" ""
+# edge and cli carry migrations/ too since they took the SHARED ladder — same
+# reasoning: without a dir-extras entry only the zip -j pass runs and the
+# directory is silently dropped, which is how a gateway shipped without one.
+check "dir extras: edge"     "$(payload_dir_extras edge    | paste -sd, -)" "covers,migrations"
+check "dir extras: cli"      "$(payload_dir_extras cli     | paste -sd, -)" "migrations"
 check "dir extras: agent"    "$(payload_dir_extras agent   | paste -sd, -)" ""
 
 # --- payload_manifest -------------------------------------------------------
@@ -72,8 +75,51 @@ check "manifest: gateway" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" 
 check "manifest: picks up a new migration" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
     "update.sh,migrations/run.sh,migrations/v1_to_v2.sh,migrations/v2_to_v3.sh"
 
-check "manifest: edge"  "$(payload_manifest edge  "${TMP}/nope" | paste -sd, -)" \
-    "update.sh,updater.update.sh,covers/admin.html,covers/default.html"
+# edge's manifest carries the SHARED ladder's members plus its own two files.
+# The shared half is discovered by glob from inner/_shared/migrations, so it is
+# pinned here against a fixture rather than against the real directory — a test
+# that globbed the same directory the code globs would agree with itself no
+# matter what either contained.
+SHARED_FIX="${TMP}/shared-migrations"
+mkdir -p "${SHARED_FIX}"
+: > "${SHARED_FIX}/run.sh"; : > "${SHARED_FIX}/upgrade.sh"; : > "${SHARED_FIX}/lib_paths.sh"
+: > "${SHARED_FIX}/lib_stale_user_bins.sh"; : > "${SHARED_FIX}/stale_user_bins.sh"
+SHARED_MIGRATIONS_DIR="${SHARED_FIX}"
+EDGE_SRC="${TMP}/manifest-edge"
+mkdir -p "${EDGE_SRC}/migrations"
+: > "${EDGE_SRC}/migrations/component.conf"; : > "${EDGE_SRC}/migrations/ledger"
+check "manifest: edge"  "$(payload_manifest edge  "${EDGE_SRC}" | paste -sd, -)" \
+    "update.sh,updater.update.sh,covers/admin.html,covers/default.html,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
+check "manifest: cli"   "$(payload_manifest cli   "${EDGE_SRC}" | paste -sd, -)" \
+    "update.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
+
+# --- stage_component_migrations (shared ladder) -----------------------------
+SHARED_ASM="${TMP}/shared-asm"; mkdir -p "${SHARED_ASM}"
+if stage_component_migrations cli "${EDGE_SRC}" "${SHARED_ASM}"; then
+    ok "shared stage: succeeds"
+else bad "shared stage: failed"; fi
+for f in run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh stale_user_bins.sh component.conf ledger; do
+    if [ -f "${SHARED_ASM}/migrations/${f}" ]; then ok "shared stage: ${f}"
+    else bad "shared stage: ${f} missing"; fi
+done
+
+# component.conf and ledger are REQUIRED, because the shared runner carries no
+# component defaults: a kit without them refuses on EVERY install, and the cut
+# is the last place that is cheap to find out.
+NOCONF_SRC="${TMP}/manifest-noconf"; mkdir -p "${NOCONF_SRC}/migrations"
+: > "${NOCONF_SRC}/migrations/ledger"
+if stage_component_migrations cli "${NOCONF_SRC}" "${TMP}/noconf-asm" 2>/dev/null; then
+    bad "shared stage: accepted a source with no component.conf"
+else ok "shared stage: rejects a source with no component.conf"; fi
+
+# --- ledger_file_migrations -------------------------------------------------
+printf '# a comment\n\n0.2.0 stale_user_bins.sh\n0.3.0 rekey.sh\n' > "${TMP}/ledger.ok"
+check "ledger file: rows" "$(ledger_file_migrations "${TMP}/ledger.ok" | paste -sd, -)" \
+    "stale_user_bins.sh,rekey.sh"
+printf '0.2.0 stale_user_bins.sh\n0.3.0\n' > "${TMP}/ledger.odd"
+if ledger_file_migrations "${TMP}/ledger.odd" >/dev/null 2>&1; then
+    bad "ledger file: accepted a dangling row"
+else ok "ledger file: rejects a dangling row"; fi
 check "manifest: agent" "$(payload_manifest agent "${TMP}/nope" | paste -sd, -)" ""
 
 # --- stage_payload_extras ---------------------------------------------------
@@ -238,9 +284,35 @@ if assert_payload_migrations gateway "${TMP}/ledger-gap.zip" "${LEDGER_SRC}" 2>/
     bad "gate: accepted a payload missing a ledger-named migration"
 else ok "gate: rejects a payload missing a ledger-named migration"; fi
 
-# Non-gateway components are untouched by the gate.
-if assert_payload_migrations edge "${TMP}/junked.zip" "${SRC}"; then
-    ok "gate: no-op for edge"
-else bad "gate: fired on a non-gateway component"; fi
+# Components with NO ladder at all are untouched by the gate.
+if assert_payload_migrations agent "${TMP}/junked.zip" "${SRC}"; then
+    ok "gate: no-op for a component with no ladder"
+else bad "gate: fired on a component with no ladder"; fi
+
+# --- the gate on a SHARED-ladder component ----------------------------------
+# A zip whose migrations/ was dropped by `zip -j` must be refused for edge and
+# cli exactly as it is for the gateway: install.sh sources the sweep and runs
+# the ladder out of that directory.
+if assert_payload_migrations edge "${TMP}/junked.zip" "${EDGE_SRC}" 2>/dev/null; then
+    bad "gate: accepted a shared-ladder payload with no migrations/"
+else ok "gate: rejects a shared-ladder payload with no migrations/"; fi
+
+SHARED_ZIP_ASM="${TMP}/shared-zip"; mkdir -p "${SHARED_ZIP_ASM}"
+stage_component_migrations edge "${EDGE_SRC}" "${SHARED_ZIP_ASM}" >/dev/null
+printf '0.2.0 stale_user_bins.sh\n' > "${EDGE_SRC}/migrations/ledger"
+cp "${EDGE_SRC}/migrations/ledger" "${SHARED_ZIP_ASM}/migrations/ledger"
+( cd "${SHARED_ZIP_ASM}" && zip -r -q "${TMP}/shared-good.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/shared-good.zip" "${EDGE_SRC}"; then
+    ok "gate: accepts a complete shared-ladder payload"
+else bad "gate: rejected a complete shared-ladder payload"; fi
+
+# …and refuses when the LEDGER names a rung the zip does not carry — the row
+# the runner would refuse on, on every host, after the cut.
+rm -f "${SHARED_ZIP_ASM}/migrations/stale_user_bins.sh"
+rm -f "${TMP}/shared-gap.zip"
+( cd "${SHARED_ZIP_ASM}" && zip -r -q "${TMP}/shared-gap.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/shared-gap.zip" "${EDGE_SRC}" 2>/dev/null; then
+    bad "gate: accepted a shared-ladder payload missing a ledger-named rung"
+else ok "gate: rejects a shared-ladder payload missing a ledger-named rung"; fi
 
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi

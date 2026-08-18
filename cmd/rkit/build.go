@@ -401,7 +401,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	}
 
 	// 5b. Component-specific extra payload files beyond bins+dispatcher+install.sh.
-	extras, err := extraPayload(o.Component, o.SrcDir)
+	extras, err := extraPayload(o.Component, o.SrcDir, o.RepoDir)
 	if err != nil {
 		return nil, fmt.Errorf("extra payload: %w", err)
 	}

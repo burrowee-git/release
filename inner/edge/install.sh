@@ -31,10 +31,19 @@
 # Removing the flow does not remove what it left behind, and the leftovers keep
 # winning: $HOME/.local/bin PRECEDES /usr/local/bin on a normal PATH. So an
 # install also sweeps the stale per-user copies of its own binaries, by exact
-# name, after the units naming $BIN_DIR are loaded — remove_stale_user_bins.
-# What it does NOT sweep is the per-user CONFIG tree an earlier unprivileged
-# install paired: that holds this edge's identity, so it is reported, never
-# touched — note_orphaned_user_state.
+# name, after the units naming $BIN_DIR are loaded — sweep_stale_user_bins,
+# which loads the shared migrations/lib_stale_user_bins.sh rather than
+# open-coding a second copy of it. What it does NOT sweep is the per-user
+# CONFIG tree an earlier unprivileged install paired: that holds this edge's
+# identity, so it is reported, never touched — note_orphaned_user_state.
+#
+# THIS RELEASE ALSO CARRIES A MIGRATION LADDER (migrations/), and the sweep is
+# a rung on it as well as a step here. install.sh runs only when somebody runs
+# the installer and the updater never does, so a host updated in place kept its
+# stale per-user copies indefinitely; the rung is what reaches those hosts. The
+# ladder is walked unconditionally by run_migration_ladder and its exit code is
+# acted on: 1 stops the install before any unit is written, 3 completes the
+# install but withholds the version anchor.
 #
 # The system [Service] block mirrors the relay system unit (Restart / RestartSec
 # / TimeoutStopSec / HOME); ExecStart is `<bin> run` (the edge daemon verb).
@@ -78,6 +87,14 @@ fi
 # BURROWEE_BIN_DIR seam; it keeps its name because the rendered units, and every
 # caller that already sets it, are written in terms of it.
 SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
+# BIN_DIR and SYS_BIN_DIR are ONE destination under two names: the units and the
+# test harness spell it SYS_BIN_DIR, the placement/uninstall code below spells it
+# BIN_DIR, and since the 0.2.0 collapse they can never differ. Resolved HERE, at
+# the top, rather than beside the config home further down — the shared sweep
+# library reads $BIN_DIR for the guard that refuses to sweep the install
+# destination, and a library sourced before the value was decided would have
+# taken the production default while this run installed somewhere else.
+BIN_DIR="$SYS_BIN_DIR"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
 SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge-updater.service"
@@ -103,24 +120,40 @@ remove_legacy_launchd_units() {
 is_root() { [ "$(id -u)" = 0 ]; }
 
 # ---------------------------------------------------------------------------
-# Stale per-user binaries, left by an UNPRIVILEGED install of this component.
+# THE STALE PER-USER BINARY SWEEP, AND THE MIGRATION LADDER IT NOW ALSO RIDES ON
 #
-# Until this collapse the unprivileged branch dropped the binaries in
+# Until the 0.2.0 collapse the unprivileged branch dropped the binaries in
 # $HOME/.local/bin, and before the managed root service existed that was the
 # only shape an edge install took. A host converging onto the root scheme gets
 # everything in /usr/local/bin and keeps the old copies — and $HOME/.local/bin
 # PRECEDES /usr/local/bin on a normal PATH, so every unqualified `burrowee` or
 # `burrowee-edge-cli` an operator types resolves to the OLD binary while the
-# system unit runs the new one. The gateway's sibling installer carries the
-# same sweep, for the same reason, with the same ordering rule.
+# system unit runs the new one.
 #
-# THE ORDERING IS A SAFETY PROPERTY. A host arriving here may still be running
-# a unit whose ExecStart names the per-user path; the macOS LaunchDaemons this
-# script writes gate KeepAlive on PathState, so unlinking the binary does not
-# stale a future restart — it stops the running daemon. The sweep therefore
-# runs only after the new binaries are in $SYS_BIN_DIR and the units naming
-# them have been rendered and (re)loaded, and it refuses outright when a unit
-# file on this host still names the old directory.
+# THE SWEEP IS NOT OPEN-CODED HERE ANY MORE. It lives in
+# migrations/lib_stale_user_bins.sh, inside this same bundle, and the 0.2.0
+# ladder rung (migrations/stale_user_bins.sh) sources the same file out of the
+# same directory. Every guard in it fails silently in the safe-looking direction
+# — a sweep pointed at the wrong home finds nothing and reports success; an
+# ownership check that admits too much deletes an operator's own file and
+# reports success too — so a second copy that drifted would look exactly like
+# the original right up to the deletion it got wrong.
+#
+# IT IS ALSO A LADDER RUNG NOW, and that is why the drift was worth fixing.
+# install.sh runs only when somebody runs the installer, and THE UPDATER NEVER
+# DOES: it runs update.sh, swaps binaries and restarts the daemon. So a host
+# updated in place kept its stale per-user copies forever. Making the sweep a
+# rung is what reaches those hosts; keeping the call HERE as well is deliberate
+# rather than redundant, because a FRESH install must not depend on the ladder
+# being coherent, and the sweep is idempotent.
+#
+# THE ORDERING IS A SAFETY PROPERTY, not a tidiness preference. A host arriving
+# here may still be running a unit whose ExecStart names the per-user path; the
+# macOS LaunchDaemons this script writes gate KeepAlive on PathState, so
+# unlinking the binary does not stale a future restart — it stops the running
+# daemon. So the sweep runs only after the new binaries are in $SYS_BIN_DIR and
+# the units naming them have been rendered and (re)loaded, and even then it
+# refuses outright when a unit file on this host still names the old directory.
 #
 # THE BINARIES ARE ALL IT TOUCHES. The per-user CONFIG tree beside them
 # (~/.burrowee/edge: this edge's identity, console.json, covers) is this host's
@@ -130,168 +163,150 @@ is_root() { [ "$(id -u)" = 0 ]; }
 # edge, from an installer, with no operator in the loop.
 # ---------------------------------------------------------------------------
 
-# LEGACY_HOME_PARENTS — where an account's home may live on a host with neither
-# getent nor dscl. Same name and default as the gateway's installer and the
-# gateway repo's migrations/run.sh, so one override covers all of them.
-LEGACY_HOME_PARENTS="${BURROWEE_LEGACY_HOME_PARENTS:-/Users /home}"
+# The library spells the unit directories LAUNCHD_DIR / SYSTEMD_DIR — the same
+# names the gateway's installer and the gateway repo's runner use. This script
+# (and every caller that already sets them, including the Go install-test
+# harness) spells them LAUNCHD_PLIST_DIR / SYSTEMD_UNIT_DIR. Mapped here, once,
+# so a sandboxed run cannot leak into the real /Library/LaunchDaemons.
+LAUNCHD_DIR="$LAUNCHD_PLIST_DIR"
+SYSTEMD_DIR="$SYSTEMD_UNIT_DIR"
 
-# home_of_user <name> — that account's home directory, or empty + non-zero:
-# getent on Linux, dscl on macOS, a parent-directory guess for a slim image.
-home_of_user() {
-    _hu=""
-    if command -v getent >/dev/null 2>&1; then
-        _hu="$(getent passwd "$1" 2>/dev/null | cut -d: -f6)"
+# MIGRATIONS_DIR — the ladder shipped beside this installer, or empty when this
+# bundle carries none. A bundle with no migrations/ is an OLD bundle, not a
+# broken one (a $COMP_HOME self-copy from an install that predates the
+# directory, reachable only through BURROWEE_UNITS_ONLY), so it stays quiet —
+# while a bundle that HAS migrations/ and is missing a file inside it is a
+# mis-assembled release, which this project has shipped once and must never
+# ship quietly again.
+MIGRATIONS_DIR=""
+if [ -d "$(dirname "$0")/migrations" ]; then
+    MIGRATIONS_DIR="$(dirname "$0")/migrations"
+fi
+
+# SWEEP_LIB_LOADED gates both call sites below. It is a separate variable and
+# not a test of $MIGRATIONS_DIR, because "the directory is there" and "the
+# functions are defined" are different facts and the second is the one the
+# callers depend on.
+SWEEP_LIB_LOADED=0
+if [ -n "$MIGRATIONS_DIR" ]; then
+    if [ -f "$MIGRATIONS_DIR/lib_stale_user_bins.sh" ] && [ -f "$MIGRATIONS_DIR/lib_paths.sh" ]; then
+        # LIB_STALE_USER_BINS_DIR pins where the library looks for its siblings
+        # (lib_paths.sh, component.conf). Without it the library resolves them
+        # from $0 — which, sourced from here, is the BUNDLE ROOT and not
+        # migrations/, so component.conf would never be found and the sweep
+        # would silently have no names to sweep.
+        LIB_STALE_USER_BINS_DIR="$MIGRATIONS_DIR"
+        export LIB_STALE_USER_BINS_DIR
+        # shellcheck source=/dev/null
+        . "$MIGRATIONS_DIR/lib_paths.sh"
+        # shellcheck source=/dev/null
+        . "$MIGRATIONS_DIR/lib_stale_user_bins.sh"
+        SWEEP_LIB_LOADED=1
+        # THE TWO LISTS MUST AGREE. $BINS is what this installer PLACES;
+        # $STALE_USER_BINS (from migrations/component.conf) is what the sweep
+        # removes, and it is the one the ladder rung uses too. A name added to
+        # one and not the other is a binary that is installed and never swept —
+        # a shadowing copy left on PATH, which is this whole defect — or one
+        # swept and never installed. Neither is visible without saying so out
+        # loud, because the sweep's normal output on a converged host is nothing
+        # at all.
+        if [ "$BINS" != "$STALE_USER_BINS" ]; then
+            echo "note: this installer places [$BINS]" >&2
+            echo "note: but $MIGRATIONS_DIR/component.conf sweeps [$STALE_USER_BINS]." >&2
+            echo "note: the two lists disagree, so some name is installed and never swept" >&2
+            echo "note: (it keeps shadowing $BIN_DIR on PATH) or swept and never installed." >&2
+        fi
+    else
+        echo "note: $MIGRATIONS_DIR carries no lib_stale_user_bins.sh + lib_paths.sh pair —" >&2
+        echo "note: THIS RELEASE IS INCOMPLETE. The pre-0.2.0 per-user copies of these" >&2
+        echo "note: binaries are NOT being swept, and they precede $BIN_DIR on a normal" >&2
+        echo "note: PATH. Remove them by hand, or re-run a complete release." >&2
     fi
-    if [ -z "$_hu" ] && command -v dscl >/dev/null 2>&1; then
-        _hu="$(dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
-    fi
-    if [ -z "$_hu" ]; then
-        for _hu_p in $LEGACY_HOME_PARENTS; do
-            if [ -d "$_hu_p/$1" ]; then _hu="$_hu_p/$1"; break; fi
-        done
-    fi
-    [ -n "$_hu" ] || return 1
-    echo "$_hu"
+fi
+
+# sweep_stale_user_bins — run the library's sweep, or say why it cannot.
+# Named differently from the library's own remove_stale_user_bins on purpose:
+# two definitions of one name in one shell, with which one a call reaches
+# depending on whether the source has happened yet, is not a hazard worth
+# creating to save a word.
+sweep_stale_user_bins() {
+    [ "$SWEEP_LIB_LOADED" = 1 ] || return 0
+    remove_stale_user_bins
 }
 
-# operator_home — the home of the account whose per-user tree an earlier
-# unprivileged install wrote to, which is NOT $HOME on the path that matters:
-# the documented flow is `curl … | sudo sh`, and under sudo $HOME is root's
-# (/root, or /var/root on macOS). A sweep aimed at $HOME/.local/bin would look
-# in a tree no unprivileged install ever wrote to, find nothing, and report
-# success — a check whose scope is narrower than its claim. $SUDO_USER is who
-# invoked sudo; it is unset for a genuine root login, where $HOME is already
-# the right answer.
-operator_home() {
-    case "${SUDO_USER:-}" in
-    '' | root) ;;
+# ---------------------------------------------------------------------------
+# run_migration_ladder — walk migrations/run.sh, which runs every migration in
+# migrations/ledger this host has not reached yet, oldest first.
+#
+# The runner owns the whole decision: it reads the version anchor, gates each
+# rung on `installed < target`, runs them oldest first, and records each one
+# that completes. It is a no-op unless one applies, so this is called
+# UNCONDITIONALLY — a caller that decided for itself when the ladder was worth
+# running would be a second copy of the gate.
+#
+# WHERE IT SITS IN THE FLOW, and why. It runs after the binaries are in
+# $BIN_DIR and before the version marker is written:
+#
+#   * AFTER the binaries, because the 0.2.0 rung removes the per-user copies
+#     that SHADOW $BIN_DIR on PATH. Removing them before the replacements exist
+#     would leave an operator's `burrowee-edge-cli` resolving to nothing at all
+#     for the length of an install.
+#   * BEFORE the version marker, because exit 3 means "the rung ran and its
+#     receipt was lost", and the only correct response to that is to withhold
+#     the anchor so the next install re-runs the rung. An anchor written before
+#     the ladder ran could not be withheld after it.
+#
+# EXIT CODES — the runner's contract, acted on rather than merely observed:
+#   0  nothing applied. Continue.
+#   2  migrations ran. Continue. (This runner stops no service — see its header.)
+#   3  ran, but a receipt was lost: continue, and DO NOT record the version.
+#   1 or anything else  FATAL. Stopping here leaves the binaries placed and no
+#      units written, which is loud and re-runnable; carrying on would write
+#      units and an anchor for a migration that refused, and the anchor is what
+#      closes the gate on that rung permanently.
+#
+# Not found is not an error: BURROWEE_UNITS_ONLY can run from $COMP_HOME's
+# self-copy, and an install predating migrations/ has none beside it.
+# ---------------------------------------------------------------------------
+MIGRATE_UNRECORDED=0
+run_migration_ladder() {
+    [ -n "$MIGRATIONS_DIR" ] || return 0
+    [ -f "$MIGRATIONS_DIR/run.sh" ] || return 0
+    # $COMP_HOME must exist before the runner is asked about it: an absent tree
+    # is the runner's "I could not read the evidence" answer, and on a host
+    # converging off the per-user layout root's tree legitimately does not exist
+    # yet. Creating it here makes the ladder's input a fact rather than an
+    # accident of which step happened to mkdir first.
+    mkdir -p "$COMP_HOME" 2>/dev/null || true
+    set +e
+    COMP_HOME="$COMP_HOME" \
+        BIN_DIR="$BIN_DIR" \
+        LAUNCHD_DIR="$LAUNCHD_PLIST_DIR" \
+        SYSTEMD_DIR="$SYSTEMD_UNIT_DIR" \
+        sh "$MIGRATIONS_DIR/run.sh"
+    _rml_rc=$?
+    set -e
+    case "$_rml_rc" in
+    0 | 2) ;;
+    3) MIGRATE_UNRECORDED=1 ;;
     *)
-        if _oh="$(home_of_user "$SUDO_USER")" && [ -n "$_oh" ]; then
-            echo "$_oh"
-            return 0
-        fi
-        echo "note: \$SUDO_USER='$SUDO_USER' has no resolvable home — the stale per-user" >&2
-        echo "note: binary sweep falls back to \$HOME." >&2
+        echo "error: a state migration refused or failed — stopping before the service" >&2
+        echo "error: units are written. The binaries are in $BIN_DIR; nothing else on this" >&2
+        echo "error: host has been changed." >&2
+        echo "hint: fix the cause reported above and re-run this installer." >&2
+        exit 1
         ;;
     esac
-    echo "${HOME:-}"
 }
 
-# unit_naming_dir <dir> <operator-home> — the first service unit file on this
-# host that still names <dir>, or empty + non-zero when none does. It reads the
-# unit FILES rather than asking the supervisor and treats one on disk as
-# possibly loaded: the two outcomes are "skip a cleanup" and "stop a running
-# daemon", and only one of them is undone by running the installer again.
-unit_naming_dir() {
-    for _und_d in "$LAUNCHD_PLIST_DIR" "$SYSTEMD_UNIT_DIR" \
-        "$2/Library/LaunchAgents" "$2/.config/systemd/user"; do
-        [ -d "$_und_d" ] || continue
-        for _und_f in "$_und_d"/*; do
-            [ -f "$_und_f" ] || continue
-            if grep -qF "$1/" "$_und_f" 2>/dev/null; then
-                echo "$_und_f"
-                return 0
-            fi
-        done
-    done
-    return 1
-}
-
-# is_burrowee_binary <file> — whether <file> is one of OURS, decided by reading
-# it and never by running it.
-#
-# Every burrowee binary is a Go binary built from a github.com/burrowee-git/*
-# module, and the toolchain stamps that module path into the executable's
-# build-info blob (the bytes `go version -m` reads back). It survives -trimpath
-# and -ldflags "-s -w", so a release build carries it too.
-#
-# NOT `"$file" --version`. This installer runs as root on the path that
-# matters, and the directory being swept is writable by the very user whose
-# files are in question — executing one of them to ask what it is would hand
-# uid 0 to whoever can drop a file there. Reading a file grants it nothing.
-is_burrowee_binary() {
-    LC_ALL=C grep -qF 'github.com/burrowee-git/' "$1" 2>/dev/null
-}
-
-# stale_dir_has_other_burrowee_bin <dir> — whether any burrowee-* binary of
-# OURS remains in <dir> after this component's own names have been swept. The
-# glob is a DETECTION over what is left, never a removal target: nothing is ever
-# deleted by pattern here, only by exact name out of $BINS. Each candidate is
-# put to is_burrowee_binary so an operator's own `burrowee-notes` script cannot
-# stand in for an installed component and pin the shadowing dispatcher forever.
-stale_dir_has_other_burrowee_bin() {
-    for _sdo_f in "$1"/burrowee-*; do
-        [ -f "$_sdo_f" ] || continue
-        if is_burrowee_binary "$_sdo_f"; then return 0; fi
-    done
-    return 1
-}
-
-# remove_one_stale_bin <path> — remove ONE stale per-user copy, and only when it
-# is provably ours. Absent is success, not a warning.
-remove_one_stale_bin() {
-    _ros_p="$1"
-    if [ -h "$_ros_p" ]; then
-        echo "note: $_ros_p is a symlink, not a binary this installer placed — left in place." >&2
-        return 0
-    fi
-    [ -e "$_ros_p" ] || return 0
-    if [ ! -f "$_ros_p" ]; then
-        echo "note: $_ros_p is not a regular file — left in place." >&2
-        return 0
-    fi
-    if ! is_burrowee_binary "$_ros_p"; then
-        echo "note: $_ros_p carries no burrowee build stamp — it is not ours, left in place." >&2
-        return 0
-    fi
-    if rm -f "$_ros_p"; then
-        echo "removed stale per-user binary: $_ros_p"
-    else
-        echo "note: could not remove $_ros_p — it shadows $BIN_DIR on PATH; remove it by hand." >&2
-    fi
-}
-
-# remove_stale_user_bins — sweep the per-user copies of THIS component's
-# binaries, by exact name out of $BINS and never by glob.
-remove_stale_user_bins() {
-    _rsb_home="$(operator_home)"
-    [ -n "$_rsb_home" ] || return 0
-    _rsb_dir="$_rsb_home/.local/bin"
-    [ -d "$_rsb_dir" ] || return 0
-
-    # The one thing this must never do is delete the install it just made.
-    # There WAS an explicit `[ "$_rsb_dir" = "$BIN_DIR" ] && return 0` here,
-    # written when the unprivileged branch installed INTO $_rsb_dir. It is gone,
-    # because with that branch removed nothing could ever reach it: this run has
-    # already rendered AND loaded units naming $BIN_DIR by the time it is
-    # called, so the refusal below — a unit on this host still names that
-    # directory — fires first in every state, including the redirected
-    # $SYS_BIN_DIR the suite uses to point the destination at a per-user dir on
-    # purpose. Deleting an unreachable guard was the choice over keeping one no
-    # test could ever fail on; the property it protected is now asserted through
-    # the check that actually enforces it.
-    _rsb_unit=""
-    _rsb_unit="$(unit_naming_dir "$_rsb_dir" "$_rsb_home")" || _rsb_unit=""
-    if [ -n "$_rsb_unit" ]; then
-        echo "note: $_rsb_unit still names $_rsb_dir, so a supervisor may be running a" >&2
-        echo "note: binary from there — the stale per-user copies are left in place." >&2
-        echo "hint: remove them by hand once nothing points at that directory." >&2
-        return 0
-    fi
-
-    for _rsb_b in $BINS; do
-        # The bare `burrowee` dispatcher is SHARED across co-installed
-        # components (cli still installs per-user by design), so it is handled
-        # after this component's own names and only when nothing else remains —
-        # the same rule the uninstall path below applies to $BIN_DIR.
-        case "$_rsb_b" in burrowee) continue ;; esac
-        remove_one_stale_bin "$_rsb_dir/$_rsb_b"
-    done
-    if stale_dir_has_other_burrowee_bin "$_rsb_dir"; then
-        echo "kept $_rsb_dir/burrowee (dispatcher) — another burrowee component is still installed there"
-    else
-        remove_one_stale_bin "$_rsb_dir/burrowee"
-    fi
+# report_unrecorded_migration — say that a migration completed without its
+# receipt, and that the version anchor was withheld on purpose so it runs again.
+report_unrecorded_migration() {
+    [ "$MIGRATE_UNRECORDED" = 1 ] || return 0
+    echo "note: a migration completed but its receipt could not be written." >&2
+    echo "note: the installed version is deliberately NOT recorded, so the next install" >&2
+    echo "note: re-runs the migration (they are idempotent) rather than gating it off" >&2
+    echo "note: on a version number with no receipt behind it." >&2
 }
 
 # note_orphaned_user_state — REPORT, and never touch, the per-user config tree an
@@ -308,7 +323,15 @@ remove_stale_user_bins() {
 # the CALLER's condition — this is only reached from the "next: pair this edge"
 # branch — and it is not re-tested here: a second copy of a condition its only
 # call site already decided cannot fail independently, it can only drift.
+#
+# It resolves the operator's home through the SAME operator_home the sweep uses
+# — one definition, in migrations/lib_paths.sh — so the directory it reports on
+# and the directory the sweep acted on can never be two different answers. With
+# no library loaded it says nothing rather than guessing $HOME, which under
+# `sudo sh` is root's and holds no per-user tree: a report naming the wrong
+# directory is worse than no report, because it is acted on.
 note_orphaned_user_state() {
+    [ "$SWEEP_LIB_LOADED" = 1 ] || return 0
     _nos_home="$(operator_home)"
     [ -n "$_nos_home" ] || return 0
     _nos_dir="$_nos_home/.burrowee/$COMP"
@@ -321,25 +344,30 @@ note_orphaned_user_state() {
 }
 
 # ── the one install target ───────────────────────────────────────────────────
-# $BIN_DIR and the service's config home, decided here and nowhere else — there
-# is no branch left to take, so every step below that only made sense for a root
-# install (setup_root_service, the unit teardown on uninstall, the stale-bin
-# sweep, the version marker under root's home) now runs on EVERY install.
-#
-# BIN_DIR and SYS_BIN_DIR are one destination under two names: the units and the
-# test harness spell it SYS_BIN_DIR, the placement/uninstall code below spells it
-# BIN_DIR, and since the collapse they can never differ.
+# The service's config home. $BIN_DIR was decided at the top of this file,
+# beside $SYS_BIN_DIR — there is no branch left to take, so every step below
+# that only made sense for a root install (setup_root_service, the unit teardown
+# on uninstall, the stale-bin sweep, the version marker under root's home) now
+# runs on EVERY install.
 #
 # The config home is root's home + /.burrowee/edge, because the daemon that reads
 # it runs as root. Root's home is /root on Linux but /var/root on macOS — /root
 # sits on the sealed read-only system volume there, so any mkdir under it fails.
-# Resolve it robustly (tilde expansion), falling back to the well-known
-# /var/root; ROOT_HOME is overridable only for the Go install-test harness
-# (like SYS_BIN_DIR). It is resolved from ~root rather than from $HOME because
-# under `sudo sh` $HOME is not reliably root's — macOS sudo keeps the invoking
-# user's by default.
-BIN_DIR="$SYS_BIN_DIR"
-if [ "$(uname -s)" = "Darwin" ]; then
+# ROOT_HOME is overridable only for the Go install-test harness (like
+# SYS_BIN_DIR). It is resolved from ~root rather than from $HOME because under
+# `sudo sh` $HOME is not reliably root's — macOS sudo keeps the invoking user's
+# by default.
+#
+# root_home() from migrations/lib_paths.sh is the ONE implementation of that
+# rule, shared with the migration runner, so the tree this installer writes and
+# the tree the ladder migrates cannot be two different directories. The inline
+# fallback below is reached only by a bundle that carries no migrations/ at all
+# — a $COMP_HOME self-copy predating the directory, which only
+# BURROWEE_UNITS_ONLY runs — and it is deliberately the same rule rather than a
+# simplification of it.
+if command -v root_home >/dev/null 2>&1; then
+    ROOT_HOME="$(root_home)"
+elif [ "$(uname -s)" = "Darwin" ]; then
     ROOT_HOME="${ROOT_HOME:-$(eval echo ~root)}"
     case "$ROOT_HOME" in /*) ;; *) ROOT_HOME=/var/root ;; esac
 else
@@ -608,6 +636,11 @@ for b in $BINS; do
 done
 echo "installed to $BIN_DIR: $BINS"
 
+# ---- state migrations -------------------------------------------------------
+# Unconditional and a no-op unless a rung applies. See run_migration_ladder for
+# why it sits exactly here: after the binaries, before the version anchor.
+run_migration_ladder
+
 # ---- cover assets (decoy pages for handleCover file mode) -------------------
 # Always refresh the two SHIPPED defaults (admin.html + default.html) on every
 # install/update: a stale hardcoded footer blows the decoy, so the shipped covers
@@ -633,12 +666,20 @@ esac
 # ---- version-gated config migration ---------------------------------------
 # Roll new default config onto existing installs (seed-if-absent), gated by the
 # prior installed version. Best-effort; never aborts the install/update.
+#
+# $VERSION_MARKER is ALSO the migration ladder's anchor (migrations/run.sh reads
+# it as $COMP_HOME/installed-version), which is why the write is withheld when a
+# rung ran and could not be recorded: the receipt and the anchor are the two
+# gates on a rung, and recording the version with the receipt lost closes the
+# last one on work nothing can prove finished.
 if [ -n "${BURROWEE_VERSION:-}" ]; then
     OLD_VER=""
     [ -f "$VERSION_MARKER" ] && OLD_VER="$(cat "$VERSION_MARKER" 2>/dev/null || true)"
     migrate_config "$OLD_VER" || echo "warning: config migration step failed; continuing" >&2
     mkdir -p "$COMP_HOME" 2>/dev/null || true
-    if printf '%s\n' "$BURROWEE_VERSION" > "$VERSION_MARKER.tmp" 2>/dev/null; then
+    if [ "$MIGRATE_UNRECORDED" = 1 ]; then
+        report_unrecorded_migration
+    elif printf '%s\n' "$BURROWEE_VERSION" > "$VERSION_MARKER.tmp" 2>/dev/null; then
         mv -f "$VERSION_MARKER.tmp" "$VERSION_MARKER" 2>/dev/null || echo "warning: could not record installed version" >&2
     else
         echo "warning: could not write version marker" >&2
@@ -648,8 +689,18 @@ fi
 # Self-copy: keep a copy of this installer at $COMP_HOME/install.sh so an offline
 # units-only reinstall (BURROWEE_UNITS_ONLY=1, run by edge's LocalReinstall) can
 # re-render + reload the service units without a fresh download.
+#
+# THE MIGRATIONS GO WITH IT. This script resolves the runner and the sweep
+# library relative to its OWN path, so a $COMP_HOME holding install.sh without
+# migrations/ is an installer that silently cannot migrate and silently stops
+# sweeping — both of which look exactly like a clean run.
 mkdir -p "$COMP_HOME" 2>/dev/null || true
 cp "$0" "$COMP_HOME/install.sh" 2>/dev/null || true
+if [ -n "$MIGRATIONS_DIR" ] && [ "$MIGRATIONS_DIR" != "$COMP_HOME/migrations" ]; then
+    mkdir -p "$COMP_HOME/migrations" 2>/dev/null || true
+    cp "$MIGRATIONS_DIR"/* "$COMP_HOME/migrations/" 2>/dev/null \
+        || echo "note: could not keep a copy of migrations/ at $COMP_HOME — a later" >&2
+fi
 
 # ---- the managed system service --------------------------------------------
 # Every install sets up the managed root service running `burrowee-edge run` and
@@ -662,7 +713,7 @@ setup_root_service
 # mode above — that path places no binaries at all, so the precondition
 # this sweep's safety rests on ("the new copies are already in place") is
 # not something that mode establishes.
-remove_stale_user_bins
+sweep_stale_user_bins
 "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
 echo "edge system install complete."
 # The managed service runs the daemon; pairing is a separate operator step:
