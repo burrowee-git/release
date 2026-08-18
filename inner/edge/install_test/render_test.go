@@ -68,7 +68,17 @@ func stubRootEnv(t *testing.T) string {
 func seedEdgeBins(t *testing.T, dir string) {
 	t.Helper()
 	for _, b := range edgeBins {
-		if err := os.WriteFile(filepath.Join(dir, b), []byte("#!/bin/sh\necho "+b+"\n"), 0o755); err != nil {
+		// THE STAMP IS LOAD-BEARING, TWICE OVER. The shared sweep decides
+		// ownership by reading the module path the Go toolchain writes into
+		// every github.com/burrowee-git/* executable — and since the
+		// guard-scope fix it reads it on BOTH sides: on the per-user copy it is
+		// considering, and on the root-installed twin in $BIN_DIR that is what
+		// makes that copy stale rather than the only install there is. An
+		// unstamped payload makes the twin invisible, the sweep correctly does
+		// nothing, and every removal assertion below fails for a reason that
+		// has nothing to do with the sweep.
+		body := "#!/bin/sh\n# github.com/burrowee-git/edge/cmd/" + b + "\necho " + b + "\n"
+		if err := os.WriteFile(filepath.Join(dir, b), []byte(body), 0o755); err != nil {
 			t.Fatalf("seed bin %s: %v", b, err)
 		}
 	}

@@ -207,11 +207,16 @@ func TestEdgeStaleSweepUsesTheOperatorHomeNotDollarHome(t *testing.T) {
 	assertContains(t, out, "removed stale per-user binary: "+filepath.Join(operatorStale, "burrowee-edge"))
 }
 
-// TestEdgeStaleSweepSkipsWhenAUnitStillNamesThePerUserDir — the ordering guard
-// as a refusal: another component's unit can still point into the per-user
+// TestEdgeStaleSweepLeavesOnlyTheFileAUnitStillNames — the ordering guard,
+// asked PER FILE. Another component's unit can still point into the per-user
 // tree, and removing a binary a loaded unit names stops the daemon rather than
-// merely staling its next restart.
-func TestEdgeStaleSweepSkipsWhenAUnitStillNamesThePerUserDir(t *testing.T) {
+// merely staling its next restart — so that file is left.
+//
+// ONLY that file. The directory-scoped form of this guard is the defect this
+// change exists for: on a production node one edge-updater unit naming
+// ~/.local/bin abandoned the whole sweep, including six gateway names that unit
+// does not mention and never could.
+func TestEdgeStaleSweepLeavesOnlyTheFileAUnitStillNames(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
@@ -223,22 +228,59 @@ func TestEdgeStaleSweepSkipsWhenAUnitStillNamesThePerUserDir(t *testing.T) {
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A co-installed relay's unit, naming ONE of edge's files.
+	protected := filepath.Join(stale, "burrowee-edge-cli")
 	foreignUnit := filepath.Join(unitDir, "burrowee-relay.service")
 	if err := os.WriteFile(foreignUnit,
-		[]byte("[Service]\nExecStart="+stale+"/burrowee-relay run\n"), 0o644); err != nil {
+		[]byte("[Service]\nExecStart="+protected+" run\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	_, _, out := runRootInstall(t, home, staging, sandboxLaunchd(home))
 
+	assertPresent(t, protected, "a unit still names this exact file")
+	assertContains(t, out, foreignUnit+" still names "+protected)
 	for _, b := range edgeBins {
-		assertPresent(t, filepath.Join(stale, b),
-			"a unit still names that directory, so removing from it can stop a running daemon")
+		if b == "burrowee-edge-cli" {
+			continue
+		}
+		assertGone(t, filepath.Join(stale, b),
+			"no unit names this file; a unit naming a DIFFERENT file must not protect it")
 	}
-	assertContains(t, out, foreignUnit, "still names "+stale)
-	if strings.Contains(out, "removed stale per-user binary") {
-		t.Errorf("something was removed despite a live reference:\n%s", out)
+}
+
+// TestEdgeStaleSweepCollidesOnNoBasename — `grep -F "$dir/burrowee-edge"`
+// matches a unit whose ExecStart is "$dir/burrowee-edge-updater", so a match
+// that does not terminate the basename lets the longer name's unit spare the
+// shorter name's file, silently and in the direction where the shadowing binary
+// survives.
+func TestEdgeStaleSweepCollidesOnNoBasename(t *testing.T) {
+	home := t.TempDir()
+	staging := t.TempDir()
+	seedEdgeBins(t, staging)
+	stageMigrations(t, staging)
+	stale := staleDir(home)
+	seedStale(t, stale, staleOursSet())
+
+	unitDir := filepath.Join(home, "systemd-system")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	// The unit FILE is deliberately not called burrowee-edge-updater.service:
+	// this installer writes a unit of that exact name itself, pointing at the
+	// system bin dir, and would overwrite the fixture before the sweep ran. What
+	// matters is the path inside it, not the filename.
+	updater := filepath.Join(stale, "burrowee-edge-updater")
+	if err := os.WriteFile(filepath.Join(unitDir, "some-operator-daemon.service"),
+		[]byte("[Service]\nExecStart="+updater+" run\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _ = runRootInstall(t, home, staging, sandboxLaunchd(home))
+
+	assertPresent(t, updater, "the unit names this exact file")
+	assertGone(t, filepath.Join(stale, "burrowee-edge"),
+		"burrowee-edge was spared by burrowee-edge-updater's unit — the basename match does not terminate")
 }
 
 // TestEdgeStaleSweepLeavesWhatIsNotOurs — the bar for deleting from a user's
@@ -267,10 +309,20 @@ func TestEdgeStaleSweepLeavesWhatIsNotOurs(t *testing.T) {
 	assertContains(t, out, filepath.Join(stale, "burrowee-edge-cli")+" carries no burrowee build stamp")
 }
 
-// TestEdgeStaleSweepKeepsTheDispatcherWhileAnotherComponentIsInstalledThere —
-// the bare `burrowee` dispatcher is shared, and the cli component still
-// installs per-user by design.
-func TestEdgeStaleSweepKeepsTheDispatcherWhileAnotherComponentIsInstalledThere(t *testing.T) {
+// TestEdgeStaleSweepRemovesTheDispatcherOnceARootOneExists — the operator's
+// ruling, and a reversal of the rule that used to live here. The bare
+// `burrowee` dispatcher was spared whenever any other stamped burrowee-* file
+// remained per-user; a co-installed cli therefore pinned a stale dispatcher in
+// place indefinitely, and because ~/.local/bin precedes the system bin dir on a
+// normal PATH it went on answering every `burrowee …` with old code.
+//
+// The rule is now the root-twin predicate alone: this install placed a root
+// `burrowee`, so the per-user one goes. It strands nothing — burrowee's
+// main.go pins only gateway, edge and register to the system bin dir and
+// resolves everything else through PATH and then {/usr/local/bin,
+// /opt/homebrew/bin, ~/.local/bin} — and the per-user cli below, which has no
+// root twin, is left exactly where the dispatcher can still find it.
+func TestEdgeStaleSweepRemovesTheDispatcherOnceARootOneExists(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
@@ -282,9 +334,10 @@ func TestEdgeStaleSweepKeepsTheDispatcherWhileAnotherComponentIsInstalledThere(t
 
 	_, _, out := runRootInstall(t, home, staging, sandboxLaunchd(home))
 
-	assertPresent(t, filepath.Join(stale, "burrowee"),
-		"the cli is still installed there and the dispatcher is shared")
-	assertPresent(t, filepath.Join(stale, "burrowee-cli"), "it belongs to another component")
+	assertGone(t, filepath.Join(stale, "burrowee"),
+		"this install placed a root dispatcher, so the per-user one only shadows it on PATH")
+	assertContains(t, out, "removed stale per-user binary: "+filepath.Join(stale, "burrowee"))
+	assertPresent(t, filepath.Join(stale, "burrowee-cli"),
+		"the cli has no root twin yet — this is a LIVE install, and the root dispatcher still resolves it")
 	assertGone(t, filepath.Join(stale, "burrowee-edge"), "edge's own binaries still move")
-	assertContains(t, out, "kept "+filepath.Join(stale, "burrowee")+" (dispatcher)")
 }

@@ -77,12 +77,29 @@ mutate operator-home-is-HOME lib_paths.sh \
     "the sweep resolves the OPERATOR's home via \$SUDO_USER, not \$HOME (case 11)"
 
 mutate unit-guard-removed lib_stale_user_bins.sh \
-    "s|^    if unit_naming_dir \"\$_sbp_dir\" \"\$_sbp_home\" >/dev/null 2>&1; then return 1; fi|    :|" \
-    "a host whose unit still names the per-user dir is never selected (case 7)"
+    "s|^    if _sbd_u=\"\$(unit_naming_bin \"\$1\" \"\$2\" \"\$3\")\"; then|    if false; then|" \
+    "a file some unit still names is left in place (case 7)"
 
-mutate dispatcher-always-removed lib_stale_user_bins.sh \
-    "s|^    if stale_dir_has_other_burrowee_bin \"\$_rsb_dir\"; then|    if false; then|" \
-    "the shared dispatcher survives while another component is installed there (case 9)"
+# The guard used to be asked about the DIRECTORY. Feeding it an empty basename
+# restores that question, and case 7 is what notices: on admin-kr one edge unit
+# naming the per-user directory blocked six gateway names it does not mention.
+mutate unit-guard-scoped-to-the-directory lib_stale_user_bins.sh \
+    "s|^    if _sbd_u=\"\$(unit_naming_bin \"\$1\" \"\$2\" \"\$3\")\"; then|    if _sbd_u=\"\$(unit_naming_bin \"\$1\" \"\" \"\$3\")\"; then|" \
+    "the unit guard is asked PER FILE, not per directory (case 7)"
+
+# The substring collision: with the terminator test gone, any occurrence counts,
+# so a unit naming burrowee-edge-updater spares burrowee-edge.
+mutate basename-match-not-terminated lib_stale_user_bins.sh \
+    "s|^        \[ -n \"\$_lnb_l\" \] || return 0|        return 0|" \
+    "the basename match TERMINATES — burrowee-edge-updater's unit does not protect burrowee-edge (case 7b)"
+
+mutate root-twin-ignored lib_stale_user_bins.sh \
+    "s|^    if ! system_twin_exists \"\$2\"; then|    if false; then|" \
+    "a per-user binary with no root-installed twin is the LIVE install and survives (cases 9b, 18, 18c)"
+
+mutate foreign-file-counts-as-a-root-install lib_stale_user_bins.sh \
+    "s|^    \[ \"\$(stale_bin_verdict \"\$BIN_DIR/\$1\")\" = ours \]|    [ -e \"\$BIN_DIR/\$1\" ]|" \
+    "an operator's own file in \$BIN_DIR is not evidence of a root install (case 9d)"
 
 mutate sweep-dir-equals-bindir lib_stale_user_bins.sh \
     "s|^    \[ \"\$_subd_dir\" != \"\$BIN_DIR\" \] |: |" \

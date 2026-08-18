@@ -32,7 +32,13 @@ func installShPath(t *testing.T) string {
 func seedCliBins(t *testing.T, dir string) {
 	t.Helper()
 	for _, b := range cliBins {
-		if err := os.WriteFile(filepath.Join(dir, b), []byte("#!/bin/sh\necho "+b+"\n"), 0o755); err != nil {
+		// Stamped: the shared sweep reads the Go module path to decide
+		// ownership, and since the guard-scope fix it reads it on the
+		// ROOT-INSTALLED TWIN as well as on the per-user copy. An unstamped
+		// payload makes the twin invisible and every removal assertion fails
+		// for a reason unrelated to the sweep.
+		body := "#!/bin/sh\n# github.com/burrowee-git/cli/cmd/" + b + "\necho " + b + "\n"
+		if err := os.WriteFile(filepath.Join(dir, b), []byte(body), 0o755); err != nil {
 			t.Fatalf("seed bin %s: %v", b, err)
 		}
 	}

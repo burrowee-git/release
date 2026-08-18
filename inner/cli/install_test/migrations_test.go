@@ -238,14 +238,23 @@ func TestCliLadderSweepsWhenTheDestinationIsElsewhere(t *testing.T) {
 	}
 }
 
-// TestCliLadderKeepsTheSharedDispatcher IS THE CLI'S OWN RULE, stated as a test.
+// TestCliLadderRemovesTheSharedDispatcherOnceARootOneExists IS THE CLI'S RULE,
+// and the operator reversed it: "burrowee dispatcher should be removed and only
+// root dispatcher exists."
 //
-// `burrowee` is the dispatcher every burrowee component shares. The cli's rung
-// removes it from the per-user directory ONLY when, after the cli's own names
-// have gone, no remaining file matching burrowee-* in that same directory
-// carries the github.com/burrowee-git/ build stamp. A co-installed
-// burrowee-gateway is exactly such a file and pins it.
-func TestCliLadderKeepsTheSharedDispatcher(t *testing.T) {
+// The previous rule removed the per-user `burrowee` only when, after the cli's
+// own names had gone, no remaining burrowee-* file in that directory carried the
+// github.com/burrowee-git/ build stamp — so a co-installed burrowee-gateway
+// pinned it. On a real host that is what kept a stale dispatcher alive through
+// an upgrade, and ~/.local/bin precedes the system bin dir on a normal PATH, so
+// every later `burrowee …` ran old code.
+//
+// The rule is now the root-twin predicate and nothing else. It strands no
+// component: burrowee's main.go pins only gateway, edge and register to
+// /usr/local/bin and resolves the rest through PATH and then {/usr/local/bin,
+// /opt/homebrew/bin, ~/.local/bin}, so the per-user burrowee-gateway below is
+// still reachable — and is still not the cli's to remove.
+func TestCliLadderRemovesTheSharedDispatcherOnceARootOneExists(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedCliBins(t, staging)
@@ -258,17 +267,14 @@ func TestCliLadderKeepsTheSharedDispatcher(t *testing.T) {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
-	if _, err := os.Stat(filepath.Join(perUser, "burrowee")); err != nil {
-		t.Errorf("the shared dispatcher was removed while burrowee-gateway is still installed there")
+	if _, err := os.Stat(filepath.Join(perUser, "burrowee")); err == nil {
+		t.Errorf("this install placed a root dispatcher, so the per-user one must go:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(perUser, "burrowee-gateway")); err != nil {
-		t.Errorf("another component's binary is not the cli's to remove")
+		t.Errorf("another component's binary is not the cli's to remove, and it has no root twin")
 	}
 	if _, err := os.Stat(filepath.Join(perUser, "burrowee-cli")); err == nil {
 		t.Errorf("the cli's own names must still go")
-	}
-	if !strings.Contains(out, "kept "+filepath.Join(perUser, "burrowee")+" (dispatcher)") {
-		t.Errorf("keeping the dispatcher must be reported; got:\n%s", out)
 	}
 }
 

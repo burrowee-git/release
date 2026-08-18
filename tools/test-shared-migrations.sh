@@ -143,6 +143,18 @@ seed_foreign() {
     for _sf_n in "$@"; do cp "$BINFIX/foreign.bin" "$_sf_d/$_sf_n"; chmod 0755 "$_sf_d/$_sf_n"; done
 }
 
+# seed_twins <bin-dir> <name…> — the ROOT-INSTALLED copies, in $BIN_DIR.
+#
+# NOT SCENERY. A per-user binary is stale exactly when $BIN_DIR holds a copy of
+# ours under the same name; with no twin it is not a leftover but the only
+# install this host has, and the sweep is CORRECT to leave it. So every case
+# below that expects a removal has to state the twin, and the cases that expect a
+# survival state either the twin (so the survival is about the claim under test)
+# or its deliberate absence (so the survival IS the claim).
+seed_twins() {
+    seed_ours "$@"
+}
+
 # run_ladder <kit> <home> <comp-home> <bin-dir> [args…] — run the ladder with
 # EVERY system scan redirected into the sandbox. Sets RC and OUT.
 #
@@ -173,6 +185,7 @@ echo "== shared migration ladder suite ($(basename "${0}") under ${TEST_SHELL_NA
 t1="$TMP/t1"; kit "$t1" edge root installed-version $EDGE_BINS
 h="$t1/home"; ch="$h/root-home/.burrowee/edge"; mkdir -p "$ch"
 seed_ours "$h/.local/bin" $EDGE_BINS
+seed_twins "$h/usr-local-bin" $EDGE_BINS
 run_ladder "$t1" "$h" "$ch" "$h/usr-local-bin"
 assert_eq "$RC" 2 "no anchor + a pending sweep must exit 2 (migrations ran)"
 assert_contains "$OUT" "no installed version recorded" "the runner must say which input it decided on"
@@ -200,6 +213,7 @@ assert_contains "$OUT" "its receipt records it completed here for $ch" "the skip
 t3="$TMP/t3"; kit "$t3" edge root installed-version $EDGE_BINS
 h3="$t3/home"; ch3="$h3/root-home/.burrowee/edge"; mkdir -p "$ch3"
 seed_ours "$h3/.local/bin" $EDGE_BINS
+seed_twins "$h3/usr-local-bin" $EDGE_BINS
 echo "0.10.0" > "$ch3/installed-version"
 run_ladder "$t3" "$h3" "$ch3" "$h3/usr-local-bin"
 assert_eq "$RC" 0 "installed 0.10.0 is NEWER than target 0.2.0 — nothing may apply"
@@ -222,6 +236,7 @@ assert_gone "$h3/.local/bin/burrowee-edge" "the gated rung must sweep"
 t5="$TMP/t5"; kit "$t5" edge root installed-version $EDGE_BINS
 h5="$t5/home"; ch5="$h5/root-home/.burrowee/edge"; mkdir -p "$ch5"
 seed_ours "$h5/.local/bin" $EDGE_BINS
+seed_twins "$h5/usr-local-bin" $EDGE_BINS
 echo "0.2.0.2026.08.17.4e43c2ed" > "$ch5/installed-version"
 
 # 5a. the plain ladder does nothing — the gate cannot see a build-only change.
@@ -257,6 +272,10 @@ h6="$t6/home"; ch6="$h6/root-home/.burrowee/edge"; mkdir -p "$ch6"
 seed_ours "$h6/.local/bin" burrowee-edge burrowee-edge-updater
 seed_foreign "$h6/.local/bin" burrowee-edge-cli
 ln -s /bin/sh "$h6/.local/bin/burrowee"
+# A root twin for EVERY name in the fixture, including the ones that must
+# survive: without it each survivor would survive for want of a twin and the
+# claims under test — no stamp, not a regular file — would assert nothing.
+seed_twins "$h6/usr-local-bin" $EDGE_BINS
 run_ladder "$t6" "$h6" "$ch6" "$h6/usr-local-bin"
 assert_eq "$RC" 2 "a mixed directory still has ours to sweep"
 assert_gone "$h6/.local/bin/burrowee-edge" "a stamped copy of ours must go"
@@ -266,21 +285,80 @@ assert_present "$h6/.local/bin/burrowee" "a symlink is not a binary this install
 assert_contains "$OUT" "is a symlink" "the symlink keep must say why"
 
 # ---------------------------------------------------------------------------
-# 7. GUARD 4 — a unit file still naming the directory refuses the whole sweep
+# 7. GUARD 5 — a unit file protects THE FILE IT NAMES, and only that file
+#
+#    Observed on a production node 2026-08-18: one
+#    /etc/systemd/system/burrowee-edge-updater.service naming the per-user
+#    DIRECTORY abandoned the entire sweep, so six gateway names that unit does
+#    not mention — and never could — were left shadowing $BIN_DIR on PATH. The
+#    guard's direction was never in question; its observed set was.
 # ---------------------------------------------------------------------------
 t7="$TMP/t7"; kit "$t7" edge root installed-version $EDGE_BINS
 h7="$t7/home"; ch7="$h7/root-home/.burrowee/edge"; mkdir -p "$ch7" "$h7/systemd"
 seed_ours "$h7/.local/bin" $EDGE_BINS
+seed_twins "$h7/usr-local-bin" $EDGE_BINS
 printf 'ExecStart=%s/.local/bin/burrowee-edge run\n' "$h7" > "$h7/systemd/burrowee-edge.service"
-OUT="$(HOME="$h7" COMP_HOME="$ch7" BIN_DIR="$h7/usr-local-bin" \
-    LAUNCHD_DIR="$h7/no-launchd" SYSTEMD_DIR="$h7/systemd" \
-    BURROWEE_LEGACY_HOME_PARENTS="$h7/nowhere" SUDO=/nonexistent-sudo \
-    sh "$t7/migrations/run.sh" 2>&1)"; RC=$?
-assert_eq "$RC" 0 "a unit still naming the per-user dir must make the ladder a no-op, not a failure"
-assert_contains "$OUT" "does not recognise" "the probe must decline for the same reason the sweep would"
-for b in $EDGE_BINS; do
-    assert_present "$h7/.local/bin/$b" "nothing may be removed while a unit names the directory"
+run_unit_ladder() {
+    OUT="$(HOME="$1" COMP_HOME="$2" BIN_DIR="$3" \
+        LAUNCHD_DIR="$1/no-launchd" SYSTEMD_DIR="$1/systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$1/nowhere" SUDO=/nonexistent-sudo \
+        sh "$4/migrations/run.sh" 2>&1)"; RC=$?
+}
+run_unit_ladder "$h7" "$ch7" "$h7/usr-local-bin" "$t7"
+assert_eq "$RC" 2 "the rung still applies: only ONE file is protected, not the directory"
+assert_present "$h7/.local/bin/burrowee-edge" "a unit names this exact file — removing it can stop a running daemon"
+assert_contains "$OUT" "still names $h7/.local/bin/burrowee-edge" "the keep must name both the unit and the file"
+for b in burrowee burrowee-edge-cli burrowee-edge-updater; do
+    assert_gone "$h7/.local/bin/$b" "no unit names $b; a unit naming a DIFFERENT file must not protect it"
 done
+
+# 7b. THE SUBSTRING COLLISION, tested directly. `grep -F "$dir/burrowee-edge"`
+#     matches a unit whose ExecStart is "$dir/burrowee-edge-updater", so a match
+#     that does not TERMINATE the basename lets the longer name's unit spare the
+#     shorter name's file — silently, and in the direction where the shadowing
+#     binary survives.
+t7b="$TMP/t7b"; kit "$t7b" edge root installed-version $EDGE_BINS
+h7b="$t7b/home"; ch7b="$h7b/root-home/.burrowee/edge"; mkdir -p "$ch7b" "$h7b/systemd"
+seed_ours "$h7b/.local/bin" $EDGE_BINS
+seed_twins "$h7b/usr-local-bin" $EDGE_BINS
+printf 'ExecStart=%s/.local/bin/burrowee-edge-updater run\n' "$h7b" > "$h7b/systemd/burrowee-edge-updater.service"
+run_unit_ladder "$h7b" "$ch7b" "$h7b/usr-local-bin" "$t7b"
+assert_eq "$RC" 2 "the rung must still run"
+assert_present "$h7b/.local/bin/burrowee-edge-updater" "the unit names this exact file"
+assert_gone "$h7b/.local/bin/burrowee-edge" "burrowee-edge was spared by burrowee-edge-updater's unit — the basename match does not terminate"
+assert_gone "$h7b/.local/bin/burrowee" "and the dispatcher was spared by it too"
+
+# 7c. THE TERMINATOR SET, one case per shape a real unit file writes a path in.
+#     Each protects burrowee-edge-cli and nothing else, so a terminator the match
+#     fails to recognise shows up as a DELETION of a file a unit names.
+_t7c=0
+for _form in \
+    'ExecStart=@P@ --serve' \
+    'ExecStart=@P@' \
+    'ExecStart=@P@	--serve' \
+    '	<string>@P@</string>' \
+    'ExecStart="@P@" --serve'; do
+    _t7c=$((_t7c + 1))
+    d="$TMP/t7c$_t7c"; kit "$d" edge root installed-version $EDGE_BINS
+    hd="$d/home"; chd="$hd/root-home/.burrowee/edge"; mkdir -p "$chd" "$hd/systemd"
+    seed_ours "$hd/.local/bin" $EDGE_BINS
+    seed_twins "$hd/usr-local-bin" $EDGE_BINS
+    _p="$hd/.local/bin/burrowee-edge-cli"
+    printf '%s\n' "$(printf '%s' "$_form" | sed "s|@P@|$_p|")" > "$hd/systemd/x.service"
+    run_unit_ladder "$hd" "$chd" "$hd/usr-local-bin" "$d"
+    assert_present "$_p" "a unit names this file as [$_form] and the match did not recognise the terminator"
+    assert_gone "$hd/.local/bin/burrowee-edge" "the rest of the sweep must still run"
+done
+
+# 7d. A UNIT FILE WITH NO TRAILING NEWLINE — `read` drops a final unterminated
+#     line, and a hand-edited unit is exactly where that happens.
+t7d="$TMP/t7d"; kit "$t7d" edge root installed-version $EDGE_BINS
+h7d="$t7d/home"; ch7d="$h7d/root-home/.burrowee/edge"; mkdir -p "$ch7d" "$h7d/systemd"
+seed_ours "$h7d/.local/bin" $EDGE_BINS
+seed_twins "$h7d/usr-local-bin" $EDGE_BINS
+printf '[Service]\nExecStart=%s/.local/bin/burrowee-edge-cli' "$h7d" > "$h7d/systemd/x.service"
+run_unit_ladder "$h7d" "$ch7d" "$h7d/usr-local-bin" "$t7d"
+assert_present "$h7d/.local/bin/burrowee-edge-cli" "the last line of a unit file with no trailing newline was not read"
 
 # ---------------------------------------------------------------------------
 # 8. PER-USER STATE IS NEVER TOUCHED — only binaries, by exact name
@@ -289,6 +367,7 @@ t8="$TMP/t8"; kit "$t8" edge root installed-version $EDGE_BINS
 h8="$t8/home"; ch8="$h8/root-home/.burrowee/edge"; mkdir -p "$ch8" "$h8/.burrowee/edge/identity"
 seed_ours "$h8/.local/bin" $EDGE_BINS
 seed_ours "$h8/.local/bin" burrowee-edge-notes   # ours by stamp, NOT in $BINS
+seed_twins "$h8/usr-local-bin" $EDGE_BINS burrowee-edge-notes
 echo "secret" > "$h8/.burrowee/edge/identity/relay_ed.key"
 echo '{"paired":true}' > "$h8/.burrowee/edge/console.json"
 run_ladder "$t8" "$h8" "$ch8" "$h8/usr-local-bin"
@@ -298,35 +377,66 @@ assert_present "$h8/.burrowee/edge/console.json" "per-user pairing state must ne
 assert_present "$h8/.local/bin/burrowee-edge-notes" "a name outside \$STALE_USER_BINS must survive — removal is by exact name, never by glob"
 
 # ---------------------------------------------------------------------------
-# 9. THE DISPATCHER RULE — kept while another burrowee component is still
-#    installed per-user there; removed once nothing else of ours is left.
+# 9. THE DISPATCHER RULE — removed once a ROOT dispatcher exists, full stop.
+#
+#    OPERATOR RULING, and it reverses the previous rule. The dispatcher used to
+#    be spared whenever any other stamped burrowee-* file was left in the
+#    directory. On a host that also carried per-user edge binaries that kept the
+#    stale dispatcher alive indefinitely, and because ~/.local/bin precedes
+#    /usr/local/bin on a normal PATH it went on answering every `burrowee …`
+#    with old code — which is the whole complaint.
+#
+#    Removing it strands nothing: burrowee's main.go pins only gateway, edge and
+#    register to /usr/local/bin and resolves every other component through PATH
+#    and then {/usr/local/bin, /opt/homebrew/bin, ~/.local/bin}, so a per-user
+#    component it does not pin is still found where it lies. 9a asserts exactly
+#    that pairing — the dispatcher goes, the unpinned per-user binary stays.
 # ---------------------------------------------------------------------------
 t9="$TMP/t9"; kit "$t9" cli user .installed-version $CLI_BINS
 h9="$t9/home"; ch9="$h9/.burrowee/cli"; mkdir -p "$ch9"
 seed_ours "$h9/.local/bin" $CLI_BINS burrowee-gateway
+# Root-installed: the cli's own names and the shared dispatcher. NOT
+# burrowee-gateway — a co-installed component that has not been root-collapsed.
+seed_twins "$h9/usr-local-bin" $CLI_BINS
 run_ladder "$t9" "$h9" "$ch9" "$h9/usr-local-bin"
 assert_eq "$RC" 2 "the cli rung must run when its own names are stale"
 assert_gone "$h9/.local/bin/burrowee-cli" "the cli's own names go"
-assert_present "$h9/.local/bin/burrowee" "the dispatcher must stay while burrowee-gateway is still installed there"
-assert_present "$h9/.local/bin/burrowee-gateway" "another component's binary is not the cli's to remove"
-assert_contains "$OUT" "kept $h9/.local/bin/burrowee (dispatcher)" "keeping the dispatcher must be reported"
+assert_gone "$h9/.local/bin/burrowee" "a root dispatcher exists, so the per-user one only shadows it on PATH"
+assert_present "$h9/.local/bin/burrowee-gateway" "another component's binary is not the cli's to remove, and it has no root twin"
 
-# 9b. with the co-installed component gone, the dispatcher goes too.
-rm -f "$h9/.local/bin/burrowee-gateway"
-rm -rf "$ch9/migration-receipts"
-seed_ours "$h9/.local/bin" $CLI_BINS
-run_ladder "$t9" "$h9" "$ch9" "$h9/usr-local-bin"
-assert_eq "$RC" 2 "the rung must run again once the receipt is gone"
-assert_gone "$h9/.local/bin/burrowee" "with nothing else of ours left, the shadowing dispatcher goes"
+# 9b. WITH NO ROOT DISPATCHER THE PER-USER ONE STAYS. This is the other half of
+#     the same predicate and the reason 9a is safe to state unconditionally: the
+#     rule is "a root twin exists", never "delete the dispatcher".
+t9b="$TMP/t9b"; kit "$t9b" cli user .installed-version $CLI_BINS
+h9b="$t9b/home"; ch9b="$h9b/.burrowee/cli"; mkdir -p "$ch9b"
+seed_ours "$h9b/.local/bin" $CLI_BINS
+seed_twins "$h9b/usr-local-bin" burrowee-cli burrowee-cli-updater   # no root `burrowee`
+run_ladder "$t9b" "$h9b" "$ch9b" "$h9b/usr-local-bin"
+assert_eq "$RC" 2 "the cli's own names are still stale"
+assert_present "$h9b/.local/bin/burrowee" "with no root dispatcher, the per-user one is the only one there is"
+assert_contains "$OUT" "there is no $h9b/usr-local-bin/burrowee to replace it" "the keep must say why"
 
-# 9c. an operator's OWN burrowee-* script must not pin the dispatcher forever.
-rm -rf "$ch9/migration-receipts"
-seed_ours "$h9/.local/bin" $CLI_BINS
-seed_foreign "$h9/.local/bin" burrowee-notes
-run_ladder "$t9" "$h9" "$ch9" "$h9/usr-local-bin"
+# 9c. an operator's OWN burrowee-* script is left alone and settles nothing.
+t9c="$TMP/t9c"; kit "$t9c" cli user .installed-version $CLI_BINS
+h9c="$t9c/home"; ch9c="$h9c/.burrowee/cli"; mkdir -p "$ch9c"
+seed_ours "$h9c/.local/bin" $CLI_BINS
+seed_foreign "$h9c/.local/bin" burrowee-notes
+seed_twins "$h9c/usr-local-bin" $CLI_BINS
+run_ladder "$t9c" "$h9c" "$ch9c" "$h9c/usr-local-bin"
 assert_eq "$RC" 2 "the rung must run"
-assert_gone "$h9/.local/bin/burrowee" "an operator's own burrowee-* file is not evidence a component is installed"
-assert_present "$h9/.local/bin/burrowee-notes" "and it must itself be left alone"
+assert_gone "$h9c/.local/bin/burrowee" "an operator's own burrowee-* file is not evidence of anything"
+assert_present "$h9c/.local/bin/burrowee-notes" "and it must itself be left alone"
+
+# 9d. A FOREIGN /usr/local/bin/burrowee IS NOT A ROOT INSTALL. An operator's own
+#     wrapper of that name must not be read as evidence, or the sweep would
+#     delete the dispatcher every component still needs.
+t9d="$TMP/t9d"; kit "$t9d" cli user .installed-version $CLI_BINS
+h9d="$t9d/home"; ch9d="$h9d/.burrowee/cli"; mkdir -p "$ch9d"
+seed_ours "$h9d/.local/bin" $CLI_BINS
+seed_twins "$h9d/usr-local-bin" burrowee-cli burrowee-cli-updater
+seed_foreign "$h9d/usr-local-bin" burrowee
+run_ladder "$t9d" "$h9d" "$ch9d" "$h9d/usr-local-bin"
+assert_present "$h9d/.local/bin/burrowee" "a foreign file in \$BIN_DIR is not a root install of ours"
 
 # ---------------------------------------------------------------------------
 # 10. THE CLI'S ORDINARY HOST — $BIN_DIR IS the per-user dir, so there is
@@ -353,6 +463,10 @@ h11="$t11/home"; ch11="$h11/root-home/.burrowee/edge"; mkdir -p "$ch11"
 mkdir -p "$h11/parents/alice"
 seed_ours "$h11/parents/alice/.local/bin" $EDGE_BINS
 seed_ours "$h11/root-home/.local/bin" burrowee-edge-cli   # root's own tree: a decoy
+# The twins are shared by both trees, so the decoy is a file the sweep WOULD
+# take if it were looking at root's home. Without them it would survive whatever
+# home was resolved and the assertion below would pass for the broken version.
+seed_twins "$h11/usr-local-bin" $EDGE_BINS
 OUT="$(HOME="$h11/root-home" SUDO_USER=alice COMP_HOME="$ch11" BIN_DIR="$h11/usr-local-bin" \
     LAUNCHD_DIR="$h11/no-launchd" SYSTEMD_DIR="$h11/no-systemd" \
     BURROWEE_LEGACY_HOME_PARENTS="$h11/parents" SUDO=/nonexistent-sudo \
@@ -428,6 +542,7 @@ assert_eq "$RC" 1 "a missing component.conf must fail — the runner has no comp
 t15="$TMP/t15"; kit "$t15" edge root installed-version $EDGE_BINS
 h15="$t15/home"; ch15="$h15/root-home/.burrowee/edge"; mkdir -p "$ch15"
 seed_ours "$h15/.local/bin" $EDGE_BINS
+seed_twins "$h15/usr-local-bin" $EDGE_BINS
 # The receipts path is blocked by a FILE where the directory has to go, so
 # mkdir -p fails while $COMP_HOME itself stays writable — the receipt is lost
 # and nothing else is.
@@ -443,6 +558,7 @@ assert_gone "$h15/.local/bin/burrowee-edge" "exit 3 still means the rung RAN"
 t16="$TMP/t16"; kit "$t16" edge root installed-version $EDGE_BINS
 h16="$t16/home"; ch16="$h16/root-home/.burrowee/edge"; mkdir -p "$ch16/migration-receipts"
 seed_ours "$h16/.local/bin" $EDGE_BINS
+seed_twins "$h16/usr-local-bin" $EDGE_BINS
 printf 'stale_user_bins.sh\ncomp_home=/some/other/tree\n' > "$ch16/migration-receipts/stale_user_bins.sh.done"
 run_ladder "$t16" "$h16" "$ch16" "$h16/usr-local-bin"
 assert_eq "$RC" 2 "a receipt earned for another tree must not skip this one"
@@ -452,6 +568,7 @@ assert_contains "$OUT" "was earned for /some/other/tree" "the re-evaluation must
 t16b="$TMP/t16b"; kit "$t16b" edge root installed-version $EDGE_BINS
 h16b="$t16b/home"; ch16b="$h16b/root-home/.burrowee/edge"; mkdir -p "$ch16b/migration-receipts"
 seed_ours "$h16b/.local/bin" $EDGE_BINS
+seed_twins "$h16b/usr-local-bin" $EDGE_BINS
 printf 'stale_user_bins.sh\n' > "$ch16b/migration-receipts/stale_user_bins.sh.done"
 run_ladder "$t16b" "$h16b" "$ch16b" "$h16b/usr-local-bin"
 assert_eq "$RC" 2 "an unprovenanced receipt must not skip a tree it cannot speak for"
@@ -484,6 +601,7 @@ run_upgrade() {
 t17="$TMP/t17"; kit "$t17" edge root installed-version $EDGE_BINS
 h17="$t17/home"; ch17="$h17/root-home/.burrowee/edge"; mkdir -p "$ch17"
 seed_ours "$h17/.local/bin" $EDGE_BINS
+seed_twins "$h17/usr-local-bin" $EDGE_BINS
 echo "0.2.0.2026.08.17.4e43c2ed" > "$ch17/installed-version"
 
 # 17a. the plain ladder does nothing — the state the operator is stuck in.
@@ -531,6 +649,132 @@ run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.0 extra
 assert_eq "$RC" 64 "a second argument must be rejected, never silently discarded"
 run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.x
 assert_eq "$RC" 64 "an unparseable version must be refused, never rounded to 0.2.0"
+
+# ---------------------------------------------------------------------------
+# 18. THE ROOT-TWIN PREDICATE — what makes a per-user copy "stale" rather than
+#     "the install", and the operator's ruling about the cli.
+#
+#     "for burrowee-cli, once root installed, all user's user home burrowee-cli
+#     get obsolete, and require to use root cli." The rule needs no version
+#     policy and no cross-component coupling: today there is no
+#     /usr/local/bin/burrowee-cli anywhere in the field, so a per-user cli is a
+#     LIVE install and survives; the day the cli's root collapse lands and a
+#     twin appears, the same predicate sweeps it with no rule change at all.
+#
+#     The kit here is the cli's, with $BIN_DIR pointed somewhere else (an
+#     explicit PREFIX), because on a DEFAULT cli host the sweep dir IS $BIN_DIR
+#     and the rung is a no-op — case 10.
+# ---------------------------------------------------------------------------
+t18="$TMP/t18"; kit "$t18" cli user .installed-version $CLI_BINS
+h18="$t18/home"; ch18="$h18/.burrowee/cli"; mkdir -p "$ch18"
+seed_ours "$h18/.local/bin" $CLI_BINS
+seed_twins "$h18/usr-local-bin" burrowee            # a root dispatcher only
+run_ladder "$t18" "$h18" "$ch18" "$h18/usr-local-bin"
+assert_eq "$RC" 2 "the dispatcher has a root twin, so the rung has something to do"
+assert_present "$h18/.local/bin/burrowee-cli" "no root burrowee-cli exists — this is a LIVE cli install, not a stale copy"
+assert_present "$h18/.local/bin/burrowee-cli-updater" "same for the updater it ships with"
+assert_gone "$h18/.local/bin/burrowee" "the dispatcher has a root twin and must go"
+
+# 18b. the day the root cli lands, the per-user copies are obsolete.
+t18b="$TMP/t18b"; kit "$t18b" cli user .installed-version $CLI_BINS
+h18b="$t18b/home"; ch18b="$h18b/.burrowee/cli"; mkdir -p "$ch18b"
+seed_ours "$h18b/.local/bin" $CLI_BINS
+seed_twins "$h18b/usr-local-bin" $CLI_BINS
+run_ladder "$t18b" "$h18b" "$ch18b" "$h18b/usr-local-bin"
+assert_eq "$RC" 2 "the rung must run"
+for b in $CLI_BINS; do
+    assert_gone "$h18b/.local/bin/$b" "$b is root-installed now, so the per-user copy only shadows it on PATH"
+done
+
+# 18c. NOTHING root-installed at all: the rung must not even select itself, or
+#      the runner buys a daemon stop for a sweep that will decline everything.
+t18c="$TMP/t18c"; kit "$t18c" edge root installed-version $EDGE_BINS
+h18c="$t18c/home"; ch18c="$h18c/root-home/.burrowee/edge"; mkdir -p "$ch18c"
+seed_ours "$h18c/.local/bin" $EDGE_BINS
+run_ladder "$t18c" "$h18c" "$ch18c" "$h18c/usr-local-bin"
+assert_eq "$RC" 0 "with no root-installed twin anywhere there is nothing stale — the rung must not apply"
+for b in $EDGE_BINS; do
+    assert_present "$h18c/.local/bin/$b" "$b is the only copy on this host; removing it is an uninstall"
+done
+
+# ---------------------------------------------------------------------------
+# 19. admin-kr's TREE, for the shared ladder: a cross-component per-user
+#     directory, a partial root install, and one unit still pointing into it.
+#
+#     The unit names burrowee-edge-updater. Under the directory-scoped guard it
+#     abandoned the whole sweep. It must now protect that one file and nothing
+#     else — and the names with no root twin must survive on their own merits,
+#     not because a blocker stopped the run.
+# ---------------------------------------------------------------------------
+t19="$TMP/t19"; kit "$t19" edge root installed-version $EDGE_BINS
+h19="$t19/home"; ch19="$h19/root-home/.burrowee/edge"; mkdir -p "$ch19" "$h19/systemd"
+seed_ours "$h19/.local/bin" $EDGE_BINS burrowee-gateway burrowee-gateway-cli burrowee-cli
+# Root-installed: the dispatcher, edge's daemon and cli, and the gateway's pair.
+# NOT burrowee-edge-updater and NOT burrowee-cli.
+seed_twins "$h19/usr-local-bin" burrowee burrowee-edge burrowee-edge-cli burrowee-gateway burrowee-gateway-cli
+printf 'ExecStart=%s/.local/bin/burrowee-edge-updater run\n' "$h19" > "$h19/systemd/burrowee-edge-updater.service"
+run_unit_ladder "$h19" "$ch19" "$h19/usr-local-bin" "$t19"
+assert_eq "$RC" 2 "one unit naming one file must not abandon the sweep"
+assert_gone "$h19/.local/bin/burrowee" "the shadowing dispatcher is the whole complaint and must go"
+assert_gone "$h19/.local/bin/burrowee-edge" "root-installed and named by no unit"
+assert_gone "$h19/.local/bin/burrowee-edge-cli" "root-installed and named by no unit"
+assert_present "$h19/.local/bin/burrowee-edge-updater" "a unit names this exact file"
+assert_present "$h19/.local/bin/burrowee-cli" "no root twin: a LIVE cli install"
+assert_present "$h19/.local/bin/burrowee-gateway" "not one of edge's names — removal is by exact name, never across components"
+assert_present "$h19/.local/bin/burrowee-gateway-cli" "same"
+
+# ---------------------------------------------------------------------------
+# 20. THE TWO-COPY GUARD.
+#
+#     lib_stale_user_bins.sh exists TWICE: here, staged into the edge and cli
+#     kits, and in the gateway repo, whose ladder tools/payload.sh assembles
+#     wholly from that worktree (takes_shared_ladder deliberately excludes the
+#     gateway). They cannot be one file — two repos, and the gateway's own suite
+#     runs the rung out of its own migrations/ directory — so the drift is
+#     guarded instead of prevented.
+#
+#     Everything between the SHARED SWEEP CONTRACT sentinels is byte-identical in
+#     both copies, and both repos pin the SAME sha256 of it. Editing either copy
+#     reddens that repo's test, and the only digest that makes both green again
+#     is one both copies produce. Nothing outside the sentinels is compared,
+#     which is what lets the two preambles differ.
+#
+#     If this fails and the edit was intended: apply the same edit to
+#     burrowee-git/gateway migrations/lib_stale_user_bins.sh, then update the
+#     digest in BOTH repos (here, and sweepContractDigest in the gateway's
+#     internal/updatescript/migration_stale_user_bins_adminkr_test.go).
+# ---------------------------------------------------------------------------
+#     SKIPPED UNDER THE MUTATION HARNESS. tools/test-shared-migrations-mutants.sh
+#     points $SHARED_MIGRATIONS_DIR at a deliberately broken COPY, and every one
+#     of its mutants changes the region — so this check would redden for all of
+#     them and score each as "killed" whether or not any behavioural assertion
+#     noticed. A guard that answers for claims it never made is exactly the
+#     defect this suite exists to catch, so it only speaks for the checked-in
+#     file.
+SWEEP_CONTRACT_DIGEST="0b3ec871afa6df2844f47c01ad56f3de5bd19d2d0e8ab23453780526560f60df"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum < "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 < "$1" | cut -d' ' -f1
+    fi
+}
+
+if [ -n "${SHARED_MIGRATIONS_DIR:-}" ]; then
+    echo "-- contract digest skipped: running against an injected \$SHARED_MIGRATIONS_DIR"
+else
+_lib="$SHARED/lib_stale_user_bins.sh"
+_region="$TMP/contract-region"
+awk '/^# === SHARED SWEEP CONTRACT BEGIN ===$/{p=1} p{print} /^# === SHARED SWEEP CONTRACT END ===$/{if(p)exit}' \
+    "$_lib" > "$_region"
+# A region that came out EMPTY would hash to a constant and could be pinned, so
+# the sentinels are asserted before the digest is compared.
+assert_contains "$(head -1 "$_region")" "SHARED SWEEP CONTRACT BEGIN" "the contract's opening sentinel is missing from $_lib"
+assert_contains "$(tail -1 "$_region")" "SHARED SWEEP CONTRACT END" "the contract's closing sentinel is missing from $_lib"
+assert_eq "$(sha256_of "$_region")" "$SWEEP_CONTRACT_DIGEST" \
+    "the shared sweep contract region changed — apply the same edit to the gateway repo's copy and update the digest in BOTH"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="
