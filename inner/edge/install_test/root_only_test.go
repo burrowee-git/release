@@ -80,6 +80,10 @@ func newSandbox(t *testing.T) sandbox {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedEdgeBins(t, staging)
+	// Every real edge kit carries migrations/ since the ladder shipped, and the
+	// stale-bin sweep now lives inside it — a sandbox without it would be
+	// exercising a bundle shape no host receives.
+	stageMigrations(t, staging)
 	sb := sandbox{
 		home:      home,
 		staging:   staging,
@@ -113,7 +117,7 @@ func (sb sandbox) env(stub string, extra ...string) []string {
 // returning combined output and the process error (nil ⇒ exit 0).
 func (sb sandbox) run(t *testing.T, shell, stub string, extra ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(shell, installShPath(t))
+	cmd := exec.Command(shell, stagedInstaller(t, sb.staging))
 	cmd.Dir = sb.staging
 	cmd.Env = sb.env(stub, extra...)
 	out, err := cmd.CombinedOutput()

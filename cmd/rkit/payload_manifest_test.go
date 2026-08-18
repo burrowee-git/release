@@ -66,10 +66,15 @@ func shellManifest(t *testing.T, comp, srcDir string) []string {
 	return names
 }
 
+// Both manifests resolve the SHARED ladder (inner/_shared/migrations) out of
+// repoRoot (trusted_comment_test.go), so the two sides are compared against the
+// same real directory rather than against two fixtures that could agree while
+// the shipped set differed from both.
+
 // goManifest returns extraPayload's member names for a component.
 func goManifest(t *testing.T, comp, srcDir string) []string {
 	t.Helper()
-	extras, err := extraPayload(comp, srcDir)
+	extras, err := extraPayload(comp, srcDir, repoRoot(t))
 	if err != nil {
 		t.Fatalf("extraPayload %s: %v", comp, err)
 	}
@@ -127,8 +132,13 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		files []string
 	}{
 		{"gateway", []string{"update.sh", "migrations/run.sh", "migrations/v1_to_v2.sh"}},
-		{"cli", []string{"update.sh"}},
-		{"edge", []string{"update.sh", "updater.update.sh"}},
+		// edge and cli take the SHARED ladder: the runner and rungs come from
+		// inner/_shared/migrations (both manifests glob the real directory), and
+		// component.conf + ledger come from the component source. Both are
+		// required — the shared runner has no component defaults — so the fixture
+		// carries them.
+		{"cli", []string{"update.sh", "migrations/component.conf", "migrations/ledger"}},
+		{"edge", []string{"update.sh", "updater.update.sh", "migrations/component.conf", "migrations/ledger"}},
 		// relay is PRIVATE and gated, and was the last component left out of
 		// this comparison: tools/release.sh's do_release_relay open-coded
 		// `install.sh update.sh updater.update.sh` instead of reading the
@@ -146,6 +156,14 @@ func TestPayloadManifestsAgree(t *testing.T) {
 			src := srcFixture(t, tc.files...)
 			if tc.comp == "gateway" {
 				ledgerRunner(t, src, "v1_to_v2.sh")
+			}
+			if tc.comp == "edge" || tc.comp == "cli" {
+				// The ledger must name a rung the SHARED directory really
+				// carries, because both manifests cross-check it.
+				if err := os.WriteFile(filepath.Join(src, "migrations", "ledger"),
+					[]byte("0.2.0 stale_user_bins.sh\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if tc.comp == "edge" {
 				// extraPayload resolves edge covers out of the edge.web tree;

@@ -94,6 +94,28 @@ func assertContains(t *testing.T, s string, want ...string) {
 	}
 }
 
+// stagedInstaller copies install.sh INTO dir and returns the copy's path.
+//
+// It matters that the script runs from inside the bundle. install.sh resolves
+// migrations/ (the sweep library and the ladder runner) relative to its OWN
+// path, which in production is the unzipped release dir — the same directory
+// the binaries and migrations/ sit in. Running the repo's copy with cwd merely
+// pointed at the staging dir resolves migrations/ next to inner/edge/ instead,
+// where there is none, so every sweep and ladder assertion would be measuring a
+// bundle shape no host ever receives.
+func stagedInstaller(t *testing.T, dir string) string {
+	t.Helper()
+	body, err := os.ReadFile(installShPath(t))
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	p := filepath.Join(dir, "install.sh")
+	if err := os.WriteFile(p, body, 0o755); err != nil {
+		t.Fatalf("stage install.sh: %v", err)
+	}
+	return p
+}
+
 // runRootInstall runs install.sh as the simulated-root system install in a sandbox:
 // system binaries land in sysBinDir, system units in unitDir (both under sandbox).
 // Returns (sysBinDir, unitDir, combined output).
@@ -118,7 +140,7 @@ func runRootInstall(t *testing.T, home, staging string, extraEnv ...string) (str
 	}
 	env = append(env, extraEnv...)
 
-	cmd := exec.Command("sh", installShPath(t))
+	cmd := exec.Command("sh", stagedInstaller(t, staging))
 	cmd.Dir = staging
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()

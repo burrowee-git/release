@@ -119,7 +119,144 @@ func ledgerMigrations(runSh string) ([]string, error) {
 //     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/edge.web (release.sh line 1064).
 //
 // The remaining component (agent) has no extras.
-func extraPayload(comp, srcDir string) ([]pack.Content, error) {
+// takesSharedLadder reports whether this component's migrations/ is assembled
+// from inner/_shared/migrations PLUS its own repo, rather than wholly from its
+// own repo. Mirrors takes_shared_ladder in tools/payload.sh.
+//
+// The gateway is deliberately absent: its runner lives in the gateway repo, has
+// shipped, and does three things no other component needs — stopping a daemon
+// so a SQLite store is at rest while it is copied, pre-flighting the cli's
+// `migrate` verb, and resolving which ACCOUNT's pre-split tree holds the host's
+// identity.
+func takesSharedLadder(comp string) bool {
+	return comp == "edge" || comp == "cli"
+}
+
+// sharedMigrationScripts returns the shared ladder's files under
+// <repoDir>/inner/_shared/migrations, sorted by basename. Discovered by glob
+// rather than listed, so adding one stays a one-file change; mirrors
+// shared_migration_scripts in tools/payload.sh.
+func sharedMigrationScripts(repoDir string) ([]string, error) {
+	dir := filepath.Join(repoDir, "inner", "_shared", "migrations")
+	paths, err := filepath.Glob(filepath.Join(dir, "*.sh"))
+	if err != nil {
+		return nil, fmt.Errorf("shared migrations glob %s: %w", dir, err)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// componentMigrationFiles returns the component's OWN half of its ladder —
+// component.conf, ledger, and any rung it authored — sorted by basename.
+// Mirrors component_migration_files in tools/payload.sh.
+func componentMigrationFiles(srcDir string) ([]string, error) {
+	paths, err := filepath.Glob(filepath.Join(srcDir, "migrations", "*"))
+	if err != nil {
+		return nil, fmt.Errorf("component migrations glob %s: %w", srcDir, err)
+	}
+	var files []string
+	for _, p := range paths {
+		if st, statErr := os.Stat(p); statErr != nil || st.IsDir() {
+			continue
+		}
+		files = append(files, p)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// ledgerFileMigrations returns the script names a migrations/ledger data file
+// declares, in ledger order.
+//
+// The shared runner reads its ledger from a FILE rather than from a here-string
+// inside itself, because one runner is copied byte-identical into several kits
+// and a per-component list cannot live inside it. Word-split into (version,
+// script) pairs EXACTLY as that runner splits it, so the two cannot disagree
+// about what a ledger says. An odd word count is an error rather than a
+// truncation: a dangling word is a row with a target and no script (or the
+// reverse), the runner refuses on it, and a cut that shipped one would refuse
+// on every host. Mirrors ledger_file_migrations in tools/payload.sh.
+func ledgerFileMigrations(body string) ([]string, error) {
+	var words []string
+	for _, line := range strings.Split(body, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		words = append(words, strings.Fields(line)...)
+	}
+	if len(words) == 0 || len(words)%2 != 0 {
+		return nil, fmt.Errorf("ledger holds %d words, want (version, script) pairs", len(words))
+	}
+	scripts := make([]string, 0, len(words)/2)
+	for i := 1; i < len(words); i += 2 {
+		scripts = append(scripts, words[i])
+	}
+	return scripts, nil
+}
+
+// sharedLadderPayload returns the migrations/ members for a component assembled
+// from two sources, in the order tools/payload.sh emits them: the shared files
+// first, then the component's own.
+//
+// component.conf and ledger are REQUIRED. The shared runner carries no
+// component defaults and refuses without them, so a kit missing either is a
+// component whose EVERY install ends in a refusal — caught here, at the cut,
+// rather than on a host. run.sh, lib_paths.sh and lib_stale_user_bins.sh are
+// required for the same reason one level up: install.sh sources the sweep from
+// this directory and runs the ladder out of it, and a zip missing any of them
+// installs cleanly and silently stops migrating.
+func sharedLadderPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
+	shared, err := sharedMigrationScripts(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	own, err := componentMigrationFiles(srcDir)
+	if err != nil {
+		return nil, err
+	}
+	var extras []pack.Content
+	present := map[string]bool{}
+	for _, p := range append(append([]string{}, shared...), own...) {
+		base := filepath.Base(p)
+		present[base] = true
+		// Zip member names are always "/"-separated; filepath.Join would be
+		// wrong the moment this is built anywhere non-unix.
+		extras = append(extras, pack.Content{Src: p, Name: "migrations/" + base})
+	}
+	for _, want := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh"} {
+		if !present[want] {
+			return nil, fmt.Errorf("shared migration %s missing under %s", want,
+				filepath.Join(repoDir, "inner", "_shared", "migrations"))
+		}
+	}
+	for _, want := range []string{"component.conf", "ledger"} {
+		if !present[want] {
+			return nil, fmt.Errorf("%s migrations/%s missing in source %s", comp, want,
+				filepath.Join(srcDir, "migrations"))
+		}
+	}
+	// The globs ship whatever is on disk; the LEDGER is what the runner will
+	// actually walk. A rung named in it but never committed is a row the runner
+	// refuses on — on every host, after the cut — so the build is the last place
+	// it can be caught.
+	ledgerPath := filepath.Join(srcDir, "migrations", "ledger")
+	body, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s migration ledger %s: %w", comp, ledgerPath, err)
+	}
+	named, err := ledgerFileMigrations(string(body))
+	if err != nil {
+		return nil, fmt.Errorf("%s migration ledger in %s: %w", comp, ledgerPath, err)
+	}
+	for _, name := range named {
+		if !present[name] {
+			return nil, fmt.Errorf("%s migration %q is named in the ledger of %s but no such file was staged", comp, name, ledgerPath)
+		}
+	}
+	return extras, nil
+}
+
+func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	var extras []pack.Content
 	switch comp {
 	case "edge", "relay":
@@ -200,6 +337,16 @@ func extraPayload(comp, srcDir string) ([]pack.Content, error) {
 			pack.Content{Src: filepath.Join(edgeWeb, "admin.html"), Name: "covers/admin.html"},
 			pack.Content{Src: filepath.Join(edgeWeb, "login.html"), Name: "covers/default.html"},
 		)
+	}
+	// LAST, matching payload_manifest's emission order in tools/payload.sh —
+	// cmd/rkit/payload_manifest_test.go compares the two lists name-for-name, so
+	// an order that differed would be a red test rather than a real defect.
+	if takesSharedLadder(comp) {
+		shared, err := sharedLadderPayload(comp, srcDir, repoDir)
+		if err != nil {
+			return nil, err
+		}
+		extras = append(extras, shared...)
 	}
 	return extras, nil
 }

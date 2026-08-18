@@ -197,6 +197,44 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		}
 	}
 
+	// sharedRepo is a fixture RELEASE repo carrying inner/_shared/migrations.
+	// The gateway and relay cases never read it — they do not take the shared
+	// ladder — but extraPayload takes it as a parameter, and handing those cases
+	// a directory that exists keeps a failure there from being mistaken for the
+	// missing-shared-ladder error the shared cases assert on.
+	sharedRepo := func(t *testing.T, files ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, f := range files {
+			p := filepath.Join(dir, "inner", "_shared", "migrations", f)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	sharedOK := sharedRepo(t, "run.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh")
+
+	// writeSharedLedger writes migrations/ledger — the DATA-file ledger the
+	// shared runner reads, as opposed to the gateway runner's here-string.
+	writeSharedLedger := func(t *testing.T, dir string, scripts ...string) {
+		t.Helper()
+		body := "# ledger\n"
+		for i, s := range scripts {
+			body += fmt.Sprintf("0.%d.0 %s\n", i+2, s)
+		}
+		p := filepath.Join(dir, "migrations", "ledger")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Every script in migrations/ ships, discovered by glob — adding a migration
 	// must not require a change here, or the runner's ledger could name a script
 	// that is not in the zip.
@@ -206,7 +244,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 			filepath.Join("migrations", "v1_to_v2.sh"),
 			filepath.Join("migrations", "v2_to_v3.sh"))
 		writeLedger(t, src, "v1_to_v2.sh", "v2_to_v3.sh")
-		got, err := extraPayload("gateway", src)
+		got, err := extraPayload("gateway", src, sharedOK)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -222,7 +260,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	t.Run("the migration's zip name is slash-separated", func(t *testing.T) {
 		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"), filepath.Join("migrations", "v1_to_v2.sh"))
 		writeLedger(t, src, "v1_to_v2.sh")
-		got, err := extraPayload("gateway", src)
+		got, err := extraPayload("gateway", src, sharedOK)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -245,7 +283,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	// state, which is far worse than a build that stops here.
 	t.Run("gateway without the runner is a build error", func(t *testing.T) {
 		src := writeSrc(t, "update.sh")
-		if _, err := extraPayload("gateway", src); err == nil {
+		if _, err := extraPayload("gateway", src, sharedOK); err == nil {
 			t.Error("missing migrations/run.sh accepted, want a build error")
 		}
 	})
@@ -260,7 +298,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 			filepath.Join("migrations", "run.sh"),
 			filepath.Join("migrations", "v1_to_v2.sh"))
 		writeLedger(t, src, "v1_to_v2.sh", "v2_to_v3.sh") // v2_to_v3.sh not committed
-		_, err := extraPayload("gateway", src)
+		_, err := extraPayload("gateway", src, sharedOK)
 		if err == nil {
 			t.Fatal("a ledger row naming a missing script was accepted, want a build error")
 		}
@@ -275,7 +313,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		src := writeSrc(t, "update.sh",
 			filepath.Join("migrations", "run.sh"),
 			filepath.Join("migrations", "v1_to_v2.sh"))
-		if _, err := extraPayload("gateway", src); err == nil {
+		if _, err := extraPayload("gateway", src, sharedOK); err == nil {
 			t.Error("a run.sh with no MIGRATIONS= ledger was accepted, want a build error")
 		}
 	})
@@ -285,7 +323,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	t.Run("an empty ledger is fine", func(t *testing.T) {
 		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"))
 		writeLedger(t, src)
-		got, err := extraPayload("gateway", src)
+		got, err := extraPayload("gateway", src, sharedOK)
 		if err != nil {
 			t.Fatalf("empty ledger rejected: %v", err)
 		}
@@ -298,40 +336,83 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	// nothing invokes them, so the zip looks complete and migrates nothing.
 	t.Run("migrations without the runner is a build error", func(t *testing.T) {
 		src := writeSrc(t, "update.sh", filepath.Join("migrations", "v1_to_v2.sh"))
-		if _, err := extraPayload("gateway", src); err == nil {
+		if _, err := extraPayload("gateway", src, sharedOK); err == nil {
 			t.Error("migrations/ without run.sh accepted, want a build error")
 		}
 	})
 
-	// Only gateway needs it — cli shares the update.sh arm but has no such
-	// config move, so requiring the file there would break its builds.
-	t.Run("cli does not require the migration", func(t *testing.T) {
-		src := writeSrc(t, "update.sh")
-		got, err := extraPayload("cli", src)
+	// The cli does NOT carry the gateway's migrations — it has its own ladder,
+	// and none of the gateway's rungs are on it. It carries the SHARED runner
+	// plus its own two files, and nothing named vN_to_vM.
+	t.Run("cli carries the shared ladder, not the gateway's", func(t *testing.T) {
+		src := writeSrc(t, "update.sh",
+			"migrations/component.conf", "migrations/ledger")
+		writeSharedLedger(t, src, "stale_user_bins.sh")
+		got, err := extraPayload("cli", src, sharedOK)
 		if err != nil {
-			t.Fatalf("cli should not require the gateway migration: %v", err)
+			t.Fatalf("cli should build with the shared ladder: %v", err)
 		}
-		for _, c := range got {
-			if strings.Contains(c.Name, "migrations/") {
-				t.Errorf("cli extras include %q", c.Name)
-			}
+		want := []string{
+			"migrations/component.conf", "migrations/ledger",
+			"migrations/lib_paths.sh", "migrations/lib_stale_user_bins.sh",
+			"migrations/run.sh", "migrations/stale_user_bins.sh",
+			"update.sh",
 		}
-	})
-
-	t.Run("cli ships update.sh only", func(t *testing.T) {
-		src := writeSrc(t, "update.sh")
-		got, err := extraPayload("cli", src)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := []string{"update.sh"}; !reflect.DeepEqual(names(got), want) {
+		if !reflect.DeepEqual(names(got), want) {
 			t.Errorf("cli extras = %v, want %v", names(got), want)
 		}
 	})
 
+	// component.conf and ledger are REQUIRED: the shared runner has no component
+	// defaults and refuses without them, so a kit missing either is a component
+	// whose every install ends in a refusal.
+	for _, missing := range []string{"component.conf", "ledger"} {
+		t.Run("shared ladder requires "+missing, func(t *testing.T) {
+			files := []string{"update.sh", "migrations/component.conf", "migrations/ledger"}
+			src := writeSrc(t, files...)
+			writeSharedLedger(t, src, "stale_user_bins.sh")
+			if err := os.Remove(filepath.Join(src, "migrations", missing)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := extraPayload("cli", src, sharedOK); err == nil {
+				t.Errorf("a cli source with no migrations/%s was accepted", missing)
+			}
+		})
+	}
+
+	// A ledger row naming a rung that is not staged is the row the runner
+	// refuses on — on every host, after the cut.
+	t.Run("shared ladger rejects a ledger row with no script", func(t *testing.T) {
+		src := writeSrc(t, "update.sh", "migrations/component.conf", "migrations/ledger")
+		writeSharedLedger(t, src, "rekey_console.sh")
+		if _, err := extraPayload("cli", src, sharedOK); err == nil {
+			t.Error("a ledger naming an unstaged rung was accepted")
+		}
+	})
+
+	// And a shared directory that lost the runner (or the library install.sh
+	// sources) is a mis-assembled release, not a component problem.
+	for _, missing := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh"} {
+		t.Run("shared ladder requires shared "+missing, func(t *testing.T) {
+			var kept []string
+			for _, f := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh"} {
+				if f != missing {
+					kept = append(kept, f)
+				}
+			}
+			src := writeSrc(t, "update.sh", "migrations/component.conf", "migrations/ledger")
+			writeSharedLedger(t, src, "stale_user_bins.sh")
+			if _, err := extraPayload("cli", src, sharedRepo(t, kept...)); err == nil {
+				t.Errorf("a shared ladder with no %s was accepted", missing)
+			}
+		})
+	}
+
 	t.Run("edge ships both update scripts", func(t *testing.T) {
-		src := writeSrc(t, "update.sh", "updater.update.sh")
-		got, err := extraPayload("edge", src)
+		src := writeSrc(t, "update.sh", "updater.update.sh",
+			"migrations/component.conf", "migrations/ledger")
+		writeSharedLedger(t, src, "stale_user_bins.sh")
+		got, err := extraPayload("edge", src, sharedOK)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -348,7 +429,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 
 	for _, comp := range []string{"gateway", "cli", "relay"} {
 		t.Run("missing update.sh is fail-loud: "+comp, func(t *testing.T) {
-			if _, err := extraPayload(comp, t.TempDir()); err == nil {
+			if _, err := extraPayload(comp, t.TempDir(), sharedOK); err == nil {
 				t.Errorf("%s: expected error for missing update.sh, got nil", comp)
 			}
 		})
