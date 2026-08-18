@@ -20,6 +20,36 @@ sha256_of() {
     else die "no shasum/sha256sum"; fi
 }
 
+# ---- work dir + cleanup ------------------------------------------------------
+# This script re-renders every bootstrap with the TEST key (section 1), so it
+# MUTATES tracked files. It used to restore nothing at all, leaving TEST-keyed
+# bootstraps in the working tree for the next `git add` — a published installer
+# that verifies against a key nothing we release is signed with, which
+# cmd/rkit/pubkey_bake_test.go names as the reason it exists. Stash the pre-test
+# bytes and restore THOSE, on any exit; never `git checkout`, which would also
+# throw away a contributor's uncommitted work (the pattern
+# tools/test-version-floor.sh and tools/test-tag-binding.sh already use).
+GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
+cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
+cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh"
+
+W="$(mktemp -d "${TMPDIR:-/tmp}/test-preflight-XXXXXX")"
+mkdir -p "${W}/orig"
+for f in ${GENERATED}; do
+    [ -f "${REPO_ROOT}/${f}" ] || continue
+    mkdir -p "${W}/orig/$(dirname "${f}")"
+    cp "${REPO_ROOT}/${f}" "${W}/orig/${f}"
+done
+
+SHIM=""
+cleanup() {
+    for g in ${GENERATED}; do
+        if [ -f "${W}/orig/${g}" ]; then cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"; fi
+    done
+    rm -rf "${W}" ${SHIM:+"${SHIM}"}
+}
+trap cleanup EXIT INT TERM
+
 # ---- (1) regenerate with the TEST pubkey so preflight.sh files exist --------
 say "gen-bootstraps.sh (TEST pubkey)"
 BURROWEE_PUBKEY_FILE="${REPO_ROOT}/tools/testkeys/test.pub" sh tools/gen-bootstraps.sh
@@ -37,8 +67,10 @@ grep -q 'NGINX="0"' agent/preflight.sh   || die "agent/preflight.sh should bake 
 
 # ---- (3) dry-run structure under a faked apt-get ----------------------------
 say "dry-run edge preflight with a faked apt-get"
+# NOTE: no second `trap` here. Registering one would REPLACE the restore trap
+# above — sh keeps one handler per signal — and that is exactly how the
+# TEST-keyed bootstraps used to survive the run. cleanup() removes the shim.
 SHIM="$(mktemp -d "${TMPDIR:-/tmp}/pf-shim-XXXXXX")"
-trap 'rm -rf "${SHIM}"' EXIT
 printf '#!/bin/sh\necho "fake-apt $*"\n' > "${SHIM}/apt-get"
 chmod +x "${SHIM}/apt-get"
 out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 sh edge/preflight.sh 2>&1)" \

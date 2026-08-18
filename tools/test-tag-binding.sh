@@ -33,7 +33,9 @@ command -v "${MINISIGN}" >/dev/null 2>&1 || MINISIGN="/opt/homebrew/bin/minisign
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\n✗ TAG-BINDING TEST FAILED: %s\n' "$*" >&2; exit 1; }
 
-GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh"
+GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
+cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
+cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh"
 
 # ---- work dir + cleanup ------------------------------------------------------
 # The bootstraps are regenerated twice below (real key, then an ephemeral one),
