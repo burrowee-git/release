@@ -361,12 +361,14 @@ assert_payload_migrations() {
     # precisely the class of defect the gateway's gate below already exists for.
     if takes_shared_ladder "${comp}"; then
         local want ledger
-        for want in run.sh lib_paths.sh lib_stale_user_bins.sh component.conf ledger; do
+        for want in run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh component.conf ledger; do
             if ! printf '%s\n' "${members}" | grep -qxF "migrations/${want}"; then
                 echo "✗ ${comp} payload has no migrations/${want}: ${zip_path}" >&2
                 echo "  install.sh runs the ladder out of the unzipped bundle and sources the sweep" >&2
                 echo "  from the same directory; without every one of these it installs cleanly and" >&2
-                echo "  silently stops migrating." >&2
+                echo "  silently stops migrating. upgrade.sh is in the list because the HOSTED" >&2
+                echo "  release.burrowee.com/${comp}/upgrade.sh one-liner execs it out of this same" >&2
+                echo "  kit and refuses at runtime when it is absent." >&2
                 return 1
             fi
         done

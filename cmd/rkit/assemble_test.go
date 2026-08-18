@@ -216,7 +216,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		}
 		return dir
 	}
-	sharedOK := sharedRepo(t, "run.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh")
+	sharedOK := sharedRepo(t, "run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh")
 
 	// writeSharedLedger writes migrations/ledger — the DATA-file ledger the
 	// shared runner reads, as opposed to the gateway runner's here-string.
@@ -355,7 +355,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 		want := []string{
 			"migrations/component.conf", "migrations/ledger",
 			"migrations/lib_paths.sh", "migrations/lib_stale_user_bins.sh",
-			"migrations/run.sh", "migrations/stale_user_bins.sh",
+			"migrations/run.sh", "migrations/stale_user_bins.sh", "migrations/upgrade.sh",
 			"update.sh",
 		}
 		if !reflect.DeepEqual(names(got), want) {
@@ -392,10 +392,10 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 
 	// And a shared directory that lost the runner (or the library install.sh
 	// sources) is a mis-assembled release, not a component problem.
-	for _, missing := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh"} {
+	for _, missing := range []string{"run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh"} {
 		t.Run("shared ladder requires shared "+missing, func(t *testing.T) {
 			var kept []string
-			for _, f := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh"} {
+			for _, f := range []string{"run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh"} {
 				if f != missing {
 					kept = append(kept, f)
 				}

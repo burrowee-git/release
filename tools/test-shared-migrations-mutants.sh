@@ -150,5 +150,23 @@ mutate receipt-mode-widened run.sh \
     "s|as_owner chmod 0700 \"\$RECEIPTS\"|as_owner chmod 0755 \"\$RECEIPTS\"|" \
     "the receipts directory is 0700 (case 1)"
 
+# --- upgrade.sh, the override ----------------------------------------------
+
+mutate upgrade-does-not-force upgrade.sh \
+    "s|^sh \"\$RUNNER\" --installed-version 0.0.0 --rerun-recorded|sh \"\$RUNNER\"|" \
+    "upgrade.sh forces a rung the plain ladder skips on a same-semver host (case 17b)"
+
+mutate upgrade-crosscheck-decorative upgrade.sh \
+    "s|^if \[ \"\$WANT_NORM\" != \"\$KIT_NORM\" \]; then|if false; then|" \
+    "a version that does not match the kit's ladder is REFUSED (case 17d)"
+
+mutate upgrade-swallows-the-code upgrade.sh \
+    "s|^exit \"\$CODE\"|exit 0|" \
+    "the ladder's exit code is propagated, not swallowed (cases 17b, 17f)"
+
+mutate upgrade-does-not-list-the-rungs upgrade.sh \
+    "s|^ROWS=.*|ROWS=\"\"|" \
+    "the rungs about to be re-run are NAMED before any of them runs (case 17b)"
+
 echo "== $RUN mutants, $SURVIVORS survived =="
 [ "$SURVIVORS" = 0 ] || exit 1

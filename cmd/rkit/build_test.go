@@ -53,8 +53,9 @@ func TestOrchestrateBuildsMatrixIntoScratch(t *testing.T) {
 	// on the floor by the packaging step, and nothing compared the two.
 	wantEntries := []string{
 		"burrowee", "burrowee-cli", "burrowee-cli-updater", "install.sh", "update.sh",
-		"migrations/run.sh", "migrations/lib_paths.sh", "migrations/lib_stale_user_bins.sh",
-		"migrations/stale_user_bins.sh", "migrations/component.conf", "migrations/ledger",
+		"migrations/run.sh", "migrations/upgrade.sh", "migrations/lib_paths.sh",
+		"migrations/lib_stale_user_bins.sh", "migrations/stale_user_bins.sh",
+		"migrations/component.conf", "migrations/ledger",
 	}
 	sort.Strings(wantEntries)
 	for _, zp := range res.Zips {
@@ -114,7 +115,7 @@ func writeFixtureModule(t *testing.T, repo string) {
 	// by the same directory, so the two halves land beside each other. Every one
 	// is required — a kit missing any of them installs cleanly and silently
 	// stops migrating, which is what the gate exists to make impossible.
-	for _, f := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh"} {
+	for _, f := range []string{"run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh"} {
 		write("inner/_shared/migrations/"+f, "#!/bin/sh\n: fixture "+f+"\n")
 	}
 	write("migrations/component.conf", "COMP=cli\nCOMP_HOME_SCHEME=user\n")

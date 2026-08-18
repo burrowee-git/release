@@ -116,8 +116,8 @@ fi
 kit() {
     _k_dir="$1"; _k_comp="$2"; _k_scheme="$3"; _k_vf="$4"; shift 4
     mkdir -p "$_k_dir/migrations"
-    cp "$SHARED"/run.sh "$SHARED"/lib_paths.sh "$SHARED"/lib_stale_user_bins.sh \
-       "$SHARED"/stale_user_bins.sh "$_k_dir/migrations/"
+    cp "$SHARED"/run.sh "$SHARED"/upgrade.sh "$SHARED"/lib_paths.sh \
+       "$SHARED"/lib_stale_user_bins.sh "$SHARED"/stale_user_bins.sh "$_k_dir/migrations/"
     chmod 0755 "$_k_dir/migrations"/*.sh
     {
         echo "COMP=$_k_comp"
@@ -456,6 +456,81 @@ printf 'stale_user_bins.sh\n' > "$ch16b/migration-receipts/stale_user_bins.sh.do
 run_ladder "$t16b" "$h16b" "$ch16b" "$h16b/usr-local-bin"
 assert_eq "$RC" 2 "an unprovenanced receipt must not skip a tree it cannot speak for"
 assert_contains "$OUT" "records no tree" "the re-evaluation must say the receipt cannot answer"
+
+# ---------------------------------------------------------------------------
+# 17. upgrade.sh — THE OVERRIDE, on admin-kr's exact state.
+#
+# The anchor reads a 0.2.0 RELEASE STAMP and the host has stale copies. The gate
+# compares only MAJOR.MINOR.PATCH and deliberately ignores the .date.sha tail,
+# so a host that changed BUILD without changing SEMVER is invisible to it and
+# looks already migrated. That is precisely the host the sweep exists for, and
+# the plain ladder can do nothing about it.
+# ---------------------------------------------------------------------------
+run_upgrade() {
+    _ru_kit="$1"; _ru_home="$2"; _ru_comp_home="$3"; _ru_bin="$4"; shift 4
+    OUT="$(
+        HOME="$_ru_home" \
+        COMP_HOME="$_ru_comp_home" \
+        BIN_DIR="$_ru_bin" \
+        LAUNCHD_DIR="$_ru_home/no-launchd" \
+        SYSTEMD_DIR="$_ru_home/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$_ru_home/nowhere" \
+        SUDO="/nonexistent-sudo" \
+        sh "$_ru_kit/migrations/upgrade.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+
+t17="$TMP/t17"; kit "$t17" edge root installed-version $EDGE_BINS
+h17="$t17/home"; ch17="$h17/root-home/.burrowee/edge"; mkdir -p "$ch17"
+seed_ours "$h17/.local/bin" $EDGE_BINS
+echo "0.2.0.2026.08.17.4e43c2ed" > "$ch17/installed-version"
+
+# 17a. the plain ladder does nothing — the state the operator is stuck in.
+run_ladder "$t17" "$h17" "$ch17" "$h17/usr-local-bin"
+assert_eq "$RC" 0 "precondition: the plain ladder must be a no-op on a 0.2.0 anchor"
+assert_present "$h17/.local/bin/burrowee-edge" "precondition: the stale copy must survive the plain ladder"
+
+# 17b. upgrade.sh forces it, and SAYS WHAT IT WILL RE-RUN before running it.
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.0
+assert_eq "$RC" 2 "upgrade.sh must force the rung on a same-semver host"
+assert_contains "$OUT" "every rung in this kit will be re-run" "it must list the rungs BEFORE running them"
+assert_contains "$OUT" "stale_user_bins.sh (target 0.2.0)" "the list must name the rung and its target"
+assert_gone "$h17/.local/bin/burrowee-edge" "the forced rung must sweep"
+
+# 17c. idempotent — an operator will run it twice.
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.0
+assert_eq "$RC" 2 "a second forced run must still report that the rung ran"
+
+# 17d. THE CROSS-CHECK IS ENFORCED, not decorative. An operator standing in a
+# 0.2.0 kit who types 0.3.0 has a wrong belief about their host.
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.3.0
+assert_eq "$RC" 64 "a version that does not match the kit's ladder must be refused"
+assert_contains "$OUT" "tops out at 0.2.0" "the refusal must name BOTH values"
+assert_contains "$OUT" "nothing has been touched" "a refusal must say nothing was touched"
+
+# 17e. it INSTALLS NOTHING — asserted so a future edit cannot quietly fold the
+# installer back in.
+mkdir -p "$h17/usr-local-bin"
+seed_ours "$h17/usr-local-bin" burrowee-edge
+_before="$(ls -l "$h17/usr-local-bin")"
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.0
+assert_eq "$(ls -l "$h17/usr-local-bin")" "$_before" "upgrade.sh must not place, replace or remove anything in \$BIN_DIR"
+
+# 17f. it propagates the ladder's code rather than its own feeling about it.
+t17g="$TMP/t17g"; kit "$t17g" edge root installed-version $EDGE_BINS
+h17g="$t17g/home"; mkdir -p "$h17g"
+rm -f "$t17g/migrations/stale_user_bins.sh"
+run_upgrade "$t17g" "$h17g" "$h17g/absent" "$h17g/bin" 0.2.0
+assert_eq "$RC" 1 "a ladder that refuses must propagate exit 1, not be swallowed"
+
+# 17g. the command line: one version, and it must parse.
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin"
+assert_eq "$RC" 64 "no version is a usage error"
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.0 extra
+assert_eq "$RC" 64 "a second argument must be rejected, never silently discarded"
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.x
+assert_eq "$RC" 64 "an unparseable version must be refused, never rounded to 0.2.0"
 
 # ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="

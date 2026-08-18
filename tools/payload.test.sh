@@ -82,23 +82,23 @@ check "manifest: picks up a new migration" "$(payload_manifest gateway "${SRC}" 
 # matter what either contained.
 SHARED_FIX="${TMP}/shared-migrations"
 mkdir -p "${SHARED_FIX}"
-: > "${SHARED_FIX}/run.sh"; : > "${SHARED_FIX}/lib_paths.sh"
+: > "${SHARED_FIX}/run.sh"; : > "${SHARED_FIX}/upgrade.sh"; : > "${SHARED_FIX}/lib_paths.sh"
 : > "${SHARED_FIX}/lib_stale_user_bins.sh"; : > "${SHARED_FIX}/stale_user_bins.sh"
 SHARED_MIGRATIONS_DIR="${SHARED_FIX}"
 EDGE_SRC="${TMP}/manifest-edge"
 mkdir -p "${EDGE_SRC}/migrations"
 : > "${EDGE_SRC}/migrations/component.conf"; : > "${EDGE_SRC}/migrations/ledger"
 check "manifest: edge"  "$(payload_manifest edge  "${EDGE_SRC}" | paste -sd, -)" \
-    "update.sh,updater.update.sh,covers/admin.html,covers/default.html,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/component.conf,migrations/ledger"
+    "update.sh,updater.update.sh,covers/admin.html,covers/default.html,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
 check "manifest: cli"   "$(payload_manifest cli   "${EDGE_SRC}" | paste -sd, -)" \
-    "update.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/component.conf,migrations/ledger"
+    "update.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
 
 # --- stage_component_migrations (shared ladder) -----------------------------
 SHARED_ASM="${TMP}/shared-asm"; mkdir -p "${SHARED_ASM}"
 if stage_component_migrations cli "${EDGE_SRC}" "${SHARED_ASM}"; then
     ok "shared stage: succeeds"
 else bad "shared stage: failed"; fi
-for f in run.sh lib_paths.sh lib_stale_user_bins.sh stale_user_bins.sh component.conf ledger; do
+for f in run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh stale_user_bins.sh component.conf ledger; do
     if [ -f "${SHARED_ASM}/migrations/${f}" ]; then ok "shared stage: ${f}"
     else bad "shared stage: ${f} missing"; fi
 done

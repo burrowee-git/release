@@ -223,7 +223,11 @@ func sharedLadderPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 		// wrong the moment this is built anywhere non-unix.
 		extras = append(extras, pack.Content{Src: p, Name: "migrations/" + base})
 	}
-	for _, want := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh"} {
+	// upgrade.sh is required because the HOSTED release.burrowee.com/<comp>/upgrade.sh
+	// one-liner execs it out of this same kit and refuses at runtime when it is
+	// absent — a rendered bootstrap whose kit cannot answer it is a URL that
+	// exists and does not work.
+	for _, want := range []string{"run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh"} {
 		if !present[want] {
 			return nil, fmt.Errorf("shared migration %s missing under %s", want,
 				filepath.Join(repoDir, "inner", "_shared", "migrations"))
