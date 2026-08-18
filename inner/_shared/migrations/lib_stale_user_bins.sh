@@ -30,7 +30,7 @@
 # tools/payload.sh. The only thing that varies between components is the list of
 # names, which comes from migrations/component.conf.
 #
-# THE FOUR GUARDS, each of which has a real failure behind it:
+# THE FIVE GUARDS, each of which has a real failure behind it:
 #   1. THE OPERATOR'S HOME, NOT $HOME. The documented install is
 #      `curl … | sudo sh`, where $HOME is /root or /var/root — a tree no
 #      per-user install ever wrote to. A sweep aimed there finds nothing,
@@ -40,11 +40,18 @@
 #      is writable by the very user whose files are in question; running one of
 #      them to ask what it is would hand uid 0 to anyone who can drop a file
 #      there. The evidence is the Go build stamp, read with grep.
-#   3. EXACT NAMES, NEVER A GLOB, and the shared `burrowee` dispatcher last.
-#   4. NOTHING IS REMOVED WHILE A UNIT STILL NAMES THE DIRECTORY. On macOS the
-#      KeepAlive.PathState the installers write keys off the binary's
+#   3. EXACT NAMES, NEVER A GLOB. $STALE_USER_BINS is the whole candidate set.
+#   4. NOTHING IS REMOVED THAT HAS NO ROOT-INSTALLED TWIN. A per-user binary is
+#      stale exactly when $BIN_DIR holds a copy of ours under the same name;
+#      with no twin it is not a leftover, it is the only install this host has.
+#      That is what keeps a live per-user cli alive, and it is what lets the
+#      bare `burrowee` dispatcher go without a second, weaker rule.
+#   5. NOTHING IS REMOVED WHILE A UNIT STILL NAMES *THAT FILE*. On macOS the
+#      KeepAlive.PathState the installers writes keys off the binary's
 #      existence, so unlinking it does not stale a future restart — it stops
-#      the running daemon.
+#      the running daemon. Asked PER FILE: the directory-scoped form of this
+#      guard let one edge unit block six gateway names it does not mention
+#      (observed 2026-08-18), which is guard-scope failure, not conservatism.
 # Undecidable cases fail toward KEEP.
 #
 # Every variable is defaulted with ${X:-…} so a caller that already resolved one
@@ -89,26 +96,137 @@ BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
 LAUNCHD_DIR="${LAUNCHD_DIR:-${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}}"
 
-# ---------------------------------------------------------------------------
-# unit_naming_dir <dir> <operator-home> — the first service unit file on this
-# host that still names <dir>, or empty + non-zero when none does.
+# === SHARED SWEEP CONTRACT BEGIN ===
+# Everything between this line and the matching END line is BYTE-IDENTICAL in
+# the two repos that carry this library:
 #
-# Guard 4. It scans the unit FILES rather than asking the supervisor, and
-# treats a file on disk as "possibly loaded". That is deliberately the
-# conservative direction: the two outcomes are "skip a cleanup" and "stop a
-# running daemon", and only one of them is recoverable by running again. The
-# system dirs cover ANOTHER component's units too (a co-installed gateway or
-# relay still pointing at the per-user tree), which is the case no single
-# component's own re-render can speak for.
+#   burrowee-git/gateway  migrations/lib_stale_user_bins.sh
+#   burrowee-git/release  inner/_shared/migrations/lib_stale_user_bins.sh
+#
+# They cannot be one file: they are two independent repos, the gateway's ladder
+# is assembled wholly from the gateway worktree (tools/payload.sh's
+# takes_shared_ladder deliberately excludes it) and the gateway's own suite runs
+# the rung out of its own migrations/ directory. So the drift is guarded instead
+# of prevented: each repo's suite hashes THIS REGION and compares it against a
+# pinned digest that is the same literal in both. Editing one copy reddens that
+# repo's test until the digest is updated, and the digest cannot be updated to a
+# value the other repo does not also produce without the other repo's test going
+# red in turn. Nothing outside the sentinels is compared, which is what lets the
+# preamble above differ (the gateway hardcodes its own binary list and defines
+# operator_home inline; the shared copy loads component.conf and lib_paths.sh).
+#
+# The functions below are the WHOLE decision. Anything that changes what gets
+# deleted belongs in here.
+
+# LNB_TAB / LNB_CR — the two terminator characters that cannot be written
+# legibly inside a `case` pattern. Built once, at source time, and compared as
+# values. A CR is in the list because a unit file edited on Windows ends every
+# line with one, and without it the last name on every line would look
+# unterminated and be spared forever.
+LNB_TAB="$(printf '\t')"
+LNB_CR="$(printf '\r')"
+
 # ---------------------------------------------------------------------------
-unit_naming_dir() {
-    for _und_d in "$LAUNCHD_DIR" "$SYSTEMD_DIR" \
-        "$2/Library/LaunchAgents" "$2/.config/systemd/user"; do
-        [ -d "$_und_d" ] || continue
-        for _und_f in "$_und_d"/*; do
-            [ -f "$_und_f" ] || continue
-            if grep -qF "$1/" "$_und_f" 2>/dev/null; then
-                echo "$_und_f"
+# line_names_bin <line> <path> — whether <line> names exactly <path>, with the
+# BASENAME TERMINATED.
+#
+# THE SUBSTRING HAZARD, and it is not hypothetical. A plain `grep -F
+# "$dir/burrowee-gateway"` matches a unit whose ExecStart is
+# "$dir/burrowee-gateway-updater", so the shorter name would be spared by the
+# longer one's unit and the sweep would silently under-remove — the same
+# collision family run.sh already records for burrowee-gateway-console.
+#
+# A match counts only when the character AFTER it TERMINATES the basename: end
+# of line, a space, a tab, a CR, a closing quote, or the "<" that ends a launchd
+# plist <string>. Anything else is treated as continuing the name, so the "-" of
+# "-updater" does not count and the scan moves past it to look for a later
+# occurrence on the same line.
+#
+# The terminator set is written as an ALLOW-LIST rather than as "not a name
+# character" so that an unforeseen byte errs toward KEEP. "Not a name character"
+# would make every unlisted byte a terminator, i.e. a match, i.e. a DELETE — the
+# unrecoverable direction, on the one guard whose whole job is to not delete out
+# from under a running daemon.
+#
+# Written with parameter expansion rather than a regex ON PURPOSE. The needle is
+# an absolute path chosen by the host, so it routinely carries "." and may carry
+# "+", "(" or "|"; feeding it to grep -E unescaped either loosens the match or
+# makes grep exit non-zero, and a grep that ERRORS reads to the caller as "no
+# unit names this file" — the unsafe direction, where the sweep deletes.
+# ---------------------------------------------------------------------------
+line_names_bin() {
+    _lnb_l="$1"
+    _lnb_n="$2"
+    while :; do
+        case "$_lnb_l" in
+        *"$_lnb_n"*) ;;
+        *) return 1 ;;
+        esac
+        _lnb_l="${_lnb_l#*"$_lnb_n"}"
+        [ -n "$_lnb_l" ] || return 0
+        _lnb_c="${_lnb_l%"${_lnb_l#?}"}"
+        case "$_lnb_c" in
+        ' ' | '"' | "'" | '<' | "$LNB_TAB" | "$LNB_CR") return 0 ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# file_names_bin <file> <path> — whether any line of <file> names <path> with
+# the basename terminated.
+#
+# `read` loses a final line that carries no newline, and a hand-edited unit file
+# is exactly where that happens, so the `|| [ -n "$_fnb_l" ]` tail is load-
+# bearing rather than idiom.
+# ---------------------------------------------------------------------------
+file_names_bin() {
+    _fnb_f="$1"
+    _fnb_n="$2"
+    _fnb_l=""
+    while IFS= read -r _fnb_l || [ -n "$_fnb_l" ]; do
+        if line_names_bin "$_fnb_l" "$_fnb_n"; then return 0; fi
+        _fnb_l=""
+    done <"$_fnb_f"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# unit_naming_bin <dir> <bin> <operator-home> — the first service unit file on
+# this host that still names <dir>/<bin>, or empty + non-zero when none does.
+#
+# GUARD 4, AND THE POINT OF THIS TASK. It used to ask whether any unit named the
+# DIRECTORY and, on a single hit, abandon the entire sweep. Observed on a
+# production node 2026-08-18: one /etc/systemd/system/burrowee-edge-updater
+# .service naming /home/ubuntu/.local/bin blocked all six of the gateway's
+# names — names that unit does not mention and never could — so the sweep
+# removed nothing, the stale dispatcher survived, and it went on answering every
+# `burrowee …` with Aug-8 code. Correct logic, wrong observed set.
+#
+# The question is now asked PER CANDIDATE FILE: does any unit name THIS file? A
+# file no unit names is swept; a file some unit names is left, and the caller's
+# message names both the file and the unit.
+#
+# What is NOT in question is the direction it fails in. It scans the unit FILES
+# rather than asking the supervisor and treats a file on disk as "possibly
+# loaded", because the two outcomes are "skip a cleanup" and "stop a running
+# daemon" and only one of those is recoverable by running again. The system dirs
+# cover ANOTHER component's units too, which is the case no single component's
+# own re-render can speak for.
+#
+# grep -F is a pre-filter and never the decision: it cheaply skips the files that
+# cannot match, and file_names_bin then decides the ones that can.
+# ---------------------------------------------------------------------------
+unit_naming_bin() {
+    _unb_needle="$1/$2"
+    for _unb_d in "$LAUNCHD_DIR" "$SYSTEMD_DIR" \
+        "$3/Library/LaunchAgents" "$3/.config/systemd/user"; do
+        [ -d "$_unb_d" ] || continue
+        for _unb_f in "$_unb_d"/*; do
+            [ -f "$_unb_f" ] || continue
+            [ -r "$_unb_f" ] || continue
+            grep -qF -- "$_unb_needle" "$_unb_f" 2>/dev/null || continue
+            if file_names_bin "$_unb_f" "$_unb_needle"; then
+                echo "$_unb_f"
                 return 0
             fi
         done
@@ -137,14 +255,8 @@ is_burrowee_binary() {
 }
 
 # ---------------------------------------------------------------------------
-# stale_bin_verdict <path> — the WHOLE ownership decision, in one place, as one
-# word: absent | symlink | irregular | foreign | ours.
-#
-# Both callers below switch on it — the remover, to pick which note it prints,
-# and the probe, to decide whether there is anything pending at all. Written as
-# one function rather than as two similar chains because a probe that answered
-# a slightly different question than the removal it authorises is how a rung
-# gets selected and then finds nothing to do.
+# stale_bin_verdict <path> — the ownership half of the decision, as one word:
+# absent | symlink | irregular | foreign | ours.
 # ---------------------------------------------------------------------------
 stale_bin_verdict() {
     if [ -h "$1" ]; then echo symlink; return 0; fi
@@ -154,37 +266,84 @@ stale_bin_verdict() {
 }
 
 # ---------------------------------------------------------------------------
-# stale_dir_has_other_burrowee_bin <dir> — whether any burrowee-* binary of
-# OURS remains in <dir> after this component's own names have been swept.
+# system_twin_exists <bin> — whether $BIN_DIR holds a copy of OURS under the
+# same name.
 #
-# THIS IS THE DISPATCHER RULE. The bare `burrowee` dispatcher is shared by every
-# co-installed component: it is the one name in $STALE_USER_BINS that is not
-# this component's to remove unilaterally. It goes only when nothing else of
-# ours is left in that directory to need it.
+# THIS IS WHAT MAKES A PER-USER COPY "STALE" RATHER THAN "THE INSTALL". A
+# per-user binary is stale exactly when the same name has been placed in the
+# system bin dir: that copy is the one a normal PATH should have been finding,
+# and the per-user one is what shadows it. With no such copy the per-user file
+# is not a leftover at all, it is the only install this host has — which is the
+# cli's situation until its root collapse lands, and deleting it would uninstall
+# a working cli.
 #
-# The glob is a DETECTION over what is left, never a removal target: nothing is
-# ever deleted by pattern here, only by exact name out of $STALE_USER_BINS. And
-# it asks is_burrowee_binary about each candidate for the same reason the
-# removal does — an operator's own `burrowee-notes` script must not be evidence
-# that a burrowee component is installed, or it would pin the shadowing
-# dispatcher in place forever.
+# It is deliberately NOT a uid-0 test. $BIN_DIR is whatever destination the
+# CALLER resolved (an explicit PREFIX installs unprivileged, in full), so
+# demanding root ownership here would make the sweep silently do nothing on
+# every such host — a guard scoped to the wrong observed set, which is the very
+# defect being fixed. Whether $BIN_DIR is fit to be named by a root unit is a
+# different question, asked by the root-secure ancestor walk that owns it.
+#
+# The twin must carry the stamp for the same reason the candidate must: an
+# operator's own /usr/local/bin/burrowee wrapper is not evidence that a burrowee
+# component was installed there, and treating it as evidence would delete the
+# dispatcher every component still needs.
 # ---------------------------------------------------------------------------
-stale_dir_has_other_burrowee_bin() {
-    for _sdo_f in "$1"/burrowee-*; do
-        [ -f "$_sdo_f" ] || continue
-        if is_burrowee_binary "$_sdo_f"; then return 0; fi
-    done
-    return 1
+system_twin_exists() {
+    [ -n "${BIN_DIR:-}" ] || return 1
+    [ "$(stale_bin_verdict "$BIN_DIR/$1")" = ours ]
 }
 
 # ---------------------------------------------------------------------------
-# remove_one_stale_bin <path> — remove ONE stale per-user copy, and only when
-# it is provably ours. Absent is success, not a warning: this runs on every
+# stale_bin_decision <dir> <bin> <operator-home> — the WHOLE decision for one
+# candidate, as one word:
+#
+#   remove      sweep it
+#   absent      nothing there
+#   symlink     not a binary an installer placed
+#   irregular   not a regular file
+#   foreign     our exact name, but no burrowee build stamp
+#   no-twin     ours, but nothing of that name in $BIN_DIR — the LIVE install
+#   unit:<f>    ours and replaced, but <f> still names it
+#
+# ONE FUNCTION BECAUSE THERE IS ONE DECISION. The remover switches on it to pick
+# a message and the --applies probe switches on it to answer at all, so a probe
+# that authorised a removal the sweep would then decline — the shape that buys a
+# stopped gateway for no work — cannot be written without changing both at once.
+#
+# Order matters and is cheapest-first: ownership is a stat plus a grep of one
+# file, the twin is one more of each, and only a candidate that passes both is
+# worth walking every unit file on the host for.
+# ---------------------------------------------------------------------------
+stale_bin_decision() {
+    _sbd_v="$(stale_bin_verdict "$1/$2")"
+    case "$_sbd_v" in
+    ours) ;;
+    *)
+        echo "$_sbd_v"
+        return 0
+        ;;
+    esac
+    if ! system_twin_exists "$2"; then
+        echo no-twin
+        return 0
+    fi
+    if _sbd_u="$(unit_naming_bin "$1" "$2" "$3")"; then
+        echo "unit:$_sbd_u"
+        return 0
+    fi
+    echo remove
+}
+
+# ---------------------------------------------------------------------------
+# remove_one_stale_bin <dir> <bin> <operator-home> — act on one candidate, and
+# SAY what was decided. Absent is silent, not a warning: this runs on every
 # install, and a host that never had a per-user layout must say nothing at all.
 # ---------------------------------------------------------------------------
 remove_one_stale_bin() {
-    _ros_p="$1"
-    case "$(stale_bin_verdict "$_ros_p")" in
+    _ros_p="$1/$2"
+    _ros_d="$(stale_bin_decision "$1" "$2" "$3")"
+    case "$_ros_d" in
     absent) return 0 ;;
     symlink)
         echo "note: $_ros_p is a symlink, not a binary this installer placed — left in place." >&2
@@ -196,6 +355,15 @@ remove_one_stale_bin() {
         ;;
     foreign)
         echo "note: $_ros_p carries no burrowee build stamp — it is not ours, left in place." >&2
+        return 0
+        ;;
+    no-twin)
+        echo "kept $_ros_p — there is no $BIN_DIR/$2 to replace it, so this is the live install, not a stale copy"
+        return 0
+        ;;
+    unit:*)
+        echo "note: ${_ros_d#unit:} still names $_ros_p, so a supervisor may be running it —" >&2
+        echo "note: left in place. Re-render or remove that unit and run this again." >&2
         return 0
         ;;
     esac
@@ -233,34 +401,43 @@ stale_user_bin_dir() {
 
 # ---------------------------------------------------------------------------
 # stale_user_bins_pending — whether a sweep right now would remove at least one
-# file. The rung's --applies probe, and deliberately the same decision the
-# sweep makes: guard 4 answers "no" here too, so a host whose units still name
-# the per-user directory is never selected for a rung that would then decline
-# to touch anything.
+# file. The rung's --applies probe, and the same decision the sweep makes,
+# candidate for candidate.
 #
 # Silent: a probe is asked speculatively, on hosts where the answer is normally
 # "no", and every note it printed would appear on all of them.
 # ---------------------------------------------------------------------------
 stale_user_bins_pending() {
+    [ -n "$STALE_USER_BINS" ] || return 1
     _sbp_home="$(operator_home 2>/dev/null)"
     _sbp_dir="$(stale_user_bin_dir "$_sbp_home")"
     [ -n "$_sbp_dir" ] || return 1
-    if unit_naming_dir "$_sbp_dir" "$_sbp_home" >/dev/null 2>&1; then return 1; fi
-
     for _sbp_b in $STALE_USER_BINS; do
-        case "$_sbp_b" in burrowee) continue ;; esac
-        if [ "$(stale_bin_verdict "$_sbp_dir/$_sbp_b")" = ours ]; then return 0; fi
+        if [ "$(stale_bin_decision "$_sbp_dir" "$_sbp_b" "$_sbp_home" 2>/dev/null)" = remove ]; then
+            return 0
+        fi
     done
-    if ! stale_dir_has_other_burrowee_bin "$_sbp_dir" &&
-        [ "$(stale_bin_verdict "$_sbp_dir/burrowee")" = ours ]; then
-        return 0
-    fi
     return 1
 }
 
 # ---------------------------------------------------------------------------
-# remove_stale_user_bins — sweep the pre-0.2.0 per-user copies of THIS
-# component's binaries, by exact name, after everything else has converged.
+# remove_stale_user_bins — sweep the per-user copies of THIS component's
+# binaries, by exact name, after everything else has converged.
+#
+# THE BARE `burrowee` DISPATCHER IS NO LONGER A SPECIAL CASE, and that is an
+# operator ruling rather than a simplification: once a root dispatcher exists,
+# the per-user one is removed, full stop. It used to be spared whenever any
+# other stamped burrowee-* file was left in the directory, which is exactly what
+# kept the Aug-8 dispatcher alive on a host that also had per-user edge
+# binaries — and a surviving per-user `burrowee` shadows $BIN_DIR on PATH and
+# answers every `burrowee …` with old code, which is the whole complaint.
+#
+# Removing it strands nothing: the root dispatcher pins only gateway, edge and
+# register to the system bin dir and still resolves every other component
+# through PATH and then {/usr/local/bin, /opt/homebrew/bin, ~/.local/bin}, so a
+# per-user component it does not pin is still found where it lies. The root-twin
+# predicate is what makes this safe to state unconditionally: with no root
+# dispatcher there is no twin, and the per-user one stays.
 # ---------------------------------------------------------------------------
 remove_stale_user_bins() {
     if [ -z "$STALE_USER_BINS" ]; then
@@ -272,26 +449,8 @@ remove_stale_user_bins() {
     _rsb_dir="$(stale_user_bin_dir "$_rsb_home")"
     [ -n "$_rsb_dir" ] || return 0
 
-    _rsb_unit=""
-    _rsb_unit="$(unit_naming_dir "$_rsb_dir" "$_rsb_home")" || _rsb_unit=""
-    if [ -n "$_rsb_unit" ]; then
-        echo "note: $_rsb_unit still names $_rsb_dir, so a supervisor may be running a" >&2
-        echo "note: binary from there — the stale per-user copies are left in place." >&2
-        echo "hint: remove them by hand once nothing points at that directory." >&2
-        return 0
-    fi
-
     for _rsb_b in $STALE_USER_BINS; do
-        # The bare `burrowee` dispatcher is SHARED across co-installed
-        # components — so it is handled below, after the names that are
-        # unambiguously this component's, and only when nothing else of ours
-        # is left there.
-        case "$_rsb_b" in burrowee) continue ;; esac
-        remove_one_stale_bin "$_rsb_dir/$_rsb_b"
+        remove_one_stale_bin "$_rsb_dir" "$_rsb_b" "$_rsb_home"
     done
-    if stale_dir_has_other_burrowee_bin "$_rsb_dir"; then
-        echo "kept $_rsb_dir/burrowee (dispatcher) — another burrowee component is still installed there"
-    else
-        remove_one_stale_bin "$_rsb_dir/burrowee"
-    fi
 }
+# === SHARED SWEEP CONTRACT END ===
