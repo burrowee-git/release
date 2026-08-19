@@ -387,5 +387,47 @@ mutate upgrade-exit2-note-unconditional upgrade.sh \
     "s|^    if \[ -n \"\${SERVICE_STOP_RUNGS:-}\" \]; then|    if true; then|" \
     "cli's operator override still says nothing was left down (case 26b)"
 
+# --- the forced adoption ----------------------------------------------------
+# The whole point of forcing: a tree adopted from the WRONG source is repaired by
+# re-running the migration. A rung that announces a forced run and then invokes
+# the ordinary never-overwriting copy leaves the host exactly as broken.
+mutate forced-run-drops-the-flag adopt_user_tree.sh \
+    "s|^    MIGRATE_FORCE=\"--force\"\$|    MIGRATE_FORCE=\"\"|" \
+    "a forced run passes --force to the cli and the destination changes (case 30b)"
+
+# The other direction, and the guard on the change itself: never-overwrite is
+# still what an ordinary ladder run gets.
+mutate every-run-forces adopt_user_tree.sh \
+    "s|^FORCED=0\$|FORCED=1|" \
+    "an unforced ladder run never passes --force (case 30c)"
+
+# --applies must stop treating "the destination already holds an identity" as
+# "already done" when forcing — that state IS what a wrongly-adopted host looks
+# like, so keeping the check declines the rung on every host the flag is for.
+mutate forced-applies-still-checks-already-adopted adopt_user_tree.sh \
+    "s|^    if \[ \"\$FORCED\" = 1 \]; then\$|    if false; then|" \
+    "a forced run with NO named version is still selected on a populated destination (case 30e)"
+
+# Forcing widens what may be OVERWRITTEN, never what may be read: with no source
+# tree there is nothing to copy, and a receipt for that is a lie.
+mutate forced-applies-ignores-nothing-to-adopt adopt_user_tree.sh \
+    "s|^        if nothing_to_adopt; then exit 1; fi\$|        if false; then exit 1; fi|" \
+    "a forced run with an unenrolled source still declines (case 30d)"
+
+# The runner's half. Without the export the rung can never learn it was forced,
+# and upgrade.sh becomes the no-op it already was. NO ANCHORS AND NO TRAILING
+# BACKSLASH in the pattern: the assignment sits on a line-continuation, and an
+# expression that has to spell that backslash is one sed rejects — which the
+# harness scores as a broken mutant, not as a killed one.
+mutate runner-never-declares-force run.sh \
+    "s|MIGRATION_FORCED=\"\$RERUN_RECORDED\"|MIGRATION_FORCED=\"0\"|" \
+    "--rerun-recorded reaches the rungs as \$MIGRATION_FORCED (case 30b/30e)"
+
+# And the announcement: an operator about to lose a node identity has to read it
+# while the daemon is still up.
+mutate forced-run-says-nothing adopt_user_tree.sh \
+    "s|^    say \"FORCED RUN|    : \"FORCED RUN|" \
+    "a forced run announces itself before the stop (case 30b)"
+
 echo "== $RUN mutants, $SURVIVORS survived =="
 [ "$SURVIVORS" = 0 ] || exit 1

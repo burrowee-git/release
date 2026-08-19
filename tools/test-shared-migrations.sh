@@ -987,19 +987,30 @@ make_cli_stub() {
 echo "$*" >> "${CLI_STUB_LOG:-/dev/null}"
 [ "$1" = migrate ] || exit 2
 [ "$2" = --help ] && exit 0
-FROM=""; ROOT=""
+FROM=""; ROOT=""; FORCE=0
 while [ $# -gt 0 ]; do
     case "$1" in
     --from) FROM="$2"; shift 2 ;;
     --home) ROOT="$2"; shift 2 ;;
+    --force) FORCE=1; shift ;;
     *) shift ;;
     esac
 done
 [ -n "$FROM" ] && [ -n "$ROOT" ] || exit 64
 DST="$ROOT/$COMP_NAME"
 mkdir -p "$DST/identity"
-[ -f "$DST/identity/relay_ed.key" ] || cp "$FROM/identity/relay_ed.key" "$DST/identity/relay_ed.key" 2>/dev/null || true
-[ -f "$DST/config" ] || cp "$FROM/config" "$DST/config" 2>/dev/null || true
+# --force overwrites and SNAPSHOTS FIRST; without it the copy never overwrites.
+# The stub mirrors only the contract the RUNG depends on — the real publish,
+# refusal and enumerated carried set are proved in the edge repo's internal/adopt.
+if [ "$FORCE" = 1 ]; then
+    [ -d "$DST" ] && cp -R "$DST" "$DST.pre-force-stub" 2>/dev/null || true
+    cp "$FROM/identity/relay_ed.key" "$DST/identity/relay_ed.key" 2>/dev/null || true
+    cp "$FROM/config" "$DST/config" 2>/dev/null || true
+    echo "cli-stub: REPLACED $DST/identity/relay_ed.key"
+else
+    [ -f "$DST/identity/relay_ed.key" ] || cp "$FROM/identity/relay_ed.key" "$DST/identity/relay_ed.key" 2>/dev/null || true
+    [ -f "$DST/config" ] || cp "$FROM/config" "$DST/config" 2>/dev/null || true
+fi
 echo "cli-stub: adopted $FROM -> $DST"
 STUB
     } > "$_mcs_dir/burrowee-$_mcs_comp-cli"
@@ -1799,6 +1810,145 @@ run_adopt_ladder "$t29d" "$h29d" "$ch29d" "$h29d/usr-local-bin" "$h29d/stubs"
 assert_eq "$RC" 2 "an absent machine root must be migrated, not skipped"
 assert_contains "$OUT" "has not converged on the" "the runner must say why it evaluated anyway"
 assert_present "$ch29d/identity/relay_ed.key" "and the adoption must have created and filled the config root"
+
+# ---------------------------------------------------------------------------
+# 30. THE FORCED ADOPTION. A tree adopted from the WRONG source, which the
+#     never-overwrite copy can never repair, and which the operator repairs by
+#     re-running the migration — no manual copying, no follow-up commands.
+#
+#     This is admin-kr AFTER the withdrawn aa21f55c: the destination is
+#     populated and wrong in two ways at once. present-but-different
+#     (identity/relay_ed.key, config — what a root daemon minted for itself
+#     against an empty tree) and absent (everything root's home never had). And
+#     it holds install records of its own — installed-version,
+#     migration-receipts/, migrations/ — which describe THIS install and must
+#     survive untouched.
+# ---------------------------------------------------------------------------
+t30="$TMP/t30"; adopt_kit "$t30" edge system installed-version $EDGE_BINS
+h30="$t30/home"; ch30="$h30/sys-etc/burrowee/edge"; cd30="$h30/sys-var/burrowee/edge"
+mkdir -p "$ch30/identity" "$cd30" "$h30/stubs"
+seed_per_user_tree "$h30/.burrowee/edge"
+# present-but-different. The two values MUST differ or an overwrite is
+# unobservable and the case passes either way.
+printf 'MINTED-BY-THE-ROOT-DAEMON\n' > "$ch30/identity/relay_ed.key"
+printf 'lan_listen=127.0.0.1:9448\n' > "$ch30/config"
+if [ "$(cat "$ch30/identity/relay_ed.key")" = "$(cat "$h30/.burrowee/edge/identity/relay_ed.key")" ]; then
+    fail "case 30 fixture: the two identities are equal, so a replacement is unobservable"
+fi
+# the destination's OWN install records.
+echo "0.2.0.2026.08.19.72743ca2" > "$ch30/installed-version"
+mkdir -p "$ch30/migration-receipts"
+# A receipt for a rung NOT on this ladder: the runner legitimately writes its
+# own receipts for the rungs it runs, so asserting against one of those would be
+# asserting that the runner does not work.
+echo "earned by $ch30" > "$ch30/migration-receipts/some_earlier_rung.sh.done"
+seed_ours "$h30/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h30/usr-local-bin" edge
+make_supervisor_stub "$h30/stubs" kills
+
+# 30a. THE PLAIN LADDER STILL CANNOT REPAIR IT, and that is the whole premise.
+#      The anchor reads 0.2.0 and the destination holds an identity, so the
+#      numeric gate and --applies both decline.
+ADOPT_COMP_DATA="$cd30" \
+run_adopt_ladder "$t30" "$h30" "$ch30" "$h30/usr-local-bin" "$h30/stubs"
+assert_eq "$RC" 0 "the plain ladder must decline on a wrongly-adopted host — this is the state the operator is stuck in"
+assert_eq "$(cat "$ch30/identity/relay_ed.key")" "MINTED-BY-THE-ROOT-DAEMON" "the plain ladder must not have replaced anything"
+
+# 30b. FORCED — the operator re-runs the migration, and the host is repaired.
+UPGRADE30="$(
+    HOME="$h30" COMP_HOME="$ch30" COMP_DATA="$cd30" BIN_DIR="$h30/usr-local-bin" \
+    SYS_CONFIG_ROOT="$h30/sys-etc/burrowee" SYS_DATA_ROOT="$h30/sys-var/burrowee" \
+    ROOT_HOME="$h30/root-home" \
+    LAUNCHD_DIR="$h30/no-launchd" SYSTEMD_DIR="$h30/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h30/nowhere" SUDO="$h30/stubs/sudo" \
+    SYSTEMCTL="$h30/stubs/supervisor" LAUNCHCTL="$h30/stubs/supervisor" \
+    CLI_STUB_LOG="$h30/stubs/cli.log" BURROWEE_MIGRATE_STOP_TIMEOUT=2 \
+    sh "$t30/migrations/upgrade.sh" 0.2.0 2>&1
+)"; UPGRADE30_RC=$?
+assert_eq "$UPGRADE30_RC" 2 "upgrade.sh must run the adoption on a wrongly-adopted host"
+# THE FLAG REACHED THE CLI. Without this the rung could announce a forced run and
+# invoke the ordinary, never-overwriting copy.
+assert_contains "$(cat "$h30/stubs/cli.log")" "--force" "the rung must pass --force to the cli on a forced run"
+# AND THE DESTINATION ACTUALLY CHANGED.
+assert_eq "$(cat "$ch30/identity/relay_ed.key")" "PRIVATE-KEY-BYTES" "the destination must now hold the RUNNING USER's identity"
+assert_eq "$(cat "$ch30/config")" "$(cat "$h30/.burrowee/edge/config")" "the destination config must now be the running user's"
+# THE DESTINATION'S OWN INSTALL RECORDS SURVIVE. Carrying installed-version would
+# tell this ladder it had run rungs it has not; migration-receipts/ is worse.
+assert_eq "$(cat "$ch30/installed-version")" "0.2.0.2026.08.19.72743ca2" "installed-version belongs to THIS install and must not be carried"
+assert_eq "$(cat "$ch30/migration-receipts/some_earlier_rung.sh.done")" "earned by $ch30" "migration-receipts/ belongs to THIS tree and must not be carried"
+# COPY, NEVER MOVE — still true when forcing.
+assert_present "$h30/.burrowee/edge/identity/relay_ed.key" "the per-user tree must survive a forced run too"
+# AND THE OPERATOR IS TOLD, BEFORE AND AFTER, THAT AN IDENTITY WAS REPLACED.
+assert_contains "$UPGRADE30" "FORCED RUN" "a forced run must announce itself before the stop"
+assert_contains "$UPGRADE30" "REPLACED it with" "a run that swapped the node identity must say so"
+assert_contains "$UPGRADE30" "unknown-relay" "the notice must name what a wrong source looks like afterwards"
+
+# 30c. THE UNFORCED PATH IS UNCHANGED. Same populated-and-wrong destination, and
+#      never-overwrite still holds. Without this the change is unguarded:
+#      "forced overwrites" is also satisfied by a rung that always does.
+#
+#      THE ANCHOR IS 0.1.115, NOT ABSENT, and that is the whole design of this
+#      case. With no recorded version the --applies probe decides, sees an
+#      identity at the destination, and declines — so the rung never runs, the
+#      cli is never invoked, and both assertions below pass without measuring
+#      anything. An old anchor opens the numeric gate instead, the probe loses
+#      its veto, and the rung actually executes against a populated destination:
+#      the only arrangement in which "it did not overwrite" is a finding.
+t30c="$TMP/t30c"; adopt_kit "$t30c" edge system installed-version $EDGE_BINS
+h30c="$t30c/home"; ch30c="$h30c/sys-etc/burrowee/edge"; cd30c="$h30c/sys-var/burrowee/edge"
+mkdir -p "$ch30c/identity" "$cd30c" "$h30c/stubs"
+seed_per_user_tree "$h30c/.burrowee/edge"
+printf 'MINTED-BY-THE-ROOT-DAEMON\n' > "$ch30c/identity/relay_ed.key"
+echo "0.1.115" > "$ch30c/installed-version"
+seed_ours "$h30c/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h30c/usr-local-bin" edge
+make_supervisor_stub "$h30c/stubs" kills
+ADOPT_COMP_DATA="$cd30c" \
+run_adopt_ladder "$t30c" "$h30c" "$ch30c" "$h30c/usr-local-bin" "$h30c/stubs"
+assert_eq "$RC" 2 "fixture premise: the unforced rung must actually RUN, or the assertions below measure nothing"
+assert_present "$h30c/stubs/cli.log" "fixture premise: the cli must have been invoked"
+assert_eq "$(cat "$ch30c/identity/relay_ed.key")" "MINTED-BY-THE-ROOT-DAEMON" "the UNFORCED ladder must never overwrite a destination identity"
+assert_lacks "$(cat "$h30c/stubs/cli.log")" "--force" "the unforced ladder must not pass --force"
+assert_lacks "$OUT" "FORCED RUN" "an unforced run must not announce itself as forced"
+
+# 30d. A FORCED RUN WITH NOTHING TO ADOPT FROM STILL DECLINES. Forcing widens
+#      what may be overwritten, never what may be read: with no source tree
+#      there is nothing to copy, and answering "applies" would leave a receipt
+#      for work that could not happen.
+t30d="$TMP/t30d"; adopt_kit "$t30d" edge system installed-version $EDGE_BINS
+h30d="$t30d/home"; ch30d="$h30d/sys-etc/burrowee/edge"; cd30d="$h30d/sys-var/burrowee/edge"
+mkdir -p "$ch30d/identity" "$cd30d" "$h30d/stubs" "$h30d/.burrowee/edge"
+printf 'MINTED-BY-THE-ROOT-DAEMON\n' > "$ch30d/identity/relay_ed.key"
+seed_ours "$h30d/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h30d/usr-local-bin" edge
+make_supervisor_stub "$h30d/stubs" kills
+ADOPT_COMP_DATA="$cd30d" \
+run_adopt_ladder "$t30d" "$h30d" "$ch30d" "$h30d/usr-local-bin" "$h30d/stubs" --rerun-recorded
+assert_eq "$(cat "$ch30d/identity/relay_ed.key")" "MINTED-BY-THE-ROOT-DAEMON" "a forced run with an unenrolled source must change nothing"
+assert_contains "$OUT" "adopt_user_tree.sh skipped" "and it must say it evaluated and declined"
+
+# 30e. FORCED WITH NO NAMED VERSION — where the --applies branch is the ONLY
+#      thing selecting the rung.
+#
+#      30b goes through upgrade.sh, which names --installed-version 0.0.0, and a
+#      named version makes --applies advisory (run.sh's header: the probe gets no
+#      veto). So 30b cannot tell whether the forced --applies branch works at
+#      all. Here there is no anchor and no named version, so the probe DECIDES:
+#      without the forced branch it sees an identity at the destination, answers
+#      "already carried over", and the rung is skipped on exactly the host the
+#      flag exists for.
+t30e="$TMP/t30e"; adopt_kit "$t30e" edge system installed-version $EDGE_BINS
+h30e="$t30e/home"; ch30e="$h30e/sys-etc/burrowee/edge"; cd30e="$h30e/sys-var/burrowee/edge"
+mkdir -p "$ch30e/identity" "$cd30e" "$h30e/stubs"
+seed_per_user_tree "$h30e/.burrowee/edge"
+printf 'MINTED-BY-THE-ROOT-DAEMON\n' > "$ch30e/identity/relay_ed.key"
+seed_ours "$h30e/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h30e/usr-local-bin" edge
+make_supervisor_stub "$h30e/stubs" kills
+ADOPT_COMP_DATA="$cd30e" \
+run_adopt_ladder "$t30e" "$h30e" "$ch30e" "$h30e/usr-local-bin" "$h30e/stubs" --rerun-recorded
+assert_eq "$RC" 2 "a forced run must be SELECTED on a populated destination even with no named version"
+assert_eq "$(cat "$ch30e/identity/relay_ed.key")" "PRIVATE-KEY-BYTES" "and it must replace the destination identity"
 
 # ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="
