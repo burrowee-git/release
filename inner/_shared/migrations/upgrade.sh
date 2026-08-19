@@ -41,6 +41,17 @@
 # silent blanket re-run harmful. So the list of rungs about to be re-run is
 # printed BEFORE any of them runs.
 #
+# AND ONE RUNG NOW READS IT AS MORE THAN "DO IT AGAIN". run.sh passes
+# --rerun-recorded down as $MIGRATION_FORCED=1, and adopt_user_tree.sh turns that
+# into `migrate --force`: it OVERWRITES the destination — identity, bridge keys,
+# console pin and config — from the running user's tree, after snapshotting both
+# destination roots. That is not a widening of this script's meaning but the
+# whole of it: on a host whose tree was adopted from the WRONG source, the
+# adoption never overwrites and so re-running it is a guaranteed no-op, which is
+# precisely the state that left an operator copying key material by hand on a
+# production node. See adopt_user_tree.sh's header. The rung announces the
+# forced run and names every file it replaced.
+#
 # THEN WHAT IS THE ARGUMENT FOR? A cross-check, and it is ENFORCED. This script
 # ships once and takes the version as an argument — there is no per-release copy
 # to render or sign — so nothing else would notice an operator who unpacked a
@@ -113,6 +124,12 @@ build).
 
 It runs:  sh $RUNNER --installed-version 0.0.0 --rerun-recorded
 and prints the rungs it is about to re-run before running any of them.
+
+A rung may read the forced flag and OVERWRITE state it would otherwise leave
+alone. adopt_user_tree.sh does: forced, it replaces this component's identity,
+bridge keys, console pin and config with the running user's tree, after
+snapshotting both destination roots to siblings it names. That is the repair for
+a tree adopted from the wrong source, and it is not something to type by mistake.
 
 Run it as the account that owns this component's tree.
 

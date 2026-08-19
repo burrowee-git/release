@@ -102,8 +102,47 @@
 # wrong is recovered by pointing the old unit back at it. Enforced on the Go side.
 #
 # IDEMPOTENT. A second run finds every destination present, copies nothing, and
-# says so — which is what makes it safe for install.sh, for update.sh, and for an
-# operator forcing the ladder with upgrade.sh.
+# says so — which is what makes it safe for install.sh and for update.sh.
+#
+# $MIGRATION_FORCED=1 — THE ONE THING THAT CHANGES THAT, and it is what
+# upgrade.sh means. run.sh sets it when the operator gave --rerun-recorded, i.e.
+# when they said "run this again" on a host where running it again is otherwise
+# a guaranteed no-op.
+#
+# WHY A NO-OP IS THE WRONG ANSWER THERE. Never-overwrite plus one-source-entirely
+# means a tree adopted from the WRONG source can never be COMPLETED: every
+# destination is already present, so every file is skipped and the run reports
+# success on a host that did not change. That is not hypothetical — it is
+# admin-kr, where the withdrawn aa21f55c adopted root's home, the corrected build
+# could not repair it, and the operator was left copying key material by hand on
+# a production node. What the live host looked like afterwards:
+#
+#     Files …/bridge/bridge_ed.key       and …/bridge/bridge_ed.key       differ
+#     Files …/config                     and …/config                     differ
+#     Files …/identity/relay_ed.key      and …/identity/relay_ed.key      differ
+#     Only in /home/ubuntu/.burrowee/edge/: cf-token console.json host-cert lan-cert config.json
+#     Only in /usr/local/etc/burrowee/edge/: migration-receipts migrations
+#
+# — wrong in two ways at once: present-but-different, and absent. A forced run
+# has to OVERWRITE the first and CREATE the second, in one pass, or the host is
+# not repaired.
+#
+# WHAT FORCING DOES *NOT* CHANGE. The source is still the running user's home and
+# nothing else. The carried set is still enumerated — installed-version,
+# migration-receipts/, migrations/ and install.sh belong to the DESTINATION
+# install and are still left exactly as they are, because carrying them would
+# tell this ladder it had run rungs it has not. The copy still refuses a
+# truncated source credential before writing anything, and now does so even when
+# the destination already holds one, since that is precisely what is about to be
+# replaced.
+#
+# AND IT PRESERVES WHAT IT REPLACES. `migrate --force` snapshots BOTH destination
+# roots to siblings before its first write and names them in its report. The one
+# state forcing gets wrong is a host re-enrolled AFTER migrating — its system
+# root then holds the NEWER identity and the user's home a stale one — and that
+# is not detectable from here: both trees hold a well-formed key, and which one
+# the console knows is a fact about the console. So this does not guess. It
+# preserves, reports, and leaves the judgement to the operator who typed it.
 set -eu
 
 HERE="$(dirname "$0")"
@@ -156,6 +195,17 @@ if [ -z "${COMP_DATA:-}" ]; then
     system) COMP_DATA="$SYS_DATA_ROOT/$COMP" ;;
     *)      COMP_DATA="$COMP_HOME" ;;
     esac
+fi
+
+# FORCED is this rung's whole reading of $MIGRATION_FORCED. run.sh exports it
+# (1 when --rerun-recorded was given, 0 otherwise); a direct invocation may set
+# it by hand, and anything that is not exactly 1 is not forcing.
+# An `if`, not `[ … ] && FORCED=1`: this script runs under `set -e`, and a bare
+# AND-list whose test fails is exactly the shape that has ended a run here before
+# (see the SOURCE SELECTION block's note on `case $?`).
+FORCED=0
+if [ "${MIGRATION_FORCED:-0}" = 1 ]; then
+    FORCED=1
 fi
 
 BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
@@ -374,6 +424,17 @@ nothing_to_adopt() {
 # Anything else — including every form of "I could not see" — is a yes.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--applies" ]; then
+    # A FORCED RUN SKIPS THE "already carried over" ANSWER, and only that one.
+    # "the destination holds an identity" is exactly the state forcing exists
+    # for — it is what a wrongly-adopted tree looks like — so treating it as
+    # "already done" would decline the rung on every host the flag is for. The
+    # other two answers still stand: with no tree to adopt FROM there is
+    # nothing for force to copy, and saying otherwise would leave a receipt for
+    # work that could not happen.
+    if [ "$FORCED" = 1 ]; then
+        if nothing_to_adopt; then exit 1; fi
+        exit 0
+    fi
     if already_adopted; then exit 1; fi
     if nothing_to_adopt; then exit 1; fi
     exit 0
@@ -537,24 +598,53 @@ stop_component() {
 _dest_had_identity=0
 if already_adopted; then _dest_had_identity=1; fi
 
+MIGRATE_FORCE=""
+if [ "$FORCED" = 1 ]; then
+    MIGRATE_FORCE="--force"
+    # SAID BEFORE THE STOP, not after the copy. This is the run that can replace
+    # the host's identity, and an operator who is about to lose one has to be
+    # able to read it while the daemon is still up.
+    say "FORCED RUN (\$MIGRATION_FORCED=1, i.e. --rerun-recorded / upgrade.sh):"
+    say "  the destination will be made to MATCH $SRC, overwriting what it holds —"
+    say "  identity, bridge keys, console pin and config included."
+    say "  both destination roots are snapshotted to siblings first, and every file"
+    say "  replaced is named in the report below."
+    say "  installed-version, migrations/ and migration-receipts/ belong to THIS"
+    say "  install and are left alone."
+fi
+
 say "stopping burrowee-$COMP so $COMP_HOME holds still while it is written"
 if ! stop_component; then exit 1; fi
 
-if ! elevate "$CLI" migrate --from "$SRC" --home "$(dirname "$COMP_HOME")"; then
+# $MIGRATE_FORCE IS DELIBERATELY UNQUOTED. It holds exactly "" or "--force" —
+# two literals assigned above and nothing read from the environment — and an
+# empty quoted expansion would pass the cli an empty ARGUMENT, which its flag
+# parser sees as a stray positional and refuses.
+# shellcheck disable=SC2086
+if ! elevate "$CLI" migrate --from "$SRC" --home "$(dirname "$COMP_HOME")" $MIGRATE_FORCE; then
     warn "migrate failed — $SRC is untouched."
     warn "burrowee-$COMP is STOPPED. re-run by hand once the cause is fixed:"
-    warn "  sudo $CLI migrate --from $SRC --home $(dirname "$COMP_HOME")"
+    warn "  sudo $CLI migrate --from $SRC --home $(dirname "$COMP_HOME")${MIGRATE_FORCE:+ $MIGRATE_FORCE}"
     warn "then start the service."
     exit 1
 fi
 
-if [ "$_dest_had_identity" = 1 ]; then
+if [ "$_dest_had_identity" = 1 ] && [ "$FORCED" = 1 ]; then
+    # The forced counterpart of the branch below, and it says the OPPOSITE
+    # thing, so it must be its own sentence: this host's identity WAS replaced.
+    say "$COMP_HOME held an identity before this run and this run REPLACED it with"
+    say "$SRC's. If the console answers \`unknown-relay\` after this, the tree forced"
+    say "FROM is not the one this host was enrolled with — restore from the snapshot"
+    say "named in the report above rather than re-pairing."
+elif [ "$_dest_had_identity" = 1 ]; then
     # "adopted" would be a lie here, and the lie has a cost: this is the exact
     # state an operator recovering from a mis-targeted adoption lands in, and a
     # success line sends them away believing the host changed.
     say "$COMP_HOME already held an identity before this run — the copy never"
     say "overwrites, so nothing of $SRC's identity replaced it. See the per-file"
     say "report above for what was and was not taken."
+    say "to make the destination MATCH that tree instead, force the ladder:"
+    say "  sudo sh migrations/upgrade.sh <the version this component is on>"
 elif [ "$DST_DATA" != "$COMP_HOME" ]; then
     say "adopted $SRC → $COMP_HOME (config) + $DST_DATA (state)"
 else

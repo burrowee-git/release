@@ -67,8 +67,26 @@
 # FLAGS — an operator seam, never used by install.sh or update.sh:
 #   --installed-version <v>  treat this host as having been on <v>, INSTEAD of
 #                            reading the version anchor. See below.
-#   --rerun-recorded         run a rung even though its receipt says it finished.
+#   --rerun-recorded         run a rung even though its receipt says it finished,
+#                            AND declare the run FORCED to the rungs
+#                            ($MIGRATION_FORCED=1 in their environment).
 #   -h | --help | help       print the usage on stdout and exit 0.
+#
+# $MIGRATION_FORCED IS THE ONE THING THIS RUNNER SAYS ABOUT *WHY* A RUNG IS
+# RUNNING, and it exists because "run this again" and "make the destination
+# match the source" are the same operator intent for one rung on this ladder.
+#
+# The adoption never overwrites a destination, and it takes one source entirely.
+# Both rules are right. Their consequence is that a tree adopted from the WRONG
+# source can never be COMPLETED by the tooling: every destination is already
+# there, so a re-run skips every file. An operator reaching for upgrade.sh on
+# such a host is not asking for the same no-op a second time — they are saying
+# the running user's tree is authoritative. So --rerun-recorded is passed down,
+# and adopt_user_tree.sh turns it into `migrate --force`, which snapshots both
+# destination roots first and names every file it replaces.
+#
+# NOTHING ELSE ON THIS LADDER READS IT. A rung that does not care about being
+# forced simply does not look at the variable, and its behaviour is unchanged.
 # A bad flag or an unparseable version exits 64 (EX_USAGE), NOT 2: 2 already
 # means "migrations ran", and a caller switches on it. A usage error that reused
 # 2 would make a typo look like a completed migration.
@@ -366,13 +384,18 @@ A no-op unless one applies, so it is safe to run unconditionally.
         never rounded down to 0.0.0.
 
   --rerun-recorded
-        Also run migrations whose receipt says they already completed here.
-        COSTS: the rung is done again from the top. Today's rungs are
-        idempotent, so that is close to free — but a future rung may rewrite,
-        prune or re-key state, and re-running it is then NOT free. Read the rung
-        you are about to repeat before you use this. It does not force past the
-        version gate: name --installed-version as well if the rung is one this
-        host's version says it is already past.
+        Also run migrations whose receipt says they already completed here, and
+        declare the run FORCED to every rung (\$MIGRATION_FORCED=1).
+        COSTS: the rung is done again from the top, and a rung that reads
+        \$MIGRATION_FORCED may then OVERWRITE state it would otherwise have left
+        alone. adopt_user_tree.sh is such a rung: forced, it replaces the
+        destination's identity, bridge keys, console pin and config with the
+        running user's, after snapshotting both destination roots. That is the
+        point of it — a tree adopted from the wrong source cannot be repaired
+        any other way — and it is not something to type twice by accident. Read
+        the rung you are about to repeat before you use this. It does not force
+        past the version gate: name --installed-version as well if the rung is
+        one this host's version says it is already past.
 
   -h, --help
         Print this and exit 0.
@@ -733,6 +756,7 @@ run_migration() {
         COMP_DATA="$COMP_DATA" \
         BIN_DIR="$BIN_DIR" \
         STALE_USER_BINS="${STALE_USER_BINS:-}" \
+        MIGRATION_FORCED="$RERUN_RECORDED" \
         SUDO="$SUDO" \
         LAUNCHCTL="$LAUNCHCTL" \
         SYSTEMCTL="$SYSTEMCTL" \
@@ -894,6 +918,7 @@ for _word in $MIGRATIONS; do
         warn "$_script has a receipt saying it already completed here — re-running it"
         warn "because --rerun-recorded was given. Re-read that rung if you have not:"
         warn "an idempotent rung is close to free to repeat, one that rewrites state is not."
+        warn "this run is FORCED: a rung that reads \$MIGRATION_FORCED may OVERWRITE state."
         ;;
     unprovenanced)
         say "$_script: it has a receipt, but one that records no tree — so it cannot"
