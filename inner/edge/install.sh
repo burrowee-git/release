@@ -272,14 +272,16 @@ MIGRATE_UNRECORDED=0
 run_migration_ladder() {
     [ -n "$MIGRATIONS_DIR" ] || return 0
     [ -f "$MIGRATIONS_DIR/run.sh" ] || return 0
-    # $COMP_HOME must exist before the runner is asked about it: an absent tree
-    # is the runner's "I could not read the evidence" answer, and on a host
-    # converging off the per-user layout root's tree legitimately does not exist
-    # yet. Creating it here makes the ladder's input a fact rather than an
-    # accident of which step happened to mkdir first.
-    mkdir -p "$COMP_HOME" 2>/dev/null || true
+    # Both roots exist by now (ensure_system_roots, before anything is placed),
+    # and the runner is handed BOTH: for a `system`-scheme component it refuses a
+    # $COMP_HOME without a $COMP_DATA rather than pairing a named tree with a
+    # defaulted one, which is what keeps the installer and the ladder from
+    # describing two different installs.
     set +e
     COMP_HOME="$COMP_HOME" \
+        COMP_DATA="$COMP_DATA" \
+        SYS_CONFIG_ROOT="$SYS_CONFIG_ROOT" \
+        SYS_DATA_ROOT="$SYS_DATA_ROOT" \
         BIN_DIR="$BIN_DIR" \
         LAUNCHD_DIR="$LAUNCHD_PLIST_DIR" \
         SYSTEMD_DIR="$SYSTEMD_UNIT_DIR" \
@@ -309,38 +311,45 @@ report_unrecorded_migration() {
     echo "note: on a version number with no receipt behind it." >&2
 }
 
-# note_orphaned_user_state — REPORT, and never touch, the per-user config tree an
-# earlier unprivileged install paired.
+# note_orphaned_user_state — REPORT, and never touch, a home-shaped config tree
+# that holds this host's pairing while the managed service reads elsewhere.
 #
-# The managed daemon reads $COMP_HOME under ROOT's home. A pre-collapse install's
-# identity sits under the OPERATOR's ~/.burrowee/edge and does not travel with
-# the binaries, so a host converging onto the root scheme comes up as a healthy,
-# running, UNPAIRED edge. Silence is the worst outcome available here: the
-# install exits 0, the service is up, and nothing gives the operator a reason to
-# look for the identity that already exists a directory away.
+# TWO CANDIDATES, the same two the adoption rung takes its source from: ROOT's
+# ~/.burrowee/edge (a 0.2.0 host, from the collapse or from the manual copy made
+# during the outage) and the OPERATOR's (a pre-collapse host). Neither travels
+# with the binaries, so a host converging onto the machine-owned roots comes up
+# as a healthy, running, UNPAIRED edge. Silence is the worst outcome available
+# here: the install exits 0, the service is up, and nothing gives the operator a
+# reason to look for the identity that already exists a directory away.
 #
-# Says nothing when there is no per-user state. That the ROOT tree is unpaired is
-# the CALLER's condition — this is only reached from the "next: pair this edge"
+# Says nothing when there is no such state. That $COMP_HOME is unpaired is the
+# CALLER's condition — this is only reached from the "next: pair this edge"
 # branch — and it is not re-tested here: a second copy of a condition its only
 # call site already decided cannot fail independently, it can only drift.
 #
-# It resolves the operator's home through the SAME operator_home the sweep uses
-# — one definition, in migrations/lib_paths.sh — so the directory it reports on
-# and the directory the sweep acted on can never be two different answers. With
-# no library loaded it says nothing rather than guessing $HOME, which under
-# `sudo sh` is root's and holds no per-user tree: a report naming the wrong
-# directory is worse than no report, because it is acted on.
+# It resolves both homes through the SAME operator_home/root_home the sweep and
+# the ladder use — one definition, in migrations/lib_paths.sh — so the directory
+# it reports on and the directory the rung would act on can never be two
+# different answers. With no library loaded it says nothing rather than guessing
+# $HOME, which under `sudo sh` is root's: a report naming the wrong directory is
+# worse than no report, because it is acted on.
 note_orphaned_user_state() {
     [ "$SWEEP_LIB_LOADED" = 1 ] || return 0
-    _nos_home="$(operator_home)"
-    [ -n "$_nos_home" ] || return 0
-    _nos_dir="$_nos_home/.burrowee/$COMP"
-    if [ "$_nos_dir" = "$COMP_HOME" ]; then return 0; fi
-    if [ ! -d "$_nos_dir/identity" ] && [ ! -f "$_nos_dir/console.json" ]; then return 0; fi
-    echo "note: $_nos_dir holds a paired edge identity from an earlier per-user install," >&2
-    echo "note: but the managed service reads $COMP_HOME — this edge starts UNPAIRED." >&2
-    echo "hint: pair it again (burrowee $COMP cli bootstrap <blob> <pin>), or stop the" >&2
-    echo "hint: service and move that state across by hand. Nothing was removed." >&2
+    _nos_seen=""
+    for _nos_dir in "$(root_home)/.burrowee/$COMP" "$(operator_home)/.burrowee/$COMP"; do
+        [ -n "$_nos_dir" ] || continue
+        case "$_nos_dir" in "/.burrowee/$COMP") continue ;; esac
+        [ "$_nos_dir" = "$COMP_HOME" ] && continue
+        [ "$_nos_dir" = "$COMP_DATA" ] && continue
+        case " $_nos_seen " in *" $_nos_dir "*) continue ;; esac
+        _nos_seen="$_nos_seen $_nos_dir"
+        [ -d "$_nos_dir/identity" ] || [ -f "$_nos_dir/console.json" ] || continue
+        echo "note: $_nos_dir holds a paired edge identity from an earlier install," >&2
+        echo "note: but the managed service reads $COMP_HOME — this edge starts UNPAIRED." >&2
+        echo "hint: the migration ladder adopts it (root's tree first when both exist);" >&2
+        echo "hint: force it with  sh $COMP_HOME/migrations/upgrade.sh 0.2.0" >&2
+        echo "hint: or pair again (burrowee $COMP cli bootstrap <blob> <pin>). Nothing was removed." >&2
+    done
 }
 
 # ── the one install target ───────────────────────────────────────────────────
@@ -350,21 +359,44 @@ note_orphaned_user_state() {
 # on uninstall, the stale-bin sweep, the version marker under root's home) now
 # runs on EVERY install.
 #
-# The config home is root's home + /.burrowee/edge, because the daemon that reads
-# it runs as root. Root's home is /root on Linux but /var/root on macOS — /root
-# sits on the sealed read-only system volume there, so any mkdir under it fails.
-# ROOT_HOME is overridable only for the Go install-test harness (like
-# SYS_BIN_DIR). It is resolved from ~root rather than from $HOME because under
-# `sudo sh` $HOME is not reliably root's — macOS sudo keeps the invoking user's
-# by default.
+# TWO MACHINE-OWNED ROOTS, not root's home. Spec
+# 2026-08-13-burrowee-root-install-shared-cli-design §3 gave edge the system
+# roots at the same time it gave them to the gateway; 0.2.0 shipped the binary
+# move without the layout and the daemon kept reading
+# $ROOT_HOME/.burrowee/edge — i.e. whichever home the supervisor exported.
+#
+#   $COMP_HOME  /usr/local/etc/burrowee/edge  config: identity/, console.json,
+#               the operator's `config`, bridge/, host-cert/, lan-cert/,
+#               cf-token, installed-version, migration-receipts/, migrations/,
+#               this installer's self-copy. Backed up, never cleared.
+#   $COMP_DATA  /usr/local/var/burrowee/edge  state: config.json, logs/, stats/,
+#               covers/, running.json. Rewritten while the daemon serves and
+#               reclaimable.
+#
+# SYS_CONFIG_ROOT / SYS_DATA_ROOT are overridable only for the Go install-test
+# harness, like SYS_BIN_DIR. They are NOT a supported operator knob and no
+# shipped unit names anything derived from them but these two paths.
+SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
+SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/var/burrowee}"
+COMP_HOME="$SYS_CONFIG_ROOT/$COMP"
+COMP_DATA="$SYS_DATA_ROOT/$COMP"
+VERSION_MARKER="$COMP_HOME/installed-version"
+
+# $ROOT_HOME is still resolved, and it is no longer where anything lives. The
+# units set HOME=$ROOT_HOME (below) purely so a library that dereferences $HOME
+# has a real directory to find: systemd exports none to a root unit and launchd
+# exports none at all, and os.UserHomeDir() then fails with "$HOME is not
+# defined" — which on the gateway killed the updater agent on every start until
+# the supervisor gave up. Nothing about edge's config or state is derived from
+# it any more; internal/edgeroot resolves both roots without consulting $HOME.
+# The stale-tree note and the adoption rung still name it, because it is one of
+# the two places an already-enrolled host's state may currently be.
 #
 # root_home() from migrations/lib_paths.sh is the ONE implementation of that
-# rule, shared with the migration runner, so the tree this installer writes and
-# the tree the ladder migrates cannot be two different directories. The inline
-# fallback below is reached only by a bundle that carries no migrations/ at all
-# — a $COMP_HOME self-copy predating the directory, which only
-# BURROWEE_UNITS_ONLY runs — and it is deliberately the same rule rather than a
-# simplification of it.
+# rule, shared with the migration runner. The inline fallback below is reached
+# only by a bundle that carries no migrations/ at all — a $COMP_HOME self-copy
+# predating the directory, which only BURROWEE_UNITS_ONLY runs — and it is
+# deliberately the same rule rather than a simplification of it.
 if command -v root_home >/dev/null 2>&1; then
     ROOT_HOME="$(root_home)"
 elif [ "$(uname -s)" = "Darwin" ]; then
@@ -373,8 +405,45 @@ elif [ "$(uname -s)" = "Darwin" ]; then
 else
     ROOT_HOME="${ROOT_HOME:-/root}"
 fi
-COMP_HOME="$ROOT_HOME/.burrowee/$COMP"
-VERSION_MARKER="$COMP_HOME/installed-version"
+
+# ---------------------------------------------------------------------------
+# ensure_system_roots — create both machine-owned roots, root-owned and 0700.
+#
+# A NON-ROOT PROCESS MUST NEVER BE THE ONE TO CREATE THEM: on a host where
+# /usr/local is writable by the installing user (Intel macOS, where Homebrew
+# chowns it) an unprivileged mkdir succeeds and leaves the root daemon writing
+# identity/relay_ed.key — whose pubkey IS this node's fingerprint — and the
+# host-cert private key inside a directory that user fully controls. Edge's
+# installer is root-only, so is_root is the whole check; a non-root run refuses
+# here rather than half-creating the pair.
+#
+# 0700 on the component roots, 0755 on the shared PARENTS. /usr/local/etc/burrowee
+# is the gateway's parent too, and the gateway's console.token carries a 0640
+# root:<admin-group> grant that a 0700 parent would silently revoke — a mode
+# nobody reading that file could detect. The parents are only moded when THIS
+# run created them; one that already exists belongs to whoever made it.
+#
+# The mode is set explicitly rather than left to mkdir's argument because
+# mkdir -p applies the process umask: under 022 a 0700 argument still yields
+# 0755, and under 077 a 0755 argument yields 0700.
+# ---------------------------------------------------------------------------
+ensure_system_roots() {
+    if ! is_root; then
+        echo "error: $0 must run as root — it creates $COMP_HOME and $COMP_DATA," >&2
+        echo "error: and whatever an unprivileged process creates, that user owns." >&2
+        exit 1
+    fi
+    for _esr_root in "$SYS_CONFIG_ROOT" "$SYS_DATA_ROOT"; do
+        if [ ! -d "$_esr_root" ]; then
+            mkdir -p "$_esr_root" || { echo "error: could not create $_esr_root" >&2; exit 1; }
+            chmod 0755 "$_esr_root" 2>/dev/null || true
+        fi
+    done
+    for _esr_dir in "$COMP_HOME" "$COMP_DATA"; do
+        mkdir -p "$_esr_dir" || { echo "error: could not create $_esr_dir" >&2; exit 1; }
+        chmod 0700 "$_esr_dir" 2>/dev/null || true
+    done
+}
 
 # ver_lt A B — true (exit 0) when version A < B, comparing the vMAJOR.MINOR.PATCH
 # prefix numerically (any .date.sha suffix is ignored). Empty A sorts as 0.0.0.
@@ -582,6 +651,12 @@ if ! is_root; then
     exit 1
 fi
 
+# Both machine-owned roots, before anything is placed and before the ladder is
+# asked about them. Deliberately AFTER the source-only seam above: sourcing this
+# file defines functions and creates nothing, which is what lets
+# tools/test-config-migrate.sh drive them as an ordinary user.
+ensure_system_roots
+
 # ---------------------------------------------------------------------------
 # Units-only mode (BURROWEE_UNITS_ONLY=1): the offline reinstall entrypoint run
 # by edge's LocalReinstall. Re-render + reload the managed service units WITHOUT
@@ -646,12 +721,14 @@ run_migration_ladder
 # install/update: a stale hardcoded footer blows the decoy, so the shipped covers
 # must track the release. Operator-added per-host <host>.html covers are not
 # enumerated here, so they survive untouched (and still win in selectCover).
+# The DATA root: a cover page is shipped content the installer re-places on
+# every run, not something an operator reconstructs.
 if [ -d "./covers" ]; then
-    mkdir -p "$COMP_HOME/covers"
+    mkdir -p "$COMP_DATA/covers"
     for cf in admin.html default.html; do
         [ -f "./covers/$cf" ] || continue
-        install -m 0644 "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
-            || cp "./covers/$cf" "$COMP_HOME/covers/$cf" 2>/dev/null \
+        install -m 0644 "./covers/$cf" "$COMP_DATA/covers/$cf" 2>/dev/null \
+            || cp "./covers/$cf" "$COMP_DATA/covers/$cf" 2>/dev/null \
             || echo "warning: could not install cover $cf" >&2
     done
 fi

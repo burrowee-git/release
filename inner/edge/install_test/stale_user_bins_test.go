@@ -150,6 +150,8 @@ func TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled(t *testing.T) {
 		"SYS_BIN_DIR=" + dest,
 		"SYSTEMD_UNIT_DIR=" + unitDir,
 		"ROOT_HOME=" + filepath.Join(home, "root-home"),
+		"SYS_CONFIG_ROOT=" + filepath.Join(home, "sys-etc", "burrowee"),
+		"SYS_DATA_ROOT=" + filepath.Join(home, "sys-var", "burrowee"),
 		sandboxLaunchd(home),
 	}
 	out, err := cmd.CombinedOutput()

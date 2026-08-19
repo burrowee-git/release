@@ -266,8 +266,8 @@ mutate blind-probe-answers-already-done adopt_user_tree.sh \
     "an unreadable DESTINATION answers 'still needed', never 'already done' (case 23a)"
 
 mutate blind-source-answers-nothing-to-adopt adopt_user_tree.sh \
-    "s@^    src_is_readable_here .. return 1@    :@" \
-    "an unreadable SOURCE answers 'still needed', never 'nothing to adopt' (case 23c)"
+    "s@^    \[ \"\$SRC_BLIND\" = 1 \] .. return 1@    :@" \
+    "an unreadable SOURCE answers 'still needed', never 'nothing to adopt' (cases 23c, 28e)"
 
 # With the destination check gone the rung would re-run forever on every adopted
 # host — the per-user tree survives the copy, so the source-side evidence alone
@@ -305,8 +305,46 @@ mutate liveness-match-not-terminated adopt_user_tree.sh \
 
 # The guard that makes a SHARED rung inert for a per-user component.
 mutate same-tree-guard-removed adopt_user_tree.sh \
-    "s|^if same_tree; then\$|if false; then|" \
-    "a component whose two trees are one is told so, not copied onto itself (case 26c)"
+    "s|^        is_a_destination \"\$_cand\" .. continue\$|        :|" \
+    "a component whose tree IS its own is skipped as a source, not copied onto itself (case 26c)"
+
+# --- the two-source rule ----------------------------------------------------
+# The candidate order is the whole of the precedence, and it is invisible unless
+# the two trees differ — which is why case 28b seeds them with different bytes.
+mutate source-order-reversed adopt_user_tree.sh \
+    "s|for _cand in \"\$(root_home)/.burrowee/\$COMP\" \"\$(operator_home)/.burrowee/\$COMP\"; do|for _cand in \"\$(operator_home)/.burrowee/\$COMP\" \"\$(root_home)/.burrowee/\$COMP\"; do|" \
+    "root's tree wins when both are enrolled — it is the one a 0.2.0 daemon has been writing (case 28b)"
+
+# Gap-filling is the failure this rule exists to prevent: two enrolled trees can
+# belong to two different edges, and a host built from both is neither.
+mutate second-source-adopted-too adopt_user_tree.sh \
+    "s|0) if \[ -z \"\$SRC\" \]; then SRC=\"\$_cand\"; else SRC_LEFT=\"\$_cand\"; fi ;;|0) SRC=\"\$_cand\" ;;|" \
+    "ONE source is taken entirely; the second is named, never merged (case 28b)"
+
+# ADOPT_FROM is the operator naming the tree. A rung that then looked for a
+# better one would be second-guessing the person recovering the host.
+mutate adopt_from_ignored adopt_user_tree.sh \
+    "s|^if \[ -n \"\${ADOPT_FROM:-}\" \]; then\$|if false; then|" \
+    "\$ADOPT_FROM overrides the whole selection (case 28c)"
+
+# --- the system scheme ------------------------------------------------------
+# An absent machine root is the state to migrate FROM, not a tree in the wrong
+# place. Skipping there refuses the rung on exactly the hosts that need it.
+mutate system-absent-root-skips-everything run.sh \
+    "s|^if \[ ! -d \"\$COMP_HOME\" \] .. \[ \"\${COMP_HOME_SCHEME:-user}\" = system \]; then\$|if false; then|" \
+    "an absent system config root is evaluated, not skipped (case 29d)"
+
+# Pairing a named tree with a defaulted one is how a run reads config from one
+# install and writes state into another.
+mutate half-a-pair-accepted run.sh \
+    "s|^    if \[ -n \"\${COMP_HOME:-}\" \] .. \[ -z \"\${COMP_DATA:-}\" \]; then\$|    if false; then|" \
+    "a system-scheme run given \$COMP_HOME without \$COMP_DATA refuses (case 29c)"
+
+# A stray \$COMP_DATA in a caller's environment must not split a component that
+# never made the split.
+mutate user_scheme_honours_comp_data run.sh \
+    "s|^    COMP_DATA=\"\$COMP_HOME\"\$|    COMP_DATA=\"\${COMP_DATA:-\$COMP_HOME}\"|" \
+    "a user/root-scheme component ignores \$COMP_DATA entirely (case 29b)"
 
 # --- the runner's half of the stop contract ---------------------------------
 

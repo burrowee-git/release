@@ -147,6 +147,8 @@ func runRootInstall(t *testing.T, home, staging string, extraEnv ...string) (str
 		// Sandbox root's config home (COMP_HOME) so the self-copy + version
 		// marker land under the test HOME instead of the real /root.
 		"ROOT_HOME=" + filepath.Join(home, "root-home"),
+		"SYS_CONFIG_ROOT=" + filepath.Join(home, "sys-etc", "burrowee"),
+		"SYS_DATA_ROOT=" + filepath.Join(home, "sys-var", "burrowee"),
 	}
 	env = append(env, extraEnv...)
 
@@ -276,6 +278,8 @@ func TestEdgeRootInstallDarwin(t *testing.T) {
 		"SYS_BIN_DIR=" + sysBinDir,
 		"LAUNCHD_PLIST_DIR=" + launchdDir,
 		"ROOT_HOME=" + rootHome,
+		"SYS_CONFIG_ROOT=" + filepath.Join(filepath.Dir(rootHome), "sys-etc", "burrowee"),
+		"SYS_DATA_ROOT=" + filepath.Join(filepath.Dir(rootHome), "sys-var", "burrowee"),
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -291,8 +295,10 @@ func TestEdgeRootInstallDarwin(t *testing.T) {
 	}
 	// Covers landed under root's home — the exact step that aborted pre-fix.
 	for _, cf := range []string{"admin.html", "default.html"} {
-		if _, err := os.Stat(filepath.Join(rootHome, ".burrowee", "edge", "covers", cf)); err != nil {
-			t.Errorf("cover not installed under root home: %s: %v", cf, err)
+		// Covers live in the DATA root: shipped content the installer re-places
+		// on every run, not something an operator reconstructs.
+		if _, err := os.Stat(filepath.Join(filepath.Dir(rootHome), "sys-var", "burrowee", "edge", "covers", cf)); err != nil {
+			t.Errorf("cover not installed under the data root: %s: %v", cf, err)
 		}
 	}
 
@@ -369,6 +375,8 @@ func TestEdgeRootUninstallRemovesUpdaterUnit(t *testing.T) {
 		"STUB_LOG=" + filepath.Join(home, "uninstall-calls.log"),
 		"SYS_BIN_DIR=" + sysBinDir,
 		"SYSTEMD_UNIT_DIR=" + unitDir,
+		"SYS_CONFIG_ROOT=" + filepath.Join(home, "sys-etc", "burrowee"),
+		"SYS_DATA_ROOT=" + filepath.Join(home, "sys-var", "burrowee"),
 		"BURROWEE_UNINSTALL=1",
 	}
 	out, err := cmd.CombinedOutput()
@@ -440,6 +448,8 @@ func TestEdgeRootInstallDarwinRestartsOptedInUpdater(t *testing.T) {
 		"SYS_BIN_DIR=" + sysBinDir,
 		"LAUNCHD_PLIST_DIR=" + launchdDir,
 		"ROOT_HOME=" + rootHome,
+		"SYS_CONFIG_ROOT=" + filepath.Join(filepath.Dir(rootHome), "sys-etc", "burrowee"),
+		"SYS_DATA_ROOT=" + filepath.Join(filepath.Dir(rootHome), "sys-var", "burrowee"),
 		"STUB_UPDATER_OPTED_IN=1",
 	}
 	out, err := cmd.CombinedOutput()
@@ -495,7 +505,9 @@ func TestEdgeUnitsOnlyRerendersUnitsWithoutBinaries(t *testing.T) {
 
 // TestEdgeFreshInstallWritesSelfCopy verifies a fresh (root) install leaves a
 // copy of the installer at $COMP_HOME/install.sh, so LocalReinstall has a local
-// installer to invoke offline. COMP_HOME resolves under the sandboxed ROOT_HOME.
+// installer to invoke offline. $COMP_HOME is the machine-owned CONFIG root: the
+// script a root process re-execs must sit in the tree that is backed up and
+// never cleared, beside the migrations/ it walks.
 func TestEdgeFreshInstallWritesSelfCopy(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
@@ -503,7 +515,7 @@ func TestEdgeFreshInstallWritesSelfCopy(t *testing.T) {
 
 	runRootInstall(t, home, staging)
 
-	selfCopy := filepath.Join(home, "root-home", ".burrowee", "edge", "install.sh")
+	selfCopy := filepath.Join(home, "sys-etc", "burrowee", "edge", "install.sh")
 	if _, err := os.Stat(selfCopy); err != nil {
 		t.Errorf("self-copy missing at %s: %v", selfCopy, err)
 	}
