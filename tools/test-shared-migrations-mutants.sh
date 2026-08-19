@@ -305,21 +305,44 @@ mutate liveness-match-not-terminated adopt_user_tree.sh \
 
 # The guard that makes a SHARED rung inert for a per-user component.
 mutate same-tree-guard-removed adopt_user_tree.sh \
-    "s|^        is_a_destination \"\$_cand\" .. continue\$|        :|" \
+    "s|^    if ! is_a_destination \"\$_cand\"; then\$|    if true; then|" \
     "a component whose tree IS its own is skipped as a source, not copied onto itself (case 26c)"
 
-# --- the two-source rule ----------------------------------------------------
-# The candidate order is the whole of the precedence, and it is invisible unless
-# the two trees differ — which is why case 28b seeds them with different bytes.
-mutate source-order-reversed adopt_user_tree.sh \
-    "s|for _cand in \"\$(root_home)/.burrowee/\$COMP\" \"\$(operator_home)/.burrowee/\$COMP\"; do|for _cand in \"\$(operator_home)/.burrowee/\$COMP\" \"\$(root_home)/.burrowee/\$COMP\"; do|" \
-    "root's tree wins when both are enrolled — it is the one a 0.2.0 daemon has been writing (case 28b)"
+# --- the one-source rule ----------------------------------------------------
+#
+# There used to be two candidates here, root's home first, and two mutants
+# defending that precedence. Both are gone with the rule they defended: what has
+# to be defended now is that root's home is NOT consulted, that a root login
+# shell REFUSES rather than falling back to it, and that the refusal does not
+# leak into the --applies probe as "nothing to adopt".
 
-# Gap-filling is the failure this rule exists to prevent: two enrolled trees can
-# belong to two different edges, and a host built from both is neither.
-mutate second-source-adopted-too adopt_user_tree.sh \
-    "s|0) if \[ -z \"\$SRC\" \]; then SRC=\"\$_cand\"; else SRC_LEFT=\"\$_cand\"; fi ;;|0) SRC=\"\$_cand\" ;;|" \
-    "ONE source is taken entirely; the second is named, never merged (case 28b)"
+# THE DEFECT ITSELF, restored. Root's home was the first candidate, and on
+# admin-kr it was a manual copy a crash-looping daemon had cut down to one line.
+# Case 28a's fixtures differ byte for byte precisely so this is observable.
+mutate roots-home-is-the-source-again adopt_user_tree.sh \
+    "s|^elif _run_home=\"\$(running_user_home)\" .. \[ -n \"\$_run_home\" \]; then\$|elif _run_home=\"\$(root_home)\" \&\& [ -n \"\$_run_home\" ]; then|" \
+    "the source is the RUNNING USER's home; root's is never a candidate (case 28a)"
+
+# THE SILENT FALLBACK, restored. With the euid test gone a root login shell
+# resolves \$HOME — root's — and adopts it without saying anything, which is the
+# exact shape of the defect one level up.
+mutate root-login-falls-back-to-HOME lib_paths.sh \
+    "s|^        if \[ \"\$(id -u)\" = 0 \]; then return 1; fi\$|        :|" \
+    "a root login shell has NO running user and refuses; it never falls back to root's \$HOME (case 28e)"
+
+# The refusal must not become the probe's answer: run.sh reads exit 1 from
+# --applies as "does not apply", so folding "no running user" into "nothing to
+# adopt" skips the rung silently on the host that cannot name its own source.
+mutate no-running-user-reads-as-nothing-to-adopt adopt_user_tree.sh \
+    "s|^    \[ \"\$NO_RUNNING_USER\" = 1 \] .. return 1\$|    :|" \
+    "no running user answers STILL NEEDED, never 'nothing to adopt' (case 28f)"
+
+# Under `curl … | sudo sh` \$HOME is root's and \$SUDO_USER names the account whose
+# tree matters. Case 28h seeds a DIFFERENT enrolled tree at \$HOME so the two
+# answers are distinguishable.
+mutate running-user-home-ignores-SUDO_USER lib_paths.sh \
+    "s|^    _ruh_user=\"\${SUDO_USER:-}\"\$|    _ruh_user=\"\"|" \
+    "the running user under sudo is \$SUDO_USER, not \$HOME (case 28h)"
 
 # ADOPT_FROM is the operator naming the tree. A rung that then looked for a
 # better one would be second-guessing the person recovering the host.

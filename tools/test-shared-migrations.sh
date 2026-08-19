@@ -35,6 +35,14 @@ SUITE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # the extent someone once read it.
 SHARED="${SHARED_MIGRATIONS_DIR:-$SUITE_DIR/inner/_shared/migrations}"
 
+# THE AMBIENT $SUDO_USER IS CLEARED ONCE, HERE. It is the single variable that
+# decides which tree the adoption rung takes, so a suite that let it through
+# would resolve fixture sources out of the real home directory of whoever
+# happened to run it from a `sudo -s`. Cases that need one set it themselves, as
+# a prefix on the invocation under test (case 11, case 28h).
+SUDO_USER=""
+export SUDO_USER
+
 FAILED=0
 CASES=0
 
@@ -1059,6 +1067,13 @@ seed_per_user_tree() {
 }
 
 # run_adopt_ladder <kit> <home> <comp-home> <bin-dir> <stub-dir> [args…]
+#
+# $SUDO_USER is EXPORTED EMPTY unless $ADOPT_SUDO_USER names an account. The
+# suite runs under whatever shell an operator started, and a developer who ran
+# it from a `sudo -s` would otherwise have every case resolve its source out of
+# their real home directory — the one variable that decides which tree this rung
+# takes, inherited from the environment. $ADOPT_HOME_PARENTS is its other half:
+# the fixture parent a named account's home is resolved under.
 # $ADOPT_COMP_DATA is the DATA root a `system`-scheme case names. It is a
 # variable rather than a sixth positional so the `user`-scheme cases (cli) can
 # leave it unset and keep their one-tree shape — run.sh forces $COMP_DATA to
@@ -1067,9 +1082,11 @@ seed_per_user_tree() {
 # refuses a $COMP_HOME without a $COMP_DATA rather than pairing a named tree with
 # a default one.
 #
-# $ROOT_HOME is seamed for the same reason LAUNCHD_DIR is: the adoption rung now
-# treats root's home as its FIRST candidate source, and an unseamed run would
-# probe the real /root (or /var/root) on the machine running this suite.
+# $ROOT_HOME is seamed for the same reason LAUNCHD_DIR is. It is no longer a
+# candidate SOURCE — that is the whole point of case 28 — but it is still where
+# a `root`-scheme component's HOME resolves, and an unseamed run would name the
+# real /root (or /var/root) on the machine running this suite. Several cases
+# below also SEED a tree there, precisely to prove it is never taken.
 run_adopt_ladder() {
     _ral_kit="$1"; _ral_home="$2"; _ral_ch="$3"; _ral_bin="$4"; _ral_stub="$5"; shift 5
     CLI_STUB_LOG="$_ral_stub/cli.log"
@@ -1083,7 +1100,8 @@ run_adopt_ladder() {
         BIN_DIR="$_ral_bin" \
         LAUNCHD_DIR="$_ral_home/no-launchd" \
         SYSTEMD_DIR="$_ral_home/no-systemd" \
-        BURROWEE_LEGACY_HOME_PARENTS="$_ral_home/nowhere" \
+        BURROWEE_LEGACY_HOME_PARENTS="${ADOPT_HOME_PARENTS:-$_ral_home/nowhere}" \
+        SUDO_USER="${ADOPT_SUDO_USER:-}" \
         SUDO="${ADOPT_SUDO:-$_ral_stub/sudo}" \
         SYSTEMCTL="$_ral_stub/supervisor" \
         LAUNCHCTL="$_ral_stub/supervisor" \
@@ -1436,14 +1454,17 @@ assert_contains "$OUT" "is not a script in" "the refusal must name the value it 
 assert_gone "$ch27/identity/relay_ed.key" "and nothing may have been touched"
 
 # ===========================================================================
-# 28. THE TWO-SOURCE RULE. A host arriving at this rung has its state in ONE of
-#     two home-shaped trees, and after the 0.2.0 collapse it can have it in both.
+# 28. ONE SOURCE: THE RUNNING USER'S HOME.
 #
-#     seed_per_user_tree already covers "only the operator's tree" (case 22).
-#     Everything below is the other three states, and the both-present case is
-#     seeded with DIFFERING BYTES on purpose: two identical trees make the
-#     precedence unobservable, so a test built on identical fixtures would pass
-#     for an implementation that took either one.
+#     There used to be two candidates here, root's home first, and that
+#     precedence took an edge node down. Everything below is the rule that
+#     replaced it: root's home is not a source, whatever it holds; a root login
+#     shell has no running user and REFUSES; $ADOPT_FROM still names the tree.
+#
+#     Every fixture that has a root tree at all seeds it with DIFFERENT BYTES
+#     from the running user's, on purpose: two identical trees make the choice
+#     between them unobservable, and a case built on identical fixtures would
+#     pass for an implementation that took either one.
 # ===========================================================================
 
 # seed_tree <dir> <fqdn> — an enrolled tree whose CONTENT identifies it, so an
@@ -1454,58 +1475,93 @@ seed_tree() {
     printf 'host_fqdn=%s\ntls_listen=:443\n' "$2" > "$1/config"
 }
 
-# 28a. ONLY ROOT'S HOME holds an identity — the 0.2.0 host, or the one whose
-#      operator made the manual copy during the outage. It must be adopted, and
-#      the run must SAY it took root's tree.
+# seed_stub_tree <dir> — admin-kr's ROOT tree, verbatim in shape: enrolled, and
+# a config two days of a crash-looping daemon had rewritten down to ONE line.
+# This is the tree the old precedence called "strictly newer".
+seed_stub_tree() {
+    mkdir -p "$1/identity"
+    printf 'PRIVATE-KEY-BYTES-roots-manual-copy\n' > "$1/identity/relay_ed.key"
+    printf 'lan_listen=127.0.0.1:9448\n' > "$1/config"
+}
+
+# seed_real_tree <dir> — admin-kr's OPERATOR tree: the same identity question,
+# the whole five-line answer. tls_listen is the line whose absence made the
+# daemon try to bind privileged :443 unprivileged.
+seed_real_tree() {
+    mkdir -p "$1/identity"
+    printf 'PRIVATE-KEY-BYTES-the-operators-tree\n' > "$1/identity/relay_ed.key"
+    printf 'tls_listen=127.0.0.1:9443\nlan_listen=127.0.0.1:9448\nserve_mode=frontier\nallow_push_update=true\nhost_fqdn=admin-kr.faranow.com\n' > "$1/config"
+}
+
+# make_root_id_stub <dir> — an `id` that answers 0 to `id -u` and defers
+# everything else to the real one. It is how a ROOT LOGIN SHELL is reachable
+# from an unprivileged suite: euid is the single input that separates "$HOME is
+# the running user's" from "$HOME is root's and there is no running user", and a
+# case that could only be exercised under sudo would be exercised never.
+make_root_id_stub() {
+    mkdir -p "$1"
+    {
+        echo '#!/bin/sh'
+        echo '[ "$1" = "-u" ] && { echo 0; exit 0; }'
+        echo 'exec /usr/bin/id "$@"'
+    } > "$1/id"
+    chmod 0755 "$1/id"
+}
+
+# 28a. admin-kr's EXACT STATE, and the case the whole rewrite exists for.
+#
+#      Root's home is enrolled AND holds the one-line stub. The running user's
+#      is enrolled and holds the real five-line config. The old rule took root's
+#      because it "provably holds an identity" and was tried first; the identity
+#      came across fine and the config was destroyed. The FULL config must land.
 t28a="$TMP/t28a"; adopt_kit "$t28a" edge system installed-version $EDGE_BINS
 h28a="$t28a/home"; ch28a="$h28a/sys-etc/burrowee/edge"; cd28a="$h28a/sys-var/burrowee/edge"
 mkdir -p "$ch28a" "$cd28a" "$h28a/stubs"
-seed_tree "$h28a/root-home/.burrowee/edge" root.example.org
+seed_stub_tree "$h28a/root-home/.burrowee/edge"
+seed_real_tree "$h28a/.burrowee/edge"
+if cmp -s "$h28a/root-home/.burrowee/edge/config" "$h28a/.burrowee/edge/config"; then
+    fail "case 28a fixture: the two trees are byte-identical, so which one was taken is unobservable"
+fi
 seed_ours "$h28a/usr-local-bin" $EDGE_BINS
 make_cli_stub "$h28a/usr-local-bin" edge
 make_supervisor_stub "$h28a/stubs" kills
 ADOPT_COMP_DATA="$cd28a" \
 run_adopt_ladder "$t28a" "$h28a" "$ch28a" "$h28a/usr-local-bin" "$h28a/stubs" --installed-version 0.0.0
-assert_eq "$RC" 2 "root's home is a first-class source — a host whose state is only there must still be adopted"
-assert_contains "$OUT" "adopted $h28a/root-home/.burrowee/edge" "the run must name the tree it took"
-assert_present "$ch28a/identity/relay_ed.key" "and the destination must HOLD the identity"
-assert_eq "$(cat "$ch28a/config")" "$(cat "$h28a/root-home/.burrowee/edge/config")" "the adopted config must be ROOT's config"
-assert_present "$h28a/root-home/.burrowee/edge/identity/relay_ed.key" "copy never move — the source survives"
+assert_eq "$RC" 2 "the running user's tree holds the identity and must be adopted"
+assert_contains "$OUT" "adopted $h28a/.burrowee/edge" "the run must name the tree it took"
+assert_lacks "$OUT" "$h28a/root-home/.burrowee/edge" "root's home must not even be NAMED — it is not a candidate"
+# THE BYTES DECIDE. This is the assertion the differing fixtures exist for, and
+# the one the shipped rung fails: the config that lands must be the operator's
+# five lines, not root's one.
+assert_eq "$(cat "$ch28a/config")" "tls_listen=127.0.0.1:9443
+lan_listen=127.0.0.1:9448
+serve_mode=frontier
+allow_push_update=true
+host_fqdn=admin-kr.faranow.com" "the adopted config must be the RUNNING USER's five-line config, not root's one-line stub"
+assert_eq "$(cat "$ch28a/identity/relay_ed.key")" "PRIVATE-KEY-BYTES-the-operators-tree" "and the adopted identity must be the running user's"
+assert_present "$h28a/.burrowee/edge/identity/relay_ed.key" "copy never move — the source survives"
+assert_present "$h28a/root-home/.burrowee/edge/identity/relay_ed.key" "and root's tree is untouched"
 
-# 28b. BOTH TREES HOLD AN IDENTITY, WITH DIFFERENT BYTES. Root's wins, and the
-#      run names BOTH — the one taken and the one left — with the line that
-#      takes the other.
+# 28b. ONLY ROOT'S HOME IS ENROLLED, and that is NOTHING TO ADOPT.
 #
-#      The fixtures differ because that is the only way the precedence is
-#      OBSERVABLE: with identical bytes every assertion below passes whichever
-#      tree was copied.
+#      The running user's tree is readable and holds no identity, so the answer
+#      is provable: there is nothing to carry. Root's enrolled tree does not
+#      change it — a rung that fell back to root's here is the one that shipped.
 t28b="$TMP/t28b"; adopt_kit "$t28b" edge system installed-version $EDGE_BINS
 h28b="$t28b/home"; ch28b="$h28b/sys-etc/burrowee/edge"; cd28b="$h28b/sys-var/burrowee/edge"
-mkdir -p "$ch28b" "$cd28b" "$h28b/stubs"
+mkdir -p "$ch28b" "$cd28b" "$h28b/stubs" "$h28b/.burrowee/edge"
 seed_tree "$h28b/root-home/.burrowee/edge" root.example.org
-seed_tree "$h28b/.burrowee/edge" operator.example.org
-if cmp -s "$h28b/root-home/.burrowee/edge/config" "$h28b/.burrowee/edge/config"; then
-    fail "case 28b fixture: the two trees are byte-identical, so the precedence cannot be observed"
-fi
 seed_ours "$h28b/usr-local-bin" $EDGE_BINS
 make_cli_stub "$h28b/usr-local-bin" edge
 make_supervisor_stub "$h28b/stubs" kills
 ADOPT_COMP_DATA="$cd28b" \
 run_adopt_ladder "$t28b" "$h28b" "$ch28b" "$h28b/usr-local-bin" "$h28b/stubs" --installed-version 0.0.0
-assert_eq "$RC" 2 "both trees present must still adopt"
-assert_contains "$OUT" "Taking $h28b/root-home/.burrowee/edge" "the run must name the tree it took"
-assert_contains "$OUT" "LEAVING $h28b/.burrowee/edge" "and the tree it left"
-assert_contains "$OUT" "ADOPT_FROM=$h28b/.burrowee/edge" "and print the line that takes the other one"
-# THE BYTES DECIDE. Root's tree is the newer one, and this is the assertion the
-# differing fixtures exist for.
-assert_eq "$(cat "$ch28b/config")" "host_fqdn=root.example.org
-tls_listen=:443" "the adopted config must be ROOT's, not the operator's"
-assert_eq "$(cat "$ch28b/identity/relay_ed.key")" "PRIVATE-KEY-BYTES-root.example.org" "the adopted identity must be ROOT's"
-# BOTH SOURCES SURVIVE. The one that was left is the operator's only route back.
-assert_present "$h28b/.burrowee/edge/identity/relay_ed.key" "the tree that was NOT taken must be untouched"
-assert_present "$h28b/root-home/.burrowee/edge/identity/relay_ed.key" "and so must the one that was"
+assert_contains "$OUT" "nothing to adopt" "and the rung must say so"
+assert_gone "$ch28b/identity/relay_ed.key" "nothing may have been copied from root's tree"
+assert_eq "$(cat "$h28b/stubs/cli.log" 2>/dev/null | grep -c '^migrate --from' || true)" "0" "the cli must never be exec'd for a tree that is not a candidate"
+assert_lacks "$(cat "$h28b/stubs/supervisor.log" 2>/dev/null || echo "")" "stop" "and nothing may be stopped on the way to saying it"
 
-# 28c. $ADOPT_FROM OVERRIDES THE SELECTION ENTIRELY, even with root's tree
+# 28c. $ADOPT_FROM OVERRIDES THE SELECTION ENTIRELY, even with both other trees
 #      present and enrolled. The operator has named the tree; a rung that then
 #      went looking for a "better" one would be second-guessing the person
 #      recovering the host.
@@ -1513,6 +1569,7 @@ t28c="$TMP/t28c"; adopt_kit "$t28c" edge system installed-version $EDGE_BINS
 h28c="$t28c/home"; ch28c="$h28c/sys-etc/burrowee/edge"; cd28c="$h28c/sys-var/burrowee/edge"
 mkdir -p "$ch28c" "$cd28c" "$h28c/stubs"
 seed_tree "$h28c/root-home/.burrowee/edge" root.example.org
+seed_tree "$h28c/.burrowee/edge" operator.example.org
 seed_tree "$h28c/elsewhere/.burrowee/edge" third.example.org
 seed_ours "$h28c/usr-local-bin" $EDGE_BINS
 make_cli_stub "$h28c/usr-local-bin" edge
@@ -1521,48 +1578,122 @@ ADOPT_FROM="$h28c/elsewhere/.burrowee/edge" ADOPT_COMP_DATA="$cd28c" \
 run_adopt_ladder "$t28c" "$h28c" "$ch28c" "$h28c/usr-local-bin" "$h28c/stubs" --installed-version 0.0.0
 assert_eq "$RC" 2 "ADOPT_FROM must be honoured"
 assert_eq "$(cat "$ch28c/config")" "host_fqdn=third.example.org
-tls_listen=:443" "ADOPT_FROM must win over root's tree, not be merged with it"
+tls_listen=:443" "ADOPT_FROM must win over the running user's tree, not be merged with it"
 
-# 28d. NEITHER TREE PROVABLY HOLDS AN IDENTITY, and both are readable → nothing
-#      to adopt. This is the fresh 0.2.x host, and a rung that claimed to apply
-#      here would leave a misleading receipt on every one of them.
+# 28d. THE RUNNING USER'S TREE IS READABLE AND HOLDS NO IDENTITY → nothing to
+#      adopt. This is the fresh 0.2.x host, and a rung that claimed to apply here
+#      would leave a misleading receipt on every one of them.
 t28d="$TMP/t28d"; adopt_kit "$t28d" edge system installed-version $EDGE_BINS
 h28d="$t28d/home"; ch28d="$h28d/sys-etc/burrowee/edge"; cd28d="$h28d/sys-var/burrowee/edge"
-mkdir -p "$ch28d" "$cd28d" "$h28d/stubs" "$h28d/root-home/.burrowee" "$h28d/.burrowee"
+mkdir -p "$ch28d" "$cd28d" "$h28d/stubs" "$h28d/.burrowee"
 seed_ours "$h28d/usr-local-bin" $EDGE_BINS
 make_cli_stub "$h28d/usr-local-bin" edge
 make_supervisor_stub "$h28d/stubs" kills
 OUT="$(HOME="$h28d" COMP_HOME="$ch28d" COMP_DATA="$cd28d" ROOT_HOME="$h28d/root-home" \
     BIN_DIR="$h28d/usr-local-bin" BURROWEE_LEGACY_HOME_PARENTS="$h28d/nowhere" SUDO=/nonexistent-sudo \
     sh "$t28d/migrations/adopt_user_tree.sh" --applies 2>&1)"; RC=$?
-assert_eq "$RC" 1 "two readable trees with no identity is 'nothing to adopt', not 'still needed'"
+assert_eq "$RC" 1 "a readable tree with no identity is 'nothing to adopt', not 'still needed'"
 
-# 28e. ROOT'S TREE CANNOT BE READ → still needed. The blindness asymmetry, now
-#      facing the candidate this rung prefers: root's tree is 0700 root-owned by
-#      construction, and this probe is reached unprivileged on every install.
-if [ "$(id -u)" = 0 ]; then
-    fail "case 28e must not run as root: chmod 000 does not blind uid 0."
-else
+# 28e. A ROOT LOGIN SHELL REFUSES, and names $ADOPT_FROM.
+#
+#      $SUDO_USER unset with euid 0 means no account invoked this run, so there
+#      is no running user and no source. $HOME is root's — one keystroke from
+#      being taken as the answer, which is exactly the defect. The refusal is
+#      asserted DIRECTLY: "it did not use root's home" would also pass for a run
+#      that used nothing at all and quietly no-opped.
+#
+#      Root's tree is seeded ENROLLED so the refusal is measured against a host
+#      that visibly has something a fallback would have grabbed.
 t28e="$TMP/t28e"; adopt_kit "$t28e" edge system installed-version $EDGE_BINS
 h28e="$t28e/home"; ch28e="$h28e/sys-etc/burrowee/edge"; cd28e="$h28e/sys-var/burrowee/edge"
-mkdir -p "$ch28e" "$cd28e" "$h28e/stubs" "$h28e/.burrowee"
-seed_tree "$h28e/root-home/.burrowee/edge" root.example.org
-chmod 000 "$h28e/root-home/.burrowee/edge/identity"
-if [ -r "$h28e/root-home/.burrowee/edge/identity/relay_ed.key" ]; then
-    fail "case 28e fixture is readable — the blindness assertion would prove nothing"
+mkdir -p "$ch28e" "$cd28e" "$h28e/stubs"
+seed_stub_tree "$h28e/root-home/.burrowee/edge"
+seed_ours "$h28e/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h28e/usr-local-bin" edge
+make_supervisor_stub "$h28e/stubs" kills
+make_root_id_stub "$h28e/root-id"
+# The blindfold is asserted, not assumed: without the stub this is an ordinary
+# unprivileged run and the case would be measuring the wrong branch.
+if [ "$(PATH="$h28e/root-id:$PATH" id -u)" != 0 ]; then
+    fail "case 28e: the id stub does not answer 0, so the root-login branch is never reached"
 fi
-OUT="$(HOME="$h28e" COMP_HOME="$ch28e" COMP_DATA="$cd28e" ROOT_HOME="$h28e/root-home" \
+OUT="$(PATH="$h28e/root-id:$PATH" HOME="$h28e/root-home" \
+    COMP_HOME="$ch28e" COMP_DATA="$cd28e" ROOT_HOME="$h28e/root-home" \
+    BIN_DIR="$h28e/usr-local-bin" BURROWEE_LEGACY_HOME_PARENTS="$h28e/nowhere" \
+    SUDO="$h28e/stubs/sudo" SYSTEMCTL="$h28e/stubs/supervisor" LAUNCHCTL="$h28e/stubs/supervisor" \
+    CLI_STUB_LOG="$h28e/stubs/cli.log" \
+    sh "$t28e/migrations/adopt_user_tree.sh" 2>&1)"; RC=$?
+assert_eq "$RC" 1 "a root login shell must REFUSE — there is no running user, so there is no source"
+assert_contains "$OUT" "REFUSING" "the refusal must say it is one"
+assert_contains "$OUT" "ADOPT_FROM=" "and name the escape hatch"
+assert_contains "$OUT" "nothing has been stopped" "and say the daemon was left alone"
+assert_gone "$ch28e/identity/relay_ed.key" "root's home must not have been adopted"
+assert_eq "$(cat "$h28e/stubs/cli.log" 2>/dev/null | grep -c '^migrate --from' || true)" "0" "the cli must never be exec'd"
+assert_lacks "$(cat "$h28e/stubs/supervisor.log" 2>/dev/null || echo "")" "stop" "and nothing may be stopped before the refusal"
+
+# 28f. THE SAME ROOT LOGIN SHELL, ASKED --applies, answers STILL NEEDED.
+#      The refusal belongs to the run, not to the probe: run.sh reads exit 1 as
+#      "does not apply", so refusing there would skip the rung silently on
+#      exactly the host that cannot resolve its own source.
+OUT="$(PATH="$h28e/root-id:$PATH" HOME="$h28e/root-home" \
+    COMP_HOME="$ch28e" COMP_DATA="$cd28e" ROOT_HOME="$h28e/root-home" \
     BIN_DIR="$h28e/usr-local-bin" BURROWEE_LEGACY_HOME_PARENTS="$h28e/nowhere" SUDO=/nonexistent-sudo \
     sh "$t28e/migrations/adopt_user_tree.sh" --applies 2>&1)"; RC=$?
-assert_eq "$RC" 0 "an unreadable ROOT tree must answer STILL NEEDED, never 'nothing to adopt'"
-chmod 700 "$h28e/root-home/.burrowee/edge/identity"
+assert_eq "$RC" 0 "no running user is 'I could not be told which tree', which is STILL NEEDED, never 'nothing to adopt'"
+
+# 28h. UNDER sudo THE RUNNING USER IS $SUDO_USER, NOT $HOME.
+#
+#      This is the documented install path — `curl … | sudo sh` — where $HOME is
+#      root's and the tree that matters belongs to the account that typed sudo.
+#      $HOME is seeded with a DIFFERENT enrolled tree on purpose: with only one
+#      tree in the fixture, "resolved $SUDO_USER" and "fell back to $HOME" would
+#      produce the same result and this case would measure nothing.
+t28h="$TMP/t28h"; adopt_kit "$t28h" edge system installed-version $EDGE_BINS
+h28h="$t28h/home"; ch28h="$h28h/sys-etc/burrowee/edge"; cd28h="$h28h/sys-var/burrowee/edge"
+mkdir -p "$ch28h" "$cd28h" "$h28h/stubs"
+# The operator's account. The name is one no real host has: home_of_user asks
+# getent/dscl BEFORE the seeded parents, so a name that happens to exist on the
+# machine running this suite would resolve to a REAL home directory.
+seed_real_tree "$h28h/homes/burrowee-fixture-op/.burrowee/edge"
+seed_stub_tree "$h28h/.burrowee/edge"          # $HOME's tree — the wrong answer
+seed_ours "$h28h/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h28h/usr-local-bin" edge
+make_supervisor_stub "$h28h/stubs" kills
+ADOPT_COMP_DATA="$cd28h" ADOPT_SUDO_USER=burrowee-fixture-op \
+ADOPT_HOME_PARENTS="$h28h/homes" \
+run_adopt_ladder "$t28h" "$h28h" "$ch28h" "$h28h/usr-local-bin" "$h28h/stubs" --installed-version 0.0.0
+assert_eq "$RC" 2 "\$SUDO_USER's tree holds the identity and must be adopted"
+assert_contains "$OUT" "adopted $h28h/homes/burrowee-fixture-op/.burrowee/edge" "the run must name \$SUDO_USER's tree, not \$HOME's"
+assert_eq "$(cat "$ch28h/identity/relay_ed.key")" "PRIVATE-KEY-BYTES-the-operators-tree" "under sudo \$HOME is root's — the identity must come from \$SUDO_USER's tree"
+
+# 28g. ROOT'S TREE IS NOT CONSULTED FOR BLINDNESS EITHER. Root's is unreadable
+#      and the running user's is readable-and-empty: the answer is "nothing to
+#      adopt", because the only candidate answered provably. A rung that still
+#      counted root's tree would report "still needed" forever on such a host.
+if [ "$(id -u)" = 0 ]; then
+    fail "case 28g must not run as root: chmod 000 does not blind uid 0."
+else
+t28g="$TMP/t28g"; adopt_kit "$t28g" edge system installed-version $EDGE_BINS
+h28g="$t28g/home"; ch28g="$h28g/sys-etc/burrowee/edge"; cd28g="$h28g/sys-var/burrowee/edge"
+mkdir -p "$ch28g" "$cd28g" "$h28g/stubs" "$h28g/.burrowee/edge"
+seed_tree "$h28g/root-home/.burrowee/edge" root.example.org
+chmod 000 "$h28g/root-home/.burrowee/edge/identity"
+if [ -r "$h28g/root-home/.burrowee/edge/identity/relay_ed.key" ]; then
+    fail "case 28g fixture is readable — the blindness assertion would prove nothing"
+fi
+OUT="$(HOME="$h28g" COMP_HOME="$ch28g" COMP_DATA="$cd28g" ROOT_HOME="$h28g/root-home" \
+    BIN_DIR="$h28g/usr-local-bin" BURROWEE_LEGACY_HOME_PARENTS="$h28g/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t28g/migrations/adopt_user_tree.sh" --applies 2>&1)"; RC=$?
+assert_eq "$RC" 1 "an unreadable ROOT tree is not evidence of anything — it is not a candidate"
+chmod 700 "$h28g/root-home/.burrowee/edge/identity"
 fi
 
 # ---------------------------------------------------------------------------
-# 29. admin-kr's EXACT SHAPE UNDER THE SPLIT: root's home populated by the
-#     MANUAL COPY the operator was given during the outage, the machine-owned
-#     roots empty, the anchor already reading 0.2.0 — driven through upgrade.sh,
-#     which is run.sh --installed-version 0.0.0 --rerun-recorded.
+# 29. admin-kr's EXACT SHAPE UNDER THE SPLIT: the running user's tree holding
+#     the real state, root's home holding the stub copy the operator was given
+#     during the outage, the machine-owned roots empty, the anchor already
+#     reading 0.2.0 — driven through upgrade.sh, which is run.sh
+#     --installed-version 0.0.0 --rerun-recorded.
 #
 #     The daemon's running.json is in the DATA root, which is what makes this
 #     also the assertion that the rung looks there: a version that only probed
@@ -1571,7 +1702,8 @@ fi
 t29="$TMP/t29"; adopt_kit "$t29" edge system installed-version $EDGE_BINS
 h29="$t29/home"; ch29="$h29/sys-etc/burrowee/edge"; cd29="$h29/sys-var/burrowee/edge"
 mkdir -p "$ch29" "$cd29" "$h29/stubs"
-seed_tree "$h29/root-home/.burrowee/edge" edge.example.org
+seed_real_tree "$h29/.burrowee/edge"
+seed_stub_tree "$h29/root-home/.burrowee/edge"
 seed_ours "$h29/usr-local-bin" $EDGE_BINS
 make_cli_stub "$h29/usr-local-bin" edge
 make_supervisor_stub "$h29/stubs" kills
@@ -1593,11 +1725,16 @@ UPGRADE_OUT="$(
     sh "$t29/migrations/upgrade.sh" 0.2.0 2>&1
 )"; UPGRADE_RC=$?
 assert_eq "$UPGRADE_RC" 2 "upgrade.sh must force the adoption on a 0.2.0-anchored host"
-assert_contains "$UPGRADE_OUT" "adopted $h29/root-home/.burrowee/edge" "the rung must name root's tree as the source it took"
+assert_contains "$UPGRADE_OUT" "adopted $h29/.burrowee/edge" "the rung must name the running user's tree as the source it took"
 # AFTER: the machine CONFIG root holds the state, byte for byte.
 assert_present "$ch29/identity/relay_ed.key" "AFTER: the config root must HOLD the identity"
-assert_eq "$(cat "$ch29/config")" "$(cat "$h29/root-home/.burrowee/edge/config")" "AFTER: the adopted config must be the source config"
-assert_present "$h29/root-home/.burrowee/edge/identity/relay_ed.key" "AFTER: root's tree is left intact"
+assert_eq "$(cat "$ch29/config")" "$(cat "$h29/.burrowee/edge/config")" "AFTER: the adopted config must be the running user's config"
+# tls_listen is the line root's stub does not have, and its absence is what made
+# the daemon try to bind privileged :443 unprivileged. Asserted by name because
+# a plain equality would also pass for a one-line file if the fixtures drifted.
+assert_contains "$(cat "$ch29/config")" "tls_listen=127.0.0.1:9443" "AFTER: the adopted config must carry tls_listen — root's stub does not, and its absence crash-looped the daemon"
+assert_present "$h29/.burrowee/edge/identity/relay_ed.key" "AFTER: the source tree is left intact"
+assert_present "$h29/root-home/.burrowee/edge/identity/relay_ed.key" "AFTER: and root's tree is untouched"
 assert_present "$ch29/migration-receipts/adopt_user_tree.sh.done" "the runner must record the rung in the CONFIG root"
 # THE RUNG SAW THE DAEMON THROUGH THE DATA ROOT and stopped it before copying.
 assert_contains "$(cat "$h29/stubs/supervisor.log")" "stop burrowee-edge" "running.json lives in the DATA root — the rung must probe there and stop the daemon"
@@ -1652,7 +1789,7 @@ assert_contains "$OUT" "Refusing rather than pairing the tree you named" "the re
 t29d="$TMP/t29d"; adopt_kit "$t29d" edge system installed-version $EDGE_BINS
 h29d="$t29d/home"; ch29d="$h29d/sys-etc/burrowee/edge"; cd29d="$h29d/sys-var/burrowee/edge"
 mkdir -p "$h29d/stubs"
-seed_tree "$h29d/root-home/.burrowee/edge" absent.example.org
+seed_tree "$h29d/.burrowee/edge" absent.example.org
 seed_ours "$h29d/usr-local-bin" $EDGE_BINS
 make_cli_stub "$h29d/usr-local-bin" edge
 make_supervisor_stub "$h29d/stubs" kills
