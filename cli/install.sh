@@ -22,7 +22,7 @@
 # the migration script grows a second job: install.sh is still the only thing
 # that places binaries, and migrations/upgrade.sh is still migrations-only. And
 # it is the SAME FILE, not a fork: everything that makes this script a trust
-# anchor — the pinned preflight sha256, the baked pubkey, the v0.2.0.2026.08.18.2142cd56
+# anchor — the pinned preflight sha256, the baked pubkey, the v0.2.0.2026.08.19.6db8fbe8
 # floor, the SHA256SUMS.txt minisign gate — is the same lines for both modes,
 # because a copy of a trust anchor is a copy that drifts from it.
 #
@@ -106,7 +106,7 @@ PREFLIGHT_SHA256="cfb56c19a3e2eb756ec56147de4fff421675376a5e30e1b7e8367a1205f845
 # It rides the same first-party static channel, over the same TLS fetch, that
 # delivered $PUBKEY, so it costs no trust the installer did not already require;
 # and no download source gets to choose it.
-MIN_VERSION="v0.2.0.2026.08.18.2142cd56"
+MIN_VERSION="v0.2.0.2026.08.19.6db8fbe8"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 
 # resolve_prefix — the install root this bootstrap hands the inner installer.
