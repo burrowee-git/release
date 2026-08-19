@@ -71,7 +71,19 @@ type sandbox struct {
 	sysBinDir string
 	unitDir   string
 	rootHome  string
+	// The two machine-owned parents, redirected into the sandbox. Without
+	// these every run below would try to create the REAL
+	// /usr/local/{etc,var}/burrowee — which on this runner is somebody else's
+	// gateway install, and on a developer's machine is a root-owned path a
+	// test has no business touching.
+	sysConfigRoot string
+	sysDataRoot   string
 }
+
+// compHome / compData are the two roots install.sh resolves inside this
+// sandbox.
+func (sb sandbox) compHome() string { return filepath.Join(sb.sysConfigRoot, "edge") }
+func (sb sandbox) compData() string { return filepath.Join(sb.sysDataRoot, "edge") }
 
 // newSandbox lays out a fixture host with the edge binaries staged. Nothing
 // here resolves outside t.TempDir().
@@ -85,11 +97,13 @@ func newSandbox(t *testing.T) sandbox {
 	// exercising a bundle shape no host receives.
 	stageMigrations(t, staging)
 	sb := sandbox{
-		home:      home,
-		staging:   staging,
-		sysBinDir: filepath.Join(home, "sysbin"),
-		unitDir:   filepath.Join(home, "systemd-system"),
-		rootHome:  filepath.Join(home, "root-home"),
+		home:          home,
+		staging:       staging,
+		sysBinDir:     filepath.Join(home, "sysbin"),
+		unitDir:       filepath.Join(home, "systemd-system"),
+		rootHome:      filepath.Join(home, "root-home"),
+		sysConfigRoot: filepath.Join(home, "sys-etc", "burrowee"),
+		sysDataRoot:   filepath.Join(home, "sys-var", "burrowee"),
 	}
 	if err := os.MkdirAll(sb.unitDir, 0o755); err != nil {
 		t.Fatalf("mkdir unitDir: %v", err)
@@ -109,6 +123,8 @@ func (sb sandbox) env(stub string, extra ...string) []string {
 		"SYSTEMD_UNIT_DIR=" + sb.unitDir,
 		"LAUNCHD_PLIST_DIR=" + filepath.Join(sb.home, "LaunchDaemons"),
 		"ROOT_HOME=" + sb.rootHome,
+		"SYS_CONFIG_ROOT=" + sb.sysConfigRoot,
+		"SYS_DATA_ROOT=" + sb.sysDataRoot,
 	}
 	return append(e, extra...)
 }
@@ -267,9 +283,11 @@ func TestEdgeInstallCompletesUnderEveryShell(t *testing.T) {
 			if log := readFile(t, filepath.Join(sb.home, "stub-calls.log")); !strings.Contains(log, "enable --now burrowee-edge") {
 				t.Errorf("the init system was never asked to run the unit under %s:\n%s", shell, log)
 			}
-			// The version anchor lands under ROOT's home, not the invoking
-			// user's — the daemon that reads it runs as root.
-			marker := filepath.Join(sb.rootHome, ".burrowee", "edge", "installed-version")
+			// The version anchor lands in the machine-owned CONFIG root —
+			// not the invoking user's home and not root's either. It is the
+			// ladder's gate, and it must sit in the tree that is backed up
+			// and never cleared.
+			marker := filepath.Join(sb.compHome(), "installed-version")
 			if got, statErr := os.ReadFile(marker); statErr != nil {
 				t.Errorf("no version marker at %s under %s: %v", marker, shell, statErr)
 			} else if strings.TrimSpace(string(got)) != "edge/v0.2.0.2026.08.14.abcdef12" {
@@ -324,11 +342,11 @@ func TestEdgeInstallSaysNothingWhenTheRootTreeIsAlreadyPaired(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(operatorState, "identity"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// This host's ROOT tree is already paired.
-	if err := os.MkdirAll(filepath.Join(sb.rootHome, ".burrowee", "edge"), 0o755); err != nil {
+	// This host's machine-owned CONFIG root is already paired.
+	if err := os.MkdirAll(sb.compHome(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sb.rootHome, ".burrowee", "edge", "console.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(sb.compHome(), "console.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

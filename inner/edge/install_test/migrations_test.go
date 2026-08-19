@@ -113,8 +113,11 @@ func TestEdgeInstallLadderSweepsAndReceiptsIt(t *testing.T) {
 	stale := staleDir(home)
 	seedStale(t, stale, staleOursSet())
 
-	rootHome := filepath.Join(home, "root-home")
-	compHome := filepath.Join(rootHome, ".burrowee", "edge")
+	// The MACHINE-owned config root — where the ladder's anchor lives since the
+	// system-roots split. Seeding root's home instead would leave the anchor in
+	// a tree the runner no longer reads, and every gate below would be measuring
+	// an absent file.
+	compHome := filepath.Join(home, "sys-etc", "burrowee", "edge")
 	if err := os.MkdirAll(compHome, 0o755); err != nil {
 		t.Fatalf("mkdir comp home: %v", err)
 	}
@@ -170,7 +173,7 @@ func TestEdgeInstallKeepsTheLadderBesideItsSelfCopy(t *testing.T) {
 
 	runRootInstall(t, home, staging, sandboxLaunchd(home))
 
-	kept := filepath.Join(home, "root-home", ".burrowee", "edge", "migrations")
+	kept := filepath.Join(home, "sys-etc", "burrowee", "edge", "migrations")
 	for _, f := range []string{"run.sh", "lib_paths.sh", "lib_stale_user_bins.sh", "stale_user_bins.sh", "component.conf", "ledger"} {
 		assertPresent(t, filepath.Join(kept, f), "the self-copied ladder is missing "+f)
 	}
@@ -208,6 +211,8 @@ func TestEdgeInstallStopsWhenTheLadderRefuses(t *testing.T) {
 		"SYS_BIN_DIR=" + sysBinDir,
 		"SYSTEMD_UNIT_DIR=" + unitDir,
 		"ROOT_HOME=" + filepath.Join(home, "root-home"),
+		"SYS_CONFIG_ROOT=" + filepath.Join(home, "sys-etc", "burrowee"),
+		"SYS_DATA_ROOT=" + filepath.Join(home, "sys-var", "burrowee"),
 		sandboxLaunchd(home),
 	}
 	out, err := cmd.CombinedOutput()
@@ -237,7 +242,7 @@ func TestEdgeInstallWithholdsTheAnchorOnALostReceipt(t *testing.T) {
 	stageMigrations(t, staging)
 	seedStale(t, staleDir(home), staleOursSet())
 
-	compHome := filepath.Join(home, "root-home", ".burrowee", "edge")
+	compHome := filepath.Join(home, "sys-etc", "burrowee", "edge")
 	if err := os.MkdirAll(compHome, 0o755); err != nil {
 		t.Fatalf("mkdir comp home: %v", err)
 	}
@@ -328,7 +333,7 @@ func TestEdgeInstallerSweepsEvenWhenTheLadderDoesNot(t *testing.T) {
 	stale := staleDir(home)
 	seedStale(t, stale, staleOursSet())
 
-	compHome := filepath.Join(home, "root-home", ".burrowee", "edge")
+	compHome := filepath.Join(home, "sys-etc", "burrowee", "edge")
 	if err := os.MkdirAll(compHome, 0o755); err != nil {
 		t.Fatalf("mkdir comp home: %v", err)
 	}

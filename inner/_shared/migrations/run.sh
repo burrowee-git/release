@@ -157,7 +157,8 @@
 #
 # Env seams (production defaults shown; the installers and the test harness
 # override them):
-#   COMP_HOME                   the component tree this ladder is about
+#   COMP_HOME                   the component CONFIG tree this ladder is about
+#   COMP_DATA                   its DATA tree (`system` scheme; = COMP_HOME otherwise)
 #   PREFIX / BIN_DIR            install prefix / bin dir (BIN_DIR wins)
 #   ROOT_HOME                   root's home (the `root` COMP_HOME scheme)
 #   SUDO                        elevation command (default "sudo")
@@ -197,33 +198,77 @@ fi
 . "$HERE/lib_paths.sh"
 
 # ---------------------------------------------------------------------------
-# $COMP_HOME — the tree this ladder is about.
+# SYS_CONFIG_ROOT / SYS_DATA_ROOT — the machine-owned parents a `system`-scheme
+# component's two trees hang off. Seams for the test harness only; nothing on a
+# real host sets them, and no component that is not `system` reads them.
+# ---------------------------------------------------------------------------
+SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
+SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/var/burrowee}"
+
+# ---------------------------------------------------------------------------
+# $COMP_HOME / $COMP_DATA — the tree(s) this ladder is about.
 #
-# COMP_HOME_SCHEME says how to find it when the caller did not name one:
+# COMP_HOME_SCHEME says how to find them when the caller did not name them:
 #
-#   root   the component's daemon runs as root and reads root's own home
-#          (edge). Root's home is /root on Linux and /var/root on macOS.
+#   system the component is installed at the MACHINE level and has TWO trees
+#          (edge, since the roots split): $COMP_HOME=$SYS_CONFIG_ROOT/$COMP
+#          holds what cannot be reconstructed and gets backed up — the identity,
+#          the console pin, the operator's config, the certs — and
+#          $COMP_DATA=$SYS_DATA_ROOT/$COMP holds what the daemon rewrites while
+#          it serves. Neither is derived from anybody's $HOME, which is the whole
+#          point: a root daemon under launchd gets no $HOME and under systemd
+#          gets whatever its unit carries.
+#   root   the component's daemon runs as root and reads root's own home.
+#          Root's home is /root on Linux and /var/root on macOS.
 #   user   the component installs and runs per-user (cli), so the tree belongs
 #          to the OPERATOR — $SUDO_USER's home when this was invoked through
 #          sudo, and $HOME otherwise. Never a bare $HOME: under sudo that is
 #          /root, a tree no per-user install ever wrote to, and a ladder aimed
 #          there evaluates an empty directory and reports a clean no-op.
 #
+# ONE TREE FOR EVERY SCHEME BUT `system`. $COMP_DATA is set to $COMP_HOME there,
+# so every rung can name it unconditionally and a component that never split —
+# cli above all — behaves exactly as it did before this variable existed.
+#
 # An explicit $COMP_HOME from the caller always wins — the installers resolve
 # it themselves and hand it down, so the runner and the installer can never
-# disagree about which tree was migrated.
+# disagree about which tree was migrated. For `system` the caller must name
+# BOTH or NEITHER: pairing a named tree with a defaulted one is how a run comes
+# to read config out of one install and write state into another, which is the
+# defect the split exists to end rather than to relocate.
 # ---------------------------------------------------------------------------
-if [ -z "${COMP_HOME:-}" ]; then
-    case "${COMP_HOME_SCHEME:-user}" in
-    root) COMP_HOME="$(root_home)/.burrowee/$COMP" ;;
-    user) COMP_HOME="$(operator_home)/.burrowee/$COMP" ;;
-    *)
-        warn "$CONF sets COMP_HOME_SCHEME='$COMP_HOME_SCHEME', which is neither 'root'"
-        warn "nor 'user'. Refusing rather than guessing which tree to migrate."
+case "${COMP_HOME_SCHEME:-user}" in
+system)
+    if [ -n "${COMP_HOME:-}" ] && [ -z "${COMP_DATA:-}" ]; then
+        warn "\$COMP_HOME was named ($COMP_HOME) but \$COMP_DATA was not, and $COMP has"
+        warn "TWO machine-owned trees. Refusing rather than pairing the tree you named"
+        warn "with a default one: that is how a run reads config from one install and"
+        warn "writes state into another. Name both:"
+        warn "  COMP_HOME=$COMP_HOME COMP_DATA=/path/to/var/burrowee/$COMP sh \$0"
         exit 1
-        ;;
-    esac
-fi
+    fi
+    if [ -z "${COMP_HOME:-}" ] && [ -n "${COMP_DATA:-}" ]; then
+        warn "\$COMP_DATA was named ($COMP_DATA) but \$COMP_HOME was not. Same refusal,"
+        warn "facing the other way — name both."
+        exit 1
+    fi
+    COMP_HOME="${COMP_HOME:-$SYS_CONFIG_ROOT/$COMP}"
+    COMP_DATA="${COMP_DATA:-$SYS_DATA_ROOT/$COMP}"
+    ;;
+root)
+    COMP_HOME="${COMP_HOME:-$(root_home)/.burrowee/$COMP}"
+    COMP_DATA="$COMP_HOME"
+    ;;
+user)
+    COMP_HOME="${COMP_HOME:-$(operator_home)/.burrowee/$COMP}"
+    COMP_DATA="$COMP_HOME"
+    ;;
+*)
+    warn "$CONF sets COMP_HOME_SCHEME='$COMP_HOME_SCHEME', which is none of 'system',"
+    warn "'root' or 'user'. Refusing rather than guessing which tree to migrate."
+    exit 1
+    ;;
+esac
 
 # VERSION_FILE is the anchor's name INSIDE $COMP_HOME. It is per-component
 # because the components already disagree: edge's installer has written
@@ -338,7 +383,7 @@ runs — the last line of output says whether that happened, and exit 2 alone do
 not mean everything is still up.
 
 Environment seams (the installers set these; see the file header):
-  COMP_HOME  PREFIX  BIN_DIR  ROOT_HOME  SUDO
+  COMP_HOME  COMP_DATA  PREFIX  BIN_DIR  ROOT_HOME  SUDO
 
 Exit codes: 0 nothing applied · 1 refused/failed · 2 ran · 3 ran but a receipt
 was lost · 64 the command line was wrong.
@@ -685,6 +730,7 @@ run_migration() {
     shift
     COMP="$COMP" \
         COMP_HOME="$COMP_HOME" \
+        COMP_DATA="$COMP_DATA" \
         BIN_DIR="$BIN_DIR" \
         STALE_USER_BINS="${STALE_USER_BINS:-}" \
         SUDO="$SUDO" \
@@ -709,7 +755,21 @@ run_migration() {
 # resolved through $SUDO_USER. A scan would be answering a question neither
 # component can ask.
 # ---------------------------------------------------------------------------
-if [ ! -d "$COMP_HOME" ]; then
+# AN ABSENT `system` ROOT IS THE PRE-MIGRATION STATE, NOT A MISPLACED TREE.
+#
+# The skip below asks "is the tree somewhere else?", and for a `user` or `root`
+# component that is the right question: the tree's location depends on whose
+# $HOME the caller ran under, so an absent one usually means the ladder is aimed
+# at the wrong account. A `system` component's roots are fixed by the layout —
+# there is no other place they could be — and their absence is exactly the state
+# the ladder exists to leave behind. Skipping there would refuse to run the rung
+# that CREATES the destination, on precisely the hosts that need it.
+if [ ! -d "$COMP_HOME" ] && [ "${COMP_HOME_SCHEME:-user}" = system ]; then
+    say "$COMP_HOME does not exist yet — this host has not converged on the"
+    say "machine-owned roots. Evaluating every migration anyway: for a system-scheme"
+    say "component an absent root is the state to migrate FROM, not a tree in the"
+    say "wrong place, and the rung that creates it is on this ladder."
+elif [ ! -d "$COMP_HOME" ]; then
     warn "SKIPPING every migration WITHOUT EVALUATING IT: $COMP_HOME does not exist."
     warn "if this host has a $COMP tree somewhere else, name it and re-run:"
     warn "  COMP_HOME=/path/to/.burrowee/$COMP sh $0"
@@ -725,6 +785,18 @@ if [ ! -d "$COMP_HOME" ]; then
         exit 1
     fi
     exit 0
+fi
+
+# SAY WHICH TREE(S) THIS RUN IS ABOUT, before any of them is read.
+#
+# Every skip, every receipt and every rung below is scoped to these directories,
+# and which ones they are depends on the component's scheme and on whose $HOME
+# the caller ran under. An operator reading this output otherwise has to know the
+# scheme to know what was evaluated — and the failure this whole ladder exists
+# for was a daemon reading a tree nobody had looked at.
+say "component tree $COMP_HOME"
+if [ "$COMP_DATA" != "$COMP_HOME" ]; then
+    say "data tree $COMP_DATA"
 fi
 
 # The named version REPLACES the file — installed_version() is not called at all
