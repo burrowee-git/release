@@ -96,21 +96,52 @@
 #     recorded". Repurposing it as a second gate would silently change what
 #     shipped migrations mean.
 #
-# *** THIS RUNNER STOPS NOTHING. ***
-# The gateway's runner stops its daemon because its rungs byte-copy a live
-# SQLite store. No rung on this runner's ladders touches live state — the 0.2.0
-# rung removes stale binaries from a directory no running unit may name, and it
-# refuses when one does. So exit 2 here means "migrations ran" and nothing else;
-# there is no service for the caller to start. A future rung that DOES need the
-# daemon at rest must add the stop, name itself in this header, and change what
-# exit 2 promises — it must not be added quietly under a code that today
-# promises the opposite.
+# *** THIS RUNNER STOPS NOTHING. A RUNG MAY, AND IT SAYS WHICH ONE. ***
+# The runner itself never stops or starts a service, and it never will: it does
+# not know what any component's units are called. But the promise this header
+# used to make — that NOTHING on its ladders needed a stop, so exit 2 could
+# never leave a daemon down — stopped being true with adopt_user_tree.sh, and
+# that rung is named here because the old text told whichever rung broke the
+# promise to do exactly that.
+#
+# WHY THE STOP EXISTS. adopt_user_tree.sh copies a pre-collapse per-user tree
+# into the tree a root-scheme daemon reads, and that daemon MINTS what it cannot
+# find — an identity, a bridge key — while the copy never overwrites. Copying
+# underneath it lets the minted keys win, and the host comes up with an identity
+# the console has never seen out of a migration that reported success. See that
+# rung's header.
+#
+# HOW THE RUNNER KNOWS, without learning about any component: the component
+# DECLARES it, in migrations/component.conf.
+#
+#     SERVICE_STOP_RUNGS="adopt_user_tree.sh"
+#
+# The mechanism of stopping — unit names, launchd versus systemd, the pid probe —
+# is component knowledge and stays inside the rung. What has to be visible HERE is
+# only the fact that a stop is possible, because a contract discovered after the
+# fact cannot be announced before it: the runner says "this run will stop the
+# <comp> daemon" BEFORE the rung runs, and says the daemon is down afterwards, and
+# upgrade.sh — which starts nothing — can tell an operator what they must start.
+#
+# A COMPONENT THAT DECLARES NONE IS UNAFFECTED, byte for byte. cli's
+# component.conf sets no SERVICE_STOP_RUNGS, so the announcement below never
+# fires on its ladder and its exit 2 means exactly what it always meant.
+#
+# EVERY NAME IN $SERVICE_STOP_RUNGS MUST BE IN THE LEDGER, and the run is refused
+# when one is not. A typo there does not fail loudly on its own — it just means
+# the announcement is never printed for the rung that does stop the daemon, which
+# is the one failure mode a declaration can have that the code cannot.
 #
 # EXIT CODES — the whole contract with every caller:
-#   0  nothing applied. Do whatever you would have done anyway.
+#   0  nothing applied. Do whatever you would have done anyway. Nothing was
+#      stopped.
 #   1  refused or failed. Either nothing was touched (a pre-flight declined) or
-#      a migration failed. Do NOT record a version.
-#   2  migrations ran. Record the version.
+#      a migration failed. Do NOT record a version. A rung that failed AFTER
+#      stopping the daemon says so on stderr.
+#   2  migrations ran. Record the version. IF one of the rungs that ran is named
+#      in the component's $SERVICE_STOP_RUNGS, the component's daemon is STOPPED
+#      and the caller must start it — the runner starts nothing. The last line of
+#      output says which of the two happened, every time.
 #   3  migrations ran, but at least one RECEIPT was not written. Do NOT record
 #      the version. The receipt and the version anchor are the two gates on a
 #      rung; with the receipt lost, recording the version closes the last one on
@@ -202,7 +233,29 @@ VERSION_FILE="${VERSION_FILE:-.installed-version}"
 
 BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
 SUDO="${SUDO:-sudo}"
+# Resolved HERE and exported to every rung by run_migration, for the same reason
+# $SUDO is: a rung that inherited a different supervisor than the runner probed
+# with would be acting on a different host. Only a stop-declaring rung reads
+# them; a component with no such rung is unaffected by their presence.
+LAUNCHCTL="${LAUNCHCTL:-launchctl}"
+SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 LEDGER_FILE="$HERE/ledger"
+
+# SERVICE_STOP_RUNGS — the rungs on THIS component's ladder that leave its daemon
+# stopped. Declared in migrations/component.conf; empty for every component that
+# has none, which is the whole of what keeps their behaviour unchanged.
+SERVICE_STOP_RUNGS="${SERVICE_STOP_RUNGS:-}"
+
+# stops_the_service <script> — whether the component declared this rung as one
+# that leaves the daemon down. Word-split, never a substring match: `case` on the
+# whole string would let "adopt_user_tree.sh" be answered for by a declaration of
+# "adopt_user_tree.sh.bak".
+stops_the_service() {
+    for _sts in $SERVICE_STOP_RUNGS; do
+        [ "$_sts" = "$1" ] && return 0
+    done
+    return 1
+}
 
 # THE RECEIPTS LIVE IN THE TREE THEY ARE ABOUT. The gateway puts them in the
 # single system config root and therefore has to record which tree each one was
@@ -279,8 +332,10 @@ A no-op unless one applies, so it is safe to run unconditionally.
   -h, --help
         Print this and exit 0.
 
-This runner stops no service: exit 2 means migrations ran, not that anything
-was left down.
+This runner starts no service, ever. It stops one only when a rung this
+component declares in migrations/component.conf's \$SERVICE_STOP_RUNGS actually
+runs — the last line of output says whether that happened, and exit 2 alone does
+not mean everything is still up.
 
 Environment seams (the installers set these; see the file header):
   COMP_HOME  PREFIX  BIN_DIR  ROOT_HOME  SUDO
@@ -405,6 +460,39 @@ if [ ! -f "$LEDGER_FILE" ]; then
     exit 1
 fi
 MIGRATIONS="$(sed -e 's/#.*$//' "$LEDGER_FILE")"
+
+# ---------------------------------------------------------------------------
+# THE STOP DECLARATION IS CROSS-CHECKED AGAINST THE LEDGER, and a mismatch is
+# fatal rather than skippable.
+#
+# $SERVICE_STOP_RUNGS is the only part of this contract that is a claim rather
+# than an observation: the runner cannot see that a rung stops a daemon, it can
+# only be told. The failure mode of a claim is a typo, and a typo here is silent
+# in the worst possible way — the rung still stops the daemon, the announcement
+# never prints, and exit 2 tells the caller everything is still up. So the names
+# are required to exist, before any rung runs and before anything is stopped.
+# ---------------------------------------------------------------------------
+for _ssr in $SERVICE_STOP_RUNGS; do
+    _ssr_found=0
+    _ssr_want=0
+    for _ssr_word in $MIGRATIONS; do
+        if [ "$_ssr_want" = 1 ]; then
+            _ssr_want=0
+            [ "$_ssr_word" = "$_ssr" ] && _ssr_found=1
+            continue
+        fi
+        _ssr_want=1
+    done
+    if [ "$_ssr_found" != 1 ]; then
+        warn "component.conf declares SERVICE_STOP_RUNGS='$SERVICE_STOP_RUNGS', but"
+        warn "'$_ssr' is not a script in $LEDGER_FILE."
+        warn "THIS RELEASE IS INCOMPLETE — refusing rather than running a ladder whose"
+        warn "stop declaration names a rung that does not exist: the rung that DOES stop"
+        warn "the daemon would then run unannounced, and exit 2 would tell the caller"
+        warn "nothing was left down. Nothing has been touched."
+        exit 1
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # installed_version — the recorded version of the component currently
@@ -600,6 +688,8 @@ run_migration() {
         BIN_DIR="$BIN_DIR" \
         STALE_USER_BINS="${STALE_USER_BINS:-}" \
         SUDO="$SUDO" \
+        LAUNCHCTL="$LAUNCHCTL" \
+        SYSTEMCTL="$SYSTEMCTL" \
         sh "$HERE/$_rm_script" "$@"
 }
 
@@ -811,13 +901,33 @@ fi
 
 say "pending: $_pending"
 
+# SAY IT BEFORE IT HAPPENS. An operator reading this mid-incident needs to know
+# the daemon is about to go down while they can still decide not to, and after
+# the fact is not that moment. This is the whole reason the stop is DECLARED in
+# component.conf rather than merely observed afterwards.
+_stopped=""
+for _script in $_pending; do
+    if stops_the_service "$_script"; then
+        say "$_script will STOP burrowee-$COMP before it copies, and this runner never"
+        say "starts anything — the caller does. See that rung's header for why the"
+        say "destination has to hold still."
+    fi
+done
+
 _unrecorded=""
 for _script in $_pending; do
     say "running $_script"
     if ! run_migration "$_script"; then
         warn "$_script FAILED. fix the cause above and re-run the installer;"
         warn "completed migrations are recorded and will not be repeated."
+        if stops_the_service "$_script"; then
+            warn "$_script is declared to stop burrowee-$COMP: it may have stopped the"
+            warn "daemon before it failed. Check, and start it if it is down."
+        fi
         exit 1
+    fi
+    if stops_the_service "$_script"; then
+        _stopped="${_stopped:+$_stopped }$_script"
     fi
     # A lost receipt does not stop the remaining rungs: the cheapest safe end
     # state is still "walk to the top, then report". The failure is carried to
@@ -834,8 +944,20 @@ if [ -n "$_unrecorded" ]; then
     warn "gate is the only gate left, and recording the version closes it forever on a"
     warn "rung whose completion nothing on this host can prove."
     warn "fix the cause above and re-run: every migration is idempotent."
+    if [ -n "$_stopped" ]; then
+        warn "burrowee-$COMP is also STOPPED (by $_stopped) — start it. A lost receipt"
+        warn "does not bring a daemon back up."
+    fi
     exit 3
 fi
 
-say "migrations complete."
+# THE LAST LINE IS ALWAYS ABOUT THE SERVICE, and it is two different sentences
+# rather than one hedged one. "A rung may have stopped it" is not something a
+# caller can act on; "it is stopped" and "nothing was stopped" are.
+if [ -n "$_stopped" ]; then
+    say "migrations complete — burrowee-$COMP is STOPPED (by $_stopped) and the caller"
+    say "must start it. This runner starts nothing."
+else
+    say "migrations complete — no service was stopped, so there is nothing to start."
+fi
 exit 2

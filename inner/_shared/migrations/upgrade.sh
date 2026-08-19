@@ -64,13 +64,32 @@
 #
 # EXIT CODES: run.sh's, verbatim (0 nothing applied · 1 refused/failed · 2 ran ·
 # 3 ran but a receipt was lost), plus 64 for a wrong command line, which is also
-# run.sh's code for that. THIS RUNNER STOPS NO SERVICE, so 2 means migrations
-# ran and nothing else — there is nothing here for an operator to restart.
+# run.sh's code for that.
+#
+# THIS SCRIPT STARTS NOTHING, AND FOR SOME LADDERS THAT MATTERS. The runner
+# itself stops nothing, but a RUNG may — a component declares which ones in
+# migrations/component.conf's $SERVICE_STOP_RUNGS, and adopt_user_tree.sh is the
+# first. install.sh and update.sh restart the daemon after walking the ladder;
+# this script deliberately does not install or restart anything, so on a
+# component with such a rung exit 2 can leave the daemon down. The runner's own
+# last line says whether it did, and the exit-2 note below points at it rather
+# than repeating a claim it cannot check.
 set -eu
 
 HERE="$(dirname "$0")"
 RUNNER="$HERE/run.sh"
 LEDGER="$HERE/ledger"
+CONF="$HERE/component.conf"
+
+# The component's own facts, for the exit-2 note only. Sourced defensively: an
+# absent or unreadable conf makes the note generic, and the runner has already
+# refused the whole run in that case anyway.
+COMP=""
+SERVICE_STOP_RUNGS=""
+if [ -f "$CONF" ]; then
+    # shellcheck source=/dev/null
+    . "$CONF"
+fi
 
 # A bare `say` prints a blank line rather than a bare prefix: the output below
 # is read mid-incident and the paragraphs are what make it readable.
@@ -299,8 +318,19 @@ case "$CODE" in
     say "was touched, or a rung failed."
     ;;
 2)
-    say "the migrations ran (exit 2). This runner stops no service, so there is"
-    say "nothing here for you to restart."
+    if [ -n "${SERVICE_STOP_RUNGS:-}" ]; then
+        # NOT "the daemon is down": this script forces every rung, and a rung
+        # that declined (nothing to adopt, already adopted) stopped nothing. The
+        # runner's last line is the one that knows, and pointing at it beats
+        # inventing a second, weaker answer here.
+        say "the migrations ran (exit 2). This ladder contains a rung that STOPS"
+        say "burrowee-${COMP:-<component>} ($SERVICE_STOP_RUNGS), and this script"
+        say "installs and starts nothing — read the runner's last line above: it says"
+        say "whether the daemon was left stopped. If it was, start it."
+    else
+        say "the migrations ran (exit 2). This ladder stops no service, so there is"
+        say "nothing here for you to restart."
+    fi
     ;;
 3)
     say "the migrations ran, but a receipt was lost (exit 3). The rung stays"

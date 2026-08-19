@@ -101,6 +101,14 @@ go 1.21
 EOF
 printf 'package main\n\nfunc main() { println("x") }\n' > "$BINFIX/ours/cmd/x/main.go"
 printf 'package main\n\nfunc main() { println("x") }\n' > "$BINFIX/foreign/cmd/x/main.go"
+# A binary that STAYS UP, for the adoption rung's liveness probe (cases 24+).
+# It has to be a real executable rather than a shell script: the probe reads
+# `ps -o args=`, and a script launched by its shebang appears as
+# "/bin/sh /path/burrowee-edge", so a shell stub would be testing whether the
+# pattern happens to match an interpreter's command line rather than whether it
+# recognises the daemon.
+mkdir -p "$BINFIX/ours/cmd/sleeper"
+printf 'package main\n\nimport "time"\n\nfunc main() { time.Sleep(300 * time.Second) }\n' > "$BINFIX/ours/cmd/sleeper/main.go"
 
 if ! command -v go >/dev/null 2>&1; then
     echo "FAIL: go is not on PATH — this suite's whole ownership claim rests on" >&2
@@ -109,6 +117,7 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 ( cd "$BINFIX/ours" && GOFLAGS=-mod=mod go build -trimpath -ldflags '-s -w' -o "$BINFIX/ours.bin" ./cmd/x ) || exit 1
 ( cd "$BINFIX/foreign" && GOFLAGS=-mod=mod go build -trimpath -ldflags '-s -w' -o "$BINFIX/foreign.bin" ./cmd/x ) || exit 1
+( cd "$BINFIX/ours" && GOFLAGS=-mod=mod go build -trimpath -ldflags '-s -w' -o "$BINFIX/sleeper.bin" ./cmd/sleeper ) || exit 1
 
 # The fixtures are only evidence if they differ in the one way the sweep reads.
 # Asserted rather than assumed: a toolchain change that stopped stamping the
@@ -130,8 +139,12 @@ fi
 kit() {
     _k_dir="$1"; _k_comp="$2"; _k_scheme="$3"; _k_vf="$4"; shift 4
     mkdir -p "$_k_dir/migrations"
-    cp "$SHARED"/run.sh "$SHARED"/upgrade.sh "$SHARED"/lib_paths.sh \
-       "$SHARED"/lib_stale_user_bins.sh "$SHARED"/stale_user_bins.sh "$_k_dir/migrations/"
+    # BY GLOB, exactly as tools/payload.sh's shared_migration_scripts stages
+    # them. The list used to be spelled out here, and a hand-written list is a
+    # list that stops matching: the first shared rung added after it was written
+    # would be absent from every kit this suite builds while being present in
+    # every kit that ships, so the suite would be testing a ladder nobody runs.
+    cp "$SHARED"/*.sh "$_k_dir/migrations/"
     chmod 0755 "$_k_dir/migrations"/*.sh
     {
         echo "COMP=$_k_comp"
@@ -919,6 +932,473 @@ assert_contains "$(tail -1 "$_region")" "SHARED SWEEP CONTRACT END" "the contrac
 assert_eq "$(sha256_of "$_region")" "$SWEEP_CONTRACT_DIGEST" \
     "the shared sweep contract region changed — apply the same edit to the gateway repo's copy and update the digest in BOTH"
 fi
+
+# ===========================================================================
+# THE ADOPTION RUNG (adopt_user_tree.sh) AND THE STOP IT NEEDS
+#
+# Everything below is about the rung that carries a pre-collapse per-user tree
+# into the tree a root-scheme daemon reads, and about the promise it broke:
+# run.sh's header used to say nothing on its ladders needed a stop.
+#
+# WHAT IS *NOT* TESTED HERE: the copy. That lives in the edge repo's
+# internal/adopt, with its own suite and its own mutation run — the refusal on a
+# truncated credential, the atomic publish, the never-overwrite rule and the
+# enumerated carried set are all proved there. Re-proving them against a shell
+# stub would prove only that the stub agrees with itself. What is proved here is
+# the rung's own half: which two trees it names, that it runs the cli at all,
+# that the daemon is DOWN before it does, and what the runner tells the caller
+# afterwards.
+# ===========================================================================
+
+# adopt_kit <dir> <comp> <scheme> <version-file> <bins…> — kit(), plus the
+# ledger row and the stop declaration a component with the adoption rung has.
+# The sweep row stays FIRST, exactly as edge's shipped ledger has it.
+adopt_kit() {
+    kit "$@"
+    _ak_dir="$1"
+    printf '# ledger\n0.2.0 stale_user_bins.sh\n0.2.0 adopt_user_tree.sh\n' > "$_ak_dir/migrations/ledger"
+    echo 'SERVICE_STOP_RUNGS="adopt_user_tree.sh"' >> "$_ak_dir/migrations/component.conf"
+}
+
+# make_cli_stub <bin-dir> <comp> — a stand-in for burrowee-<comp>-cli
+# implementing exactly what the rung asks of it: `migrate --help` exits 0, and
+# `migrate --from X --home Y` records its argv in $CLI_STUB_LOG and copies the
+# two files the cases below look for.
+#
+# NOT a reimplementation of the verb. The copy here exists only so the ladder
+# cases can assert that the destination ENDS UP HOLDING the files rather than
+# that the rung reported success — the two came apart on the production host
+# this whole rung exists for.
+make_cli_stub() {
+    _mcs_dir="$1"; _mcs_comp="$2"
+    mkdir -p "$_mcs_dir"
+    {
+        echo '#!/bin/sh'
+        echo "COMP_NAME=$_mcs_comp"
+        cat <<'STUB'
+echo "$*" >> "${CLI_STUB_LOG:-/dev/null}"
+[ "$1" = migrate ] || exit 2
+[ "$2" = --help ] && exit 0
+FROM=""; ROOT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --from) FROM="$2"; shift 2 ;;
+    --home) ROOT="$2"; shift 2 ;;
+    *) shift ;;
+    esac
+done
+[ -n "$FROM" ] && [ -n "$ROOT" ] || exit 64
+DST="$ROOT/$COMP_NAME"
+mkdir -p "$DST/identity"
+[ -f "$DST/identity/relay_ed.key" ] || cp "$FROM/identity/relay_ed.key" "$DST/identity/relay_ed.key" 2>/dev/null || true
+[ -f "$DST/config" ] || cp "$FROM/config" "$DST/config" 2>/dev/null || true
+echo "cli-stub: adopted $FROM -> $DST"
+STUB
+    } > "$_mcs_dir/burrowee-$_mcs_comp-cli"
+    chmod 0755 "$_mcs_dir/burrowee-$_mcs_comp-cli"
+}
+
+# make_supervisor_stub <dir> <mode> — a stand-in for systemctl AND launchctl, so
+# the case reads the same on Linux and macOS.
+#   kills   reads $STOP_PIDFILE and kills that process (a supervisor that works)
+#   inert   logs and does nothing (a container, or a unit that is not loaded)
+make_supervisor_stub() {
+    mkdir -p "$1"
+    make_reachable_sudo "$1"
+    {
+        echo '#!/bin/sh'
+        echo "echo \"\$*\" >> \"$1/supervisor.log\""
+        if [ "$2" = kills ]; then
+            echo 'if [ -f "${STOP_PIDFILE:-/nonexistent}" ]; then kill "$(cat "$STOP_PIDFILE")" 2>/dev/null || true; fi'
+        fi
+        echo 'exit 0'
+    } > "$1/supervisor"
+    chmod 0755 "$1/supervisor"
+}
+
+# make_reachable_sudo <dir> — a $SUDO that logs and EXECS its arguments.
+#
+# The other cases in this suite point $SUDO at /nonexistent-sudo, because the
+# sweep must never escalate. The adoption rung is the opposite: it runs as root
+# in production and pre-flights `elevate true` precisely so it can refuse BEFORE
+# stopping anything when it cannot. Pointing it at a sudo that cannot run would
+# make every case below a test of that one refusal — which has its own case (25b)
+# — instead of a test of the adoption.
+make_reachable_sudo() {
+    mkdir -p "$1"
+    {
+        echo '#!/bin/sh'
+        echo "echo \"\$*\" >> \"$1/sudo.log\""
+        echo 'exec "$@"'
+    } > "$1/sudo"
+    chmod 0755 "$1/sudo"
+}
+
+# start_fake_daemon <dir> <name> — a REAL running process whose argv[0] is
+# <dir>/<name>. Echoes its pid.
+#
+# ITS STDOUT AND STDERR GO TO /dev/null, and that is not tidiness. This function
+# is called inside `$( … )`, and a command substitution does not return until
+# every process holding the write end of its pipe has exited — a background child
+# that inherits it hangs the whole suite for the sleeper's full lifetime. It cost
+# one 600-second timeout to find.
+start_fake_daemon() {
+    mkdir -p "$1"
+    cp "$BINFIX/sleeper.bin" "$1/$2"
+    chmod 0755 "$1/$2"
+    "$1/$2" >/dev/null 2>&1 &
+    echo $!
+}
+
+# seed_per_user_tree <dir> — a paired, pre-collapse tree: the identity is the
+# evidence the rung keys on, and the config is the file the outage named.
+seed_per_user_tree() {
+    mkdir -p "$1/identity"
+    printf 'PRIVATE-KEY-BYTES\n' > "$1/identity/relay_ed.key"
+    printf 'host_fqdn=edge.example.org\ntls_listen=:443\n' > "$1/config"
+}
+
+# run_adopt_ladder <kit> <home> <comp-home> <bin-dir> <stub-dir> [args…]
+run_adopt_ladder() {
+    _ral_kit="$1"; _ral_home="$2"; _ral_ch="$3"; _ral_bin="$4"; _ral_stub="$5"; shift 5
+    CLI_STUB_LOG="$_ral_stub/cli.log"
+    OUT="$(
+        HOME="$_ral_home" \
+        COMP_HOME="$_ral_ch" \
+        BIN_DIR="$_ral_bin" \
+        LAUNCHD_DIR="$_ral_home/no-launchd" \
+        SYSTEMD_DIR="$_ral_home/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$_ral_home/nowhere" \
+        SUDO="${ADOPT_SUDO:-$_ral_stub/sudo}" \
+        SYSTEMCTL="$_ral_stub/supervisor" \
+        LAUNCHCTL="$_ral_stub/supervisor" \
+        CLI_STUB_LOG="$CLI_STUB_LOG" \
+        STOP_PIDFILE="${STOP_PIDFILE:-}" \
+        BURROWEE_MIGRATE_STOP_TIMEOUT="${BURROWEE_MIGRATE_STOP_TIMEOUT:-2}" \
+        sh "$_ral_kit/migrations/run.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+
+# ---------------------------------------------------------------------------
+# 22. admin-kr's EXACT STATE, driven through upgrade.sh — the case the rung
+#     exists for.
+#
+#     Per-user tree populated, root tree empty, anchor already reading 0.2.0
+#     (so the plain ladder's numeric gate can see nothing), and the operator
+#     running `upgrade.sh 0.2.0`, which is run.sh --installed-version 0.0.0
+#     --rerun-recorded.
+# ---------------------------------------------------------------------------
+t22="$TMP/t22"; adopt_kit "$t22" edge root installed-version $EDGE_BINS
+h22="$t22/home"; ch22="$h22/root-home/.burrowee/edge"; mkdir -p "$ch22"
+seed_per_user_tree "$h22/.burrowee/edge"
+seed_ours "$h22/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h22/usr-local-bin" edge
+mkdir -p "$h22/stubs"; make_supervisor_stub "$h22/stubs" kills
+echo "0.2.0.2026.08.19.78a2c91a" > "$ch22/installed-version"
+
+# 22a. THE PLAIN LADDER DOES NOTHING — the state the operator is stuck in. The
+#      anchor already says 0.2.0, so the numeric gate closes both rows.
+run_adopt_ladder "$t22" "$h22" "$ch22" "$h22/usr-local-bin" "$h22/stubs"
+assert_eq "$RC" 0 "a 0.2.0 anchor must make the plain ladder a no-op — this is why the host stayed broken"
+assert_gone "$ch22/identity/relay_ed.key" "the plain ladder must not have adopted anything"
+assert_contains "$OUT" "nothing applied" "the ladder must say it evaluated and declined, not exit silently"
+assert_lacks "$OUT" "is STOPPED" "a run that applied nothing may not claim a daemon is down"
+
+# 22b. upgrade.sh forces it. This is the path the operator actually uses.
+UPGRADE_OUT="$(
+    HOME="$h22" COMP_HOME="$ch22" BIN_DIR="$h22/usr-local-bin" \
+    LAUNCHD_DIR="$h22/no-launchd" SYSTEMD_DIR="$h22/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h22/nowhere" SUDO="$h22/stubs/sudo" \
+    SYSTEMCTL="$h22/stubs/supervisor" LAUNCHCTL="$h22/stubs/supervisor" \
+    CLI_STUB_LOG="$h22/stubs/cli.log" BURROWEE_MIGRATE_STOP_TIMEOUT=2 \
+    sh "$t22/migrations/upgrade.sh" 0.2.0 2>&1
+)"; UPGRADE_RC=$?
+assert_eq "$UPGRADE_RC" 2 "upgrade.sh must force the adoption on a 0.2.0-anchored host"
+assert_contains "$UPGRADE_OUT" "adopt_user_tree.sh (target 0.2.0)" "upgrade.sh must NAME the rungs before running them"
+assert_contains "$UPGRADE_OUT" "will STOP burrowee-edge" "the runner must announce the stop BEFORE the rung runs"
+assert_contains "$UPGRADE_OUT" "adopted $h22/.burrowee/edge" "the rung must say which tree it adopted"
+# THE DESTINATION ACTUALLY HOLDS THE FILES. "the rung reported adopted" and
+# "the daemon will find an identity" are exactly the two statements that came
+# apart on the production host, so the report is never the assertion.
+assert_present "$ch22/identity/relay_ed.key" "the destination must HOLD the identity, not merely be reported as adopted"
+assert_present "$ch22/config" "the destination must hold the config — host_fqdn is the file the outage named"
+assert_eq "$(cat "$ch22/config")" "$(cat "$h22/.burrowee/edge/config")" "the adopted config must be the source config"
+# COPY, NEVER MOVE.
+assert_present "$h22/.burrowee/edge/identity/relay_ed.key" "the per-user tree must survive — recovery is pointing the old unit back at it"
+# THE CLI IS WHAT DID THE COPY, with both trees named.
+assert_contains "$(cat "$h22/stubs/cli.log")" "migrate --from $h22/.burrowee/edge --home $h22/root-home/.burrowee" "the rung must exec the cli with the source tree and the destination ROOT"
+# AND THE CALLER IS TOLD THE DAEMON IS DOWN.
+assert_contains "$UPGRADE_OUT" "burrowee-edge is STOPPED" "the runner's last line must say the daemon is stopped"
+assert_contains "$UPGRADE_OUT" "read the runner's last line above" "upgrade.sh, which starts nothing, must point the operator at it"
+assert_present "$ch22/migration-receipts/adopt_user_tree.sh.done" "the runner must record the rung"
+
+# 22c. IDEMPOTENT, and honest about it: the receipt skips it, and the closing
+#      line goes back to saying nothing was stopped.
+run_adopt_ladder "$t22" "$h22" "$ch22" "$h22/usr-local-bin" "$h22/stubs"
+assert_eq "$RC" 0 "a second plain run must be a clean no-op"
+assert_contains "$OUT" "nothing applied" "the second run must decline on the receipt and say so"
+assert_lacks "$OUT" "is STOPPED" "nothing may claim the daemon is down on a run that ran nothing"
+
+# ---------------------------------------------------------------------------
+# 23. THE --applies BLINDNESS ASYMMETRY. Adoption applies when it CANNOT TELL.
+#
+#     Both pieces of evidence sit in 0700 trees — the destination is root's, the
+#     source is the operator's — and the probe is reached unprivileged all the
+#     time, because install.sh and update.sh run the runner as the invoking user.
+#     A probe that read "I could not see" as "already done" would skip the
+#     migration on precisely the hosts it exists for, silently.
+# ---------------------------------------------------------------------------
+if [ "$(id -u)" = 0 ]; then
+    fail "case 23 must not run as root: chmod 000 does not blind uid 0, so every
+      blindness assertion below would pass without measuring anything. Re-run
+      this suite as an unprivileged user."
+else
+
+# 23a. THE DESTINATION IS UNREADABLE and root is unreachable → still needed.
+t23="$TMP/t23"; adopt_kit "$t23" edge root installed-version $EDGE_BINS
+h23="$t23/home"; ch23="$h23/root-home/.burrowee/edge"; mkdir -p "$ch23/identity"
+seed_per_user_tree "$h23/.burrowee/edge"
+seed_ours "$h23/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h23/usr-local-bin" edge
+mkdir -p "$h23/stubs"; make_supervisor_stub "$h23/stubs" kills
+# The destination HAS an identity — so a probe that could read it would say "no".
+printf 'ALREADY-ADOPTED\n' > "$ch23/identity/relay_ed.key"
+chmod 000 "$ch23/identity"
+# The blindfold is asserted, not assumed. If this file were readable the case
+# below would be measuring the readable-presence path instead.
+if [ -r "$ch23/identity/relay_ed.key" ]; then
+    fail "case 23a fixture is readable — the blindness assertion would prove nothing"
+fi
+run_adopt_ladder "$t23" "$h23" "$ch23" "$h23/usr-local-bin" "$h23/stubs"
+assert_eq "$RC" 2 "an unreadable destination must answer STILL NEEDED, never 'already done'"
+assert_contains "$OUT" "adopt_user_tree.sh applies: no recorded version" "the probe must select the rung when it cannot see"
+chmod 700 "$ch23/identity"
+
+# 23b. THE SAME DESTINATION, NOW READABLE, holding an identity → does NOT apply.
+#      This is the other half: without it, "always answers yes" would pass 23a.
+t23b="$TMP/t23b"; adopt_kit "$t23b" edge root installed-version $EDGE_BINS
+h23b="$t23b/home"; ch23b="$h23b/root-home/.burrowee/edge"; mkdir -p "$ch23b/identity"
+seed_per_user_tree "$h23b/.burrowee/edge"
+seed_ours "$h23b/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h23b/usr-local-bin" edge
+mkdir -p "$h23b/stubs"; make_supervisor_stub "$h23b/stubs" kills
+printf 'ALREADY-ADOPTED\n' > "$ch23b/identity/relay_ed.key"
+run_adopt_ladder "$t23b" "$h23b" "$ch23b" "$h23b/usr-local-bin" "$h23b/stubs"
+assert_contains "$OUT" "adopt_user_tree.sh skipped: no recorded version" "a READABLE identity at the destination is positive evidence the rung has run"
+assert_eq "$(cat "$ch23b/identity/relay_ed.key")" "ALREADY-ADOPTED" "an already-adopted destination must not be touched"
+
+# 23c. THE SOURCE IS UNREADABLE → still needed. The same asymmetry facing the
+#      other way: "I cannot read the operator's 0700 tree" and "there is nothing
+#      in it" are what a bare `-s` cannot tell apart, and reading the second as
+#      the first skips the rung on the host that has the state.
+t23c="$TMP/t23c"; adopt_kit "$t23c" edge root installed-version $EDGE_BINS
+h23c="$t23c/home"; ch23c="$h23c/root-home/.burrowee/edge"; mkdir -p "$ch23c"
+seed_per_user_tree "$h23c/.burrowee/edge"
+seed_ours "$h23c/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h23c/usr-local-bin" edge
+mkdir -p "$h23c/stubs"; make_supervisor_stub "$h23c/stubs" kills
+chmod 000 "$h23c/.burrowee/edge/identity"
+if [ -r "$h23c/.burrowee/edge/identity/relay_ed.key" ]; then
+    fail "case 23c fixture is readable — the blindness assertion would prove nothing"
+fi
+OUT="$(HOME="$h23c" COMP_HOME="$ch23c" BIN_DIR="$h23c/usr-local-bin" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h23c/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t23c/migrations/adopt_user_tree.sh" --applies 2>&1)"; RC=$?
+assert_eq "$RC" 0 "an unreadable SOURCE must answer STILL NEEDED, never 'nothing to adopt'"
+chmod 700 "$h23c/.burrowee/edge/identity"
+
+# 23d. A PER-USER TREE WITH NO IDENTITY, fully readable → does NOT apply. An
+#      unenrolled tree has nothing to carry, and claiming otherwise would leave a
+#      misleading receipt on every fresh host.
+t23d="$TMP/t23d"; adopt_kit "$t23d" edge root installed-version $EDGE_BINS
+h23d="$t23d/home"; ch23d="$h23d/root-home/.burrowee/edge"; mkdir -p "$ch23d" "$h23d/.burrowee/edge"
+OUT="$(HOME="$h23d" COMP_HOME="$ch23d" BIN_DIR="$h23d/usr-local-bin" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h23d/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t23d/migrations/adopt_user_tree.sh" --applies 2>&1)"; RC=$?
+assert_eq "$RC" 1 "an unenrolled per-user tree has nothing to adopt"
+
+fi   # not root
+
+# ---------------------------------------------------------------------------
+# 24. THE STOP IS A POST-CONDITION, NOT A REQUEST.
+#
+#     A daemon that is still up after the supervisor was asked to stop it is a
+#     daemon that is still WRITING: burrowee-edge mints identity/relay_ed.key and
+#     bridge/bridge_ed.key when it cannot find them, and the copy never
+#     overwrites, so the minted keys win. The rung must refuse rather than copy
+#     into a moving tree.
+# ---------------------------------------------------------------------------
+t24="$TMP/t24"; adopt_kit "$t24" edge root installed-version $EDGE_BINS
+h24="$t24/home"; ch24="$h24/root-home/.burrowee/edge"; mkdir -p "$ch24" "$h24/stubs"
+seed_per_user_tree "$h24/.burrowee/edge"
+seed_ours "$h24/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h24/usr-local-bin" edge
+make_supervisor_stub "$h24/stubs" inert          # a supervisor that cannot stop it
+D24_PID="$(start_fake_daemon "$h24/daemon" burrowee-edge)"
+printf '{"pid": %s, "version": "0.2.0"}\n' "$D24_PID" > "$ch24/running.json"
+STOP_PIDFILE=""; export STOP_PIDFILE
+run_adopt_ladder "$t24" "$h24" "$ch24" "$h24/usr-local-bin" "$h24/stubs"
+assert_eq "$RC" 1 "a daemon still running after the stop must FAIL the rung, not be copied under"
+assert_contains "$OUT" "REFUSING to copy into" "the refusal must say what it refused and why"
+assert_gone "$ch24/identity/relay_ed.key" "nothing may be copied into a tree a daemon is still writing"
+assert_eq "$(cat "$h24/stubs/cli.log" 2>/dev/null | grep -c '^migrate --from' || true)" "0" "the cli must never be exec'd once the stop failed"
+assert_present "$h24/.burrowee/edge/identity/relay_ed.key" "the per-user tree is untouched by a refusal"
+kill "$D24_PID" 2>/dev/null || true
+
+# 24b. THE SAME FIXTURE WITH A SUPERVISOR THAT WORKS — the rung proceeds.
+#      This is what makes 24 an assertion about the STOP rather than about
+#      "there was a running.json": right and wrong would otherwise produce the
+#      same refusal.
+t24b="$TMP/t24b"; adopt_kit "$t24b" edge root installed-version $EDGE_BINS
+h24b="$t24b/home"; ch24b="$h24b/root-home/.burrowee/edge"; mkdir -p "$ch24b" "$h24b/stubs"
+seed_per_user_tree "$h24b/.burrowee/edge"
+seed_ours "$h24b/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h24b/usr-local-bin" edge
+make_supervisor_stub "$h24b/stubs" kills
+D24B_PID="$(start_fake_daemon "$h24b/daemon" burrowee-edge)"
+printf '{"pid": %s, "version": "0.2.0"}\n' "$D24B_PID" > "$ch24b/running.json"
+STOP_PIDFILE="$h24b/daemon.pid"; echo "$D24B_PID" > "$STOP_PIDFILE"; export STOP_PIDFILE
+run_adopt_ladder "$t24b" "$h24b" "$ch24b" "$h24b/usr-local-bin" "$h24b/stubs"
+assert_eq "$RC" 2 "with the daemon actually stopped the rung must proceed"
+assert_present "$ch24b/identity/relay_ed.key" "and the identity must land"
+assert_contains "$(cat "$h24b/stubs/supervisor.log")" "stop burrowee-edge" "the stop must go through the supervisor seam"
+assert_lacks "$(cat "$h24b/stubs/supervisor.log")" "burrowee-edge-updater" "the UPDATER must never be stopped — update.sh runs under it"
+STOP_PIDFILE=""; export STOP_PIDFILE
+kill "$D24B_PID" 2>/dev/null || true
+
+# 24c. A RUNNING burrowee-edge-updater IS NOT THE DAEMON. The liveness pattern
+#      terminates, so a longer basename does not match — without this the rung
+#      would refuse forever on every host that runs an updater, which is all of
+#      the ones that take a push update.
+t24c="$TMP/t24c"; adopt_kit "$t24c" edge root installed-version $EDGE_BINS
+h24c="$t24c/home"; ch24c="$h24c/root-home/.burrowee/edge"; mkdir -p "$ch24c" "$h24c/stubs"
+seed_per_user_tree "$h24c/.burrowee/edge"
+seed_ours "$h24c/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h24c/usr-local-bin" edge
+make_supervisor_stub "$h24c/stubs" inert
+D24C_PID="$(start_fake_daemon "$h24c/daemon" burrowee-edge-updater)"
+printf '{"pid": %s, "version": "0.2.0"}\n' "$D24C_PID" > "$ch24c/running.json"
+run_adopt_ladder "$t24c" "$h24c" "$ch24c" "$h24c/usr-local-bin" "$h24c/stubs"
+assert_eq "$RC" 2 "a running burrowee-edge-updater must not read as a live burrowee-edge"
+assert_present "$ch24c/identity/relay_ed.key" "and the adoption must proceed"
+kill "$D24C_PID" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 25. EVERY PRE-FLIGHT RUNS BEFORE THE STOP. Discovering a missing cli after the
+#     daemon is down turns a refusal that cost nothing into an outage, on a host
+#     that is mid-upgrade with freshly swapped binaries.
+# ---------------------------------------------------------------------------
+t25="$TMP/t25"; adopt_kit "$t25" edge root installed-version $EDGE_BINS
+h25="$t25/home"; ch25="$h25/root-home/.burrowee/edge"; mkdir -p "$ch25" "$h25/stubs" "$h25/usr-local-bin"
+seed_per_user_tree "$h25/.burrowee/edge"
+make_supervisor_stub "$h25/stubs" kills
+D25_PID="$(start_fake_daemon "$h25/daemon" burrowee-edge)"
+printf '{"pid": %s, "version": "0.2.0"}\n' "$D25_PID" > "$ch25/running.json"
+STOP_PIDFILE="$h25/daemon.pid"; echo "$D25_PID" > "$STOP_PIDFILE"; export STOP_PIDFILE
+run_adopt_ladder "$t25" "$h25" "$ch25" "$h25/usr-local-bin" "$h25/stubs"
+assert_eq "$RC" 1 "no cli in \$BIN_DIR must fail the rung"
+assert_contains "$OUT" "nothing has been stopped" "the refusal must say the daemon was left alone"
+assert_lacks "$(cat "$h25/stubs/supervisor.log" 2>/dev/null || echo "")" "stop" "the supervisor must not have been asked to stop anything"
+if ! kill -0 "$D25_PID" 2>/dev/null; then
+    fail "case 25: the daemon was stopped before the pre-flight refused"
+fi
+CASES=$((CASES + 1))
+STOP_PIDFILE=""; export STOP_PIDFILE
+kill "$D25_PID" 2>/dev/null || true
+
+# 25b. THE OTHER PRE-FLIGHT: root is not reachable. On the console-push path
+#      $SUDO carries -n and there is no terminal to prompt on, so this is a real
+#      state rather than a hypothetical — and finding it out after the daemon is
+#      down is an outage where a refusal costs nothing.
+t25b="$TMP/t25b"; adopt_kit "$t25b" edge root installed-version $EDGE_BINS
+h25b="$t25b/home"; ch25b="$h25b/root-home/.burrowee/edge"; mkdir -p "$ch25b" "$h25b/stubs"
+seed_per_user_tree "$h25b/.burrowee/edge"
+seed_ours "$h25b/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h25b/usr-local-bin" edge
+make_supervisor_stub "$h25b/stubs" kills
+D25B_PID="$(start_fake_daemon "$h25b/daemon" burrowee-edge)"
+printf '{"pid": %s, "version": "0.2.0"}\n' "$D25B_PID" > "$ch25b/running.json"
+STOP_PIDFILE="$h25b/daemon.pid"; echo "$D25B_PID" > "$STOP_PIDFILE"; export STOP_PIDFILE
+ADOPT_SUDO=/nonexistent-sudo run_adopt_ladder "$t25b" "$h25b" "$ch25b" "$h25b/usr-local-bin" "$h25b/stubs"
+assert_eq "$RC" 1 "an unreachable root must fail the rung"
+assert_contains "$OUT" "cannot reach root" "the refusal must name the cause"
+assert_contains "$OUT" "nothing has been stopped" "and say the daemon was left alone"
+if ! kill -0 "$D25B_PID" 2>/dev/null; then
+    fail "case 25b: the daemon was stopped before the elevation pre-flight refused"
+fi
+CASES=$((CASES + 1))
+STOP_PIDFILE=""; export STOP_PIDFILE
+kill "$D25B_PID" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 26. THE cli COMPONENT IS UNCHANGED BY ALL OF THIS.
+#
+#     The runner is shared. adopt_user_tree.sh is staged into cli's kit too,
+#     because payload.sh globs the shared directory — so "cli is unaffected" is a
+#     claim about what its LEDGER and its component.conf say, and it is asserted
+#     rather than assumed.
+# ---------------------------------------------------------------------------
+t26="$TMP/t26"; kit "$t26" cli user .installed-version $CLI_BINS
+h26="$t26/home"; ch26="$h26/.burrowee/cli"; mkdir -p "$ch26" "$h26/stubs"
+seed_ours "$h26/.local/bin" $CLI_BINS
+seed_twins "$h26/usr-local-bin" $CLI_BINS
+make_supervisor_stub "$h26/stubs" kills
+assert_present "$t26/migrations/adopt_user_tree.sh" "the shared rung IS staged into cli's kit — that is what makes this case necessary"
+run_adopt_ladder "$t26" "$h26" "$ch26" "$h26/usr-local-bin" "$h26/stubs"
+assert_eq "$RC" 2 "cli's ladder still runs its sweep exactly as before"
+assert_contains "$OUT" "no service was stopped, so there is nothing to start" "a component that declares no stop rung gets the unchanged closing line"
+assert_lacks "$OUT" "will STOP" "nothing may announce a stop on a ladder that declares none"
+assert_lacks "$OUT" "is STOPPED" "and nothing may claim one afterwards"
+assert_lacks "$(cat "$h26/stubs/supervisor.log" 2>/dev/null || echo "")" "stop" "cli's ladder must not touch any supervisor"
+
+# 26b. upgrade.sh's exit-2 sentence for cli is the one it always was, VERBATIM.
+UPGRADE_OUT="$(
+    HOME="$h26" COMP_HOME="$ch26" BIN_DIR="$h26/usr-local-bin" \
+    LAUNCHD_DIR="$h26/no-launchd" SYSTEMD_DIR="$h26/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h26/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t26/migrations/upgrade.sh" 0.2.0 2>&1
+)"
+assert_contains "$UPGRADE_OUT" "This ladder stops no service, so there is" "cli's operator override must still say nothing was left down"
+assert_lacks "$UPGRADE_OUT" "read the runner's last line above" "and must not send a cli operator looking for a stop that cannot happen"
+
+# 26c. AND IF A user-SCHEME COMPONENT EVER DID NAME THE RUNG, it is inert: its
+#      operator tree IS its component tree, so there is nothing to adopt and the
+#      rung says so instead of copying a tree onto itself. This is the
+#      "does cli need an adoption rung?" question, answered in the suite.
+t26c="$TMP/t26c"; adopt_kit "$t26c" cli user .installed-version $CLI_BINS
+h26c="$t26c/home"; ch26c="$h26c/.burrowee/cli"; mkdir -p "$ch26c" "$h26c/stubs"
+seed_ours "$h26c/.local/bin" $CLI_BINS
+seed_twins "$h26c/usr-local-bin" $CLI_BINS
+make_supervisor_stub "$h26c/stubs" kills
+# --installed-version forces the gate: the probe DOES decline here (which is
+# itself correct — there is nothing to adopt), and the point of this case is what
+# the rung does when it is made to run anyway.
+run_adopt_ladder "$t26c" "$h26c" "$ch26c" "$h26c/usr-local-bin" "$h26c/stubs" --installed-version 0.0.0
+assert_contains "$OUT" "are the same directory" "a per-user component's two trees are one, and the rung must say so"
+assert_lacks "$(cat "$h26c/stubs/supervisor.log" 2>/dev/null || echo "")" "stop" "and it must stop nothing on the way to saying it"
+
+# ---------------------------------------------------------------------------
+# 27. THE STOP DECLARATION IS CROSS-CHECKED AGAINST THE LEDGER.
+#
+#     $SERVICE_STOP_RUNGS is the only part of this contract that is a claim
+#     rather than an observation, and the failure mode of a claim is a typo —
+#     which is silent in the worst way: the rung still stops the daemon, the
+#     announcement never prints, and exit 2 tells the caller everything is up.
+# ---------------------------------------------------------------------------
+t27="$TMP/t27"; adopt_kit "$t27" edge root installed-version $EDGE_BINS
+h27="$t27/home"; ch27="$h27/root-home/.burrowee/edge"; mkdir -p "$ch27" "$h27/stubs"
+seed_per_user_tree "$h27/.burrowee/edge"
+seed_ours "$h27/usr-local-bin" $EDGE_BINS
+make_cli_stub "$h27/usr-local-bin" edge
+make_supervisor_stub "$h27/stubs" kills
+sed -e 's/SERVICE_STOP_RUNGS="adopt_user_tree.sh"/SERVICE_STOP_RUNGS="adopt_user_treee.sh"/' \
+    "$t27/migrations/component.conf" > "$t27/migrations/component.conf.new"
+mv "$t27/migrations/component.conf.new" "$t27/migrations/component.conf"
+run_adopt_ladder "$t27" "$h27" "$ch27" "$h27/usr-local-bin" "$h27/stubs"
+assert_eq "$RC" 1 "a SERVICE_STOP_RUNGS name that is not in the ledger must refuse the whole run"
+assert_contains "$OUT" "is not a script in" "the refusal must name the value it could not reconcile"
+assert_gone "$ch27/identity/relay_ed.key" "and nothing may have been touched"
 
 # ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="

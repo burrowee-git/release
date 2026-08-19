@@ -125,9 +125,16 @@ func TestEdgeInstallLadderSweepsAndReceiptsIt(t *testing.T) {
 	_, _, out := runRootInstall(t, home, staging, sandboxLaunchd(home),
 		"BURROWEE_VERSION=edge/v0.2.0.2026.08.17.deadbeef")
 
+	// The closing line now says what happened TO THE SERVICE, because a rung on
+	// this runner's ladders can leave one stopped (adopt_user_tree.sh does; the
+	// component declares it in component.conf's SERVICE_STOP_RUNGS). This kit's
+	// synthesized ledger names only the sweep, which declares no stop — so the
+	// line asserted here is the "nothing was stopped" half, and asserting it
+	// rather than the old bare "migrations complete." is what keeps this test
+	// able to notice if the two ever swap.
 	assertContains(t, out,
 		"stale_user_bins.sh applies: installed 0.1.111 is older than 0.2.0",
-		"migrate: migrations complete.")
+		"migrate: migrations complete — no service was stopped, so there is nothing to start.")
 	for _, b := range edgeBins {
 		assertGone(t, filepath.Join(stale, b), "the ladder rung must remove the stale per-user copy")
 	}
