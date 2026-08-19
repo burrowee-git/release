@@ -83,6 +83,54 @@ operator_home() {
 }
 
 # ---------------------------------------------------------------------------
+# running_user_home — the home of the account this run is being made ON BEHALF
+# OF, or NOTHING. Empty output and a non-zero status mean "there is no running
+# user"; the caller must refuse, never substitute a tree of its own choosing.
+#
+# THIS IS NOT operator_home WITH A DIFFERENT NAME, and the difference is the
+# whole of a production outage. operator_home is a BEST EFFORT for the sweep,
+# which must not fail: with no $SUDO_USER it answers $HOME, whatever $HOME is,
+# because a sweep that resolved nothing would silently leave every shadowing
+# binary in place. An ADOPTION cannot take that trade — the tree it names is
+# copied into a destination that never overwrites, so one wrong answer is
+# unrecoverable — and $HOME under a root login shell is /root, a tree that is
+# nobody's per-user install.
+#
+# Three states, and they are not the same:
+#
+#   $SUDO_USER set        sudo names the account that invoked it. That account's
+#                         tree is the pre-collapse install. Unresolvable is a
+#                         FAILURE here, not a fallback to $HOME.
+#   unset, unprivileged   this IS the running user's own shell, so $HOME is
+#                         their home and the answer is exact.
+#   unset, euid 0         a ROOT LOGIN SHELL. No account invoked this, $HOME is
+#                         root's, and there is no running user at all — so this
+#                         fails rather than naming root's tree.
+# ---------------------------------------------------------------------------
+running_user_home() {
+    # Read into a local first so the $SUDO_USER dependency is one line a mutation
+    # can aim at, distinct from operator_home's identical-looking one. The two
+    # functions must be falsifiable separately or a single mutant "kills" both
+    # and neither claim is actually defended.
+    _ruh_user="${SUDO_USER:-}"
+    case "$_ruh_user" in
+    '' | root)
+        # `root` is treated as unset for the same reason it is in operator_home:
+        # `sudo -u root` names no per-user tree this is about.
+        if [ "$(id -u)" = 0 ]; then return 1; fi
+        [ -n "${HOME:-}" ] || return 1
+        echo "$HOME"
+        return 0
+        ;;
+    esac
+    if _ruh="$(home_of_user "$_ruh_user")" && [ -n "$_ruh" ]; then
+        echo "$_ruh"
+        return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # root_home — root's real home directory. $ROOT_HOME wins when the caller has
 # already resolved it (inner/edge/install.sh has, and its Go test harness
 # redirects it into a sandbox).

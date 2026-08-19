@@ -3,29 +3,25 @@
 # tree into the tree(s) this component's daemon actually reads.
 # Target version 0.2.0 (see the component's migrations/ledger).
 #
-# TWO POSSIBLE SOURCES, ROOT'S HOME FIRST, ONE TAKEN ENTIRELY. A host arriving
-# here is in one of two states and they are not the same directory:
+# ONE SOURCE: THE RUNNING USER'S HOME. ~<running user>/.burrowee/<comp>, and
+# there is no second candidate.
 #
-#   $ROOT_HOME/.burrowee/<comp>   a 0.2.0 host — either the collapse pointed a
-#                                 root daemon there, or the operator made the
-#                                 manual copy they were given during the outage.
-#   ~<operator>/.burrowee/<comp>  a pre-collapse host.
+# It PROVABLY holding identity/relay_ed.key is "adopt it"; it provably holding
+# none is "nothing to adopt"; not being able to SEE is "still needed".
 #
-# $ADOPT_FROM overrides the selection entirely. Otherwise the candidates are
-# tried in the order above and the FIRST that PROVABLY holds
-# identity/relay_ed.key is taken. Neither provably holding one is "nothing to
-# adopt"; not being able to SEE is "still needed". Both holding one names the
-# tree taken AND the tree left, with the ADOPT_FROM= line that takes the other.
+# The running user is $SUDO_USER when set, $HOME on an unprivileged run, and
+# NOBODY under a root login shell — where this REFUSES and names $ADOPT_FROM
+# rather than falling back to root's home. That fallback is not a hypothetical
+# risk: root's home used to be the FIRST candidate here, and on 2026-08-19 it
+# took an edge node down. See the SOURCE SELECTION block below for the whole
+# account of it.
 #
-# Root's tree wins because it is the one a 0.2.0 daemon has been READING AND
-# WRITING since the collapse, so it is strictly newer than the pre-collapse
-# ancestor it was made from — and the copy never overwrites, so adopting the
-# ancestor first would publish stale state into a destination that could then
-# never accept the newer.
+# $ADOPT_FROM overrides the selection entirely.
 #
 # ONE SOURCE ENTIRELY, NEVER GAP-FILLED: two enrolled trees can belong to two
 # different edges, and taking the identity from one and the bridge key from the
-# other yields a host that is neither — a mixture no re-run can undo.
+# other yields a host that is neither — a mixture no re-run can undo. With one
+# candidate there is no longer a second tree to take anything from.
 #
 # TWO DESTINATIONS where the component declares them. A `system`-scheme
 # component has a CONFIG tree ($COMP_HOME) and a DATA tree ($COMP_DATA); the cli
@@ -63,9 +59,9 @@
 #               header on --installed-version).
 #
 #               IT ANSWERS "STILL NEEDED" WHENEVER IT CANNOT TELL. Every piece of
-#               evidence sits in a 0700 tree — the destination is root-owned, and
-#               so is one of the two candidate sources — and this probe is
-#               reached unprivileged all the
+#               evidence sits in a 0700 tree — the destination is root-owned, the
+#               source is the running user's — and this probe is reached
+#               unprivileged all the
 #               time, because install.sh and update.sh run the runner as the
 #               invoking user and elevate the individual steps. A blind probe that
 #               guessed "already done" would silently skip the migration on the
@@ -243,48 +239,66 @@ holds_identity() {
 }
 
 # ---------------------------------------------------------------------------
-# SOURCE SELECTION — two candidates, ROOT'S HOME FIRST, one taken ENTIRELY.
+# SOURCE SELECTION — THE RUNNING USER'S HOME, AND NOTHING ELSE.
 #
-# WHY TWO. A host arriving here is in one of two states, and they are not the
-# same tree. A pre-collapse host has its state in the OPERATOR's
-# ~/.burrowee/$COMP. A 0.2.0 host has it in ROOT's — either because the collapse
-# put a root daemon there, or because the operator was handed a manual copy
-# during the outage and made one.
+# There is ONE candidate. There used to be two, root's home first, and that
+# precedence took a production edge down on 2026-08-19.
 #
-# WHY ROOT'S FIRST. Root's tree is the one a 0.2.0 daemon has been READING AND
-# WRITING since the collapse (or since that manual copy), so it is strictly newer
-# than the pre-collapse ancestor it was made from. The copy never overwrites, so
-# adopting the older tree first would publish stale `config` and a stale manifest
-# into a destination that can then never accept the newer ones — a mis-ordering
-# no re-run can undo.
+# WHY ROOT'S HOME WAS EVER FIRST. The reasoning was "root's tree is the one a
+# 0.2.0 daemon has been reading and writing since the collapse, so it is
+# strictly newer than the pre-collapse ancestor it was made from". That
+# reasoning assumed root's tree got there BY MIGRATION. On admin-kr it got there
+# by a manual copy, and two days of a crash-looping daemon then reduced it to a
+# single line:
 #
-# WHY ONE SOURCE ENTIRELY, NEVER GAP-FILLED. Two enrolled trees can belong to two
-# different edges. Taking the identity from one and the bridge key from the other
-# would produce a host that is neither: host A's node identity presenting host B's
-# bridge key, rejected by every peer in B's authorized_keys and unknown to the
-# console under A's. That mixture is unrecoverable by re-running, because the
-# copy never overwrites what it published.
+#     adopted  /usr/local/etc/burrowee/edge/config   lan_listen=127.0.0.1:9448
+#     real     /home/ubuntu/.burrowee/edge/config    tls_listen=127.0.0.1:9443
+#                                                    lan_listen=127.0.0.1:9448
+#                                                    serve_mode=frontier
+#                                                    allow_push_update=true
+#                                                    host_fqdn=admin-kr.faranow.com
 #
-# $ADOPT_FROM overrides the whole selection — the operator has named the tree,
-# and a rung that then went looking for a "better" one would be second-guessing
-# the person recovering the host.
+# NEWEST AND RICHEST DIVERGE EXACTLY WHEN THE NEWER TREE IS A DAEMON-WRITTEN
+# STUB. The identity, the bridge keys and the receipts came across correctly;
+# only the config was degraded — and with no tls_listen the daemon tried to bind
+# privileged :443 unprivileged and crash-looped. The copy never overwrites, so
+# no re-run could heal it.
+#
+# THE RULE NOW. The source is the tree of the account this run is being made on
+# behalf of, resolved by lib_paths.sh's running_user_home:
+#
+#   * $SUDO_USER when set — the account that invoked sudo, i.e. the one whose
+#     tree holds the pre-collapse install.
+#   * $HOME on an unprivileged run, where this IS that account's own shell.
+#   * NOTHING under a root login shell ($SUDO_USER unset, euid 0). There is no
+#     running user, so there is no source, and this REFUSES naming $ADOPT_FROM
+#     rather than quietly taking root's home. The quiet fallback is the defect.
+#
+# $ADOPT_FROM still overrides the whole selection — the operator has named the
+# tree, and a rung that then went looking for a "better" one would be
+# second-guessing the person recovering the host.
+#
+# ONE SOURCE ENTIRELY, NEVER GAP-FILLED, still holds and is now trivially true:
+# with one candidate there is no second tree to take the bridge key from. That
+# mixture — host A's node identity presenting host B's bridge key — is what the
+# rule was written against, and removing the second candidate removes the way in.
 # ---------------------------------------------------------------------------
-SRC=""          # the tree this run will adopt from ("" = none selected)
-SRC_LEFT=""     # a second enrolled tree that was NOT taken, if there is one
-SRC_BLIND=0     # 1 = at least one candidate could not be read at all
+SRC=""              # the tree this run will adopt from ("" = none selected)
+SRC_BLIND=0         # 1 = the candidate could not be read at all
+NO_RUNNING_USER=0   # 1 = nothing named a running user, so there is no candidate
 
 if [ -n "${ADOPT_FROM:-}" ]; then
     SRC="$ADOPT_FROM"
-else
-    for _cand in "$(root_home)/.burrowee/$COMP" "$(operator_home)/.burrowee/$COMP"; do
-        is_a_destination "$_cand" && continue
-        # A candidate that IS the one already selected is the same tree named
-        # twice (a root login shell, where operator_home resolves to root's).
-        [ -n "$SRC" ] && [ "$(canon "$_cand")" = "$(canon "$SRC")" ] && continue
+elif _run_home="$(running_user_home)" && [ -n "$_run_home" ]; then
+    _cand="$_run_home/.burrowee/$COMP"
+    # THE GUARD THAT MAKES A SHARED RUNG INERT for a component whose daemon never
+    # moved: cli is a `user`-scheme component whose tree IS the running user's,
+    # so it is skipped as a CANDIDATE rather than selected and then rejected.
+    if ! is_a_destination "$_cand"; then
         # `if`, not a bare call followed by `case $?`: this script runs under
         # `set -e`, and a bare command that exits 1 or 2 ends the run. That is
-        # not hypothetical — it is how the first cut of this loop aborted the
-        # whole rung the moment a candidate did not hold an identity, with no
+        # not hypothetical — it is how the first cut of this selection aborted
+        # the whole rung the moment the candidate held no identity, with no
         # output at all.
         if holds_identity "$_cand"; then
             _hi=0
@@ -292,10 +306,12 @@ else
             _hi=$?
         fi
         case "$_hi" in
-        0) if [ -z "$SRC" ]; then SRC="$_cand"; else SRC_LEFT="$_cand"; fi ;;
+        0) SRC="$_cand" ;;
         2) SRC_BLIND=1 ;;
         esac
-    done
+    fi
+else
+    NO_RUNNING_USER=1
 fi
 
 # ---------------------------------------------------------------------------
@@ -332,6 +348,10 @@ already_adopted() {
 nothing_to_adopt() {
     [ -n "$SRC" ] && return 1
     [ "$SRC_BLIND" = 1 ] && return 1
+    # No running user is not "nothing to adopt" either — it is "I was not told
+    # which tree to look at". Answering the first would skip the rung silently
+    # on a root login shell, which is a host that may well have state to carry.
+    [ "$NO_RUNNING_USER" = 1 ] && return 1
     return 0
 }
 
@@ -375,8 +395,7 @@ if [ -n "$SRC" ] && is_a_destination "$SRC"; then
 fi
 
 if nothing_to_adopt; then
-    say "no enrolled identity in $(root_home)/.burrowee/$COMP or $(operator_home)/.burrowee/$COMP"
-    say "— nothing to adopt."
+    say "no enrolled identity in $(running_user_home)/.burrowee/$COMP — nothing to adopt."
     say "(the identity is the evidence: a tree without one is an unenrolled tree, and"
     say "the daemon mints on first start.)"
     say "if the state is in a third tree, name it:"
@@ -384,28 +403,27 @@ if nothing_to_adopt; then
     exit 0
 fi
 
-if [ -z "$SRC" ]; then
-    warn "a candidate tree could not be read, so this rung cannot say whether there is"
-    warn "anything to adopt. Re-run as root, or name the tree:"
-    warn "  ADOPT_FROM=/path/to/.burrowee/$COMP sh $0"
+# NO RUNNING USER — REFUSE, AND NAME THE ESCAPE HATCH. This is the branch the
+# whole selection was rewritten around: root's home is one keystroke away and it
+# is the wrong answer, so the rung stops rather than substituting it.
+if [ "$NO_RUNNING_USER" = 1 ]; then
+    warn "REFUSING: this is a root login shell — \$SUDO_USER is unset, so no account"
+    warn "invoked this run and there is no running user whose tree could be adopted."
+    warn "root's own home is NOT the fallback: on a production node it held a copy a"
+    warn "crash-looping daemon had cut down to one line, and adopting it published"
+    warn "that stub into a destination the copy can never overwrite."
+    warn "name the tree and re-run:"
+    warn "  ADOPT_FROM=/home/<user>/.burrowee/$COMP sh $0"
     warn "nothing has been stopped and nothing has been copied."
     exit 1
 fi
 
-# BOTH TREES HOLD AN IDENTITY. Say which one is being taken AND which one is
-# being left, with the line that takes the other — an operator who discovers
-# afterwards that the wrong tree was adopted has no way back that this rung
-# provides, because the copy never overwrites.
-if [ -n "$SRC_LEFT" ]; then
-    say "TWO enrolled trees on this host. Taking $SRC and LEAVING $SRC_LEFT."
-    say "root's tree wins: a 0.2.0 daemon has been writing it since the collapse (or"
-    say "since the manual copy made during the outage), so it is newer than the"
-    say "pre-collapse tree it came from — and the copy never overwrites, so adopting"
-    say "the older one first would make the newer one unadoptable forever."
-    say "ONE tree is taken entirely, never gap-filled: two enrolled trees can belong"
-    say "to two different edges, and mixing them yields a host that is neither."
-    say "to take the other one instead, move $COMP_HOME aside and re-run:"
-    say "  ADOPT_FROM=$SRC_LEFT sh $0"
+if [ -z "$SRC" ]; then
+    warn "the running user's tree could not be read, so this rung cannot say whether"
+    warn "there is anything to adopt. Re-run as root, or name the tree:"
+    warn "  ADOPT_FROM=/path/to/.burrowee/$COMP sh $0"
+    warn "nothing has been stopped and nothing has been copied."
+    exit 1
 fi
 
 # EVERY PRE-FLIGHT RUNS BEFORE THE STOP. Discovering a missing cli after the
