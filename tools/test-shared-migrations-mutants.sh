@@ -39,7 +39,19 @@ mutate() {
     rm -rf "$_m_dir"
     mkdir -p "$_m_dir"
     cp "$SRC"/* "$_m_dir/"
-    sed -e "$_m_expr" "$SRC/$_m_file" > "$_m_dir/$_m_file"
+    # THE sed ITSELF MUST SUCCEED. A bad expression — most often a delimiter that
+    # also appears in the pattern — exits non-zero and leaves an EMPTY file
+    # behind, and an empty rung reddens every case that touches it. Three
+    # mutants were scored "killed" that way before this check existed, which is
+    # the same defect as a surviving one: a red suite that is red for a reason
+    # nobody claimed.
+    if ! sed -e "$_m_expr" "$SRC/$_m_file" > "$_m_dir/$_m_file" 2>"$TMP/$_m_name.sed"; then
+        echo "MUTANT EXPRESSION IS BROKEN: $_m_name — sed refused it:" >&2
+        sed -n '1,3p' "$TMP/$_m_name.sed" >&2
+        echo "  The file it left behind is empty, which reddens everything and proves nothing." >&2
+        SURVIVORS=$((SURVIVORS + 1))
+        return
+    fi
 
     if cmp -s "$SRC/$_m_file" "$_m_dir/$_m_file"; then
         echo "MUTANT NOT APPLIED: $_m_name — the sed matched nothing in $_m_file." >&2
@@ -89,8 +101,13 @@ mutate unit-guard-scoped-to-the-directory lib_stale_user_bins.sh \
 
 # The substring collision: with the terminator test gone, any occurrence counts,
 # so a unit naming burrowee-edge-updater spares burrowee-edge.
+# @-DELIMITED, and it has to be: this expression contains `||`, which with `|` as
+# the delimiter made sed refuse it outright. It then wrote an EMPTY file, the
+# suite reddened on every case that touches the sweep, and the mutant was scored
+# "killed" — a false kill that stood until the harness started checking sed's own
+# exit status.
 mutate basename-match-not-terminated lib_stale_user_bins.sh \
-    "s|^        \[ -n \"\$_lnb_l\" \] || return 0|        return 0|" \
+    "s@^        \[ -n \"\$_lnb_l\" \] .. return 0@        return 0@" \
     "the basename match TERMINATES — burrowee-edge-updater's unit does not protect burrowee-edge (case 7b)"
 
 mutate root-twin-ignored lib_stale_user_bins.sh \
@@ -214,6 +231,100 @@ mutate upgrade-swallows-the-code upgrade.sh \
 mutate upgrade-does-not-list-the-rungs upgrade.sh \
     "s|^ROWS=.*|ROWS=\"\"|" \
     "the rungs about to be re-run are NAMED before any of them runs (case 17b)"
+
+# --- the adoption rung, its stop, and the runner's contract around it -------
+#
+# Every mutant here is a plausible simplification of the rung rather than an
+# invented defect: each one is a thing somebody would write, and each is silent
+# in the direction that looks like success.
+
+# THE MOVING TARGET. Without the stop the copy runs while burrowee-edge is up,
+# and the daemon mints identity/relay_ed.key and bridge/bridge_ed.key into the
+# destination — which the copy then never overwrites, so the MINTED keys win and
+# the host comes up with an identity the console has never seen.
+mutate stop-dropped adopt_user_tree.sh \
+    "s|^if ! stop_component; then exit 1; fi|:|" \
+    "the rung REFUSES rather than copying under a daemon it could not stop (case 24)"
+
+# The other half of the same claim: asking is not stopping. A supervisor that
+# logs and does nothing is what a container, or an unloaded unit, looks like.
+# The FIRST attempt at this one replaced the WAIT loop with `while false`, and it
+# SURVIVED: skipping the wait leaves the post-condition below intact, so a daemon
+# that was never going to stop is still caught. A mutation that does not change
+# the answer for the case it is aimed at is indistinguishable from an assertion
+# that cannot fail, and the fix is a better mutant rather than a weaker claim.
+# This one deletes the post-condition itself, which is the actual simplification
+# somebody would write: the supervisor said 0, so it must be down.
+mutate stop-is-a-request-not-a-postcondition adopt_user_tree.sh \
+    "s@^    if comp_alive; then@    if false; then@" \
+    "the stop is verified against the running.json pid, not assumed from the supervisor's exit code (case 24)"
+
+# THE BLINDNESS ASYMMETRY, both directions. Getting either backwards silently
+# skips the migration on exactly the hosts it exists for.
+mutate blind-probe-answers-already-done adopt_user_tree.sh \
+    "s|^    elevate test -s \"\$DST/\$ID_REL\" >/dev/null 2>\&1|    return 0|" \
+    "an unreadable DESTINATION answers 'still needed', never 'already done' (case 23a)"
+
+mutate blind-source-answers-nothing-to-adopt adopt_user_tree.sh \
+    "s@^    src_is_readable_here .. return 1@    :@" \
+    "an unreadable SOURCE answers 'still needed', never 'nothing to adopt' (case 23c)"
+
+# With the destination check gone the rung would re-run forever on every adopted
+# host — the per-user tree survives the copy, so the source-side evidence alone
+# never stops saying yes. That is the dishonesty the gateway's probe had.
+mutate probe-ignores-the-destination adopt_user_tree.sh \
+    "s|^    if already_adopted; then exit 1; fi|    if false; then exit 1; fi|" \
+    "a destination that already holds an identity ends the rung's evaluation (case 23b)"
+
+# PRE-FLIGHTS BEFORE THE STOP. Reordered, the refusal costs an outage instead of
+# nothing, on a host mid-upgrade with freshly swapped binaries.
+# BOTH cli pre-flights, in one expression. Disabling only the `-x` check left the
+# `migrate --help` probe to refuse a moment later with the same "nothing has been
+# stopped" message, so the mutant survived — the guards overlap, and a mutation
+# aimed at one of two overlapping guards measures neither.
+mutate preflight-runs-after-the-stop adopt_user_tree.sh \
+    "s@^if \[ ! -x \"\$CLI\" \]; then@if false; then@; s@^if ! \"\$CLI\" migrate --help >/dev/null 2>\&1; then@if false; then@" \
+    "a missing cli refuses the rung before anything is stopped (case 25)"
+
+mutate elevation-not-preflighted adopt_user_tree.sh \
+    "s|^if ! elevate true >/dev/null 2>\&1; then|if false; then|" \
+    "an unreachable root refuses the rung before anything is stopped (case 25b)"
+
+# THE UPDATER MUST NEVER BE STOPPED — update.sh runs under it, so booting it out
+# kills the process running the ladder.
+mutate updater-stopped-too adopt_user_tree.sh \
+    "s@stop \"burrowee-\$COMP.service\" 2>/dev/null@stop \"burrowee-\$COMP-updater.service\" 2>/dev/null@" \
+    "only the daemon is stopped, never the updater (case 24b)"
+
+# The substring collision, on the liveness side this time: with the terminator
+# gone a running burrowee-edge-updater reads as a live burrowee-edge and the rung
+# refuses forever on every host that takes push updates.
+mutate liveness-match-not-terminated adopt_user_tree.sh \
+    's@^    "burrowee-$COMP "[*] | [*]"/burrowee-$COMP "[*]) return 0 ;;@    *"burrowee-$COMP"*) return 0 ;;@' \
+    "a running burrowee-<comp>-updater is not the daemon (case 24c)"
+
+# The guard that makes a SHARED rung inert for a per-user component.
+mutate same-tree-guard-removed adopt_user_tree.sh \
+    "s|^if same_tree; then\$|if false; then|" \
+    "a component whose two trees are one is told so, not copied onto itself (case 26c)"
+
+# --- the runner's half of the stop contract ---------------------------------
+
+mutate stop-declaration-ignored run.sh \
+    "s|^    for _sts in \$SERVICE_STOP_RUNGS; do|    for _sts in ; do|" \
+    "the runner announces the stop and says the daemon is down afterwards (case 22b)"
+
+mutate stop-declaration-always-fires run.sh \
+    "s|^    return 1\$|    return 0|" \
+    "a component that declares no stop rung gets the unchanged closing line (case 26)"
+
+mutate stop-crosscheck-decorative run.sh \
+    "s|^    if \[ \"\$_ssr_found\" != 1 \]; then|    if false; then|" \
+    "a SERVICE_STOP_RUNGS name that is not in the ledger refuses the run (case 27)"
+
+mutate upgrade-exit2-note-unconditional upgrade.sh \
+    "s|^    if \[ -n \"\${SERVICE_STOP_RUNGS:-}\" \]; then|    if true; then|" \
+    "cli's operator override still says nothing was left down (case 26b)"
 
 echo "== $RUN mutants, $SURVIVORS survived =="
 [ "$SURVIVORS" = 0 ] || exit 1
