@@ -98,8 +98,26 @@
 # rewrite would be a bad trade: a half-written relay_ed.key published once under
 # its final name can never be healed by re-running.
 #
-# COPY, NEVER MOVE. The per-user tree is left in place, so an adoption that goes
-# wrong is recovered by pointing the old unit back at it. Enforced on the Go side.
+# COPY, NEVER MOVE — FILE BY FILE. Nothing under the per-user tree is created,
+# changed or removed by the copy. Enforced on the Go side.
+#
+# AND THEN THE TREE ITSELF IS RETIRED. Once the copy VERIFIES — every file the
+# source offered is at its destination byte for byte — the cli renames the source
+# to `<tree>.bak.<YYYYMMDD-HHMMSS>` and prints the new path. An adoption that goes
+# wrong is still recovered by pointing the old unit back at it; what changed is
+# the name, and the name is in the report.
+#
+# WHY, AND IT IS NOT TIDINESS. A verified adoption leaves a retired duplicate at
+# the name every later probe treats as live state, and nothing downstream can tell
+# it from a second enrolled node. Minutes after a WORKING adoption on admin-kr —
+# identity matched, host cert valid, the console had pushed a fresh signed config
+# thirteen seconds earlier — `doctor` reported the per-user tree as "a different
+# edge" and prescribed THIS ladder's forced re-adoption, which would have
+# overwritten that thirteen-second-old manifest with a two-day-old one.
+#
+# ONLY AFTER THE COPY VERIFIES. A FAILED adoption, and the never-overwrite skip on
+# a destination that already holds a different identity, both leave the source at
+# its live name — which is exactly the tree the forced re-run below needs.
 #
 # IDEMPOTENT. A second run finds every destination present, copies nothing, and
 # says so — which is what makes it safe for install.sh and for update.sh.
@@ -650,5 +668,9 @@ elif [ "$DST_DATA" != "$COMP_HOME" ]; then
 else
     say "adopted $SRC → $COMP_HOME"
 fi
-say "the per-user tree is left intact; remove it by hand once the $COMP is healthy"
+# NOT "the per-user tree is left intact". The cli retires the tree it verified,
+# and it is the only thing here that knows the new name — it prints it, with the
+# one-`mv` recovery, in the report above. A line here that claimed the tree was
+# still at its old name would contradict the line the operator just read.
+say "where the per-user tree went, and how to put it back, is in the report above"
 say "burrowee-$COMP is STOPPED — the caller starts it (see run.sh's exit 2)"
