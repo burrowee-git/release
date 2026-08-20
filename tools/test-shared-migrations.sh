@@ -977,6 +977,11 @@ adopt_kit() {
 # cases can assert that the destination ENDS UP HOLDING the files rather than
 # that the rung reported success — the two came apart on the production host
 # this whole rung exists for.
+#
+# IT ALSO RETIRES THE SOURCE, because that is now part of the same contract: the
+# real verb renames the tree it verified to <tree>.bak.<stamp> and prints the new
+# path, and a stub that left the source at its live name would let a case assert a
+# state the shipped cli never produces.
 make_cli_stub() {
     _mcs_dir="$1"; _mcs_comp="$2"
     mkdir -p "$_mcs_dir"
@@ -1012,9 +1017,35 @@ else
     [ -f "$DST/config" ] || cp "$FROM/config" "$DST/config" 2>/dev/null || true
 fi
 echo "cli-stub: adopted $FROM -> $DST"
+# RETIRE THE SOURCE, exactly as the verb does: only after the copy, only when the
+# destination actually holds the identity, and by RENAME so every byte survives.
+if [ -s "$DST/identity/relay_ed.key" ] && [ -d "$FROM" ]; then
+    RETIRED="$FROM.bak.$(date -u +%Y%m%d-%H%M%S)"
+    if mv "$FROM" "$RETIRED" 2>/dev/null; then
+        echo "cli-stub: retired $FROM -> $RETIRED"
+    fi
+fi
 STUB
     } > "$_mcs_dir/burrowee-$_mcs_comp-cli"
     chmod 0755 "$_mcs_dir/burrowee-$_mcs_comp-cli"
+}
+
+# retired_tree <live-path> — the single <live-path>.bak.<stamp> the cli renamed
+# that tree to, or "" when there is not exactly one.
+#
+# A VERIFIED ADOPTION RETIRES ITS SOURCE, so a case that wants to assert the
+# source survived asks for the name it survived UNDER. The stamp is the run's own
+# instant, so it cannot be written into a fixture; the count is checked here
+# because two retired trees would mean the rename ran twice on a ladder that must
+# be idempotent, and "" then makes the caller's assert_present fail.
+retired_tree() {
+    _rt_n=0; _rt_hit=""
+    for _rt_p in "$1".bak.*; do
+        [ -d "$_rt_p" ] || continue
+        _rt_hit="$_rt_p"; _rt_n=$((_rt_n + 1))
+    done
+    [ "$_rt_n" = 1 ] || _rt_hit=""
+    echo "$_rt_hit"
 }
 
 # make_supervisor_stub <dir> <mode> — a stand-in for systemctl AND launchctl, so
@@ -1170,9 +1201,14 @@ assert_contains "$UPGRADE_OUT" "adopted $h22/.burrowee/edge" "the rung must say 
 # apart on the production host, so the report is never the assertion.
 assert_present "$ch22/identity/relay_ed.key" "the destination must HOLD the identity, not merely be reported as adopted"
 assert_present "$ch22/config" "the destination must hold the config — host_fqdn is the file the outage named"
-assert_eq "$(cat "$ch22/config")" "$(cat "$h22/.burrowee/edge/config")" "the adopted config must be the source config"
-# COPY, NEVER MOVE.
-assert_present "$h22/.burrowee/edge/identity/relay_ed.key" "the per-user tree must survive — recovery is pointing the old unit back at it"
+# COPY, NEVER MOVE — AND THEN RETIRE. The cli copies file by file and, once the
+# copy verifies, renames the tree it adopted to <tree>.bak.<stamp>. Every byte is
+# still there and recovery is one `mv` back, so the source is asserted at the name
+# it now has.
+R22="$(retired_tree "$h22/.burrowee/edge")"
+assert_gone "$h22/.burrowee/edge" "a verified adoption must not leave the source at its live name"
+assert_present "$R22/identity/relay_ed.key" "the per-user tree must survive the retirement — recovery is pointing the old unit back at it"
+assert_eq "$(cat "$ch22/config")" "$(cat "$R22/config")" "the adopted config must be the source config"
 # THE CLI IS WHAT DID THE COPY, with both trees named.
 assert_contains "$(cat "$h22/stubs/cli.log")" "migrate --from $h22/.burrowee/edge --home $h22/sys-etc/burrowee" "the rung must exec the cli with the source tree and the destination ROOT"
 # AND THE CALLER IS TOLD THE DAEMON IS DOWN.
@@ -1550,7 +1586,8 @@ serve_mode=frontier
 allow_push_update=true
 host_fqdn=admin-kr.faranow.com" "the adopted config must be the RUNNING USER's five-line config, not root's one-line stub"
 assert_eq "$(cat "$ch28a/identity/relay_ed.key")" "PRIVATE-KEY-BYTES-the-operators-tree" "and the adopted identity must be the running user's"
-assert_present "$h28a/.burrowee/edge/identity/relay_ed.key" "copy never move — the source survives"
+R28A="$(retired_tree "$h28a/.burrowee/edge")"
+assert_present "$R28A/identity/relay_ed.key" "copy never move — the source survives, under the name the retirement gave it"
 assert_present "$h28a/root-home/.burrowee/edge/identity/relay_ed.key" "and root's tree is untouched"
 
 # 28b. ONLY ROOT'S HOME IS ENROLLED, and that is NOTHING TO ADOPT.
@@ -1739,12 +1776,18 @@ assert_eq "$UPGRADE_RC" 2 "upgrade.sh must force the adoption on a 0.2.0-anchore
 assert_contains "$UPGRADE_OUT" "adopted $h29/.burrowee/edge" "the rung must name the running user's tree as the source it took"
 # AFTER: the machine CONFIG root holds the state, byte for byte.
 assert_present "$ch29/identity/relay_ed.key" "AFTER: the config root must HOLD the identity"
-assert_eq "$(cat "$ch29/config")" "$(cat "$h29/.burrowee/edge/config")" "AFTER: the adopted config must be the running user's config"
+R29="$(retired_tree "$h29/.burrowee/edge")"
+assert_eq "$(cat "$ch29/config")" "$(cat "$R29/config")" "AFTER: the adopted config must be the running user's config"
 # tls_listen is the line root's stub does not have, and its absence is what made
 # the daemon try to bind privileged :443 unprivileged. Asserted by name because
 # a plain equality would also pass for a one-line file if the fixtures drifted.
 assert_contains "$(cat "$ch29/config")" "tls_listen=127.0.0.1:9443" "AFTER: the adopted config must carry tls_listen — root's stub does not, and its absence crash-looped the daemon"
-assert_present "$h29/.burrowee/edge/identity/relay_ed.key" "AFTER: the source tree is left intact"
+# AFTER: THE SOURCE IS RETIRED, NOT DELETED. The cli renames the tree it verified
+# to <tree>.bak.<stamp> (retired_tree resolves the stamp and checks there is
+# exactly one); every byte is still there, and recovery is one `mv` back.
+assert_gone "$h29/.burrowee/edge" "AFTER: a verified adoption must not leave the source at its live name — that is the tree \`doctor\` reads as a second edge"
+assert_present "$R29/identity/relay_ed.key" "AFTER: the retired tree keeps every byte — a rename, never a delete"
+assert_eq "$(cat "$R29/config")" "$(cat "$ch29/config")" "AFTER: the retired tree still holds the config the destination adopted"
 assert_present "$h29/root-home/.burrowee/edge/identity/relay_ed.key" "AFTER: and root's tree is untouched"
 assert_present "$ch29/migration-receipts/adopt_user_tree.sh.done" "the runner must record the rung in the CONFIG root"
 # THE RUNG SAW THE DAEMON THROUGH THE DATA ROOT and stopped it before copying.
@@ -1871,13 +1914,15 @@ assert_eq "$UPGRADE30_RC" 2 "upgrade.sh must run the adoption on a wrongly-adopt
 assert_contains "$(cat "$h30/stubs/cli.log")" "--force" "the rung must pass --force to the cli on a forced run"
 # AND THE DESTINATION ACTUALLY CHANGED.
 assert_eq "$(cat "$ch30/identity/relay_ed.key")" "PRIVATE-KEY-BYTES" "the destination must now hold the RUNNING USER's identity"
-assert_eq "$(cat "$ch30/config")" "$(cat "$h30/.burrowee/edge/config")" "the destination config must now be the running user's"
+R30="$(retired_tree "$h30/.burrowee/edge")"
+assert_eq "$(cat "$ch30/config")" "$(cat "$R30/config")" "the destination config must now be the running user's"
 # THE DESTINATION'S OWN INSTALL RECORDS SURVIVE. Carrying installed-version would
 # tell this ladder it had run rungs it has not; migration-receipts/ is worse.
 assert_eq "$(cat "$ch30/installed-version")" "0.2.0.2026.08.19.72743ca2" "installed-version belongs to THIS install and must not be carried"
 assert_eq "$(cat "$ch30/migration-receipts/some_earlier_rung.sh.done")" "earned by $ch30" "migration-receipts/ belongs to THIS tree and must not be carried"
-# COPY, NEVER MOVE — still true when forcing.
-assert_present "$h30/.burrowee/edge/identity/relay_ed.key" "the per-user tree must survive a forced run too"
+# COPY, NEVER MOVE — still true when forcing, and the retirement is too: a forced
+# run is exactly the run whose source an operator may have to restore.
+assert_present "$R30/identity/relay_ed.key" "the per-user tree must survive a forced run too"
 # AND THE OPERATOR IS TOLD, BEFORE AND AFTER, THAT AN IDENTITY WAS REPLACED.
 assert_contains "$UPGRADE30" "FORCED RUN" "a forced run must announce itself before the stop"
 assert_contains "$UPGRADE30" "REPLACED it with" "a run that swapped the node identity must say so"
