@@ -101,21 +101,30 @@ out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_PREFLIGHT_NO_TTY
 printf '%s\n' "${out}" | grep -q 'Install it yourself'                          || die "expected tips on no-TTY; got:\n${out}"
 printf '%s\n' "${out}" | grep -q '\[dry\].*install -y nginx'                    && die "no-TTY must not install; got:\n${out}"
 
-# mk_brew_shim — a curated PATH dir exposing ONLY a fake brew (and the real
-# sh/uname/id/sed the dry-run path actually calls), so PM detection always
-# lands on brew and never races the real apt-get/dnf/apk. A plain
+# mk_pm_shim <pm-binary...> — a curated PATH dir exposing ONLY the given fake
+# package-manager binaries (each echoing "fake-<name> $*"), a fake `sudo`
+# (existence-only — root acquisition just does `command -v sudo`; DRY mode
+# never execs it), and the real sh/uname/id/sed the dry-run path actually
+# calls — so PM detection always lands on the manager(s) under test and never
+# races whatever apt-get/dnf/apk/brew (or sudo) the host itself ships. A plain
 # "/usr/bin:/bin" fallback would re-expose apt-get (Linux CI ships it at
 # /usr/bin/apt-get) or homebrew's own bin (macOS), defeating the shim. Echoes
 # the dir path; caller removes it.
-mk_brew_shim() {
-    d="$(mktemp -d "${TMPDIR:-/tmp}/pf-brewshim-XXXXXX")"
-    printf '#!/bin/sh\necho "fake-brew $*"\n' > "${d}/brew"; chmod +x "${d}/brew"
+mk_pm_shim() {
+    d="$(mktemp -d "${TMPDIR:-/tmp}/pf-pmshim-XXXXXX")"
+    for pm in "$@"; do
+        printf '#!/bin/sh\necho "fake-%s $*"\n' "$pm" > "${d}/${pm}"; chmod +x "${d}/${pm}"
+    done
+    printf '#!/bin/sh\nexit 0\n' > "${d}/sudo"; chmod +x "${d}/sudo"
     for real in sh uname id sed; do
         real_path="$(command -v "$real")" || die "test host is missing ${real}"
         ln -s "${real_path}" "${d}/${real}"
     done
     printf '%s\n' "${d}"
 }
+
+# mk_brew_shim — single-manager alias kept for the existing brew call sites below.
+mk_brew_shim() { mk_pm_shim brew; }
 
 # ---- (3e) brew as pure root refuses install (no SUDO_USER) ------------------
 say "nginx consent: brew + root + no SUDO_USER -> tips, no brew install"
@@ -168,6 +177,38 @@ else
         || die "expected non-root sudo brew services start verb; got:\n${out}"
 fi
 rm -rf "${BREWSHIM}"
+
+# ---- (3h) dnf/apk: pin the per-PM install + service literals too ------------
+# (3b)-(3g) only ever exercise apt/brew — dnf/apk template drift (a typo in
+# nginx_install's or nginx_guide's dnf/apk case arms) would pass the whole
+# suite silently. Pin both the consented dry-run verbs and the tips-block text.
+say "nginx consent: dnf auto-yes dry-runs the dnf recipe"
+DNFSHIM="$(mk_pm_shim dnf)"
+out="$(PATH="${DNFSHIM}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 sh edge/preflight.sh 2>&1)" \
+    || die "dnf auto-yes dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'package manager: dnf'                    || die "expected dnf detection; got:\n${out}"
+printf '%s\n' "${out}" | grep -q '\[dry\].*dnf install -y nginx'           || die "expected dnf nginx install verb; got:\n${out}"
+printf '%s\n' "${out}" | grep -q '\[dry\].*systemctl enable --now nginx'   || die "expected systemctl enable verb; got:\n${out}"
+rm -rf "${DNFSHIM}"
+
+say "nginx consent: dnf auto-no pins the dnf tips-block literals"
+DNFSHIM="$(mk_pm_shim dnf)"
+out="$(PATH="${DNFSHIM}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=0 sh edge/preflight.sh 2>&1)" \
+    || die "dnf auto-no dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'dnf install -y nginx'                    || die "expected dnf tips install line; got:\n${out}"
+printf '%s\n' "${out}" | grep -q 'systemctl enable --now nginx'            || die "expected dnf tips service line; got:\n${out}"
+printf '%s\n' "${out}" | grep -q '\[dry\].*install -y nginx'               && die "auto-no must not run install verbs; got:\n${out}"
+rm -rf "${DNFSHIM}"
+
+say "nginx consent: apk auto-yes dry-runs the apk recipe"
+APKSHIM="$(mk_pm_shim apk)"
+out="$(PATH="${APKSHIM}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 sh edge/preflight.sh 2>&1)" \
+    || die "apk auto-yes dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'package manager: apk'                    || die "expected apk detection; got:\n${out}"
+printf '%s\n' "${out}" | grep -q '\[dry\].*apk add nginx nginx-mod-stream' || die "expected apk nginx install verb; got:\n${out}"
+printf '%s\n' "${out}" | grep -q '\[dry\].*rc-update add nginx default'    || die "expected rc-update verb; got:\n${out}"
+printf '%s\n' "${out}" | grep -q 'rc-service nginx start'                  || die "expected rc-service start verb; got:\n${out}"
+rm -rf "${APKSHIM}"
 
 # ---- (4) SKIP_NGINX drops the nginx group -----------------------------------
 say "BURROWEE_SKIP_NGINX=1 drops the nginx group"
