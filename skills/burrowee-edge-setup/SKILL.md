@@ -139,8 +139,11 @@ The edge is a **system install**: config root `/usr/local/etc/burrowee/edge`, da
 root `/usr/local/var/burrowee/edge`, both root-owned. Do NOT wrap the command in
 `sudo` yourself and do NOT pass `--home` — `--home` only renames the config root
 for non-standard layouts, and `doctor` requests consent-gated sudo elevation
-itself for the repairs that need root. For an unattended run, add `--yes` to
-accept the remediation prompts:
+itself for the repairs that need root. **If nginx is still missing, `sudo burrowee edge doctor --fix`
+offers the same consented install as preflight did** — the doctor prompt asks on the terminal
+with one of two messages (`Install nginx now via <pm> (root)?` for missing, or
+`Enable + start nginx now via <pm> (root)?` for not running), and shows guidance tips if you decline.
+For an unattended run, add `--yes` to accept the remediation prompts:
 
 ```bash
 burrowee-edge-cli doctor --fix --yes

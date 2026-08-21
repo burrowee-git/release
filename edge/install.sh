@@ -96,7 +96,7 @@ COMP="edge"
 # curl'd, and a runtime override would make one file behave as the other.
 MODE="install"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
-PREFLIGHT_SHA256="20aff889401bbf192b378941923f58fd934f459b930436a3f225ba199b539e18"
+PREFLIGHT_SHA256="5bf7689757d985094e05feed5a05c3f06b13e9d3e2d79f8179a4b89ba4b82b28"
 # The version floor: the stamp this component was at when THIS installer was
 # generated and published (baked from versions/<comp>.stamp by
 # tools/gen-bootstraps.sh, which release.sh re-runs on every cut). A tag
