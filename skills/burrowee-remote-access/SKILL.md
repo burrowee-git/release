@@ -44,10 +44,10 @@ gateway.
 ```
 # ~/.burrowee/cli/ssh_config
 Host home-mac
-    #@gateway jc-mac-mini
-    #@relay   seoul-relay
+    #@gateway studio-mini
+    #@relay   eu-relay
     # #@service ssh   (default when omitted)
-    User jc
+    User sam
 ```
 
 `~/.burrowee/cli/vnc_config` (same directive style; `#@service` defaults to
@@ -57,8 +57,8 @@ service: `rdp_config`, `http_config`, …):
 ```
 # ~/.burrowee/cli/vnc_config
 Host home-mac
-    #@gateway jc-mac-mini
-    #@relay   seoul-relay
+    #@gateway studio-mini
+    #@relay   eu-relay
     # #@service vnc   (default when omitted)
 ```
 
@@ -74,7 +74,7 @@ SSH needs no wrapper at all:
 
 ```sh
 burrowee ssh home-mac                  # resolve via ssh_config, forward, exec ssh
-burrowee ssh home-mac@seoul-relay      # one-off relay override
+burrowee ssh home-mac@eu-relay      # one-off relay override
 burrowee ssh home-mac -l me uptime     # everything after <host> passes to ssh VERBATIM
 ```
 
