@@ -40,7 +40,7 @@
 # destination below is $COMP_HOME/$COMP_DATA rather than root's home — the first
 # cut of this rung pointed at /root/.burrowee/edge, the wrong destination, and
 # was withdrawn before promotion.) The gateway
-# got migrations/v1_to_v2.sh for exactly this; edge's ladder held the
+# got migrations/v0_1_to_v0_2.sh for exactly this; edge's ladder held the
 # stale-binary sweep and nothing else, so nothing ever moved them. Observed on a
 # production node, 2026-08-19, at v0.2.0.2026.08.19.78a2c91a:
 #

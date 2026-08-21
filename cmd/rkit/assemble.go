@@ -58,7 +58,7 @@ func assemble(comp, stamp, outRoot, installSh string, extras []pack.Content, com
 // rows, oldest first:
 //
 //	MIGRATIONS="
-//	0.2.0 v1_to_v2.sh
+//	0.2.0 v0_1_to_v0_2.sh
 //	"
 //
 // Parsed the same way the runner parses it — word-split into (version, script)

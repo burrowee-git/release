@@ -142,11 +142,11 @@ fixture gateway burrowee-gateway
 printf 'inner installer\n' > "${REPO_ROOT}/inner/gateway/install.sh"
 printf 'update\n'          > "${src}/update.sh"
 mkdir -p "${src}/migrations"
-printf '#!/bin/sh\nMIGRATIONS="\n0.2.0 v1_to_v2.sh\n"\n' > "${src}/migrations/run.sh"
-printf '#!/bin/sh\n'                                     > "${src}/migrations/v1_to_v2.sh"
+printf '#!/bin/sh\nMIGRATIONS="\n0.2.0 v0_1_to_v0_2.sh\n"\n' > "${src}/migrations/run.sh"
+printf '#!/bin/sh\n'                                     > "${src}/migrations/v0_1_to_v0_2.sh"
 if run_public; then ok "gateway: assembly succeeds"; else bad "gateway: assembly failed"; fi
 check "gateway payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-gateway,install.sh,migrations/run.sh,migrations/v1_to_v2.sh,update.sh"
+    "burrowee,burrowee-gateway,install.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,update.sh"
 
 # --- edge: a directory member whose content comes from another tree ----------
 fixture edge burrowee-edge

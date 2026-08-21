@@ -241,14 +241,14 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	t.Run("gateway ships update.sh plus every migration", func(t *testing.T) {
 		src := writeSrc(t, "update.sh",
 			filepath.Join("migrations", "run.sh"),
-			filepath.Join("migrations", "v1_to_v2.sh"),
+			filepath.Join("migrations", "v0_1_to_v0_2.sh"),
 			filepath.Join("migrations", "v2_to_v3.sh"))
-		writeLedger(t, src, "v1_to_v2.sh", "v2_to_v3.sh")
+		writeLedger(t, src, "v0_1_to_v0_2.sh", "v2_to_v3.sh")
 		got, err := extraPayload("gateway", src, sharedOK)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"migrations/run.sh", "migrations/v1_to_v2.sh", "migrations/v2_to_v3.sh", "update.sh"}
+		want := []string{"migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh", "update.sh"}
 		if !reflect.DeepEqual(names(got), want) {
 			t.Errorf("gateway extras = %v, want %v", names(got), want)
 		}
@@ -258,15 +258,15 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	// are always "/"-separated, and a filepath.Join here would silently produce
 	// a backslash member the moment this is built anywhere non-unix.
 	t.Run("the migration's zip name is slash-separated", func(t *testing.T) {
-		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"), filepath.Join("migrations", "v1_to_v2.sh"))
-		writeLedger(t, src, "v1_to_v2.sh")
+		src := writeSrc(t, "update.sh", filepath.Join("migrations", "run.sh"), filepath.Join("migrations", "v0_1_to_v0_2.sh"))
+		writeLedger(t, src, "v0_1_to_v0_2.sh")
 		got, err := extraPayload("gateway", src, sharedOK)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var found bool
 		for _, c := range got {
-			if c.Name == "migrations/v1_to_v2.sh" {
+			if c.Name == "migrations/v0_1_to_v0_2.sh" {
 				found = true
 			}
 			if strings.Contains(c.Name, `\`) {
@@ -274,7 +274,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("no migrations/v1_to_v2.sh member in %v", names(got))
+			t.Errorf("no migrations/v0_1_to_v0_2.sh member in %v", names(got))
 		}
 	})
 
@@ -296,8 +296,8 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	t.Run("a ledger row with no script is a build error", func(t *testing.T) {
 		src := writeSrc(t, "update.sh",
 			filepath.Join("migrations", "run.sh"),
-			filepath.Join("migrations", "v1_to_v2.sh"))
-		writeLedger(t, src, "v1_to_v2.sh", "v2_to_v3.sh") // v2_to_v3.sh not committed
+			filepath.Join("migrations", "v0_1_to_v0_2.sh"))
+		writeLedger(t, src, "v0_1_to_v0_2.sh", "v2_to_v3.sh") // v2_to_v3.sh not committed
 		_, err := extraPayload("gateway", src, sharedOK)
 		if err == nil {
 			t.Fatal("a ledger row naming a missing script was accepted, want a build error")
@@ -312,7 +312,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	t.Run("a runner with no ledger is a build error", func(t *testing.T) {
 		src := writeSrc(t, "update.sh",
 			filepath.Join("migrations", "run.sh"),
-			filepath.Join("migrations", "v1_to_v2.sh"))
+			filepath.Join("migrations", "v0_1_to_v0_2.sh"))
 		if _, err := extraPayload("gateway", src, sharedOK); err == nil {
 			t.Error("a run.sh with no MIGRATIONS= ledger was accepted, want a build error")
 		}
@@ -335,7 +335,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	// A migrations/ dir holding scripts but no runner is the subtler mistake:
 	// nothing invokes them, so the zip looks complete and migrates nothing.
 	t.Run("migrations without the runner is a build error", func(t *testing.T) {
-		src := writeSrc(t, "update.sh", filepath.Join("migrations", "v1_to_v2.sh"))
+		src := writeSrc(t, "update.sh", filepath.Join("migrations", "v0_1_to_v0_2.sh"))
 		if _, err := extraPayload("gateway", src, sharedOK); err == nil {
 			t.Error("migrations/ without run.sh accepted, want a build error")
 		}
@@ -446,21 +446,21 @@ func TestLedgerMigrations(t *testing.T) {
 		"# Adding a migration means adding ONE row to the ledger below.\n"
 
 	t.Run("the canonical multi-row ledger", func(t *testing.T) {
-		got, err := ledgerMigrations(header + "MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n0.2.5 v2_to_v3.sh\n\"\n\nGW_HOME=x\n")
+		got, err := ledgerMigrations(header + "MIGRATIONS=\"\n0.2.0 v0_1_to_v0_2.sh\n0.2.5 v2_to_v3.sh\n\"\n\nGW_HOME=x\n")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := []string{"v1_to_v2.sh", "v2_to_v3.sh"}; !reflect.DeepEqual(got, want) {
+		if want := []string{"v0_1_to_v0_2.sh", "v2_to_v3.sh"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("scripts = %v, want %v", got, want)
 		}
 	})
 
 	t.Run("a single-line ledger", func(t *testing.T) {
-		got, err := ledgerMigrations("MIGRATIONS=\"0.2.0 v1_to_v2.sh\"\n")
+		got, err := ledgerMigrations("MIGRATIONS=\"0.2.0 v0_1_to_v0_2.sh\"\n")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := []string{"v1_to_v2.sh"}; !reflect.DeepEqual(got, want) {
+		if want := []string{"v0_1_to_v0_2.sh"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("scripts = %v, want %v", got, want)
 		}
 	})
@@ -480,20 +480,20 @@ func TestLedgerMigrations(t *testing.T) {
 	t.Run("a commented or indented assignment is not the ledger", func(t *testing.T) {
 		src := "# MIGRATIONS=\"0.9.9 not_real.sh\"\n" +
 			"    MIGRATIONS=\"0.9.8 also_not_real.sh\"\n" +
-			"MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n\"\n"
+			"MIGRATIONS=\"\n0.2.0 v0_1_to_v0_2.sh\n\"\n"
 		got, err := ledgerMigrations(src)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := []string{"v1_to_v2.sh"}; !reflect.DeepEqual(got, want) {
+		if want := []string{"v0_1_to_v0_2.sh"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("scripts = %v, want %v", got, want)
 		}
 	})
 
 	for name, src := range map[string]string{
 		"no ledger at all":       "#!/bin/sh\nGW_HOME=x\n",
-		"unterminated":           "MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n",
-		"a row missing a script": "MIGRATIONS=\"\n0.2.0 v1_to_v2.sh\n0.2.5\n\"\n",
+		"unterminated":           "MIGRATIONS=\"\n0.2.0 v0_1_to_v0_2.sh\n",
+		"a row missing a script": "MIGRATIONS=\"\n0.2.0 v0_1_to_v0_2.sh\n0.2.5\n\"\n",
 		"two assignments":        "MIGRATIONS=\"\n0.2.0 a.sh\n\"\nMIGRATIONS=\"\n0.3.0 b.sh\n\"\n",
 	} {
 		t.Run("refused: "+name, func(t *testing.T) {

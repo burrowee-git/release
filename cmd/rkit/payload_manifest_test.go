@@ -131,7 +131,7 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		comp  string
 		files []string
 	}{
-		{"gateway", []string{"update.sh", "migrations/run.sh", "migrations/v1_to_v2.sh"}},
+		{"gateway", []string{"update.sh", "migrations/run.sh", "migrations/v0_1_to_v0_2.sh"}},
 		// edge and cli take the SHARED ladder: the runner and rungs come from
 		// inner/_shared/migrations (both manifests glob the real directory), and
 		// component.conf + ledger come from the component source. Both are
@@ -155,7 +155,7 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		t.Run(tc.comp, func(t *testing.T) {
 			src := srcFixture(t, tc.files...)
 			if tc.comp == "gateway" {
-				ledgerRunner(t, src, "v1_to_v2.sh")
+				ledgerRunner(t, src, "v0_1_to_v0_2.sh")
 			}
 			if tc.comp == "edge" || tc.comp == "cli" {
 				// The ledger must name a rung the SHARED directory really
@@ -187,8 +187,8 @@ func TestPayloadManifestsAgree(t *testing.T) {
 // passes the fixed case above and fails this one.
 func TestPayloadManifestsAgreeOnANewMigration(t *testing.T) {
 	src := srcFixture(t, "update.sh",
-		"migrations/run.sh", "migrations/v1_to_v2.sh", "migrations/v2_to_v3.sh")
-	ledgerRunner(t, src, "v1_to_v2.sh", "v2_to_v3.sh")
+		"migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh")
+	ledgerRunner(t, src, "v0_1_to_v0_2.sh", "v2_to_v3.sh")
 
 	shell := shellManifest(t, "gateway", src)
 	goSide := goManifest(t, "gateway", src)
@@ -196,7 +196,7 @@ func TestPayloadManifestsAgreeOnANewMigration(t *testing.T) {
 		t.Fatalf("assembly paths disagree after a migration was added:\n  tools/payload.sh: %v\n  assemble.go:      %v",
 			shell, goSide)
 	}
-	want := []string{"migrations/run.sh", "migrations/v1_to_v2.sh", "migrations/v2_to_v3.sh", "update.sh"}
+	want := []string{"migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh", "update.sh"}
 	if !reflect.DeepEqual(shell, want) {
 		t.Errorf("manifest = %v, want %v", shell, want)
 	}
@@ -206,8 +206,8 @@ func TestPayloadManifestsAgreeOnANewMigration(t *testing.T) {
 // reason for all of this survives a refactor of the comparison above: whatever
 // else changes, a gateway payload names migrations/run.sh.
 func TestGatewayManifestCarriesTheRunner(t *testing.T) {
-	src := srcFixture(t, "update.sh", "migrations/run.sh", "migrations/v1_to_v2.sh")
-	ledgerRunner(t, src, "v1_to_v2.sh")
+	src := srcFixture(t, "update.sh", "migrations/run.sh", "migrations/v0_1_to_v0_2.sh")
+	ledgerRunner(t, src, "v0_1_to_v0_2.sh")
 	for name, manifest := range map[string][]string{
 		"tools/payload.sh":     shellManifest(t, "gateway", src),
 		"cmd/rkit/assemble.go": goManifest(t, "gateway", src),

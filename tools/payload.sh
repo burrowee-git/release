@@ -261,7 +261,7 @@ stage_component_migrations() {
 # rows, oldest first:
 #
 #     MIGRATIONS="
-#     0.2.0 v1_to_v2.sh
+#     0.2.0 v0_1_to_v0_2.sh
 #     "
 #
 # Word-split into (version, script) pairs exactly as the runner splits it, so

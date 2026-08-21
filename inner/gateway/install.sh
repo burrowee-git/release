@@ -149,7 +149,7 @@ SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 #   burrowee-gateway          the daemon named in the core unit
 #   burrowee-gateway-console  spawned + supervised by that daemon, from its own dir
 #   burrowee-gateway-updater  the daemon named in the updater unit
-#   burrowee-gateway-cli      execed as root by migrations/v1_to_v2.sh, which the
+#   burrowee-gateway-cli      execed as root by migrations/v0_1_to_v0_2.sh, which the
 #                             console-push path runs with no operator present
 # burrowee and burrowee-register are NOT here: nothing running as root execs
 # them. They now share $BIN_DIR with the four above regardless — the point of
@@ -608,7 +608,7 @@ remove_legacy_user_units() {
 
 # WHERE THE SWEEP ITSELF LIVES: migrations/lib_stale_user_bins.sh, inside this
 # same bundle, sourced below and sourced by the gateway's 0.2.0 rung
-# (migrations/v2_stale_user_bins.sh) out of the same directory.
+# (migrations/v0_2_stale_user_bins.sh) out of the same directory.
 #
 # IT USED TO BE OPEN-CODED HERE, and that is exactly why the sweep never ran on
 # the host that needed it most. install.sh runs only when somebody runs the
@@ -900,7 +900,7 @@ migrate_from_legacy() {
     _runner="$(migration_runner)"
     if [ -z "$_runner" ]; then return 0; fi
     # The root-owned copies go in BEFORE the runner, not with the units after it.
-    # The runner shells to burrowee-gateway-cli AS ROOT (v1_to_v2.sh's `elevate
+    # The runner shells to burrowee-gateway-cli AS ROOT (v0_1_to_v0_2.sh's `elevate
     # "$CLI" migrate`), and on the console-push path nobody is watching — so a
     # migration that could only reach a per-user cli is the same escalation the
     # per-user ExecStart was. Both the runner and this script resolve the cli out

@@ -37,10 +37,10 @@ write_ledger() {
 }
 
 # gateway_src <name> <script...> — a gateway source tree whose ledger names
-# v1_to_v2.sh and whose migrations/ holds the given scripts (run.sh always).
+# v0_1_to_v0_2.sh and whose migrations/ holds the given scripts (run.sh always).
 gateway_src() {
     local dir="${TMP}/$1"; shift
-    write_ledger "${dir}" "0.2.0 v1_to_v2.sh"
+    write_ledger "${dir}" "0.2.0 v0_1_to_v0_2.sh"
     local s
     for s in "$@"; do : > "${dir}/migrations/${s}"; done
     printf '%s' "${dir}"
@@ -65,15 +65,15 @@ check "dir extras: cli"      "$(payload_dir_extras cli     | paste -sd, -)" "mig
 check "dir extras: agent"    "$(payload_dir_extras agent   | paste -sd, -)" ""
 
 # --- payload_manifest -------------------------------------------------------
-SRC="$(gateway_src manifest-gw v1_to_v2.sh)"
+SRC="$(gateway_src manifest-gw v0_1_to_v0_2.sh)"
 check "manifest: gateway" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
-    "update.sh,migrations/run.sh,migrations/v1_to_v2.sh"
+    "update.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh"
 
 # Discovery, not declaration: a migration added to the gateway repo appears with
 # no edit to payload.sh.
 : > "${SRC}/migrations/v2_to_v3.sh"
 check "manifest: picks up a new migration" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
-    "update.sh,migrations/run.sh,migrations/v1_to_v2.sh,migrations/v2_to_v3.sh"
+    "update.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
 
 # edge's manifest carries the SHARED ladder's members plus its own two files.
 # The shared half is discovered by glob from inner/_shared/migrations, so it is
@@ -174,20 +174,20 @@ if stage_payload_extras relay "${PARTIAL_SRC}" "${PARTIAL_ASM}" 2>/dev/null; the
 else ok "stage extras: rejects a source missing a declared extra"; fi
 
 # --- ledger_migrations ------------------------------------------------------
-write_ledger "${TMP}/ledger-one" "0.2.0 v1_to_v2.sh"
-check "ledger: one row" "$(ledger_migrations "${TMP}/ledger-one/migrations/run.sh" | paste -sd, -)" "v1_to_v2.sh"
+write_ledger "${TMP}/ledger-one" "0.2.0 v0_1_to_v0_2.sh"
+check "ledger: one row" "$(ledger_migrations "${TMP}/ledger-one/migrations/run.sh" | paste -sd, -)" "v0_1_to_v0_2.sh"
 
-write_ledger "${TMP}/ledger-many" "0.2.0 v1_to_v2.sh" "0.2.5 v2_to_v3.sh" "0.3.0 v3_to_v4.sh"
+write_ledger "${TMP}/ledger-many" "0.2.0 v0_1_to_v0_2.sh" "0.2.5 v2_to_v3.sh" "0.3.0 v3_to_v4.sh"
 check "ledger: ledger order preserved" \
     "$(ledger_migrations "${TMP}/ledger-many/migrations/run.sh" | paste -sd, -)" \
-    "v1_to_v2.sh,v2_to_v3.sh,v3_to_v4.sh"
+    "v0_1_to_v0_2.sh,v2_to_v3.sh,v3_to_v4.sh"
 
 write_ledger "${TMP}/ledger-empty"
 check "ledger: empty ledger" "$(ledger_migrations "${TMP}/ledger-empty/migrations/run.sh" | paste -sd, -)" ""
 
 # An odd word count means a row lost its script (or its version) — refusing to
 # guess which is the whole point.
-write_ledger "${TMP}/ledger-odd" "0.2.0 v1_to_v2.sh" "0.2.5"
+write_ledger "${TMP}/ledger-odd" "0.2.0 v0_1_to_v0_2.sh" "0.2.5"
 if ledger_migrations "${TMP}/ledger-odd/migrations/run.sh" >/dev/null 2>&1; then
     bad "ledger: odd word count accepted"
 else ok "ledger: odd word count rejected"; fi
@@ -197,24 +197,24 @@ if ledger_migrations "${TMP}/no-ledger.sh" >/dev/null 2>&1; then
     bad "ledger: file with no MIGRATIONS= accepted"
 else ok "ledger: file with no MIGRATIONS= rejected"; fi
 
-{ echo 'MIGRATIONS="'; echo '0.2.0 v1_to_v2.sh'; echo '"'; echo 'MIGRATIONS="'; echo '0.3.0 x.sh'; echo '"'; } \
+{ echo 'MIGRATIONS="'; echo '0.2.0 v0_1_to_v0_2.sh'; echo '"'; echo 'MIGRATIONS="'; echo '0.3.0 x.sh'; echo '"'; } \
     > "${TMP}/two-ledgers.sh"
 if ledger_migrations "${TMP}/two-ledgers.sh" >/dev/null 2>&1; then
     bad "ledger: two MIGRATIONS= assignments accepted"
 else ok "ledger: two MIGRATIONS= assignments rejected"; fi
 
-{ echo 'MIGRATIONS="'; echo '0.2.0 v1_to_v2.sh'; } > "${TMP}/unterminated.sh"
+{ echo 'MIGRATIONS="'; echo '0.2.0 v0_1_to_v0_2.sh'; } > "${TMP}/unterminated.sh"
 if ledger_migrations "${TMP}/unterminated.sh" >/dev/null 2>&1; then
     bad "ledger: unterminated assignment accepted"
 else ok "ledger: unterminated assignment rejected"; fi
 
 # --- stage_gateway_migrations -----------------------------------------------
-SRC="$(gateway_src stage-gw v1_to_v2.sh)"
+SRC="$(gateway_src stage-gw v0_1_to_v0_2.sh)"
 ASM="${TMP}/stage-asm"; mkdir -p "${ASM}"
 if stage_gateway_migrations "${SRC}" "${ASM}"; then ok "stage: succeeds"; else bad "stage: failed"; fi
 check "stage: copies every migration" \
     "$(cd "${ASM}" && find migrations -type f | sort | paste -sd, -)" \
-    "migrations/run.sh,migrations/v1_to_v2.sh"
+    "migrations/run.sh,migrations/v0_1_to_v0_2.sh"
 if [ -x "${ASM}/migrations/run.sh" ]; then ok "stage: runner is executable"; else bad "stage: runner not executable"; fi
 
 mkdir -p "${TMP}/empty-gw/migrations" "${TMP}/empty-asm"
@@ -234,7 +234,7 @@ pack() {
     fi
 }
 
-SRC="$(gateway_src zip-gw v1_to_v2.sh lib_stale_user_bins.sh)"
+SRC="$(gateway_src zip-gw v0_1_to_v0_2.sh lib_stale_user_bins.sh)"
 ASM="${TMP}/zip-asm"; mkdir -p "${ASM}"
 : > "${ASM}/burrowee-gateway"; : > "${ASM}/install.sh"; : > "${ASM}/update.sh"
 stage_gateway_migrations "${SRC}" "${ASM}" >/dev/null
@@ -252,7 +252,7 @@ pack "${TMP}/good.zip" "${ASM}" yes
 # (zip -r also records a bare "migrations/" directory entry; only the files matter)
 check "zip -r keeps the migrations/ path" \
     "$(unzip -Z1 "${TMP}/good.zip" | grep '^migrations/' | grep -v '/$' | sort | paste -sd, -)" \
-    "migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v1_to_v2.sh"
+    "migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh"
 if assert_payload_migrations gateway "${TMP}/good.zip" "${SRC}"; then
     ok "gate: accepts a complete payload"
 else bad "gate: rejected a complete payload"; fi
@@ -274,11 +274,11 @@ else ok "gate: rejects a payload with no stale-user-bin sweep library"; fi
 # A ledger row whose script never made it into the zip: the subtler failure, and
 # an unrecoverable one downstream (the runner skips it and the version is
 # recorded anyway).
-LEDGER_SRC="$(gateway_src ledger-gap-gw v1_to_v2.sh lib_stale_user_bins.sh)"
+LEDGER_SRC="$(gateway_src ledger-gap-gw v0_1_to_v0_2.sh lib_stale_user_bins.sh)"
 LEDGER_ASM="${TMP}/ledger-gap-asm"; mkdir -p "${LEDGER_ASM}"
 : > "${LEDGER_ASM}/install.sh"
 stage_gateway_migrations "${LEDGER_SRC}" "${LEDGER_ASM}" >/dev/null
-rm "${LEDGER_ASM}/migrations/v1_to_v2.sh"
+rm "${LEDGER_ASM}/migrations/v0_1_to_v0_2.sh"
 pack "${TMP}/ledger-gap.zip" "${LEDGER_ASM}" yes
 if assert_payload_migrations gateway "${TMP}/ledger-gap.zip" "${LEDGER_SRC}" 2>/dev/null; then
     bad "gate: accepted a payload missing a ledger-named migration"
