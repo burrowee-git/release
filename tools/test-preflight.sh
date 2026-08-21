@@ -78,6 +78,42 @@ out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 sh edge/preflight.sh 2>&1
 printf '%s\n' "${out}" | grep -q 'package manager: apt'        || die "expected apt detection; got:\n${out}"
 printf '%s\n' "${out}" | grep -q 'default: nginx + stream'      || die "expected nginx group for edge; got:\n${out}"
 
+# ---- (3b) consent: auto-yes runs the canonical apt verbs --------------------
+say "nginx consent: BURROWEE_NGINX_INSTALL=1 dry-runs the apt recipe"
+out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 sh edge/preflight.sh 2>&1)" \
+    || die "auto-yes dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'apt-get install -y nginx libnginx-mod-stream' || die "expected apt nginx install verb; got:\n${out}"
+printf '%s\n' "${out}" | grep -q 'systemctl enable --now nginx'                 || die "expected systemctl enable verb; got:\n${out}"
+
+# ---- (3c) consent: auto-no prints tips, installs nothing --------------------
+say "nginx consent: BURROWEE_NGINX_INSTALL=0 prints tips and no install verb"
+out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=0 sh edge/preflight.sh 2>&1)" \
+    || die "auto-no dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'Install it yourself'                          || die "expected tips block; got:\n${out}"
+printf '%s\n' "${out}" | grep -q 'ask your AI agent'                            || die "expected AI-agent line; got:\n${out}"
+printf '%s\n' "${out}" | grep -q 'sudo burrowee edge doctor'                    || die "expected doctor pointer; got:\n${out}"
+printf '%s\n' "${out}" | grep -q '\[dry\].*install -y nginx'                    && die "auto-no must not run install verbs; got:\n${out}"
+
+# ---- (3d) consent: no TTY falls back to tips without hanging ----------------
+say "nginx consent: no TTY -> tips (must not hang)"
+out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_PREFLIGHT_NO_TTY=1 sh edge/preflight.sh 2>&1)" \
+    || die "no-TTY dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'Install it yourself'                          || die "expected tips on no-TTY; got:\n${out}"
+printf '%s\n' "${out}" | grep -q '\[dry\].*install -y nginx'                    && die "no-TTY must not install; got:\n${out}"
+
+# ---- (3e) brew as pure root refuses install (no SUDO_USER) ------------------
+say "nginx consent: brew + root + no SUDO_USER -> tips, no brew install"
+BREWSHIM="$(mktemp -d "${TMPDIR:-/tmp}/pf-brewshim-XXXXXX")"
+printf '#!/bin/sh\necho "fake-brew $*"\n' > "${BREWSHIM}/brew"; chmod +x "${BREWSHIM}/brew"
+printf '#!/bin/sh\nexit 1\n' > "${BREWSHIM}/apt-get_DISABLED"   # ensure brew is the detected PM: expose ONLY brew
+out="$(PATH="${BREWSHIM}:/usr/bin:/bin" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 SUDO_USER= sh edge/preflight.sh 2>&1)" \
+    || die "brew root dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'package manager: brew' || die "expected brew detection; got:\n${out}"
+if [ "$(id -u)" = 0 ]; then
+    printf '%s\n' "${out}" | grep -q '\[dry\].*brew install nginx' && die "pure-root brew must not install; got:\n${out}"
+fi
+rm -rf "${BREWSHIM}"
+
 # ---- (4) SKIP_NGINX drops the nginx group -----------------------------------
 say "BURROWEE_SKIP_NGINX=1 drops the nginx group"
 out_skip="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_SKIP_NGINX=1 sh edge/preflight.sh 2>&1)" \
