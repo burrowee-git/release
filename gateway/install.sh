@@ -96,7 +96,7 @@ COMP="gateway"
 # curl'd, and a runtime override would make one file behave as the other.
 MODE="install"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
-PREFLIGHT_SHA256="2d91551afebe0819061120d138d80d365dc438e16ee47a4d952a2c64e638450d"
+PREFLIGHT_SHA256="d10032f3773183d8fdce1648fd70f39609018cb5d32e4fd3bd2a938316a57420"
 # The version floor: the stamp this component was at when THIS installer was
 # generated and published (baked from versions/<comp>.stamp by
 # tools/gen-bootstraps.sh, which release.sh re-runs on every cut). A tag

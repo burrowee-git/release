@@ -76,7 +76,7 @@ chmod +x "${SHIM}/apt-get"
 out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 sh edge/preflight.sh 2>&1)" \
     || die "dry-run edge preflight exited non-zero"
 printf '%s\n' "${out}" | grep -q 'package manager: apt'        || die "expected apt detection; got:\n${out}"
-printf '%s\n' "${out}" | grep -q 'default: nginx + stream'      || die "expected nginx group for edge; got:\n${out}"
+printf '%s\n' "${out}" | grep -q 'edge front: nginx'             || die "expected nginx group for edge; got:\n${out}"
 
 # ---- (3b) consent: auto-yes runs the canonical apt verbs --------------------
 say "nginx consent: BURROWEE_NGINX_INSTALL=1 dry-runs the apt recipe"
@@ -105,8 +105,15 @@ printf '%s\n' "${out}" | grep -q '\[dry\].*install -y nginx'                    
 say "nginx consent: brew + root + no SUDO_USER -> tips, no brew install"
 BREWSHIM="$(mktemp -d "${TMPDIR:-/tmp}/pf-brewshim-XXXXXX")"
 printf '#!/bin/sh\necho "fake-brew $*"\n' > "${BREWSHIM}/brew"; chmod +x "${BREWSHIM}/brew"
-printf '#!/bin/sh\nexit 1\n' > "${BREWSHIM}/apt-get_DISABLED"   # ensure brew is the detected PM: expose ONLY brew
-out="$(PATH="${BREWSHIM}:/usr/bin:/bin" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 SUDO_USER= sh edge/preflight.sh 2>&1)" \
+# Curated PATH: the fake brew plus the handful of real binaries the dry-run
+# path actually calls (sh/uname/id/sed) — a plain "/usr/bin:/bin" fallback
+# would also re-expose the real apt-get (Linux CI ships it at /usr/bin/apt-get)
+# or homebrew's own bin (macOS), defeating the shim and letting apt/brew race.
+for real in sh uname id sed; do
+    real_path="$(command -v "$real")" || die "test host is missing ${real}"
+    ln -s "${real_path}" "${BREWSHIM}/${real}"
+done
+out="$(PATH="${BREWSHIM}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 SUDO_USER= sh edge/preflight.sh 2>&1)" \
     || die "brew root dry-run exited non-zero"
 printf '%s\n' "${out}" | grep -q 'package manager: brew' || die "expected brew detection; got:\n${out}"
 if [ "$(id -u)" = 0 ]; then
@@ -118,7 +125,7 @@ rm -rf "${BREWSHIM}"
 say "BURROWEE_SKIP_NGINX=1 drops the nginx group"
 out_skip="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_SKIP_NGINX=1 sh edge/preflight.sh 2>&1)" \
     || die "skip-nginx dry-run exited non-zero"
-printf '%s\n' "${out_skip}" | grep -q 'default: nginx + stream' \
+printf '%s\n' "${out_skip}" | grep -q 'edge front: nginx' \
     && die "nginx group should be skipped under BURROWEE_SKIP_NGINX=1"
 
 # ---- (5) install.sh pins the generated preflight ----------------------------

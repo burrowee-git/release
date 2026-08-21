@@ -96,7 +96,7 @@ COMP="agent"
 # curl'd, and a runtime override would make one file behave as the other.
 MODE="upgrade"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
-PREFLIGHT_SHA256="b8a384431b937e225d36448cf6db0bfe777409e1f027a2cd6efcfd84200b12c5"
+PREFLIGHT_SHA256="84abe05d30323f01da385850076e8bce4d71fc58fd3d13ebe605d48833b92f3b"
 # The version floor: the stamp this component was at when THIS installer was
 # generated and published (baked from versions/<comp>.stamp by
 # tools/gen-bootstraps.sh, which release.sh re-runs on every cut). A tag

@@ -14,8 +14,10 @@
 # from tools/preflight.template.sh by tools/gen-bootstraps.sh.
 #
 # Env vars:
-#   BURROWEE_SKIP_NGINX     set to skip the nginx + stream-module group (edge only)
-#   BURROWEE_PREFLIGHT_DRY  set to print the verbs it WOULD run and install nothing
+#   BURROWEE_SKIP_NGINX       set to skip the nginx group entirely (edge only)
+#   BURROWEE_NGINX_INSTALL    1 = install nginx without asking; 0 = never ask, print tips
+#   BURROWEE_PREFLIGHT_DRY    set to print the verbs it WOULD run and install nothing
+#   BURROWEE_PREFLIGHT_NO_TTY test-only: pretend /dev/tty is absent
 
 set -eu
 
@@ -69,7 +71,7 @@ if [ -z "$PM" ]; then
     warn "no supported package manager found (apt/dnf/yum/apk/brew)"
     info "install these by hand, then re-run the installer:"
     info "  required:    minisign unzip curl ca-certificates"
-    [ "$NGINX" = 1 ] && info "  edge:        nginx + the nginx stream module, then enable+start nginx"
+    [ "$NGINX" = 1 ] && info "  edge: nginx + its stream module as a root/system service (see release.burrowee.com docs)"
     info "  best-effort: netcat openssl jq"
     # SOFT exit — the installer's trust gate is the backstop for the required tools.
     exit 0
@@ -95,7 +97,7 @@ if [ "$PM" != brew ]; then
             dnf) info "  ${DNF_BIN} install -y minisign unzip curl ca-certificates" ;;
             apk) info "  apk add minisign unzip curl ca-certificates" ;;
         esac
-        [ "$NGINX" = 1 ] && [ -z "${BURROWEE_SKIP_NGINX:-}" ] && info "  ...plus nginx + its stream module, then enable+start nginx"
+        [ "$NGINX" = 1 ] && [ -z "${BURROWEE_SKIP_NGINX:-}" ] && info "  edge: nginx + its stream module as a root/system service (see release.burrowee.com docs)"
         exit 1
     fi
 fi
@@ -177,59 +179,126 @@ case "$PM" in
     apt|dnf|apk) info "installing ca-certificates"; pm_install ca-certificates && N_INSTALLED=$((N_INSTALLED + 1)) || { warn "ca-certificates install failed (best-effort)"; N_WARNED=$((N_WARNED + 1)); } ;;
 esac
 
-# ---- DEFAULT group (edge nginx + stream module) -------------------------
+# ---- DEFAULT group (edge front: nginx + stream module) ------------------
+# Policy: burrowee never installs, enables, or starts nginx without explicit
+# operator consent. Present + running -> ok. Otherwise: ask on /dev/tty
+# (BURROWEE_NGINX_INSTALL=1/0 pre-answers); yes -> per-PM recipe as root;
+# no / no TTY -> print the guidance tips and continue (doctor re-checks).
+
+# nginx_guide <mode> — the operator guidance block. mode=full|service.
+nginx_guide() {
+    printf '\n  Install it yourself (%s):\n' "$PM" >&2
+    if [ "$1" = full ]; then
+        case "$PM" in
+            apt)  printf '    apt-get update && apt-get install -y nginx libnginx-mod-stream\n' >&2 ;;
+            dnf)  printf '    %s install -y nginx\n' "$DNF_BIN" >&2 ;;
+            apk)  printf '    apk add nginx nginx-mod-stream\n' >&2 ;;
+            brew) printf '    brew install nginx\n' >&2 ;;
+        esac
+    fi
+    case "$PM" in
+        apt|dnf) printf '    systemctl enable --now nginx\n' >&2 ;;
+        apk)     printf '    rc-update add nginx default && rc-service nginx start\n' >&2 ;;
+        brew)    printf '    sudo brew services start nginx      # system daemon, not a user agent\n' >&2 ;;
+    esac
+    printf '\n  Or ask your AI agent — copy this line:\n' >&2
+    printf '    Install nginx with its stream module on this machine, run it as a\n' >&2
+    printf '    root/system service, then run: sudo burrowee edge doctor\n\n' >&2
+}
+
+# nginx_running — best-effort master probe (pgrep may be absent: treat as running
+# so a limited box never double-prompts; doctor owns the authoritative check).
+nginx_running() {
+    command -v pgrep >/dev/null 2>&1 || return 0
+    pgrep -x nginx >/dev/null 2>&1
+}
+
+# nginx_consent — env pre-answer, else ask on /dev/tty; no TTY = no.
+nginx_consent() {
+    case "${BURROWEE_NGINX_INSTALL:-}" in
+        1) return 0 ;;
+        0) return 1 ;;
+    esac
+    [ -n "${BURROWEE_PREFLIGHT_NO_TTY:-}" ] && return 1
+    [ -r /dev/tty ] && [ -w /dev/tty ] || return 1
+    printf '  %s [y/N] ' "$1" > /dev/tty
+    IFS= read -r pf_ans < /dev/tty || return 1
+    case "$pf_ans" in y|Y) return 0 ;; *) return 1 ;; esac
+}
+
+# nginx_install <mode> — the consented recipe, as root. mode=full|service.
+nginx_install() {
+    if [ "$1" = full ]; then
+        case "$PM" in
+            apt)
+                if [ "$APT_UPDATED" = 0 ]; then run apt-get update; APT_UPDATED=1; fi
+                run apt-get install -y nginx libnginx-mod-stream || return 1 ;;
+            dnf)
+                run "$DNF_BIN" install -y nginx || return 1
+                run "$DNF_BIN" install -y nginx-mod-stream >/dev/null 2>&1 || true ;;
+            apk)  run apk add nginx nginx-mod-stream || return 1 ;;
+            brew)
+                # brew refuses root; drop to the sudo-ing user for the install.
+                if [ "$(id -u)" = 0 ]; then
+                    [ -n "${SUDO_USER:-}" ] || { warn "cannot run brew as root and no SUDO_USER to drop to"; return 1; }
+                    run sudo -u "$SUDO_USER" brew install nginx || return 1
+                else
+                    run brew install nginx || return 1
+                fi ;;
+        esac
+    fi
+    case "$PM" in
+        apt|dnf) run systemctl enable --now nginx ;;
+        apk)     run rc-update add nginx default && run rc-service nginx start ;;
+        brew)
+            # always a system LaunchDaemon, never a user agent: root runs it
+            # directly, a non-root operator re-sudos (consent was just given
+            # on the TTY, so an interactive sudo prompt here is fine).
+            if [ "$(id -u)" = 0 ]; then
+                run brew services start nginx
+            else
+                run sudo brew services start nginx
+            fi ;;
+    esac
+}
+
 if [ "$NGINX" = 1 ] && [ -z "${BURROWEE_SKIP_NGINX:-}" ]; then
-    info "default: nginx + stream module"
-    if present nginx; then
-        ok "nginx already present"
-        N_SKIPPED=$((N_SKIPPED + 1))
+    info "edge front: nginx + stream module (operator-consented)"
+    MODE=""
+    if ! present nginx; then
+        MODE=full
+        warn "nginx not found — burrowee edge needs a system-level nginx (stream module included)"
+    elif ! nginx_running; then
+        MODE=service
+        warn "nginx is installed but not running as a service"
     else
-        info "installing nginx"
-        if pm_install nginx; then
-            ok "nginx installed"
-            N_INSTALLED=$((N_INSTALLED + 1))
+        ok "nginx present and running"
+        N_SKIPPED=$((N_SKIPPED + 1))
+    fi
+    if [ -n "$MODE" ]; then
+        if [ "$MODE" = full ] && nginx_consent "Install nginx now via $PM (root)?"; then
+            if nginx_install full && { [ -n "$DRY" ] || present nginx; }; then
+                ok "nginx installed + service enabled"
+                N_INSTALLED=$((N_INSTALLED + 1))
+            else
+                warn "nginx install did not complete"
+                nginx_guide full
+                N_WARNED=$((N_WARNED + 1))
+            fi
+        elif [ "$MODE" = service ] && nginx_consent "Enable + start nginx now via $PM (root)?"; then
+            if nginx_install service; then
+                ok "nginx service enabled + started"
+                N_INSTALLED=$((N_INSTALLED + 1))
+            else
+                warn "could not start nginx"
+                nginx_guide service
+                N_WARNED=$((N_WARNED + 1))
+            fi
         else
-            warn "could not install nginx (edge will need it — re-run with root)"
+            nginx_guide "$MODE"
             N_WARNED=$((N_WARNED + 1))
         fi
     fi
-    # stream module + enable/start per manager
-    case "$PM" in
-        apt)
-            info "installing libnginx-mod-stream"
-            pm_install libnginx-mod-stream \
-                && { ok "libnginx-mod-stream installed"; N_INSTALLED=$((N_INSTALLED + 1)); } \
-                || { warn "libnginx-mod-stream install failed"; N_WARNED=$((N_WARNED + 1)); }
-            info "enabling + starting nginx"
-            run systemctl enable --now nginx \
-                || { warn "could not enable+start nginx (no systemd? start it by hand)"; N_WARNED=$((N_WARNED + 1)); }
-            ;;
-        dnf)
-            # stream is usually built into the dnf nginx; try the split pkg, ignore failure.
-            info "trying nginx-mod-stream (built-in on most RHEL nginx — ignoring if absent)"
-            pm_install nginx-mod-stream >/dev/null 2>&1 \
-                && ok "nginx-mod-stream installed" \
-                || info "nginx-mod-stream not a separate package (stream built-in) — ok"
-            info "enabling + starting nginx"
-            run systemctl enable --now nginx \
-                || { warn "could not enable+start nginx (no systemd? start it by hand)"; N_WARNED=$((N_WARNED + 1)); }
-            ;;
-        apk)
-            info "installing nginx-mod-stream"
-            pm_install nginx-mod-stream \
-                && { ok "nginx-mod-stream installed"; N_INSTALLED=$((N_INSTALLED + 1)); } \
-                || { warn "nginx-mod-stream install failed"; N_WARNED=$((N_WARNED + 1)); }
-            info "enabling + starting nginx (openrc)"
-            { run rc-update add nginx default && run rc-service nginx start; } \
-                || { warn "could not enable+start nginx (no openrc? start it by hand)"; N_WARNED=$((N_WARNED + 1)); }
-            ;;
-        brew)
-            # the brew nginx formula already includes the stream module — no separate pkg.
-            info "enabling + starting nginx (brew services)"
-            run brew services start nginx \
-                || { warn "could not start nginx via brew services"; N_WARNED=$((N_WARNED + 1)); }
-            ;;
-    esac
 fi
 
 # ---- BEST-EFFORT group --------------------------------------------------
