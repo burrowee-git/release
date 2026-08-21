@@ -47,9 +47,11 @@ no-op.
 
 **Preflight — nginx consent:** If the binary is not yet on the system, the installer
 runs its preflight to install OS dependencies (minisign, unzip, curl, and for edge: nginx
-+ its stream module as a root/system service). For nginx, the preflight asks
-`Install nginx now via <pm> (root)? [y/N]` on the terminal when a TTY is present
-(e.g., in interactive installs). Agent-driven or piped runs get guidance tips instead.
++ its stream module as a root/system service). For nginx, the preflight asks one of two
+prompts on the terminal when a TTY is present (e.g., in interactive installs):
+`Install nginx now via <pm> (root)? [y/N]` if nginx is missing, or
+`Enable + start nginx now via <pm> (root)? [y/N]` if nginx is installed but not running.
+Agent-driven or piped runs get guidance tips instead.
 You can pre-answer yes with `BURROWEE_NGINX_INSTALL=1` for unattended installs, or
 force no (showing tips) with `=0`. Skip the nginx group entirely with `BURROWEE_SKIP_NGINX`.
 Nginx runs as a system service (on macOS: `sudo brew services start nginx` as a
