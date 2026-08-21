@@ -26,9 +26,11 @@ Run `burrowee-agent status`. If it reports `not bound`, stop and route to the
 
 Run this **on the machine that will be the edge relay** — normally an always-on host
 or VPS (a `managed` service only survives reboot there). You will need a public
-hostname base for it to serve on (the `hostname_base` decision, §2) and — on Linux —
-**root** for the nginx front the setup stands up (the `sudo … --fix` in §5). If the
-user has no such host, or no root on it, surface that before starting.
+hostname base for it to serve on (the `hostname_base` decision, §2) and the ability
+to grant **root** when asked — since 0.2.0 the edge is a system install (root-owned
+roots under `/usr/local`, a system service, an nginx front), and its tools request
+consent-gated sudo elevation for the steps that need it (§5). If the user has no
+such host, or no root on it, surface that before starting.
 
 If your agent isn't on that host but can `ssh` to it, do the whole setup there the
 entry skill's way — install + bind `burrowee-agent` on it, then run `edge setup`
@@ -62,7 +64,7 @@ burrowee-agent edge setup
 Then apply the next-action loop in §3. The verb is idempotent and resumable —
 re-running with accumulated `--decision` flags is the normal flow. In ONE verb it
 auto-ensures the install (§1), mints + enrolls the relay, runs bootstrap (which also
-stands up the nginx LAN front automatically), starts the edge per `service_mode`,
+stands up the nginx front automatically), starts the edge per `service_mode`,
 and approves the relay.
 
 Expect these decisions (gated one at a time):
@@ -129,18 +131,23 @@ For a health check or to remediate the nginx front (e.g. after an `edge_install_
 error, or if the relay isn't reachable), run the installed setup binary's doctor:
 
 ```bash
-burrowee-edge-cli doctor          # read-only: identity / console reachable / nginx front
-burrowee-edge-cli doctor --fix    # bring the nginx LAN front up (install → apply → start)
+burrowee-edge-cli doctor          # read-only diagnostic: identity / console reachable / nginx front / host cert
+burrowee-edge-cli doctor --fix    # remediate the nginx front (install → apply → start) and issue/renew the host cert
 ```
 
-On Linux the `--fix` path needs root for the nginx install + enable, and `--home`
-because sudo swaps `$HOME`:
+The edge is a **system install**: config root `/usr/local/etc/burrowee/edge`, data
+root `/usr/local/var/burrowee/edge`, both root-owned. Do NOT wrap the command in
+`sudo` yourself and do NOT pass `--home` — `--home` only renames the config root
+for non-standard layouts, and `doctor` requests consent-gated sudo elevation
+itself for the repairs that need root. For an unattended run, add `--yes` to
+accept the remediation prompts:
 
 ```bash
-sudo "$(command -v burrowee-edge-cli)" doctor --fix --yes --home "$HOME/.burrowee/edge"
+burrowee-edge-cli doctor --fix --yes
 ```
 
-Report each `doctor` line back to the user; `--fix` is safe to re-run.
+Report each `doctor` line back to the user; `--fix` is safe to re-run. Exit 0 is
+all green, exit 3 means one or more ✗ rows remain.
 
 ## 6. Related verb
 - `burrowee-agent edge approve` — approve an already-minted pending relay by id;
