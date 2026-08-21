@@ -64,9 +64,19 @@
 # that may not need it (every migration is idempotent and receipted) rather than
 # to skip one that does.
 #
-# FLAGS — an operator seam, never used by install.sh or update.sh:
+# FLAGS — an operator seam; --assume-below is also what migrations/upgrade.sh
+# (the forcing entry) passes; install.sh and update.sh pass none of them:
 #   --installed-version <v>  treat this host as having been on <v>, INSTEAD of
-#                            reading the version anchor. See below.
+#                            reading the version anchor. STRICT: rungs targeting
+#                            exactly <v> are skipped as done. See below.
+#   --assume-below <line>    the INCLUSIVE FLOOR: assume this host is below
+#                            <line>. The anchor is not read, and every rung
+#                            targeting <line> or newer is selected; strictly
+#                            older targets are done. Mutually exclusive with
+#                            --installed-version — they answer opposite
+#                            questions about rungs targeting the named line,
+#                            which is exactly why the strict flag cannot express
+#                            the floor (0.0.0 is not a floor, it is "everything").
 #   --rerun-recorded         run a rung even though its receipt says it finished,
 #                            AND declare the run FORCED to the rungs
 #                            ($MIGRATION_FORCED=1 in their environment).
@@ -371,7 +381,7 @@ as_owner() {
 # ---------------------------------------------------------------------------
 usage() {
     cat <<EOF
-usage: sh $0 [--installed-version <version>] [--rerun-recorded]
+usage: sh $0 [--installed-version <version> | --assume-below <line>] [--rerun-recorded]
 
 Runs every $COMP state migration this host has not reached yet, oldest first.
 A no-op unless one applies, so it is safe to run unconditionally.
@@ -381,7 +391,20 @@ A no-op unless one applies, so it is safe to run unconditionally.
         stamp's trailing .date.sha are accepted). The ladder starts from it and
         \$COMP_HOME/$VERSION_FILE is NOT read. Use it when that file is absent
         or wrong. Must be MAJOR.MINOR.PATCH: an unparseable value is refused,
-        never rounded down to 0.0.0.
+        never rounded down to 0.0.0. STRICT: "was on 0.2.0" means the 0.2.0
+        rungs are done — a rung targeting exactly <version> is skipped. To make
+        rungs targeting a line run AGAIN, name that line with --assume-below.
+
+  --assume-below <line>
+        The INCLUSIVE FLOOR: "assume this host is below <line>". The version
+        anchor is not read and the per-rung version gate is bypassed — every
+        rung targeting <line> OR NEWER runs; rungs targeting older lines are
+        skipped as genuinely done. Same accepted spellings and the same
+        refuse-not-round rule as --installed-version, and mutually exclusive
+        with it: the two answer opposite questions about rungs targeting the
+        named line, so a command naming both has no one meaning. This flag
+        moves only the GATE — receipts still skip finished work unless
+        --rerun-recorded is also given.
 
   --rerun-recorded
         Also run migrations whose receipt says they already completed here, and
@@ -466,6 +489,8 @@ valid_version() {
 # value alone; only a second variable can.
 NAMED_VERSION=""
 VERSION_NAMED=0
+FLOOR_VERSION=""
+FLOOR_NAMED=0
 RERUN_RECORDED=0
 
 while [ $# -gt 0 ]; do
@@ -479,6 +504,17 @@ while [ $# -gt 0 ]; do
     --installed-version=*)
         NAMED_VERSION="${1#--installed-version=}"
         VERSION_NAMED=1
+        shift
+        ;;
+    --assume-below)
+        [ $# -ge 2 ] || usage_error "--assume-below needs a version line, e.g. --assume-below 0.2.0"
+        FLOOR_VERSION="$2"
+        FLOOR_NAMED=1
+        shift 2
+        ;;
+    --assume-below=*)
+        FLOOR_VERSION="${1#--assume-below=}"
+        FLOOR_NAMED=1
         shift
         ;;
     --rerun-recorded)
@@ -497,12 +533,34 @@ done
 
 # Validated HERE — before the tree is even looked at, and far before anything is
 # copied or removed. A refusal at this point has touched nothing.
+#
+# THE TWO VERSION FLAGS ARE MUTUALLY EXCLUSIVE, and that is refused first: they
+# answer OPPOSITE questions about a rung targeting the named line
+# (--installed-version 0.2.0 says its 0.2.0 rungs are done; --assume-below 0.2.0
+# says they are not), so a command naming both has no one meaning for the
+# runner to honor — whichever one "won" would silently invert the other.
+if [ "$VERSION_NAMED" = 1 ] && [ "$FLOOR_NAMED" = 1 ]; then
+    warn "--installed-version and --assume-below were both given, and they disagree"
+    warn "by construction about rungs targeting the named line: 'was on <v>' skips"
+    warn "rungs targeting exactly <v>, 'assume below <line>' runs them. Name the one"
+    warn "that matches what you believe about this host. nothing has been touched."
+    exit 64
+fi
 if [ "$VERSION_NAMED" = 1 ] && ! valid_version "$NAMED_VERSION"; then
     warn "--installed-version '$NAMED_VERSION' is not a version this runner can compare."
     warn "expected MAJOR.MINOR.PATCH, all numeric — e.g. 0.1.115, v0.1.115,"
     warn "0.1.114.2026.08.04.be19c8b6 (a release stamp), or 0.2.10-rc1."
     warn "refusing rather than guessing: an unparseable field reads as 0, so"
     warn "'$NAMED_VERSION' would have selected the rungs for some other version."
+    warn "nothing has been touched."
+    exit 64
+fi
+if [ "$FLOOR_NAMED" = 1 ] && ! valid_version "$FLOOR_VERSION"; then
+    warn "--assume-below '$FLOOR_VERSION' is not a version this runner can compare."
+    warn "expected MAJOR.MINOR.PATCH, all numeric — e.g. 0.2.0, v0.2.0, or a release"
+    warn "stamp's 0.2.0.2026.08.17.4e43c2ed."
+    warn "refusing rather than guessing: an unparseable field reads as 0, so"
+    warn "'$FLOOR_VERSION' would have selected some other line's rungs."
     warn "nothing has been touched."
     exit 64
 fi
@@ -618,8 +676,8 @@ version_lt() {
 }
 
 # ---------------------------------------------------------------------------
-# receipt_state <script> — what this host's receipt for <script> proves, if
-# anything. Echoes one of:
+# receipt_state <script> <target> — what this host's receipt for the ledger
+# ITEM "<target> <script>" proves, if anything. Echoes one of:
 #
 #   none              no receipt
 #   done              a receipt earned for THIS $COMP_HOME
@@ -628,6 +686,22 @@ version_lt() {
 #
 # The receipt is written by the RUNNER after the script exits 0, so it means
 # "this migration finished", not "this migration started".
+#
+# THE RECEIPT IS PER ITEM — per ledger ROW, `<script>@<target>.done` — not per
+# script file. The ladder's unit of work is the row: one FILE may legitimately
+# appear on several rows (re-listed at a newer target when a line gains a step),
+# and a receipt keyed by the file alone would let the run that satisfied the
+# 0.2.0 row silently satisfy a later 0.3.0 row too — the receipt check runs
+# BEFORE the version gate, so the gate would never even see the new item. The
+# target in the name is what makes "this file ran once" and "this ITEM ran"
+# different facts, which is the whole reason a re-listed row cannot be missed.
+#
+# LEGACY RECEIPTS (`<script>.done`, written before receipts carried the target)
+# are honored ONLY when the ledger names that script exactly once: with one row
+# there is exactly one item the old receipt could have witnessed. The moment a
+# second row names the same script, a target-less receipt can no longer say
+# WHICH item it proves, and it re-evaluates — the fail-safe direction: an
+# idempotent rung re-runs, a missed item never hides.
 #
 # WHY THE TREE IS PART OF THE RECEIPT. Every migration in a ladder is
 # TREE-scoped, and which tree that is depends on the scheme and on whose $HOME
@@ -640,14 +714,37 @@ version_lt() {
 # A receipt that cannot be read even as root, and one whose contents say nothing
 # about a tree, both re-evaluate rather than skip — the fail-safe direction, and
 # the same one the header picks for a garbage version file. Only "done", a
-# receipt that names THIS tree, ends a rung's evaluation here.
+# receipt that names THIS tree, ends an item's evaluation here.
 # ---------------------------------------------------------------------------
+# script_row_count <script> — how many ledger rows name <script>. Decides
+# whether a legacy target-less receipt is unambiguous (see receipt_state).
+script_row_count() {
+    _src_n=0
+    _src_want=0
+    for _src_word in $MIGRATIONS; do
+        if [ "$_src_want" = 1 ]; then
+            _src_want=0
+            [ "$_src_word" = "$1" ] && _src_n=$((_src_n + 1))
+            continue
+        fi
+        _src_want=1
+    done
+    echo "$_src_n"
+}
+
 receipt_state() {
-    _rs_file="$RECEIPTS/$1.done"
+    _rs_file="$RECEIPTS/$1@$2.done"
     # No receipts directory at all: nothing has ever been recorded here, and
     # asking for root to confirm that would put a sudo prompt in front of every
     # host that has never run a migration.
     if [ ! -d "$RECEIPTS" ]; then echo none; return 0; fi
+    # The per-item receipt is authoritative when present in any state; the
+    # legacy name is consulted only when the item receipt is plainly absent AND
+    # the ledger's single row for this script makes the old name unambiguous.
+    if [ ! -f "$_rs_file" ] && [ -x "$RECEIPTS" ] \
+        && [ -f "$RECEIPTS/$1.done" ] && [ "$(script_row_count "$1")" = 1 ]; then
+        _rs_file="$RECEIPTS/$1.done"
+    fi
     if [ -r "$_rs_file" ]; then
         _rs_body="$(cat "$_rs_file" 2>/dev/null || true)"
     elif [ -f "$_rs_file" ] || [ ! -x "$RECEIPTS" ]; then
@@ -669,8 +766,9 @@ receipt_state() {
 }
 
 # ---------------------------------------------------------------------------
-# record_migration <script> — write the receipt. NON-ZERO when it could not,
-# which the caller turns into exit 3.
+# record_migration <script> <target> — write the ITEM's receipt
+# (`<script>@<target>.done` — see receipt_state for why the target is part of
+# the name). NON-ZERO when it could not, which the caller turns into exit 3.
 #
 # Failing to record is not cosmetic bookkeeping. The receipt is the gate that
 # keeps a migration RE-RUNNABLE; with it absent the only gate left is the
@@ -693,11 +791,12 @@ record_migration() {
     if ! as_owner chmod 0700 "$RECEIPTS" 2>/dev/null; then
         warn "could not chmod 0700 $RECEIPTS — its receipts stay readable to every local user."
     fi
-    # Two lines: the script name (first line, for anything reading the shape)
-    # and the TREE this rung was run against. See receipt_state for why the tree
-    # is the part that matters.
-    if ! printf '%s\ncomp_home=%s\n' "$1" "$COMP_HOME" | as_owner tee "$RECEIPTS/$1.done" >/dev/null; then
-        warn "could not write $RECEIPTS/$1.done — $1 ran but is NOT recorded."
+    # Three lines: the script name (first line, for anything reading the
+    # shape), the ledger TARGET this item upgrades to, and the TREE this rung
+    # was run against. See receipt_state for why the tree and the target are
+    # the parts that matter.
+    if ! printf '%s\ntarget=%s\ncomp_home=%s\n' "$1" "$2" "$COMP_HOME" | as_owner tee "$RECEIPTS/$1@$2.done" >/dev/null; then
+        warn "could not write $RECEIPTS/$1@$2.done — $1 (target $2) ran but is NOT recorded."
         return 1
     fi
     # And 0600 on the file. `tee` creates it under the writer's umask, which on
@@ -705,8 +804,8 @@ record_migration() {
     # but this is what keeps the receipt closed when that chmod could not be
     # applied or when a later change re-widens the directory for some other
     # file's sake.
-    if ! as_owner chmod 0600 "$RECEIPTS/$1.done" 2>/dev/null; then
-        warn "could not chmod 0600 $RECEIPTS/$1.done — it stays readable to every local user."
+    if ! as_owner chmod 0600 "$RECEIPTS/$1@$2.done" 2>/dev/null; then
+        warn "could not chmod 0600 $RECEIPTS/$1@$2.done — it stays readable to every local user."
     fi
 }
 
@@ -808,6 +907,14 @@ elif [ ! -d "$COMP_HOME" ]; then
         warn "no-op: the tree that version describes is not at $COMP_HOME."
         exit 1
     fi
+    # The same contradiction, spelled with the other flag: --assume-below asserts
+    # this host still needs the named line's migrations, and the tree they would
+    # migrate is not here to be examined.
+    if [ "$FLOOR_NAMED" = 1 ]; then
+        warn "you named --assume-below $FLOOR_VERSION, so this is a REFUSAL, not a"
+        warn "no-op: the tree those migrations are about is not at $COMP_HOME."
+        exit 1
+    fi
     exit 0
 fi
 
@@ -825,8 +932,14 @@ fi
 
 # The named version REPLACES the file — installed_version() is not called at all
 # when one was given, so the ladder is a function of what the operator typed and
-# nothing that may be stale on disk.
-if [ "$VERSION_NAMED" = 1 ]; then
+# nothing that may be stale on disk. The FLOOR does the same one louder: the
+# anchor is not read AND the per-rung comparison inverts — the floor selects
+# every rung targeting it or newer, instead of starting above it.
+if [ "$FLOOR_NAMED" = 1 ]; then
+    _version=""
+    say "using --assume-below $FLOOR_VERSION — compared as $(version_field "$FLOOR_VERSION" 1).$(version_field "$FLOOR_VERSION" 2).$(version_field "$FLOOR_VERSION" 3); $COMP_HOME/$VERSION_FILE is NOT read."
+    say "every rung targeting that line or newer runs; older targets are treated as done"
+elif [ "$VERSION_NAMED" = 1 ]; then
     _version="$NAMED_VERSION"
     say "using --installed-version $_version; $COMP_HOME/$VERSION_FILE is NOT read"
 else
@@ -908,7 +1021,7 @@ for _word in $MIGRATIONS; do
     #   unprovenanced   it names no tree. It falls through EXACTLY LIKE foreign:
     #                   a receipt that cannot say which tree it witnessed is not
     #                   evidence about this one either.
-    _receipt="$(receipt_state "$_script")"
+    _receipt="$(receipt_state "$_script" "$_target_version")"
     case "$_receipt" in
     done)
         if [ "$RERUN_RECORDED" != 1 ]; then
@@ -931,7 +1044,28 @@ for _word in $MIGRATIONS; do
         ;;
     esac
 
-    if [ -n "$_version" ]; then
+    if [ "$FLOOR_NAMED" = 1 ]; then
+        # THE FLOOR GATE, and it is INCLUSIVE: a rung targeting the floor line
+        # itself runs — "assume below 0.2.0" means the 0.2.0 work is NOT done.
+        # Only a rung targeting a strictly older line is treated as genuinely
+        # done. This is the comparison --installed-version cannot express: "was
+        # on 0.2.0" skips the 0.2.0 rungs, which is exactly right for a recorded
+        # version and exactly wrong for a forcing floor.
+        if version_lt "$_target_version" "$FLOOR_VERSION"; then
+            say "$_script skipped: its target $_target_version is older than the floor $FLOOR_VERSION"
+            continue
+        fi
+        say "$_script applies: its target $_target_version is at or above the floor $FLOOR_VERSION"
+        # Advisory, cannot veto — same contract as a named version: the operator
+        # asserted this host's state, and the floor must select the rungs that
+        # assertion selects. Disagreement is still said out loud.
+        if ! run_migration "$_script" --applies; then
+            warn "$_script --applies does NOT recognise this host as one that still needs it,"
+            warn "but you named --assume-below $FLOOR_VERSION, which selects it — so it is being run."
+            warn "if this host has already moved, expect the rung to do nothing and still leave"
+            warn "a receipt saying it ran here. Re-check the floor if that is not what you meant."
+        fi
+    elif [ -n "$_version" ]; then
         if ! version_lt "$_version" "$_target_version"; then
             say "$_script skipped: installed $_version is not older than $_target_version"
             continue
@@ -956,7 +1090,11 @@ for _word in $MIGRATIONS; do
         fi
         say "$_script applies: no recorded version, and it recognises this host"
     fi
-    _pending="${_pending:+$_pending }$_script"
+    # Pending entries carry the ITEM — `<script>@<target>` — not the bare file:
+    # the receipt written after the run is per item (see receipt_state), and one
+    # file re-listed at two targets is two pending items, run and receipted
+    # separately.
+    _pending="${_pending:+$_pending }$_script@$_target_version"
 done
 
 # A ledger that word-splits into an odd number of words has a row with a target
@@ -1003,36 +1141,39 @@ say "pending: $_pending"
 # the fact is not that moment. This is the whole reason the stop is DECLARED in
 # component.conf rather than merely observed afterwards.
 _stopped=""
-for _script in $_pending; do
-    if stops_the_service "$_script"; then
-        say "$_script will STOP burrowee-$COMP before it copies, and this runner never"
+for _item in $_pending; do
+    _p_script="${_item%@*}"
+    if stops_the_service "$_p_script"; then
+        say "$_p_script will STOP burrowee-$COMP before it copies, and this runner never"
         say "starts anything — the caller does. See that rung's header for why the"
         say "destination has to hold still."
     fi
 done
 
 _unrecorded=""
-for _script in $_pending; do
-    say "running $_script"
-    if ! run_migration "$_script"; then
-        warn "$_script FAILED. fix the cause above and re-run the installer;"
+for _item in $_pending; do
+    _p_script="${_item%@*}"
+    _p_target="${_item##*@}"
+    say "running $_p_script (target $_p_target)"
+    if ! run_migration "$_p_script"; then
+        warn "$_p_script FAILED. fix the cause above and re-run the installer;"
         warn "completed migrations are recorded and will not be repeated."
-        if stops_the_service "$_script"; then
-            warn "$_script is declared to stop burrowee-$COMP: it may have stopped the"
+        if stops_the_service "$_p_script"; then
+            warn "$_p_script is declared to stop burrowee-$COMP: it may have stopped the"
             warn "daemon before it failed. Check, and start it if it is down."
         fi
         exit 1
     fi
-    if stops_the_service "$_script"; then
-        _stopped="${_stopped:+$_stopped }$_script"
+    if stops_the_service "$_p_script"; then
+        _stopped="${_stopped:+$_stopped }$_p_script"
     fi
     # A lost receipt does not stop the remaining rungs: the cheapest safe end
     # state is still "walk to the top, then report". The failure is carried to
     # the exit code instead.
-    if ! record_migration "$_script"; then
-        _unrecorded="${_unrecorded:+$_unrecorded }$_script"
+    if ! record_migration "$_p_script" "$_p_target"; then
+        _unrecorded="${_unrecorded:+$_unrecorded }$_item"
     fi
-    say "$_script complete"
+    say "$_p_script complete"
 done
 
 if [ -n "$_unrecorded" ]; then

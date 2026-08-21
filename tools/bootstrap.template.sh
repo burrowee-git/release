@@ -13,10 +13,10 @@
 #
 # TWO MODES, ONE TEMPLATE. @MODE@ is substituted at render time and decides
 # whether this file stops after the inner installer (install.sh) or goes on to
-# run `migrations/upgrade.sh <line>` out of the SAME verified kit (upgrade.sh):
+# run `migrations/upgrade.sh <floor>` out of the SAME verified kit (upgrade.sh):
 #
 #   install.sh   resolve + verify + unzip  →  ./install.sh
-#   upgrade.sh   resolve + verify + unzip  →  ./install.sh  →  ./migrations/upgrade.sh <line>
+#   upgrade.sh   resolve + verify + unzip  →  ./install.sh  →  ./migrations/upgrade.sh <floor>
 #
 # The composition lives HERE, one layer above both, so neither the installer nor
 # the migration script grows a second job: install.sh is still the only thing
@@ -45,12 +45,20 @@
 # they are produced from tools/bootstrap.template.sh by tools/gen-bootstraps.sh.
 #
 # Arguments (upgrade.sh only; install.sh takes none and REJECTS any):
-#   <line>                       the release line to move to, e.g. 0.2.0. Optional —
-#                                absent, latest is resolved exactly as install.sh
-#                                does. Present, it PINS the resolution to that line:
-#                                an operator who types 0.2.0 while latest is 0.3.0
-#                                gets 0.2.0 or a refusal, never 0.3.0's migrations
-#                                under a 0.2.0 banner.
+#   <floor>                      the migration floor, e.g. 0.2.0 — an INCLUSIVE
+#                                floor meaning "assume this host is below it":
+#                                after the install, every migration the kit
+#                                carries targeting <floor> or newer is forced,
+#                                receipts reopened; older targets are treated as
+#                                done. It never changes WHICH release installs —
+#                                that is always the newest the channel serves
+#                                (or the BURROWEE_<COMP>_VERSION pin). Optional:
+#                                absent, the floor defaults to the newest target
+#                                in the installed kit's own ladder — the whole
+#                                shipped ladder, and never a value derived from
+#                                the release tag, which would refuse on every
+#                                release that ships no new rung. The kit itself
+#                                refuses a floor above its ladder top (64).
 #
 # Exit codes (upgrade.sh):
 #   0   installed; the ladder applied nothing (its 0) or its rungs RAN (its 2)
@@ -193,19 +201,13 @@ sha256_of() {
 # text that merely contains the literal `"tag_name"` can't spoof the tag.
 # Prefer jq (structural); fall back to grep/sed. Used for both the direct
 # api.github.com fetch and the GH_PROXY mirror retry.
-#
-# select_tag runs HERE, per page, and not only at the choke point in
-# resolve_latest: this function reduces a page to its single highest tag, so a
-# filter applied afterwards would be filtering an already-discarded set. A page
-# whose newest release is 0.3.0 while the line asked for is 0.2.0 would answer
-# "nothing on that line" — correct logic, wrong observed set.
 latest_tag() {
     if command -v jq >/dev/null 2>&1; then
         jq -r '.[].tag_name // empty' 2>/dev/null
     else
         grep -E '^[[:space:]]*"tag_name"[[:space:]]*:' \
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-    fi | grep -E "^${COMP}/v" | select_tag | sort -V | tail -n1
+    fi | grep -E "^${COMP}/v" | sort -V | tail -n1
 }
 
 # next_page_url — read a `curl -D` header dump on stdin and print the URL from
@@ -245,26 +247,13 @@ next_page_url() {
 # source was reached and has nothing matching — and the caller distinguishes the
 # two, because "unreachable" and "no such line" want different advice.
 #
-# select_tag — reads tags on stdin and keeps only those on ${LINE}, or all of
-# them when no line was named. This is what makes the argument a PIN on the
-# resolution rather than a label attached after it: with a line named, "latest"
-# means the newest build ON THAT LINE, so an operator who types 0.2.0 while
-# 0.3.0 is out gets 0.2.0 — not 0.3.0's migrations under a 0.2.0 banner. The
-# first three dot-fields are compared, the same fields the ladder's own gate
-# reads; the .date.sha tail is what distinguishes builds within the line and is
-# deliberately not part of the match. Inlined rather than calling semver_of so
-# this block stays self-contained between its markers.
-select_tag() {
-    while IFS= read -r _st_tag; do
-        if [ -z "${LINE:-}" ]; then
-            printf '%s\n' "$_st_tag"
-            continue
-        fi
-        _st_v="${_st_tag#*/}"
-        [ "$(printf '%s' "${_st_v#v}" | cut -d. -f1-3)" = "${LINE}" ] || continue
-        printf '%s\n' "$_st_tag"
-    done
-}
+# The upgrade argument does NOT filter this resolution. It is the migration
+# FLOOR, handed to the verified kit's own forcing entry after the install — the
+# resolution always takes the newest release the channel serves (or the
+# BURROWEE_<COMP>_VERSION env pin). A resolution-pinning argument was tried and
+# retired: it coupled "which release installs" to "which migrations force", and
+# the version floor baked into this file made any line behind the current cut
+# unreachable anyway — the one lever it added was already refused.
 resolve_latest() {
     _rl_prefix="$1"
     _rl_url="https://api.github.com/repos/${REPO}/releases?per_page=100"
@@ -281,7 +270,7 @@ resolve_latest() {
         [ "$_rl_pages" -lt 20 ] || break
         _rl_url="$(next_page_url < "$TMP/page.head")"
     done
-    sort -V < "$TMP/tags" | select_tag | tail -n1
+    sort -V < "$TMP/tags" | tail -n1
 }
 # END release-resolver
 
@@ -401,22 +390,25 @@ esac
 # verb that silently drops what it was given is what a mistyped subcommand
 # becomes, and `| sh -s -- 0.2.0` against install.sh is exactly that mistype.
 #
-# upgrade.sh takes at most one — the release line. It is optional (absent,
-# latest is resolved as always) and it is not a label: see the resolution block
-# for what "pins the line" means.
+# upgrade.sh takes at most one — the migration FLOOR. It is optional (absent,
+# the installed kit's own newest ladder target is used, i.e. the whole shipped
+# ladder) and it never changes which release installs: see the forced-migration
+# block for the floor's meaning.
 usage() {
     printf 'usage: curl -fsSL https://release.burrowee.com/%s/%s.sh | sh' "$COMP" "$MODE"
     if [ "$MODE" = upgrade ]; then
-        printf ' -s -- [<line>]\n\n'
-        printf 'Install the %s release and then FORCE this line'"'"'s state migrations from the\n' "$COMP"
-        printf 'same verified kit. <line> is MAJOR.MINOR.PATCH (e.g. 0.2.0); a leading "v" and a\n'
-        printf 'release stamp'"'"'s trailing .date.sha are accepted. Given, it pins which release is\n'
-        printf 'resolved; omitted, the latest release is used and the line is read off it.\n\n'
+        printf ' -s -- [<floor>]\n\n'
+        printf 'Install the newest %s release and then FORCE its state migrations from the\n' "$COMP"
+        printf 'same verified kit. <floor> is an INCLUSIVE floor, MAJOR.MINOR.PATCH (e.g. 0.2.0;\n'
+        printf 'a leading "v" and a release stamp'"'"'s trailing .date.sha are accepted): rungs\n'
+        printf 'targeting it or newer are forced, older targets are treated as done. Omitted,\n'
+        printf 'the kit'"'"'s whole shipped ladder is forced. The floor never changes which release\n'
+        printf 'installs — pin that with the BURROWEE_<COMP>_VERSION environment variable.\n\n'
         printf 'exit: 0 installed (ladder applied nothing, or its rungs ran) · 1 the ladder\n'
         printf 'refused or failed · 3 the ladder ran but a receipt was lost · 64 bad command line.\n'
     else
         printf '\n\nInstall the latest %s release. Takes no arguments; pin a specific release with\n' "$COMP"
-        printf 'the BURROWEE_<COMP>_VERSION environment variable. To force this line'"'"'s state\n'
+        printf 'the BURROWEE_<COMP>_VERSION environment variable. To force the kit'"'"'s state\n'
         printf 'migrations as well, use upgrade.sh instead.\n'
     fi
 }
@@ -432,11 +424,12 @@ usage_error() {
 }
 
 # norm_line <string> — MAJOR.MINOR.PATCH, or non-zero when the value is not
-# something that may be compared as a version. Deliberately the same SHAPE as
-# migrations/upgrade.sh's norm_version and run.sh's valid_version, and for the
-# same reason: a non-numeric field reads as 0 in the ladder's gate, so "0.2.x"
-# would quietly become 0.2.0 and pass a cross-check the operator's actual belief
-# would have failed. It is marginally STRICTER than those two — it rejects a
+# something that may be compared as a version. This is what normalizes the
+# operator's migration FLOOR before it is handed to the kit. Deliberately the
+# same SHAPE as migrations/upgrade.sh's norm_version and run.sh's
+# valid_version, and for the same reason: a non-numeric field reads as 0 in the
+# ladder's gate, so "0.2.x" would quietly become 0.2.0 and select some other
+# line's rungs. It is marginally STRICTER than those two — it rejects a
 # `-rc1` / `+meta` suffix outright rather than trimming it — which only moves a
 # refusal the ladder would have made anyway to before the network is touched.
 norm_line() {
@@ -459,7 +452,7 @@ norm_line() {
     printf '%s.%s.%s' "$_nl_major" "$_nl_minor" "$_nl_patch"
 }
 
-LINE=""
+FLOOR=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help|help)
@@ -469,11 +462,11 @@ while [ $# -gt 0 ]; do
             usage_error "unknown option '$1'" ;;
         *)
             [ "$MODE" = upgrade ] \
-                || usage_error "$COMP/install.sh takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the release line?"
-            [ -z "$LINE" ] \
-                || usage_error "unexpected extra argument '$1' — upgrade.sh takes at most one, the release line"
-            LINE="$(norm_line "$1")" \
-                || usage_error "'$1' is not a release line this bootstrap can compare — expected MAJOR.MINOR.PATCH, all numeric (0.2.0, v0.2.0, or the stamp 0.2.0.2026.08.17.4e43c2ed)"
+                || usage_error "$COMP/install.sh takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?"
+            [ -z "$FLOOR" ] \
+                || usage_error "unexpected extra argument '$1' — upgrade.sh takes at most one, the migration floor"
+            FLOOR="$(norm_line "$1")" \
+                || usage_error "'$1' is not a version this bootstrap can compare — expected MAJOR.MINOR.PATCH, all numeric (0.2.0, v0.2.0, or the stamp 0.2.0.2026.08.17.4e43c2ed)"
             shift ;;
     esac
 done
@@ -525,20 +518,13 @@ if [ -n "$PIN" ]; then
     TAG="$PIN"
     info "using pinned version: $TAG"
 else
-    if [ -n "${LINE:-}" ]; then
-        info "resolving the newest ${COMP} release on line ${LINE}"
-    else
-        info "resolving latest ${COMP} release"
-    fi
+    info "resolving latest ${COMP} release"
     # Who answered? "github" = api.github.com, or a GH_PROXY mirror standing in
     # for it; "catalog" = the first-party console. Only the github answer is held
     # to the version floor — see the choke point at the end of this block.
     TAG_SOURCE=github
     # GH_ANSWERED separates "nobody could be reached" from "the source was
-    # reached and has nothing on the line you asked for". Without it, a line with
-    # no release walks the mirrors and the catalog and then aborts with "GitHub
-    # and the console catalog are both unreachable" — advice about a network
-    # that was working, for a typo in an argument.
+    # reached and answered empty" — the two want different advice.
     GH_ANSWERED=0
     if TAG="$(resolve_latest '')"; then GH_ANSWERED=1; else TAG=""; fi
     # GitHub API unreachable/empty — retry through each mirror in turn BEFORE the
@@ -550,13 +536,6 @@ else
             if TAG="$(resolve_latest "$_proxy/")"; then GH_ANSWERED=1; else TAG=""; fi
             if [ -n "$TAG" ]; then info "mirror resolved: $TAG"; break; fi
         done
-    fi
-    if [ -z "$TAG" ] && [ -n "${LINE:-}" ] && [ "$GH_ANSWERED" = 1 ]; then
-        fail "no ${COMP} release found on line ${LINE}.
-    The release list was read successfully — this is not a network problem. That
-    line has never been published for ${COMP}, or you meant a different one.
-    Run it without an argument to take the latest release, or pin the exact tag
-    you want via the BURROWEE_<COMP>_VERSION environment variable."
     fi
     if [ -z "$TAG" ]; then
         TAG_SOURCE=catalog
@@ -620,26 +599,6 @@ else
     fi
 fi
 
-# THE LINE IS A PIN ON WHAT GETS INSTALLED, whoever answered. select_tag already
-# constrains the GitHub and mirror paths, but an env pin and the console catalog
-# reach $TAG without passing through it — so the invariant is asserted once,
-# here, where every path has converged. Nothing downstream can bypass it, and a
-# future resolution source inherits the check instead of having to remember it.
-#
-# NOTE WHAT THIS IS NOT: it is not the kit-level cross-check. That one happens
-# inside migrations/upgrade.sh, comparing the line against the ladder shipped in
-# the zip. This one compares the line against the RELEASE, before a byte is
-# installed, so an operator who names the wrong line finds out before the
-# install rather than after it.
-if [ -n "${LINE:-}" ]; then
-    _resolved_line="$(semver_of "${TAG#*/}")"
-    [ "$_resolved_line" = "${LINE}" ] || fail "you asked for line ${LINE}, but the release resolved for this host is \"$TAG\" (line ${_resolved_line}).
-    Refusing: installing ${_resolved_line} and then running its migrations while
-    reporting a ${LINE} upgrade is exactly the wrong belief this argument exists
-    to catch. One of the two is not what you think it is — drop the argument to
-    take what the channel is serving, or pin the exact tag you want via the
-    BURROWEE_<COMP>_VERSION environment variable."
-fi
 # END version-resolve
 
 # ---- download -----------------------------------------------------------
@@ -849,18 +808,17 @@ run_inner
 # above aborts the script on a non-zero inner installer, so the ladder cannot
 # run against a host whose binaries did not land.
 #
-# THE LINE COMES FROM THE RESOLVED TAG, never from the operator's argument. The
-# argument has already been checked against the tag (see the pin assertion in
-# the version-resolve block); deriving the ladder's argument from it as well
-# would make migrations/upgrade.sh's kit-level cross-check compare a string to
-# itself, which is a check that cannot fail. Derived from the tag, that
-# cross-check compares the release actually installed against the ladder shipped
-# inside it — the comparison it was written to make.
+# THE FLOOR IS THE OPERATOR'S ARGUMENT, VERBATIM — and when none was given, it
+# is derived from the KIT'S OWN LEDGER (its newest target), NEVER from the
+# release tag. A tag-derived default assumes *ladder top == release line*,
+# which holds only for releases that ship a new rung: the first release whose
+# line moved past an unchanged ladder (0.2.1 over a 0.2.0-topped ladder) made
+# every tag-derived run refuse after a successful install. The ledger is read
+# out of $TMP/x — the same verified kit the migrations will run from — so the
+# default the bootstrap names and the ladder the kit judges it against cannot
+# be two different beliefs. The kit's own cross-check stays the judge of an
+# operator-named floor (it refuses one above its ladder top).
 if [ "$MODE" = upgrade ]; then
-    MIG_LINE="$(semver_of "${TAG#*/}")"
-    is_semver "$MIG_LINE" \
-        || fail "cannot read a release line out of the resolved tag \"$TAG\" — refusing to force migrations for a version this bootstrap cannot name"
-
     # A kit with no ladder SAYS SO AND FAILS. Silent success here is the defect
     # this month keeps producing: a zip shipped without migrations/, an update
     # that skipped its state migration, and nothing in the output to show it.
@@ -873,24 +831,67 @@ if [ "$MODE" = upgrade ]; then
     # missing, unreadable or empty migrations/upgrade.sh invoked without this
     # guard is not merely reported badly, it is reported as a COMPLETED
     # MIGRATION. Nothing downstream can tell the two apart: by the time the code
-    # is read, the only evidence of which one happened is gone. The three tests
-    # below are cheap and they are the whole defence — removing any of them is
-    # removing the reason exit 2 can be trusted at all.
-    { [ -f "$TMP/x/migrations/upgrade.sh" ] && [ -r "$TMP/x/migrations/upgrade.sh" ] && [ -s "$TMP/x/migrations/upgrade.sh" ]; } \
-        || fail "$COMP $TAG ships no migrations/upgrade.sh — this release has no migration ladder, so there is nothing for upgrade.sh to force.
+    # is read, the only evidence of which one happened is gone. These per-file
+    # tests are cheap and they are the whole defence — removing any of them is
+    # removing the reason exit 2 can be trusted at all. run.sh and the ledger
+    # get the same treatment: the runner because the forcing entry execs it,
+    # the ledger because the default floor is read out of it below.
+    for _kit_f in migrations/upgrade.sh migrations/run.sh migrations/ledger; do
+        { [ -f "$TMP/x/$_kit_f" ] && [ -r "$TMP/x/$_kit_f" ] && [ -s "$TMP/x/$_kit_f" ]; } \
+            || fail "$COMP $TAG ships no usable $_kit_f — this release has no migration ladder, so there is nothing for upgrade.sh to force.
     The ${COMP} binaries from $TAG ARE installed: this run placed them, and only
     the migration half had nothing to run. If ${COMP} is not expected to have a
     ladder, the plain installer is the right entry point:
       curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/$COMP/install.sh | sh"
+    done
 
-    info "forcing the $MIG_LINE state migrations from the verified kit"
+    if [ -n "$FLOOR" ]; then
+        MIG_FLOOR="$FLOOR"
+        info "migration floor $MIG_FLOOR (your argument): rungs targeting it or newer will be forced"
+    else
+        # The kit ledger's NEWEST target, by numeric comparison on the first
+        # three fields — the same computation migrations/upgrade.sh makes, so
+        # the default this bootstrap names is one the kit accepts by
+        # construction. Never the last row: rows may share a target, and ledger
+        # order is the runner's contract, not this script's to assume.
+        MIG_FLOOR="$(awk '
+            function vf(v, i,   a, n, f) {
+                n = split(v, a, "."); if (i > n) return 0
+                f = a[i]; sub(/[-+].*/, "", f)
+                if (f !~ /^[0-9]+$/) return 0
+                return f + 0
+            }
+            function newer(a, b,   i, x, y) {
+                for (i = 1; i <= 3; i++) {
+                    x = vf(a, i); y = vf(b, i)
+                    if (x > y) return 1
+                    if (x < y) return 0
+                }
+                return 0
+            }
+            { sub(/#.*$/, ""); for (i = 1; i <= NF; i++) word[++c] = $i }
+            END {
+                if (c == 0 || c % 2 != 0) exit 1
+                top = word[1]
+                for (i = 3; i <= c; i += 2) if (newer(word[i], top)) top = word[i]
+                sub(/^.*\//, "", top); sub(/^v/, "", top)
+                print top
+            }
+        ' "$TMP/x/migrations/ledger")" \
+            || fail "$COMP $TAG ships a migration ledger this bootstrap cannot read — refusing to guess a floor for it. The ${COMP} binaries from $TAG ARE installed; only the forced migration pass did not run."
+        [ -n "$MIG_FLOOR" ] \
+            || fail "$COMP $TAG ships a migration ledger this bootstrap cannot read — refusing to guess a floor for it. The ${COMP} binaries from $TAG ARE installed; only the forced migration pass did not run."
+        info "migration floor $MIG_FLOOR (this kit's newest ladder target): the whole shipped ladder will be forced"
+    fi
+
+    info "forcing the state migrations from floor $MIG_FLOOR up, from the verified kit"
     # `set +e` around the call ONLY. The ladder's non-zero codes are its
     # contract, not a failure of this script, and `set -e` would abort here and
     # throw away the code the mapping below exists to read. Not a pipeline: `$?`
     # after a pipe is the LAST command's status, which is how an exit-mapping
     # test ends up reporting on something it never measured.
     set +e
-    ( cd "$TMP/x" && sh ./migrations/upgrade.sh "$MIG_LINE" )
+    ( cd "$TMP/x" && sh ./migrations/upgrade.sh "$MIG_FLOOR" )
     LADDER=$?
     set -e
 
@@ -913,7 +914,7 @@ if [ "$MODE" = upgrade ]; then
     if [ "$MAPPED" -ne 0 ]; then
         exit "$MAPPED"
     fi
-    ok "$COMP $TAG installed and its $MIG_LINE migrations forced"
+    ok "$COMP $TAG installed and its migrations forced from floor $MIG_FLOOR"
 fi
 
 # ---- PATH persistence ---------------------------------------------------

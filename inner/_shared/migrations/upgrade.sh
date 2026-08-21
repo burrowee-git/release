@@ -1,5 +1,6 @@
 #!/bin/sh
-# _shared/migrations/upgrade.sh <version> — force this line's state migrations.
+# _shared/migrations/upgrade.sh <version> — force the state migrations from
+# the inclusive floor <version> up.
 #
 #     sh migrations/upgrade.sh 0.2.0
 #
@@ -26,13 +27,17 @@
 #
 # WHAT IT RUNS, exactly:
 #
-#     run.sh --installed-version 0.0.0 --rerun-recorded
+#     run.sh --assume-below <version> --rerun-recorded
 #
-# THE FROM-VERSION IS 0.0.0 — every rung the shipped ladder contains, not an
-# arithmetic on the target. THE KIT IS ALREADY THE BOUND: a 0.2.0 release zip
-# carries only rungs up to 0.2.0, so "everything in this ladder" and "everything
-# for this upgrade" are the same set. A `target − one minor` rule would be a
-# second, weaker statement of the same bound, and it breaks at a major boundary.
+# THE ARGUMENT IS AN INCLUSIVE FLOOR — "assume this host is below <version>".
+# The anchor is ignored, the per-rung gate is bypassed, and every rung targeting
+# <version> OR NEWER runs; rungs targeting strictly older lines are skipped as
+# genuinely done. The kit bounds the top (a 0.2.1 release zip carries only rungs
+# up to 0.2.1); the floor bounds the bottom, and an operator forcing 0.2.0's
+# work on a host whose 0.1.x rungs really did run should not have that older
+# work reopened as a side effect. Passing the ladder's own newest target as the
+# floor — what the public upgrade bootstrap does by default — still selects the
+# newest line's whole rung set, which for a single-line ladder is everything.
 #
 # --rerun-recorded IS ACCEPTABLE HERE BECAUSE THIS IS THE OVERRIDE. An operator
 # running it has already decided to force, so reopening receipted rungs is a
@@ -52,16 +57,19 @@
 # production node. See adopt_user_tree.sh's header. The rung announces the
 # forced run and names every file it replaced.
 #
-# THEN WHAT IS THE ARGUMENT FOR? A cross-check, and it is ENFORCED. This script
-# ships once and takes the version as an argument — there is no per-release copy
-# to render or sign — so nothing else would notice an operator who unpacked a
-# 0.2.0 kit and typed `upgrade.sh 0.3.0`. That operator has a wrong belief about
-# their host, and a wrong belief is worth a refusal rather than a silent no-op.
-# The version is compared against the newest target in THIS kit's ledger, which
-# is the only version statement a migrations-only script can read without
-# executing a binary, and it is the one that decides what forcing can possibly
-# do here: a kit whose ladder tops out at 0.2.0 has no 0.3.0 migration to force.
-# The refusal names both values.
+# THE FLOOR IS ALSO THE CROSS-CHECK, and one direction of it is ENFORCED. This
+# script ships once and takes the floor as an argument — there is no per-release
+# copy to render or sign — so nothing else would notice an operator who unpacked
+# a 0.2.0 kit and typed `upgrade.sh 0.3.0`. A floor ABOVE the newest target in
+# THIS kit's ledger is a wrong belief about the kit — it has no such migration
+# to force, and the honest answer is a refusal naming both values, never a
+# silent empty run. A floor BELOW the top is the opposite of a mistake: it is
+# the normal backfill ("this host missed the 0.2.0 work"), and refusing it —
+# or demanding equality — would break the forcing path on the first release
+# that ships no new rung, when the release line moves past a ladder that
+# didn't. The ledger's newest target is the only version statement a
+# migrations-only script can read without executing a binary, and the one that
+# decides what forcing can possibly do here.
 #
 # IT INSTALLS NOTHING. No binary is placed, no unit is written, no version
 # anchor is recorded. The ladder's exit code is propagated unchanged so a caller
@@ -111,18 +119,22 @@ usage() {
     cat <<EOF
 usage: sh $0 <version>
 
-Force every state migration this kit's ladder contains, for the <version> line.
+Force this kit's state migrations from the inclusive floor <version> up.
 Migrations ONLY — this installs nothing. The normal way to upgrade is the
 installer; use this when the ladder's version gate cannot see that this host
-needs migrating (a missing or wrong anchor, or the same semver on a different
-build).
+needs migrating (a missing or wrong anchor, the same semver on a different
+build, or a host that reached a newer version while an older line's rungs
+never ran).
 
-  <version>   the release line this kit is for, e.g. 0.2.0. A leading "v" and a
-              release stamp's trailing .date.sha are accepted. REFUSED when it
-              does not match the newest target in this kit's ladder — that
-              mismatch means one of the two is not what you think it is.
+  <version>   the INCLUSIVE FLOOR — "assume this host is below <version>", e.g.
+              0.2.0. A leading "v" and a release stamp's trailing .date.sha are
+              accepted. Rungs targeting <version> or newer run with receipts
+              reopened; rungs targeting older lines are skipped as genuinely
+              done. REFUSED only when it is ABOVE the newest target in this
+              kit's ladder — that kit has no such migration to force. A floor
+              below the top is the normal backfill, not a mistake.
 
-It runs:  sh $RUNNER --installed-version 0.0.0 --rerun-recorded
+It runs:  sh $RUNNER --assume-below <version> --rerun-recorded
 and prints the rungs it is about to re-run before running any of them.
 
 A rung may read the forced flag and OVERWRITE state it would otherwise leave
@@ -172,6 +184,24 @@ norm_version() {
         esac
     done
     printf '%s.%s.%s\n' "$_nv_major" "$_nv_minor" "$_nv_patch"
+}
+
+# ---------------------------------------------------------------------------
+# line_lt <a> <b> — true when version a is strictly older than b, comparing the
+# first three fields NUMERICALLY. Both values arrive already normalized through
+# norm_version, so the fields are bare numbers; the shape mirrors the runner's
+# version_lt so the two scripts cannot disagree about an ordering.
+# ---------------------------------------------------------------------------
+line_lt() {
+    _ll_n=1
+    while [ "$_ll_n" -le 3 ]; do
+        _ll_x="$(printf '%s' "$1" | cut -d. -f"$_ll_n")"
+        _ll_y="$(printf '%s' "$2" | cut -d. -f"$_ll_n")"
+        if [ "$_ll_x" -lt "$_ll_y" ]; then return 0; fi
+        if [ "$_ll_x" -gt "$_ll_y" ]; then return 1; fi
+        _ll_n=$((_ll_n + 1))
+    done
+    return 1    # equal is not older
 }
 
 # ---------------------------------------------------------------------------
@@ -235,7 +265,7 @@ while [ $# -gt 0 ]; do
         usage_error "unknown option '$1'; this script takes one argument, the version"
         ;;
     *)
-        [ -z "$WANT" ] || usage_error "unexpected extra argument '$1'; this script takes one version and forces the whole shipped ladder"
+        [ -z "$WANT" ] || usage_error "unexpected extra argument '$1'; this script takes one version — the inclusive floor to force from"
         WANT="$1"
         shift
         ;;
@@ -280,35 +310,58 @@ if ! KIT_NORM="$(norm_version "$KIT_VERSION")"; then
     exit 1
 fi
 
-# THE CROSS-CHECK. Both sides named, both values printed: an operator who is
-# told only "wrong version" learns nothing about which of the two beliefs — the
-# one they typed, or the kit they are standing in — is the mistaken one.
-if [ "$WANT_NORM" != "$KIT_NORM" ]; then
-    warn "REFUSING: you asked to force the $WANT_NORM migrations, but this kit's ladder"
-    warn "tops out at $KIT_NORM."
-    warn "  compared: $WANT_NORM  (from the argument '$WANT')"
-    warn "   against: $KIT_NORM  (the newest target in $LEDGER)"
+# THE CROSS-CHECK — one direction only. A floor ABOVE the kit's newest target
+# names a migration this kit does not carry: refuse, both sides named, both
+# values printed. A floor below the top is the normal backfill and passes —
+# demanding equality here would break the forcing path on the first release
+# whose line moved past a ladder that didn't ship a new rung.
+if line_lt "$KIT_NORM" "$WANT_NORM"; then
+    warn "REFUSING: you asked to force migrations from $WANT_NORM up, but this kit's"
+    warn "ladder tops out at $KIT_NORM — it has no $WANT_NORM migration to force."
+    warn "  floor:      $WANT_NORM  (from the argument '$WANT')"
+    warn "  ladder top: $KIT_NORM  (the newest target in $LEDGER)"
     warn "one of those is not what you think it is: either this is not the kit for the"
-    warn "release you mean, or the release you mean has no migration in it. Forcing"
-    warn "anyway would run $KIT_NORM's rungs while reporting a $WANT_NORM upgrade."
+    warn "release you mean, or the release you mean has no migration in it."
     warn "unpack the kit for the release you are moving to, and re-run it from there."
     warn "nothing has been touched — no migration ran, and nothing was installed."
     exit 64
 fi
 
 # ---------------------------------------------------------------------------
-# SAY WHAT IS ABOUT TO BE RE-RUN, BEFORE RUNNING IT.
+# SAY WHAT IS ABOUT TO BE RE-RUN, BEFORE RUNNING IT — the floor's selection,
+# computed here exactly as the runner will compute it: targets at or above the
+# floor run, strictly older targets are done.
 # ---------------------------------------------------------------------------
-say "forcing the $KIT_NORM state migrations from $RUNNER."
+say "forcing the state migrations from floor $WANT_NORM up, via $RUNNER."
 say "this is the OVERRIDE, not the upgrade: install.sh places the binaries and"
 say "walks this same ladder gated. nothing here installs anything."
 say ""
-say "every rung in this kit will be re-run, including any whose receipt says it"
-say "already completed here:"
-printf '%s\n' "$ROWS" | while read -r _v _s; do
-    [ -n "$_s" ] || continue
-    say "  $_s (target $_v)"
+say "every rung targeting $WANT_NORM or newer will be re-run, including any whose"
+say "receipt says it already completed here:"
+_selected=0
+_skipped=0
+# No pipeline: a `| while` subshell could not carry the counters back out.
+_OLDIFS="$IFS"; IFS='
+'
+for _row in $ROWS; do
+    IFS="$_OLDIFS"
+    _v="${_row%% *}"
+    _s="${_row#* }"
+    [ -n "$_s" ] && [ "$_s" != "$_row" ] || { IFS='
+'; continue; }
+    if _v_norm="$(norm_version "$_v")" && ! line_lt "$_v_norm" "$WANT_NORM"; then
+        say "  $_s (target $_v)"
+        _selected=$((_selected + 1))
+    else
+        _skipped=$((_skipped + 1))
+    fi
+    IFS='
+'
 done
+IFS="$_OLDIFS"
+if [ "$_skipped" -gt 0 ]; then
+    say "($_skipped older rung(s) below the floor are treated as genuinely done and skipped)"
+fi
 say ""
 say "read those rungs if you have not: an idempotent rung is close to free to"
 say "repeat, a rung that rewrites or prunes state is not."
@@ -320,7 +373,7 @@ say ""
 # swallow the code the caller is waiting for.
 # ---------------------------------------------------------------------------
 set +e
-sh "$RUNNER" --installed-version 0.0.0 --rerun-recorded
+sh "$RUNNER" --assume-below "$WANT_NORM" --rerun-recorded
 CODE=$?
 set -e
 

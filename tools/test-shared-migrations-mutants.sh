@@ -186,6 +186,15 @@ mutate rerun-recorded-ignores-gate run.sh \
     "s|^        if ! version_lt \"\$_version\" \"\$_target_version\"; then|        if false; then|" \
     "the version gate is consulted at all (cases 3, 5c)"
 
+# THE FLOOR GATE'S INCLUSIVITY, inverted in place: "skip when target < floor"
+# becomes "skip unless floor < target", which skips the rung targeting the floor
+# line itself — the strict comparison --assume-below exists to NOT be. Every
+# single-rung floor run in the suite then reports "nothing applied", which is
+# exactly the silent no-op upgrade.sh's operator was stuck in.
+mutate floor-gate-exclusive run.sh \
+    "s|^        if version_lt \"\$_target_version\" \"\$FLOOR_VERSION\"; then|        if ! version_lt \"\$FLOOR_VERSION\" \"\$_target_version\"; then|" \
+    "the floor is INCLUSIVE — a rung targeting the floor line itself runs (case 33)"
+
 mutate usage-error-exits-2 run.sh \
     "s|^    exit 64|    exit 2|" \
     "a wrong command line exits 64, never 2 (case 12)"
@@ -214,15 +223,41 @@ mutate receipt-mode-widened run.sh \
     "s|as_owner chmod 0700 \"\$RECEIPTS\"|as_owner chmod 0755 \"\$RECEIPTS\"|" \
     "the receipts directory is 0700 (case 1)"
 
+# THE RECEIPT KEY, reverted to the file-only name it used to be. One global
+# substitution turns `<script>@<target>.done` back into `<script>.done` in
+# receipt_state and record_migration alike — the exact scheme under which the
+# run that satisfied a 0.2.0 row silently satisfies the 0.3.0 row that re-lists
+# the same file, because the receipt check runs BEFORE the version gate.
+mutate receipt-keyed-by-file-only run.sh \
+    "s|\$1@\$2\.done|\$1.done|g" \
+    "the receipt is PER ITEM — a file re-listed at a newer target is a new item, not already done (case 34b)"
+
 # --- upgrade.sh, the override ----------------------------------------------
 
 mutate upgrade-does-not-force upgrade.sh \
-    "s|^sh \"\$RUNNER\" --installed-version 0.0.0 --rerun-recorded|sh \"\$RUNNER\"|" \
+    "s|^sh \"\$RUNNER\" --assume-below \"\$WANT_NORM\" --rerun-recorded|sh \"\$RUNNER\"|" \
     "upgrade.sh forces a rung the plain ladder skips on a same-semver host (case 17b)"
 
 mutate upgrade-crosscheck-decorative upgrade.sh \
-    "s|^if \[ \"\$WANT_NORM\" != \"\$KIT_NORM\" \]; then|if false; then|" \
-    "a version that does not match the kit's ladder is REFUSED (case 17d)"
+    "s|^if line_lt \"\$KIT_NORM\" \"\$WANT_NORM\"; then|if false; then|" \
+    "a floor ABOVE the kit's ladder top is REFUSED (case 17d)"
+
+# The cross-check's OTHER direction, restored to the equality test it replaced.
+# `!=` refuses everything but the exact top — which is precisely the shape that
+# breaks the forcing path on the first release whose line moved past a ladder
+# that shipped no new rung. Only the backfill case can tell `line_lt` from `!=`:
+# the top itself passes both.
+mutate upgrade-refuses-the-backfill upgrade.sh \
+    "s|^if line_lt \"\$KIT_NORM\" \"\$WANT_NORM\"; then|if [ \"\$WANT_NORM\" != \"\$KIT_NORM\" ]; then|" \
+    "a floor BELOW the kit's top is the normal backfill, never a refusal (case 17h)"
+
+# The floor degraded back to "everything since 0.0.0" — the invocation this
+# script used to make. On a single-rung ladder the two are indistinguishable;
+# the two-target ladder is what notices, because 0.0.0 reopens the rung BELOW
+# the floor that the operator was promised is treated as genuinely done.
+mutate upgrade-floor-becomes-zero upgrade.sh \
+    "s|^sh \"\$RUNNER\" --assume-below \"\$WANT_NORM\" --rerun-recorded|sh \"\$RUNNER\" --installed-version 0.0.0 --rerun-recorded|" \
+    "upgrade.sh hands the runner the FLOOR, not 'everything since 0.0.0' (case 31a)"
 
 mutate upgrade-swallows-the-code upgrade.sh \
     "s|^exit \"\$CODE\"|exit 0|" \
