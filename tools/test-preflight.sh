@@ -101,23 +101,71 @@ out="$(PATH="${SHIM}:${PATH}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_PREFLIGHT_NO_TTY
 printf '%s\n' "${out}" | grep -q 'Install it yourself'                          || die "expected tips on no-TTY; got:\n${out}"
 printf '%s\n' "${out}" | grep -q '\[dry\].*install -y nginx'                    && die "no-TTY must not install; got:\n${out}"
 
+# mk_brew_shim — a curated PATH dir exposing ONLY a fake brew (and the real
+# sh/uname/id/sed the dry-run path actually calls), so PM detection always
+# lands on brew and never races the real apt-get/dnf/apk. A plain
+# "/usr/bin:/bin" fallback would re-expose apt-get (Linux CI ships it at
+# /usr/bin/apt-get) or homebrew's own bin (macOS), defeating the shim. Echoes
+# the dir path; caller removes it.
+mk_brew_shim() {
+    d="$(mktemp -d "${TMPDIR:-/tmp}/pf-brewshim-XXXXXX")"
+    printf '#!/bin/sh\necho "fake-brew $*"\n' > "${d}/brew"; chmod +x "${d}/brew"
+    for real in sh uname id sed; do
+        real_path="$(command -v "$real")" || die "test host is missing ${real}"
+        ln -s "${real_path}" "${d}/${real}"
+    done
+    printf '%s\n' "${d}"
+}
+
 # ---- (3e) brew as pure root refuses install (no SUDO_USER) ------------------
 say "nginx consent: brew + root + no SUDO_USER -> tips, no brew install"
-BREWSHIM="$(mktemp -d "${TMPDIR:-/tmp}/pf-brewshim-XXXXXX")"
-printf '#!/bin/sh\necho "fake-brew $*"\n' > "${BREWSHIM}/brew"; chmod +x "${BREWSHIM}/brew"
-# Curated PATH: the fake brew plus the handful of real binaries the dry-run
-# path actually calls (sh/uname/id/sed) — a plain "/usr/bin:/bin" fallback
-# would also re-expose the real apt-get (Linux CI ships it at /usr/bin/apt-get)
-# or homebrew's own bin (macOS), defeating the shim and letting apt/brew race.
-for real in sh uname id sed; do
-    real_path="$(command -v "$real")" || die "test host is missing ${real}"
-    ln -s "${real_path}" "${BREWSHIM}/${real}"
-done
+BREWSHIM="$(mk_brew_shim)"
 out="$(PATH="${BREWSHIM}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 SUDO_USER= sh edge/preflight.sh 2>&1)" \
     || die "brew root dry-run exited non-zero"
 printf '%s\n' "${out}" | grep -q 'package manager: brew' || die "expected brew detection; got:\n${out}"
 if [ "$(id -u)" = 0 ]; then
     printf '%s\n' "${out}" | grep -q '\[dry\].*brew install nginx' && die "pure-root brew must not install; got:\n${out}"
+fi
+rm -rf "${BREWSHIM}"
+
+# ---- (3f) brew + root + SUDO_USER set -> sudo -u <user> brew install nginx --
+# Off this uid (non-root, the common case on CI), nginx_install's brew branch
+# never reaches the id-u-0 check, so it always renders the plain `brew install
+# nginx` form regardless of SUDO_USER — assert whichever form this uid
+# actually reaches (mirrors the (3e)/(3g) id -u conditional; never fake uid 0).
+say "nginx consent: brew + SUDO_USER=someuser -> sudo -u install verb as root, plain as non-root"
+BREWSHIM="$(mk_brew_shim)"
+out="$(PATH="${BREWSHIM}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 SUDO_USER=someuser sh edge/preflight.sh 2>&1)" \
+    || die "brew SUDO_USER dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'package manager: brew' || die "expected brew detection; got:\n${out}"
+if [ "$(id -u)" = 0 ]; then
+    printf '%s\n' "${out}" | grep -q '\[dry\].*sudo -u someuser brew install nginx' \
+        || die "expected sudo -u drop-privilege install verb as root; got:\n${out}"
+else
+    printf '%s\n' "${out}" | grep -q '\[dry\].*brew install nginx' \
+        || die "expected plain brew install verb as non-root; got:\n${out}"
+    printf '%s\n' "${out}" | grep -q 'sudo -u someuser' \
+        && die "non-root must not render the sudo -u drop-privilege form; got:\n${out}"
+fi
+rm -rf "${BREWSHIM}"
+
+# ---- (3g) brew MODE=service -> brew services start (root direct, else sudo) -
+# nginx present but not running: fake `nginx` (present) + a `pgrep` that
+# exits 1 (nginx_running -> false) forces MODE=service.
+say "nginx consent: brew MODE=service -> brew services start nginx (root direct vs sudo)"
+BREWSHIM="$(mk_brew_shim)"
+printf '#!/bin/sh\nexit 0\n' > "${BREWSHIM}/nginx"; chmod +x "${BREWSHIM}/nginx"
+printf '#!/bin/sh\nexit 1\n' > "${BREWSHIM}/pgrep";  chmod +x "${BREWSHIM}/pgrep"
+out="$(PATH="${BREWSHIM}" BURROWEE_PREFLIGHT_DRY=1 BURROWEE_NGINX_INSTALL=1 SUDO_USER= sh edge/preflight.sh 2>&1)" \
+    || die "brew service-mode dry-run exited non-zero"
+printf '%s\n' "${out}" | grep -q 'nginx is installed but not running as a service' \
+    || die "expected MODE=service detection; got:\n${out}"
+if [ "$(id -u)" = 0 ]; then
+    printf '%s\n' "${out}" | grep -q '\[dry\] brew services start nginx' \
+        || die "expected root brew services start verb (no sudo); got:\n${out}"
+else
+    printf '%s\n' "${out}" | grep -q '\[dry\] sudo brew services start nginx' \
+        || die "expected non-root sudo brew services start verb; got:\n${out}"
 fi
 rm -rf "${BREWSHIM}"
 
