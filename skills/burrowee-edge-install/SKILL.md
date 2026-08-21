@@ -45,6 +45,17 @@ the native path does not ship, the agent falls back to the verified public
 `install.sh`. It is idempotent — a second run with the binary already present is a
 no-op.
 
+**Preflight — nginx consent:** If the binary is not yet on the system, the installer
+runs its preflight to install OS dependencies (minisign, unzip, curl, and for edge: nginx
++ its stream module as a root/system service). For nginx, the preflight asks
+`Install nginx now via <pm> (root)? [y/N]` on the terminal when a TTY is present
+(e.g., in interactive installs). Agent-driven or piped runs get guidance tips instead.
+You can pre-answer yes with `BURROWEE_NGINX_INSTALL=1` for unattended installs, or
+force no (showing tips) with `=0`. Skip the nginx group entirely with `BURROWEE_SKIP_NGINX`.
+Nginx runs as a system service (on macOS: `sudo brew services start nginx` as a
+LaunchDaemon, not a user agent). If the user declines or the preflight runs without a TTY,
+the setup verb in §3 will offer the same consented install later.
+
 ## 2. Apply the next-action loop
 Read the single line of JSON `burrowee-agent` prints on stdout and branch:
 
