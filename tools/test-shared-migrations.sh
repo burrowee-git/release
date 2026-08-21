@@ -228,12 +228,13 @@ assert_contains "$OUT" "stale_user_bins.sh applies: no recorded version" "the --
 for b in $EDGE_BINS; do
     assert_gone "$h/.local/bin/$b" "the rung must remove the stale per-user copy of $b"
 done
-assert_present "$ch/migration-receipts/stale_user_bins.sh.done" "the runner must write the receipt"
-assert_contains "$(cat "$ch/migration-receipts/stale_user_bins.sh.done")" "comp_home=$ch" "the receipt must record the TREE it was earned for"
+assert_present "$ch/migration-receipts/stale_user_bins.sh@0.2.0.done" "the runner must write the ITEM's receipt, keyed by script AND target"
+assert_contains "$(cat "$ch/migration-receipts/stale_user_bins.sh@0.2.0.done")" "comp_home=$ch" "the receipt must record the TREE it was earned for"
+assert_contains "$(cat "$ch/migration-receipts/stale_user_bins.sh@0.2.0.done")" "target=0.2.0" "the receipt must record the ledger TARGET it was earned for"
 # 0700 dir / 0600 file — the receipt names the host's upgrade band and the
 # migrated account's home directory.
 assert_eq "$(ls -ld "$ch/migration-receipts" | cut -c1-10)" "drwx------" "the receipts directory must be 0700"
-assert_eq "$(ls -l "$ch/migration-receipts/stale_user_bins.sh.done" | cut -c1-10)" "-rw-------" "a receipt must be 0600"
+assert_eq "$(ls -l "$ch/migration-receipts/stale_user_bins.sh@0.2.0.done" | cut -c1-10)" "-rw-------" "a receipt must be 0600"
 
 # ---------------------------------------------------------------------------
 # 2. idempotent: a second run finds the receipt and skips
@@ -647,7 +648,7 @@ assert_present "$h17/.local/bin/burrowee-edge" "precondition: the stale copy mus
 # 17b. upgrade.sh forces it, and SAYS WHAT IT WILL RE-RUN before running it.
 run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.0
 assert_eq "$RC" 2 "upgrade.sh must force the rung on a same-semver host"
-assert_contains "$OUT" "every rung in this kit will be re-run" "it must list the rungs BEFORE running them"
+assert_contains "$OUT" "every rung targeting 0.2.0 or newer will be re-run" "it must list the rungs BEFORE running them"
 assert_contains "$OUT" "stale_user_bins.sh (target 0.2.0)" "the list must name the rung and its target"
 assert_gone "$h17/.local/bin/burrowee-edge" "the forced rung must sweep"
 
@@ -684,6 +685,20 @@ run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.0 extra
 assert_eq "$RC" 64 "a second argument must be rejected, never silently discarded"
 run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.2.x
 assert_eq "$RC" 64 "an unparseable version must be refused, never rounded to 0.2.0"
+
+# 17h. A FLOOR BELOW THE TOP IS THE NORMAL BACKFILL, never a refusal. The
+# cross-check in 17d is one-directional: only a floor ABOVE the kit's newest
+# target names a migration the kit does not carry. 0.1.0 on this 0.2.0 kit is
+# "this host missed the 0.2.0 work" — refusing it (or demanding equality) would
+# break the forcing path on the first release whose line moved past a ladder
+# that shipped no new rung. The kit's one rung targets 0.2.0 >= 0.1.0, so it is
+# selected and runs.
+seed_ours "$h17/.local/bin" burrowee-edge
+run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin" 0.1.0
+assert_eq "$RC" 2 "a floor BELOW the kit's top is the normal backfill and must run, not be refused"
+assert_contains "$OUT" "every rung targeting 0.1.0 or newer will be re-run" "the backfill must announce the floor's selection before running it"
+assert_gone "$h17/.local/bin/burrowee-edge" "the 0.2.0 rung is at or above the 0.1.0 floor and must run"
+assert_lacks "$OUT" "older rung(s) below the floor" "a ladder with nothing below the floor must not claim it skipped something"
 
 # ---------------------------------------------------------------------------
 # 18. THE ROOT-TWIN PREDICATE — what makes a per-user copy "stale" rather than
@@ -1161,7 +1176,7 @@ run_adopt_ladder() {
 #
 #     Per-user tree populated, root tree empty, anchor already reading 0.2.0
 #     (so the plain ladder's numeric gate can see nothing), and the operator
-#     running `upgrade.sh 0.2.0`, which is run.sh --installed-version 0.0.0
+#     running `upgrade.sh 0.2.0`, which is run.sh --assume-below 0.2.0
 #     --rerun-recorded.
 # ---------------------------------------------------------------------------
 t22="$TMP/t22"; adopt_kit "$t22" edge system installed-version $EDGE_BINS
@@ -1214,7 +1229,7 @@ assert_contains "$(cat "$h22/stubs/cli.log")" "migrate --from $h22/.burrowee/edg
 # AND THE CALLER IS TOLD THE DAEMON IS DOWN.
 assert_contains "$UPGRADE_OUT" "burrowee-edge is STOPPED" "the runner's last line must say the daemon is stopped"
 assert_contains "$UPGRADE_OUT" "read the runner's last line above" "upgrade.sh, which starts nothing, must point the operator at it"
-assert_present "$ch22/migration-receipts/adopt_user_tree.sh.done" "the runner must record the rung"
+assert_present "$ch22/migration-receipts/adopt_user_tree.sh@0.2.0.done" "the runner must record the rung"
 
 # 22c. IDEMPOTENT, and honest about it: the receipt skips it, and the closing
 #      line goes back to saying nothing was stopped.
@@ -1741,7 +1756,7 @@ fi
 #     the real state, root's home holding the stub copy the operator was given
 #     during the outage, the machine-owned roots empty, the anchor already
 #     reading 0.2.0 — driven through upgrade.sh, which is run.sh
-#     --installed-version 0.0.0 --rerun-recorded.
+#     --assume-below 0.2.0 --rerun-recorded.
 #
 #     The daemon's running.json is in the DATA root, which is what makes this
 #     also the assertion that the rung looks there: a version that only probed
@@ -1789,7 +1804,7 @@ assert_gone "$h29/.burrowee/edge" "AFTER: a verified adoption must not leave the
 assert_present "$R29/identity/relay_ed.key" "AFTER: the retired tree keeps every byte — a rename, never a delete"
 assert_eq "$(cat "$R29/config")" "$(cat "$ch29/config")" "AFTER: the retired tree still holds the config the destination adopted"
 assert_present "$h29/root-home/.burrowee/edge/identity/relay_ed.key" "AFTER: and root's tree is untouched"
-assert_present "$ch29/migration-receipts/adopt_user_tree.sh.done" "the runner must record the rung in the CONFIG root"
+assert_present "$ch29/migration-receipts/adopt_user_tree.sh@0.2.0.done" "the runner must record the rung in the CONFIG root"
 # THE RUNG SAW THE DAEMON THROUGH THE DATA ROOT and stopped it before copying.
 assert_contains "$(cat "$h29/stubs/supervisor.log")" "stop burrowee-edge" "running.json lives in the DATA root — the rung must probe there and stop the daemon"
 assert_contains "$UPGRADE_OUT" "burrowee-edge is STOPPED" "the runner's last line must say the daemon is down"
@@ -1822,7 +1837,7 @@ assert_eq "$RC" 2 "cli's ladder still runs its sweep exactly as before"
 assert_gone "$h29b/should-never-be-used" "a user-scheme component must ignore \$COMP_DATA entirely"
 assert_lacks "$OUT" "should-never-be-used" "and it must not even NAME it — the runner reports the trees it resolved, and a user-scheme component has one"
 assert_contains "$OUT" "component tree $ch29b" "the runner must name the one tree it is about"
-assert_present "$ch29b/migration-receipts/stale_user_bins.sh.done" "and its receipt still lands in its one tree"
+assert_present "$ch29b/migration-receipts/stale_user_bins.sh@0.2.0.done" "and its receipt still lands in its one tree"
 
 # 29c. A system-SCHEME KIT NAMED WITH HALF A PAIR IS REFUSED. Pairing a named
 #      tree with a defaulted one is how a run reads config from one install and
@@ -1975,8 +1990,8 @@ assert_contains "$OUT" "adopt_user_tree.sh skipped" "and it must say it evaluate
 # 30e. FORCED WITH NO NAMED VERSION — where the --applies branch is the ONLY
 #      thing selecting the rung.
 #
-#      30b goes through upgrade.sh, which names --installed-version 0.0.0, and a
-#      named version makes --applies advisory (run.sh's header: the probe gets no
+#      30b goes through upgrade.sh, which names --assume-below <floor>, and a
+#      named floor makes --applies advisory (run.sh's header: the probe gets no
 #      veto). So 30b cannot tell whether the forced --applies branch works at
 #      all. Here there is no anchor and no named version, so the probe DECIDES:
 #      without the forced branch it sees an identity at the destination, answers
@@ -1994,6 +2009,164 @@ ADOPT_COMP_DATA="$cd30e" \
 run_adopt_ladder "$t30e" "$h30e" "$ch30e" "$h30e/usr-local-bin" "$h30e/stubs" --rerun-recorded
 assert_eq "$RC" 2 "a forced run must be SELECTED on a populated destination even with no named version"
 assert_eq "$(cat "$ch30e/identity/relay_ed.key")" "PRIVATE-KEY-BYTES" "and it must replace the destination identity"
+
+# ---------------------------------------------------------------------------
+# 31. THE FLOOR SELECTS BY TARGET. upgrade.sh's argument is an inclusive floor,
+#     and on a ladder with rungs on BOTH sides of it the floor is what decides:
+#     every rung targeting the floor or newer is selected and re-run, every
+#     strictly older rung is treated as genuinely done — an operator forcing
+#     0.2.0's work on a host whose 0.1.x rungs really did run must not have
+#     that older work reopened as a side effect. The single-rung sections above
+#     cannot see this at all, so the ladder here carries two targets and the
+#     rungs drop MARKERS: which rungs RAN is the whole claim, and output alone
+#     cannot prove a rung did not.
+# ---------------------------------------------------------------------------
+# stub_rung <kit> <name> — a minimal rung honoring the rung contract: --applies
+# exits 0 (always still needed — these sections test SELECTION, not evidence), a
+# bare invocation performs (APPENDS a line to <name>.ran in $COMP_HOME, so the
+# marker also counts HOW MANY times the file ran — case 34b's whole claim) and
+# exits 0, and anything else exits 64.
+stub_rung() {
+    cat > "$1/migrations/$2" <<EOF
+#!/bin/sh
+set -eu
+if [ "\$#" -gt 0 ]; then
+    [ "\$1" = "--applies" ] || exit 64
+    exit 0
+fi
+printf 'ran\n' >> "\$COMP_HOME/$2.ran"
+exit 0
+EOF
+    chmod 0755 "$1/migrations/$2"
+}
+
+# two_rung_kit <dir> — the section-31 ladder: one rung below the 0.2.0 line and
+# one on it, replacing the kit's default single-row ledger.
+two_rung_kit() {
+    kit "$1" edge root installed-version $EDGE_BINS
+    stub_rung "$1" old_rung.sh
+    stub_rung "$1" new_rung.sh
+    printf '# ledger\n0.1.5 old_rung.sh\n0.2.0 new_rung.sh\n' > "$1/migrations/ledger"
+}
+
+# 31a. floor 0.2.0: ONLY the 0.2.0 rung runs; the 0.1.5 rung is genuinely done —
+#      not listed, not run, its marker untouched — and the skip note counts it.
+t31="$TMP/t31"; two_rung_kit "$t31"
+h31="$t31/home"; ch31="$h31/root-home/.burrowee/edge"; mkdir -p "$ch31"
+run_upgrade "$t31" "$h31" "$ch31" "$h31/usr-local-bin" 0.2.0
+assert_eq "$RC" 2 "a floor with a rung on it must run that rung"
+assert_contains "$OUT" "every rung targeting 0.2.0 or newer will be re-run" "the pre-run list must announce the floor's selection"
+assert_contains "$OUT" "new_rung.sh (target 0.2.0)" "the list must name the rung at the floor"
+assert_lacks "$OUT" "old_rung.sh (target 0.1.5)" "the pre-run list holds only SELECTED rungs"
+assert_contains "$OUT" "(1 older rung(s) below the floor are treated as genuinely done and skipped)" "the skip note must count the rung below the floor"
+assert_contains "$OUT" "old_rung.sh skipped: its target 0.1.5 is older than the floor 0.2.0" "the runner must skip the older rung as genuinely done"
+assert_present "$ch31/new_rung.sh.ran" "the rung at the floor must have RUN"
+assert_gone "$ch31/old_rung.sh.ran" "the rung below the floor must NOT have been touched"
+
+# 31b. floor 0.1.0, same ladder: both targets are at or above it, so BOTH run —
+#      and with nothing below the floor there is no skip note to print.
+t31b="$TMP/t31b"; two_rung_kit "$t31b"
+h31b="$t31b/home"; ch31b="$h31b/root-home/.burrowee/edge"; mkdir -p "$ch31b"
+run_upgrade "$t31b" "$h31b" "$ch31b" "$h31b/usr-local-bin" 0.1.0
+assert_eq "$RC" 2 "a floor below both targets must run the whole ladder"
+assert_present "$ch31b/old_rung.sh.ran" "the 0.1.5 rung is above the 0.1.0 floor and must run"
+assert_present "$ch31b/new_rung.sh.ran" "the 0.2.0 rung must run too"
+assert_lacks "$OUT" "older rung(s) below the floor" "a run that skipped nothing must not claim it did"
+
+# ---------------------------------------------------------------------------
+# 32. --assume-below's COMMAND LINE — 64, never 2, and never half-honored.
+#     The two version flags answer OPPOSITE questions about rungs targeting the
+#     named line ('was on 0.2.0' skips them, 'assume below 0.2.0' runs them),
+#     so a command naming both has no one meaning; and the floor takes the same
+#     refuse-not-round rule as --installed-version (case 12).
+# ---------------------------------------------------------------------------
+t32="$TMP/t32"; kit "$t32" edge root installed-version $EDGE_BINS
+h32="$t32/home"; ch32="$h32/root-home/.burrowee/edge"; mkdir -p "$ch32"
+seed_ours "$h32/.local/bin" $EDGE_BINS
+seed_twins "$h32/usr-local-bin" $EDGE_BINS
+run_ladder "$t32" "$h32" "$ch32" "$h32/usr-local-bin" --assume-below 0.2.0 --installed-version 0.2.0
+assert_eq "$RC" 64 "--assume-below with --installed-version has no one meaning and must be refused"
+assert_contains "$OUT" "--installed-version and --assume-below were both given" "the refusal must name BOTH flags"
+assert_contains "$OUT" "nothing has been touched" "the refusal must say nothing was touched"
+run_ladder "$t32" "$h32" "$ch32" "$h32/usr-local-bin" --assume-below 0.2.x
+assert_eq "$RC" 64 "an unparseable floor must be refused, never rounded to 0.2.0"
+assert_contains "$OUT" "nothing has been touched" "a refusal must say nothing was touched"
+run_ladder "$t32" "$h32" "$ch32" "$h32/usr-local-bin" --assume-below ""
+assert_eq "$RC" 64 "an EMPTY --assume-below must be refused, not read as 'not given'"
+assert_present "$h32/.local/bin/burrowee-edge" "no refusal above may actually have touched the tree"
+
+# ---------------------------------------------------------------------------
+# 33. STRICT vs INCLUSIVE — the load-bearing distinction between the two flags,
+#     on one host. The ladder's rung targets 0.2.0, there is no anchor and no
+#     receipt, so the flag alone decides: --installed-version 0.2.0 says the
+#     0.2.0 work is DONE and must skip it; --assume-below 0.2.0 says it is NOT
+#     and must run it. A gate that drifted exclusive would make upgrade.sh's
+#     whole forcing path a silent no-op on every same-semver host — the exact
+#     state section 17's operator was stuck in.
+# ---------------------------------------------------------------------------
+t33="$TMP/t33"; kit "$t33" edge root installed-version $EDGE_BINS
+h33="$t33/home"; ch33="$h33/root-home/.burrowee/edge"; mkdir -p "$ch33"
+seed_ours "$h33/.local/bin" $EDGE_BINS
+seed_twins "$h33/usr-local-bin" $EDGE_BINS
+run_ladder "$t33" "$h33" "$ch33" "$h33/usr-local-bin" --installed-version 0.2.0
+assert_eq "$RC" 0 "--installed-version 0.2.0 is STRICT: a rung targeting exactly 0.2.0 is done"
+assert_contains "$OUT" "stale_user_bins.sh skipped: installed 0.2.0 is not older than 0.2.0" "the strict gate must skip the equal-target rung and say why"
+assert_present "$h33/.local/bin/burrowee-edge" "the strictly-gated run may touch nothing"
+run_ladder "$t33" "$h33" "$ch33" "$h33/usr-local-bin" --assume-below 0.2.0
+assert_eq "$RC" 2 "--assume-below 0.2.0 is INCLUSIVE: the same rung on the same host must RUN"
+assert_contains "$OUT" "stale_user_bins.sh applies: its target 0.2.0 is at or above the floor 0.2.0" "the floor gate must select the equal-target rung and say why"
+assert_gone "$h33/.local/bin/burrowee-edge" "the floor-gated run must have swept"
+
+# ---------------------------------------------------------------------------
+# 34. THE RECEIPT IS PER ITEM — per ledger ROW, `<script>@<target>.done` — not
+#     per script file. One FILE may legitimately appear on several rows
+#     (re-listed at a newer target when a line gains a step), and a receipt
+#     keyed by the file alone would let the run that satisfied the 0.2.0 row
+#     silently satisfy a later 0.3.0 row too: the receipt check runs BEFORE the
+#     version gate, so the gate would never even see the new item. A legacy
+#     target-less receipt (`<script>.done`, written before receipts carried the
+#     target) is honored ONLY while the ledger names that script exactly once —
+#     with one row there is exactly one item the old receipt could have
+#     witnessed.
+# ---------------------------------------------------------------------------
+# 34a. THE LEGACY FALLBACK: a target-less receipt naming this tree still skips
+#      the rung while the ledger's single row keeps it unambiguous — the hosts
+#      already in the field must not re-run a receipted rung just because the
+#      receipt scheme moved under them.
+t34="$TMP/t34"; kit "$t34" edge root installed-version $EDGE_BINS
+h34="$t34/home"; ch34="$h34/root-home/.burrowee/edge"; mkdir -p "$ch34/migration-receipts"
+seed_ours "$h34/.local/bin" $EDGE_BINS
+seed_twins "$h34/usr-local-bin" $EDGE_BINS
+printf 'stale_user_bins.sh\ncomp_home=%s\n' "$ch34" > "$ch34/migration-receipts/stale_user_bins.sh.done"
+run_ladder "$t34" "$h34" "$ch34" "$h34/usr-local-bin"
+assert_eq "$RC" 0 "a legacy receipt naming this tree must still skip a once-listed script"
+assert_contains "$OUT" "stale_user_bins.sh skipped: its receipt records it completed here" "the legacy receipt must be honored with the same skip wording"
+assert_present "$h34/.local/bin/burrowee-edge" "the legacy-receipted rung must not have run"
+
+# 34b. THE MISS-PROOF CASE: the same script re-listed at a newer target. The
+#      host recorded 0.2.5 and holds the legacy receipt its 0.2.0 run earned;
+#      the kit's ledger now lists the SAME file again at 0.3.0. The 0.2.0 item
+#      is the version gate's to skip; the 0.3.0 item must RUN — a legacy
+#      receipt that cannot say which item it witnessed settles neither — and
+#      the run must leave a per-item receipt naming the target, so a third
+#      listing can never be answered for by this one.
+t34b="$TMP/t34b"; kit "$t34b" edge root installed-version $EDGE_BINS
+stub_rung "$t34b" twice_listed.sh
+printf '# ledger\n0.2.0 twice_listed.sh\n0.3.0 twice_listed.sh\n' > "$t34b/migrations/ledger"
+h34b="$t34b/home"; ch34b="$h34b/root-home/.burrowee/edge"; mkdir -p "$ch34b/migration-receipts"
+echo "0.2.5" > "$ch34b/installed-version"
+printf 'twice_listed.sh\ncomp_home=%s\n' "$ch34b" > "$ch34b/migration-receipts/twice_listed.sh.done"
+run_ladder "$t34b" "$h34b" "$ch34b" "$h34b/usr-local-bin"
+assert_eq "$RC" 2 "the re-listed 0.3.0 item must run — a target-less receipt settles nothing once a second row names the script"
+assert_contains "$OUT" "twice_listed.sh skipped: installed 0.2.5 is not older than 0.2.0" "the 0.2.0 item is the version gate's to skip, not the legacy receipt's"
+assert_contains "$OUT" "running twice_listed.sh (target 0.3.0)" "the run phase must name the ITEM it is running"
+assert_eq "$(wc -l < "$ch34b/twice_listed.sh.ran" | tr -d ' ')" 1 "the file must run exactly once — the 0.3.0 item only"
+assert_present "$ch34b/migration-receipts/twice_listed.sh@0.3.0.done" "the run must leave a PER-ITEM receipt naming the target"
+assert_contains "$(cat "$ch34b/migration-receipts/twice_listed.sh@0.3.0.done")" "target=0.3.0" "and its body must record the target it was earned for"
+run_ladder "$t34b" "$h34b" "$ch34b" "$h34b/usr-local-bin"
+assert_eq "$RC" 0 "a second run must find the per-item receipt and apply nothing"
+assert_contains "$OUT" "nothing applied" "and say it evaluated and declined"
+assert_eq "$(wc -l < "$ch34b/twice_listed.sh.ran" | tr -d ' ')" 1 "and must not have run the file again"
 
 # ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="

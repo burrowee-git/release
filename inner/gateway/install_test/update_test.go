@@ -436,7 +436,7 @@ func TestUpdateForceReplacesIdenticalBinaries(t *testing.T) {
 
 // stagedUpdateBundle builds an update-mode bundle that also carries the
 // installer and a fake migration, so the hand-off can be asserted: binaries in
-// cwd, install.sh beside migrations/v1_to_v2.sh (install.sh resolves the
+// cwd, install.sh beside migrations/v0_1_to_v0_2.sh (install.sh resolves the
 // migration relative to its own path, not cwd).
 func stagedUpdateBundle(t *testing.T, contents map[string]string, logPath string, migrateExit int) (script, stageDir string) {
 	t.Helper()

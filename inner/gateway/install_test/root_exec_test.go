@@ -242,7 +242,7 @@ func TestInstallShRefusesABinDirItCannotProveIsRootOwned(t *testing.T) {
 // TestInstallShPlacesThePrivilegedCLIBeforeRunningTheMigration is about
 // ORDERING, which no placement assertion can catch.
 //
-// migrations/v1_to_v2.sh runs `elevate "$CLI" migrate`, resolving $CLI from
+// migrations/v0_1_to_v0_2.sh runs `elevate "$CLI" migrate`, resolving $CLI from
 // $BIN_DIR. If $BIN_DIR were only populated with the units — after the
 // migration — then every upgrading host would exec a per-user cli as root
 // exactly once, on the console-push path, with no operator present.

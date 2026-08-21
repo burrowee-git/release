@@ -141,14 +141,19 @@ func TestEdgeInstallLadderSweepsAndReceiptsIt(t *testing.T) {
 	for _, b := range edgeBins {
 		assertGone(t, filepath.Join(stale, b), "the ladder rung must remove the stale per-user copy")
 	}
-	receipt := filepath.Join(compHome, "migration-receipts", "stale_user_bins.sh.done")
-	assertPresent(t, receipt, "a rung that ran must leave a receipt")
+	// Per-item receipt: keyed by the ledger row's script AND target, so a file
+	// re-listed at a newer target is a new item the old receipt cannot satisfy.
+	receipt := filepath.Join(compHome, "migration-receipts", "stale_user_bins.sh@0.2.0.done")
+	assertPresent(t, receipt, "a rung that ran must leave a per-item receipt")
 	body, err := os.ReadFile(receipt)
 	if err != nil {
 		t.Fatalf("read receipt: %v", err)
 	}
 	if !strings.Contains(string(body), "comp_home="+compHome) {
 		t.Errorf("the receipt must record the tree it was earned for; got %q", body)
+	}
+	if !strings.Contains(string(body), "target=0.2.0") {
+		t.Errorf("the receipt must record the ledger target it was earned for; got %q", body)
 	}
 
 	// The anchor advances, so a second install's gate closes the rung.

@@ -223,11 +223,16 @@ func TestCliLadderSweepsWhenTheDestinationIsElsewhere(t *testing.T) {
 			t.Errorf("the sweep took the binary this run installed: %s", b)
 		}
 	}
-	receipt := filepath.Join(compHome, "migration-receipts", "stale_user_bins.sh.done")
+	// The receipt is PER ITEM — keyed by the ledger row's script AND target —
+	// so a file re-listed at a newer target can never be satisfied by the
+	// receipt an older row earned.
+	receipt := filepath.Join(compHome, "migration-receipts", "stale_user_bins.sh@0.2.0.done")
 	if body, err := os.ReadFile(receipt); err != nil {
 		t.Errorf("no receipt at %s: %v", receipt, err)
 	} else if !strings.Contains(string(body), "comp_home="+compHome) {
 		t.Errorf("the receipt must record the tree it was earned for; got %q", body)
+	} else if !strings.Contains(string(body), "target=0.2.0") {
+		t.Errorf("the receipt must record the ledger target it was earned for; got %q", body)
 	}
 	anchor, err := os.ReadFile(filepath.Join(compHome, ".installed-version"))
 	if err != nil {
