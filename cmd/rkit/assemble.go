@@ -123,13 +123,19 @@ func ledgerMigrations(runSh string) ([]string, error) {
 // from inner/_shared/migrations PLUS its own repo, rather than wholly from its
 // own repo. Mirrors takes_shared_ladder in tools/payload.sh.
 //
+// relay joined for its 0.2.2 root-only collapse: its repo contributes
+// component.conf, ledger and adopt_unit_home_tree.sh (the unit-derived source
+// selection), and everything else — the runner, the sweep, the shared adoption
+// rung its own rung delegates to — is staged from inner/_shared exactly as for
+// edge and cli.
+//
 // The gateway is deliberately absent: its runner lives in the gateway repo, has
 // shipped, and does three things no other component needs — stopping a daemon
 // so a SQLite store is at rest while it is copied, pre-flighting the cli's
 // `migrate` verb, and resolving which ACCOUNT's pre-split tree holds the host's
 // identity.
 func takesSharedLadder(comp string) bool {
-	return comp == "edge" || comp == "cli"
+	return comp == "edge" || comp == "cli" || comp == "relay"
 }
 
 // sharedMigrationScripts returns the shared ladder's files under
@@ -227,7 +233,16 @@ func sharedLadderPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	// one-liner execs it out of this same kit and refuses at runtime when it is
 	// absent — a rendered bootstrap whose kit cannot answer it is a URL that
 	// exists and does not work.
-	for _, want := range []string{"run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh"} {
+	required := []string{"run.sh", "upgrade.sh", "lib_paths.sh", "lib_stale_user_bins.sh"}
+	if comp == "relay" {
+		// relay's own rung (adopt_unit_home_tree.sh, ledger-named and so covered
+		// by the ledger check below) derives the adoption SOURCE and then
+		// DELEGATES to the shared adopt_user_tree.sh — a dependency no ledger
+		// row names, exactly like the sweep library above. A relay kit without
+		// it refuses on every pre-collapse host, after the cut.
+		required = append(required, "adopt_user_tree.sh")
+	}
+	for _, want := range required {
 		if !present[want] {
 			return nil, fmt.Errorf("shared migration %s missing under %s", want,
 				filepath.Join(repoDir, "inner", "_shared", "migrations"))

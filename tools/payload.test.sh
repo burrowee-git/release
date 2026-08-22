@@ -57,11 +57,12 @@ check "file extras: agent"   "$(payload_file_extras agent   | paste -sd, -)" ""
 # caught the v0.2.0 cut: without a dir-extras entry, release.sh's zip -j pass is
 # the only one that runs and the directory is dropped.
 check "dir extras: gateway"  "$(payload_dir_extras gateway | paste -sd, -)" "migrations"
-# edge and cli carry migrations/ too since they took the SHARED ladder — same
-# reasoning: without a dir-extras entry only the zip -j pass runs and the
+# edge, cli and relay carry migrations/ too since they took the SHARED ladder —
+# same reasoning: without a dir-extras entry only the zip -j pass runs and the
 # directory is silently dropped, which is how a gateway shipped without one.
 check "dir extras: edge"     "$(payload_dir_extras edge    | paste -sd, -)" "covers,migrations"
 check "dir extras: cli"      "$(payload_dir_extras cli     | paste -sd, -)" "migrations"
+check "dir extras: relay"    "$(payload_dir_extras relay   | paste -sd, -)" "migrations"
 check "dir extras: agent"    "$(payload_dir_extras agent   | paste -sd, -)" ""
 
 # --- payload_manifest -------------------------------------------------------
@@ -84,21 +85,32 @@ SHARED_FIX="${TMP}/shared-migrations"
 mkdir -p "${SHARED_FIX}"
 : > "${SHARED_FIX}/run.sh"; : > "${SHARED_FIX}/upgrade.sh"; : > "${SHARED_FIX}/lib_paths.sh"
 : > "${SHARED_FIX}/lib_stale_user_bins.sh"; : > "${SHARED_FIX}/stale_user_bins.sh"
+: > "${SHARED_FIX}/adopt_user_tree.sh"
 SHARED_MIGRATIONS_DIR="${SHARED_FIX}"
 EDGE_SRC="${TMP}/manifest-edge"
 mkdir -p "${EDGE_SRC}/migrations"
 : > "${EDGE_SRC}/migrations/component.conf"; : > "${EDGE_SRC}/migrations/ledger"
 check "manifest: edge"  "$(payload_manifest edge  "${EDGE_SRC}" | paste -sd, -)" \
-    "update.sh,updater.update.sh,covers/admin.html,covers/default.html,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
+    "update.sh,updater.update.sh,covers/admin.html,covers/default.html,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
 check "manifest: cli"   "$(payload_manifest cli   "${EDGE_SRC}" | paste -sd, -)" \
-    "update.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
+    "update.sh,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
+
+# relay takes the shared ladder too (0.2.2 root-only collapse), contributing
+# component.conf + ledger + its own unit-derived adoption rung.
+RELAY_MIG_SRC="${TMP}/manifest-relay"
+mkdir -p "${RELAY_MIG_SRC}/migrations"
+: > "${RELAY_MIG_SRC}/migrations/component.conf"
+printf '0.2.2 stale_user_bins.sh\n0.2.2 adopt_unit_home_tree.sh\n' > "${RELAY_MIG_SRC}/migrations/ledger"
+: > "${RELAY_MIG_SRC}/migrations/adopt_unit_home_tree.sh"
+check "manifest: relay" "$(payload_manifest relay "${RELAY_MIG_SRC}" | paste -sd, -)" \
+    "update.sh,updater.update.sh,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/adopt_unit_home_tree.sh,migrations/component.conf,migrations/ledger"
 
 # --- stage_component_migrations (shared ladder) -----------------------------
 SHARED_ASM="${TMP}/shared-asm"; mkdir -p "${SHARED_ASM}"
 if stage_component_migrations cli "${EDGE_SRC}" "${SHARED_ASM}"; then
     ok "shared stage: succeeds"
 else bad "shared stage: failed"; fi
-for f in run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh stale_user_bins.sh component.conf ledger; do
+for f in run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh stale_user_bins.sh adopt_user_tree.sh component.conf ledger; do
     if [ -f "${SHARED_ASM}/migrations/${f}" ]; then ok "shared stage: ${f}"
     else bad "shared stage: ${f} missing"; fi
 done
@@ -138,15 +150,21 @@ staged() { ( cd "$1" && find . -type f | sed 's|^\./||' | sort | paste -sd, - );
 # relay is the reason this function exists: its assembly site in release.sh used
 # to open-code `install.sh update.sh updater.update.sh`, so it was the one
 # component whose payload contents were still stated twice. Staging must produce
-# the extras and NOT install.sh — whose provenance differs per component and so
-# stays with the caller.
+# the extras — since 0.2.2 the shared ladder plus relay's own half among them —
+# and NOT install.sh, whose provenance differs per component and so stays with
+# the caller.
 RELAY_SRC="$(comp_src relay-src install.sh update.sh updater.update.sh)"
+mkdir -p "${RELAY_SRC}/migrations"
+: > "${RELAY_SRC}/migrations/component.conf"
+printf '0.2.2 stale_user_bins.sh\n0.2.2 adopt_unit_home_tree.sh\n' > "${RELAY_SRC}/migrations/ledger"
+: > "${RELAY_SRC}/migrations/adopt_unit_home_tree.sh"
 RELAY_ASM="${TMP}/relay-asm"; mkdir -p "${RELAY_ASM}"
 if stage_payload_extras relay "${RELAY_SRC}" "${RELAY_ASM}"; then
     ok "stage extras: relay succeeds"
 else bad "stage extras: relay failed"; fi
 check "stage extras: relay stages the manifest, not install.sh" \
-    "$(staged "${RELAY_ASM}")" "update.sh,updater.update.sh"
+    "$(staged "${RELAY_ASM}")" \
+    "migrations/adopt_unit_home_tree.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh,updater.update.sh"
 if [ -x "${RELAY_ASM}/update.sh" ] && [ -x "${RELAY_ASM}/updater.update.sh" ]; then
     ok "stage extras: relay extras are executable"
 else bad "stage extras: relay extras not executable"; fi
@@ -314,5 +332,44 @@ rm -f "${TMP}/shared-gap.zip"
 if assert_payload_migrations edge "${TMP}/shared-gap.zip" "${EDGE_SRC}" 2>/dev/null; then
     bad "gate: accepted a shared-ladder payload missing a ledger-named rung"
 else ok "gate: rejects a shared-ladder payload missing a ledger-named rung"; fi
+
+# --- the gate on relay --------------------------------------------------------
+# relay is gated like the other shared-ladder components, plus one member of its
+# own: migrations/adopt_user_tree.sh, the shared rung its ledger-named
+# adopt_unit_home_tree.sh DELEGATES to. No ledger row names it, so without its
+# own assertion nothing would ever ask for it — the same reasoning as the sweep
+# library for the gateway.
+if assert_payload_migrations relay "${TMP}/junked.zip" "${RELAY_MIG_SRC}" 2>/dev/null; then
+    bad "gate: accepted a relay payload with no migrations/"
+else ok "gate: rejects a relay payload with no migrations/"; fi
+
+RELAY_ZIP_ASM="${TMP}/relay-zip"; mkdir -p "${RELAY_ZIP_ASM}"
+stage_component_migrations relay "${RELAY_MIG_SRC}" "${RELAY_ZIP_ASM}" >/dev/null
+( cd "${RELAY_ZIP_ASM}" && zip -r -q "${TMP}/relay-good.zip" migrations/ )
+if assert_payload_migrations relay "${TMP}/relay-good.zip" "${RELAY_MIG_SRC}"; then
+    ok "gate: accepts a complete relay payload"
+else bad "gate: rejected a complete relay payload"; fi
+
+# The delegation target missing is refused for relay — and ONLY for relay: the
+# other shared-ladder components' ladders do not hard-depend on it, so the
+# requirement stays scoped to the kit that would break.
+rm -f "${RELAY_ZIP_ASM}/migrations/adopt_user_tree.sh" "${TMP}/relay-noadopt.zip"
+( cd "${RELAY_ZIP_ASM}" && zip -r -q "${TMP}/relay-noadopt.zip" migrations/ )
+if assert_payload_migrations relay "${TMP}/relay-noadopt.zip" "${RELAY_MIG_SRC}" 2>/dev/null; then
+    bad "gate: accepted a relay payload with no shared adoption rung"
+else ok "gate: rejects a relay payload with no shared adoption rung"; fi
+# The SAME zip is fine for edge, whose ladder does not delegate to it.
+if assert_payload_migrations edge "${TMP}/relay-noadopt.zip" "${EDGE_SRC}"; then
+    ok "gate: adopt_user_tree.sh requirement stays relay-scoped"
+else bad "gate: adopt_user_tree.sh requirement leaked beyond relay"; fi
+
+# …and the row check itself: relay's OWN rung named in the ledger but not in
+# the zip is refused, same as any other ledger gap.
+cp "${SHARED_FIX}/adopt_user_tree.sh" "${RELAY_ZIP_ASM}/migrations/adopt_user_tree.sh"
+rm -f "${RELAY_ZIP_ASM}/migrations/adopt_unit_home_tree.sh" "${TMP}/relay-norung.zip"
+( cd "${RELAY_ZIP_ASM}" && zip -r -q "${TMP}/relay-norung.zip" migrations/ )
+if assert_payload_migrations relay "${TMP}/relay-norung.zip" "${RELAY_MIG_SRC}" 2>/dev/null; then
+    bad "gate: accepted a relay payload missing its ledger-named adoption rung"
+else ok "gate: rejects a relay payload missing its ledger-named adoption rung"; fi
 
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi

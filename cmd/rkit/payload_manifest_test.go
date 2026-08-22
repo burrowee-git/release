@@ -148,7 +148,13 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		// on either side (build.go resolves it and passes it to assemble()
 		// separately), so the manifest applies to relay unchanged — and this row
 		// is what keeps the two sides of it pinned together.
-		{"relay", []string{"update.sh", "updater.update.sh"}},
+		//
+		// Since the 0.2.2 root-only collapse relay also takes the SHARED
+		// ladder, contributing its own component.conf + ledger + the
+		// unit-derived adoption rung.
+		{"relay", []string{"update.sh", "updater.update.sh",
+			"migrations/component.conf", "migrations/ledger",
+			"migrations/adopt_unit_home_tree.sh"}},
 		{"agent", nil},
 	}
 	for _, tc := range cases {
@@ -162,6 +168,14 @@ func TestPayloadManifestsAgree(t *testing.T) {
 				// carries, because both manifests cross-check it.
 				if err := os.WriteFile(filepath.Join(src, "migrations", "ledger"),
 					[]byte("0.2.0 stale_user_bins.sh\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.comp == "relay" {
+				// relay's real ledger shape: the shared sweep first, then its
+				// own adoption rung (which the fixture stages beside it).
+				if err := os.WriteFile(filepath.Join(src, "migrations", "ledger"),
+					[]byte("0.2.2 stale_user_bins.sh\n0.2.2 adopt_unit_home_tree.sh\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
