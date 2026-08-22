@@ -395,4 +395,28 @@ grep -q 'migrations/upgrade.sh' "$SUDO_LOG" \
     || die "the forced migration ladder did not go through sudo"
 pass "the ladder's forcing entry also ran under sudo"
 
+# ---- (9) both templates carry byte-identical elevation literals ------------
+# Same invariant as the preflight's nginx_guide vs core's setup.NginxGuide: two
+# copies of an operator-facing command that drift are worse than one copy that
+# is wrong, because nobody can tell which is current.
+#
+# needs_root_comp() differs BY DESIGN between the two templates (the shared
+# one switches on $COMP; relay is root-only unconditionally), so the range
+# compared is bounded by explicit markers in both files -- BEGIN/END pinned
+# elevation literals -- placed just after each file's own needs_root_comp()
+# and around has_tty()/resolve_elevate()/ELEVATE=, not by a brace-counting sed
+# range that would sweep needs_root_comp() in too.
+say "ASSERT (9): the two templates' elevation literals are byte-identical"
+extract_block() {
+    sed -n '/^# ---- BEGIN pinned elevation literals/,/^# ---- END pinned elevation literals/p' "$1"
+}
+if ! diff <(extract_block tools/bootstrap.template.sh) \
+          <(extract_block tools/relay-bootstrap.template.sh) > "$WORK/elev.diff"; then
+    die "elevation blocks drifted between the two templates:
+$(cat "$WORK/elev.diff")"
+fi
+extract_block tools/bootstrap.template.sh | grep -q '^has_tty() {$' \
+    || die "extract_block found nothing -- the BEGIN/END markers are missing or misspelled"
+pass "elevation literals identical between tools/bootstrap.template.sh and tools/relay-bootstrap.template.sh"
+
 printf '\n\342\234\223 ELEVATE-TEST OK\n'

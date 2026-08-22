@@ -227,6 +227,12 @@ needs_root_comp() {
     esac
 }
 
+# ---- BEGIN pinned elevation literals -------------------------------------
+# Kept byte-identical between tools/bootstrap.template.sh and
+# tools/relay-bootstrap.template.sh — tools/test-elevate.sh assertion (9)
+# diffs everything between these two markers. needs_root_comp() above is
+# deliberately OUTSIDE the pinned range: it differs by design (the shared
+# template switches on $COMP; relay is root-only unconditionally).
 # has_tty -- copied VERBATIM from inner/gateway/install.sh, which already solves
 # the piped case: under `curl … | sh` stdin IS the script, so `[ -t 0 ]` is
 # false, and the /dev/tty probe is the only thing that finds the terminal.
@@ -250,6 +256,7 @@ resolve_elevate() {
     printf 'sudo'
 }
 ELEVATE="$(resolve_elevate)"
+# ---- END pinned elevation literals ---------------------------------------
 
 sha256_of() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
