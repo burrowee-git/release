@@ -198,7 +198,7 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 	}
 
 	// sharedRepo is a fixture RELEASE repo carrying inner/_shared/migrations.
-	// The gateway and relay cases never read it — they do not take the shared
+	// The gateway cases never read it — the gateway does not take the shared
 	// ladder — but extraPayload takes it as a parameter, and handing those cases
 	// a directory that exists keeps a failure there from being mistaken for the
 	// missing-shared-ladder error the shared cases assert on.
@@ -407,6 +407,46 @@ func TestExtraPayloadUpdateScripts(t *testing.T) {
 			}
 		})
 	}
+
+	// relay took the shared ladder with the 0.2.2 root-only collapse. Its own
+	// half is component.conf + ledger + adopt_unit_home_tree.sh, the
+	// unit-derived source selection that DELEGATES to the shared
+	// adopt_user_tree.sh — which is therefore required in a relay kit even
+	// though no ledger row names it (the same reasoning as the sweep library).
+	sharedRelay := sharedRepo(t, "run.sh", "upgrade.sh", "lib_paths.sh",
+		"lib_stale_user_bins.sh", "stale_user_bins.sh", "adopt_user_tree.sh")
+	relaySrc := func(t *testing.T) string {
+		src := writeSrc(t, "update.sh", "updater.update.sh",
+			"migrations/component.conf", "migrations/adopt_unit_home_tree.sh")
+		writeSharedLedger(t, src, "stale_user_bins.sh", "adopt_unit_home_tree.sh")
+		return src
+	}
+
+	t.Run("relay carries the shared ladder plus its own adoption rung", func(t *testing.T) {
+		got, err := extraPayload("relay", relaySrc(t), sharedRelay)
+		if err != nil {
+			t.Fatalf("relay should build with the shared ladder: %v", err)
+		}
+		want := []string{
+			"migrations/adopt_unit_home_tree.sh", "migrations/adopt_user_tree.sh",
+			"migrations/component.conf", "migrations/ledger",
+			"migrations/lib_paths.sh", "migrations/lib_stale_user_bins.sh",
+			"migrations/run.sh", "migrations/stale_user_bins.sh", "migrations/upgrade.sh",
+			"update.sh", "updater.update.sh",
+		}
+		if !reflect.DeepEqual(names(got), want) {
+			t.Errorf("relay extras = %v, want %v", names(got), want)
+		}
+	})
+
+	// A shared directory without the delegation target is refused for relay —
+	// and only for relay: the cli case above builds against sharedOK, which
+	// has no adopt_user_tree.sh at all.
+	t.Run("relay requires shared adopt_user_tree.sh", func(t *testing.T) {
+		if _, err := extraPayload("relay", relaySrc(t), sharedOK); err == nil {
+			t.Error("a relay kit with no shared adopt_user_tree.sh was accepted")
+		}
+	})
 
 	t.Run("edge ships both update scripts", func(t *testing.T) {
 		src := writeSrc(t, "update.sh", "updater.update.sh",

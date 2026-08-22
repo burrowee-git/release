@@ -90,11 +90,13 @@ payload_dir_extras() {
         edge)    printf '%s\n' covers migrations ;;
         gateway) printf '%s\n' migrations ;;
         cli)     printf '%s\n' migrations ;;
+        relay)   printf '%s\n' migrations ;;
     esac
 }
 
 # SHARED_MIGRATIONS_DIR — inner/_shared/migrations, the ONE authored copy of the
-# migration runner, the sweep library and the rungs that edge and cli both take.
+# migration runner, the sweep library and the rungs that edge, cli and relay
+# all take.
 #
 # THIS IS THE POINT OF THE DIRECTORY. run.sh is ~450 lines of gating logic whose
 # every branch fails quietly in a plausible direction; two components each
@@ -138,9 +140,15 @@ component_migration_files() {
 
 # takes_shared_ladder <comp> — whether this component's migrations/ is assembled
 # from inner/_shared plus its own repo, rather than wholly from its own repo.
+#
+# relay joined for its 0.2.2 root-only collapse: its repo contributes
+# component.conf, ledger and adopt_unit_home_tree.sh (the unit-derived source
+# selection), and everything else — the runner, the sweep, the shared adoption
+# rung its own rung delegates to — is staged from inner/_shared exactly as for
+# edge and cli.
 takes_shared_ladder() {
     case "$1" in
-        edge|cli) return 0 ;;
+        edge|cli|relay) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -341,7 +349,7 @@ ledger_file_migrations() {
 
 assert_payload_migrations() {
     local comp="$1" zip_path="$2" src="$3"
-    case "${comp}" in gateway|edge|cli) ;; *) return 0 ;; esac
+    case "${comp}" in gateway|edge|cli|relay) ;; *) return 0 ;; esac
 
     if ! command -v unzip >/dev/null 2>&1; then
         echo "✗ unzip not found — cannot verify the gateway payload carries migrations/" >&2
@@ -360,8 +368,15 @@ assert_payload_migrations() {
     # installs cleanly and silently stops migrating or sweeping — which is
     # precisely the class of defect the gateway's gate below already exists for.
     if takes_shared_ladder "${comp}"; then
-        local want ledger
-        for want in run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh component.conf ledger; do
+        local want wants ledger
+        wants="run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh component.conf ledger"
+        # relay's own rung (adopt_unit_home_tree.sh, ledger-named and so covered
+        # by the ledger check below) derives the adoption SOURCE and then
+        # DELEGATES to the shared adopt_user_tree.sh — a dependency no ledger
+        # row names, exactly like the sweep library one level up. A relay kit
+        # without it refuses on every pre-collapse host, after the cut.
+        [ "${comp}" = relay ] && wants="${wants} adopt_user_tree.sh"
+        for want in ${wants}; do
             if ! printf '%s\n' "${members}" | grep -qxF "migrations/${want}"; then
                 echo "✗ ${comp} payload has no migrations/${want}: ${zip_path}" >&2
                 echo "  install.sh runs the ladder out of the unzipped bundle and sources the sweep" >&2

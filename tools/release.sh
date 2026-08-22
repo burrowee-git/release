@@ -823,6 +823,13 @@ distribute_relay() {
         read -r os arch <<<"${pair}"
         z="${stage}/burrowee-${comp}-${os}-${arch}.zip"
         [ -f "${z}" ] || { echo "✗ missing ${z} (run rkit build --component relay first)" >&2; exit 1; }
+        # The same relay payload gate the full cut runs, applied to zips this
+        # path did NOT assemble (rkit build produced them) — mirrors
+        # distribute_only's loop for the public components. Whichever assembler
+        # ran, a relay kit without its migration ladder must not reach R2 or
+        # the console catalog; ahead of the dry-run branch so a rehearsal fails
+        # on it too.
+        assert_payload_migrations "${comp}" "${z}" "${src}" || exit 1
         cp "${z}" "${latest_stage}/latest.${os}-${arch}.zip"
     done
     # shellcheck disable=SC2086
@@ -1386,8 +1393,10 @@ do_release_relay() {
             bash "${REPO_ROOT}/tools/build.sh" >&2
 
         # assemble: four binaries (3 relay-tree + dispatcher) + install.sh + the
-        # manifest's extras (update.sh + updater.update.sh). The full installer
-        # install.sh is the zip's entrypoint; the extras ride alongside it.
+        # manifest's extras (update.sh + updater.update.sh + the migrations/
+        # ladder — shared runner half plus relay's own conf/ledger/rungs). The
+        # full installer install.sh is the zip's entrypoint; the extras ride
+        # alongside it.
         #
         # install.sh is the ONE member whose provenance is component-specific:
         # relay's comes from its own source tree, the public components' from
@@ -1422,17 +1431,24 @@ do_release_relay() {
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
         # zip -j junks paths and SKIPS DIRECTORIES OUTRIGHT, so every
-        # directory-shaped payload member needs a second recursive pass — the same
-        # loop do_release runs. payload_dir_extras relay is empty today, so this
-        # loop's body never executes; it is here rather than absent because its
-        # ABSENCE is the defect: gateway/migrations/ went missing precisely because
-        # one of two assembly sites had the recursive pass and the other did not.
-        # A relay directory member added to the manifest now ships from both sites.
+        # directory-shaped payload member needs a second recursive pass — the
+        # same loop do_release runs. Since relay took the shared migration
+        # ladder (0.2.2 root-only collapse), migrations/ is such a member here
+        # too; before that the loop's body never executed and was kept anyway,
+        # because its ABSENCE is the defect: gateway/migrations/ went missing
+        # precisely because one of two assembly sites had the recursive pass
+        # and the other did not.
         for d in $(payload_dir_extras "${comp}"); do
             [ -d "${assemble}/${d}" ] \
                 || { echo "✗ ${comp} payload member ${d}/ was never staged: ${assemble}/${d}" >&2; exit 1; }
             ( cd "${assemble}" && zip -r -q "${stage}/${asset}" "${d}/" )
         done
+        # Relay payload gate: prove the finished zip carries the ladder — the
+        # runner, the libraries, component.conf/ledger, the shared adoption rung
+        # relay's own rung delegates to, and every ledger-named script — BEFORE
+        # anything is notarized, summed, signed or uploaded. Same gate, same
+        # placement as do_release's (see tools/payload.sh).
+        assert_payload_migrations "${comp}" "${stage}/${asset}" "${src}" || exit 1
 
         # Apple-sign mode: notarize the darwin zips (binaries were Developer ID
         # signed by build.sh). Submitting doesn't alter the zip, so the latest.*

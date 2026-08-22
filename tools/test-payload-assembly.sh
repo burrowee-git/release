@@ -56,6 +56,7 @@ mkdir -p "${SHARED_FIX}"
 for f in adopt_user_tree.sh lib_paths.sh lib_stale_user_bins.sh run.sh stale_user_bins.sh upgrade.sh; do
     printf '#!/bin/sh\n' > "${SHARED_FIX}/${f}"
 done
+# shellcheck disable=SC2034  # read by the sourced payload.sh staging functions.
 SHARED_MIGRATIONS_DIR="${SHARED_FIX}"
 
 # shared_ladder_src <src> — give a shared-ladder component's fixture source its
@@ -194,15 +195,21 @@ check "edge covers come from the edge.web tree, renamed" \
 # =============================================================================
 
 # --- (1) the invariant: what a relay payload carries --------------------------
-# Stated literally, matching the published relay payload (3 relay bins + the
-# burrowee dispatcher + install.sh + update.sh + updater.update.sh). Deriving
+# Stated literally, matching the published relay payload: 3 relay bins + the
+# burrowee dispatcher + install.sh + update.sh + updater.update.sh + — since the
+# 0.2.2 root-only collapse — the migrations/ ladder (the shared runner half plus
+# relay's own component.conf, ledger and unit-derived adoption rung). Deriving
 # this from payload_file_extras instead would make the assertion agree with the
 # manifest by construction and certify nothing about the manifest.
 fixture relay burrowee-relay burrowee-relay-cli burrowee-relay-updater
 for f in install.sh update.sh updater.update.sh; do printf '%s\n' "${f}" > "${src}/${f}"; done
+mkdir -p "${src}/migrations"
+printf 'COMP=relay\n' > "${src}/migrations/component.conf"
+printf '0.2.2 stale_user_bins.sh\n0.2.2 adopt_unit_home_tree.sh\n' > "${src}/migrations/ledger"
+printf '#!/bin/sh\n' > "${src}/migrations/adopt_unit_home_tree.sh"
 if run_relay; then ok "relay: assembly succeeds"; else bad "relay: assembly failed"; fi
 check "relay payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,update.sh,updater.update.sh"
+    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,migrations/adopt_unit_home_tree.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh,updater.update.sh"
 
 # install.sh comes from the COMPONENT source on this path (the public components
 # take theirs from inner/<comp>/install.sh, asserted above) — the one provenance
@@ -224,7 +231,7 @@ payload_file_extras() {
 if run_relay; then ok "relay: assembly succeeds with an injected file member"; else bad "relay: assembly failed with an injected file member"; fi
 check "release.sh ships a file member the manifest declares" \
     "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,relay.extra.sh,update.sh,updater.update.sh"
+    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,migrations/adopt_unit_home_tree.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,relay.extra.sh,update.sh,updater.update.sh"
 
 # A declared member the source does not have must stop the cut here, not on the
 # operator's node at self-update time.
@@ -234,39 +241,16 @@ if ( run_relay ) >/dev/null 2>&1; then
 else ok "relay: refuses a declared member missing from the source"; fi
 printf 'injected\n' > "${src}/relay.extra.sh"
 
-# --- (3) directory members survive the archive --------------------------------
-# `zip -j` skips directories outright, so a directory member needs the second
-# recursive pass. relay declares none today, which is exactly why this is worth
-# asserting: the pass is unexercised code until a member appears, and an
-# unexercised pass is what gateway/migrations/ was missing.
-payload_dir_extras() {
-    case "$1" in
-        edge)          printf '%s\n' covers ;;
-        gateway|relay) printf '%s\n' migrations ;;
-    esac
-}
-mkdir -p "${TMP}/mig"
-printf '#!/bin/sh\n' > "${TMP}/mig/run.sh"
+# --- (3) a declared directory member that was never staged --------------------
+# relay's migrations/ dir member and its survival through `zip -j` + the
+# recursive pass are exercised for real by the member-list check in (1) — this
+# half pins the OTHER edge: a declared directory member nothing staged is
+# `zip error: Nothing to do!` without the guard, an abort naming neither the
+# component nor the member.
 # shellcheck disable=SC2329  # invoked indirectly, from the EVAL'd assembly block.
-stage_payload_extras() { # keep the file extras, and stage the directory member
-    local c="$1" s_="$2" d_="$3" n
-    for n in $(payload_file_extras "${c}"); do
-        [ -f "${s_}/${n}" ] || return 1
-        cp "${s_}/${n}" "${d_}/${n}"
-    done
-    mkdir -p "${d_}/migrations" && cp "${TMP}/mig/run.sh" "${d_}/migrations/run.sh"
-}
-if run_relay; then ok "relay: assembly succeeds with a directory member"; else bad "relay: assembly failed with a directory member"; fi
-check "release.sh keeps a directory member's path in the relay zip" \
-    "$(unzip -Z1 "${stage}/${asset}" | grep '^migrations/' | grep -v '/$' | sort | paste -sd, -)" \
-    "migrations/run.sh"
-
-# A declared directory member that was never staged is `zip error: Nothing to
-# do!` without this guard — an abort naming neither component nor member.
-# shellcheck disable=SC2329  # invoked indirectly, from the EVAL'd assembly block.
-stage_payload_extras() {
-    local c="$1" s_="$2" d_="$3" n
-    for n in $(payload_file_extras "${c}"); do
+stage_payload_extras() { # file extras only — deliberately skip the migrations/ dir
+    local s_="$2" d_="$3" n
+    for n in update.sh updater.update.sh; do
         [ -f "${s_}/${n}" ] || return 1
         cp "${s_}/${n}" "${d_}/${n}"
     done
