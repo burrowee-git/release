@@ -1,4 +1,4 @@
-# Copy to .cut-request (gitignored) and edit, then: open tools/cut.command
+# Copy to .release-request (gitignored) and edit, then: open tools/release.command
 #
 # COMPONENTS is cut in order. Each one's marker commit is pushed before the next
 # starts — release.sh never pushes, and its cut-origin guard refuses to cut while

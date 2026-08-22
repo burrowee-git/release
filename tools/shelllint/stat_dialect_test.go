@@ -34,7 +34,7 @@ func repoRoot(t *testing.T) string {
 // shellFiles is every shell script in the SOURCE tree — .git, and the build
 // output under dist/, excluded.
 //
-// *.command counts too: tools/cut.command is bash and is opened by
+// *.command counts too: tools/release.command is bash and is opened by
 // LaunchServices, so the extension is load-bearing and cannot be .sh. Matching
 // on .sh alone would have left the one script that launches a cut as the only
 // shell in the repo this lint never read.
@@ -117,19 +117,19 @@ func TestNoShellTriesTheBsdStatFormatBeforeTheGnuOne(t *testing.T) {
 }
 
 // TestShellFilesCoversDotCommand pins the glob widening that brought
-// tools/cut.command under this lint. Without it the widening is invisible: both
-// lints pass either way today, because cut.command happens to be clean — so a
+// tools/release.command under this lint. Without it the widening is invisible: both
+// lints pass either way today, because release.command happens to be clean — so a
 // revert to `.sh`-only would go unnoticed until the one script that launches a
 // release drifted, unread.
 func TestShellFilesCoversDotCommand(t *testing.T) {
 	root := repoRoot(t)
 	var found bool
 	for _, p := range shellFiles(t, root) {
-		if strings.HasSuffix(p, "tools/cut.command") {
+		if strings.HasSuffix(p, "tools/release.command") {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("shellFiles must include tools/cut.command — it is bash, and .command is load-bearing (LaunchServices opens it)")
+		t.Error("shellFiles must include tools/release.command — it is bash, and .command is load-bearing (LaunchServices opens it)")
 	}
 }
