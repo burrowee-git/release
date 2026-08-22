@@ -2,8 +2,9 @@
 // installer as PREFIX, per component.
 //
 // The gateway and the edge install to /usr/local/bin, root-owned, and their
-// inner installers REFUSE a set PREFIX rather than overriding it
-// (inner/gateway/install.sh, inner/edge/install.sh).
+// inner installers REFUSE a PREFIX that would MISDIRECT the install rather than
+// overriding it (inner/gateway/install.sh, inner/edge/install.sh); one that
+// resolves to that same destination is honoured and then cleared.
 // tools/bootstrap.template.sh is shared by cli, gateway, edge and agent, and it
 // used to default PREFIX to $HOME/.local and pass it unconditionally — so every
 // `curl … | sh` gateway install took the per-user branch, which also switched
@@ -33,8 +34,9 @@ import (
 var publicComponents = []string{"cli", "gateway", "edge", "agent"}
 
 // rootOnly are the components whose inner installer has ONE destination
-// (/usr/local/bin, root-owned) and refuses a set PREFIX. Their bootstrap must
-// hand PREFIX through untouched — never defaulted — and must not edit a shell rc.
+// (/usr/local/bin, root-owned) and refuses a PREFIX naming anywhere else. Their
+// bootstrap must hand PREFIX through — never defaulted — and must not edit a
+// shell rc.
 var rootOnly = map[string]bool{"gateway": true, "edge": true}
 
 // bakedComp reads the COMP="<name>" literal gen-bootstraps.sh substituted into
@@ -99,6 +101,54 @@ func TestRenderedBootstrapsResolvePrefixPerComponent(t *testing.T) {
 				t.Errorf("%s resolves PREFIX=%q with none set, want %q — "+
 					"the gateway must not manufacture one (its inner installer refuses it), "+
 					"and the others must keep their per-user default", rel, got, want)
+			}
+		})
+	}
+}
+
+// TestRenderedBootstrapsCanonicaliseTheExportedPrefix — one spelling leaves the
+// bootstrap, whatever the operator typed.
+//
+// This became load-bearing when the root-only installers stopped refusing every
+// set PREFIX: their gate NORMALISES before comparing, so `PREFIX=/usr/local/` is
+// now an accepted, supported invocation instead of an abort — and everything
+// downstream of that acceptance does plain string work. The migration runner
+// derives BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"; the stale-bin sweep
+// decides "never sweep the install destination" by comparing directory NAMES.
+// `/usr/local//bin` opens the same directory and matches neither name, and the
+// sweep that stops recognising its own destination deletes the install it was
+// protecting — reporting success.
+//
+// Collapsed here, the loose spelling never reaches any of them.
+// (inner/_shared/migrations/upgrade.sh holds the second half of this, for the
+// operator who runs the ladder by hand with no bootstrap in the picture.)
+func TestRenderedBootstrapsCanonicaliseTheExportedPrefix(t *testing.T) {
+	cases := []struct{ set, want string }{
+		{"/opt/burrowee-explicit", "/opt/burrowee-explicit"}, // already canonical: untouched
+		{"/usr/local/", "/usr/local"},                        // the shape core's injection and a shell's tab-completion produce
+		{"/usr/local//", "/usr/local"},
+		{"/opt//burrowee//x/", "/opt/burrowee/x"},
+		{"/", "/"}, // root is a directory, not an empty string
+	}
+	for _, comp := range publicComponents {
+		t.Run(comp, func(t *testing.T) {
+			rel := comp + "/install.sh"
+			baked := bakedComp(t, rel)
+			for _, tc := range cases {
+				home := t.TempDir()
+				got := strings.TrimSpace(runShellFragment(t, home, strings.Join([]string{
+					"set -eu",
+					"COMP=" + baked,
+					`PREFIX="` + tc.set + `"`,
+					shellFunc(t, rel, "resolve_prefix"),
+					"resolve_prefix",
+				}, "\n")))
+				if got != tc.want {
+					t.Errorf("%s: resolve_prefix with PREFIX=%q gave %q, want %q — "+
+						"a non-canonical prefix reaches the migration ladder as <prefix>//bin, "+
+						"which the sweep's destination guard compares as text and does not recognise",
+						rel, tc.set, got, tc.want)
+				}
 			}
 		})
 	}

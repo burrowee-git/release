@@ -9,8 +9,8 @@
 //
 // SINCE THE LIBEXEC-TO-$BIN_DIR COLLAPSE (2026-08-08) this is one directory,
 // not two, and since the prefix collapse (2026-08-13) there is one flow into
-// it, not two: $BIN_DIR is root-owned, always, and a set PREFIX is refused
-// outright. Every test in this file therefore runs under installShEnv's
+// it, not two: $BIN_DIR is root-owned, always, and a PREFIX naming anywhere
+// else is refused. Every test in this file therefore runs under installShEnv's
 // BURROWEE_BIN_DIR redirect and asserts against binDir(home) — the root-secure
 // ANCESTOR WALK, not a second directory, is what makes that safe in
 // production, and this file proves the walk's placement/refusal behavior, not

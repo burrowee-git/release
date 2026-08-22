@@ -51,7 +51,8 @@ func sysDataDir(home string) string { return filepath.Join(home, "system-var", "
 // since the prefix collapse. It stands in for the real, root-owned production
 // destination (/usr/local/bin), redirected so this suite never touches that
 // real directory. There is no second, per-user directory an install can choose
-// any more: a set PREFIX is refused (bin_dir_default_test.go).
+// any more: a PREFIX naming anywhere else is refused (bin_dir_default_test.go,
+// prefix_gate_test.go).
 //
 // The suite can prove PLACEMENT and unit CONTENT here; it cannot prove
 // OWNERSHIP, because the harness's `sudo` is a pass-through stub and every file

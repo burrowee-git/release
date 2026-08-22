@@ -82,15 +82,19 @@ func TestInstallShHasNoPerUserPrefixBranch(t *testing.T) {
 	}
 }
 
-// TestInstallShRefusesAnExplicitPrefix — decision 3 of the plan, executed.
+// TestInstallShRefusesAMisdirectingPrefix — decision 3 of the plan, executed.
 //
-// Silently overriding a set PREFIX would be the same class of surprise as the
-// bug being fixed, pointed the other way: the operator asks for one directory
-// and a different one is written, root-owned, without a word. So the run must
-// FAIL, name what changed (0.2.0) and where things go now (/usr/local/bin) —
-// and it must do so BEFORE placing anything, which is asserted separately
-// because a refusal after a half-install is not a refusal.
-func TestInstallShRefusesAnExplicitPrefix(t *testing.T) {
+// Silently overriding a PREFIX that names somewhere else would be the same
+// class of surprise as the bug being fixed, pointed the other way: the operator
+// asks for one directory and a different one is written, root-owned, without a
+// word. So the run must FAIL, name what changed (0.2.0) and where things go now
+// (/usr/local/bin) — and it must do so BEFORE placing anything, which is
+// asserted separately because a refusal after a half-install is not a refusal.
+//
+// The $HOME/.local it uses is genuinely divergent, so this stays exactly as
+// true under the divergent-only rule; prefix_gate_test.go owns the other half
+// (a PREFIX that resolves to $BIN_DIR is honoured).
+func TestInstallShRefusesAMisdirectingPrefix(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	staging := t.TempDir()

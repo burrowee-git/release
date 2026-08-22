@@ -14,8 +14,10 @@
 # unit/plist so the daemon resolves the same dir. The documented entry point is
 # therefore `curl ... | sudo sh`, which is what the console mints.
 #
-# THE PER-USER FLOW IS GONE, not de-defaulted. A set PREFIX is REFUSED, loudly,
-# and so is a run that never reached uid 0 — both before anything is placed,
+# THE PER-USER FLOW IS GONE, not de-defaulted. A PREFIX that would MISDIRECT the
+# install is REFUSED, loudly (one that merely names this same destination is
+# honoured and then cleared), and so is a run that never reached uid 0 — both
+# before anything is placed,
 # never silently redirected. This mirrors the gateway's 0.2.0 collapse
 # (inner/gateway/install.sh, whose header carries the full reasoning) and exists
 # for the same failure: a per-user install is invisible to every root-scheme
@@ -59,26 +61,6 @@ set -eu
 BINS="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater"
 COMP=edge
 
-# A SET PREFIX IS REFUSED, not honoured and not silently overridden, and it is
-# refused HERE — before a directory is created, a binary placed or a unit
-# written. Refusing is the point: an operator who typed PREFIX=$HOME/.local and
-# got a root-owned /usr/local/bin would be handed exactly the class of surprise
-# this collapse exists to remove, one direction reversed. They get told instead,
-# and the process that set it (a shell profile, an outer bootstrap, a wrapper)
-# is the thing that has to change. The version is named because the operator
-# hitting this needs to know since when; it is asserted by the suite
-# (install_test/root_only_test.go), so it cannot drift away from the release it
-# describes without a test failing.
-if [ -n "${PREFIX:-}" ]; then
-    echo "install: PREFIX is set to '$PREFIX', but as of edge 0.2.0 this installer" >&2
-    echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
-    echo "install: flow is gone — edge's service units run as root and name the binaries" >&2
-    echo "install: absolutely, and other components resolve /usr/local/bin/burrowee by" >&2
-    echo "install: absolute path, so a per-user copy is invisible to both." >&2
-    echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
-    exit 1
-fi
-
 # ── system install paths ─────────────────────────────────────────────────────
 # SYS_BIN_DIR + SYSTEMD_UNIT_DIR + LAUNCHD_PLIST_DIR default to the real system
 # locations; they are overridable only so the Go install-test harness can
@@ -86,6 +68,11 @@ fi
 # on a real host. SYS_BIN_DIR is this component's equivalent of the gateway's
 # BURROWEE_BIN_DIR seam; it keeps its name because the rendered units, and every
 # caller that already sets it, are written in terms of it.
+#
+# SYS_BIN_DIR and BIN_DIR are resolved BEFORE the PREFIX gate below, because the
+# gate's whole question is "does this PREFIX name the destination we would have
+# picked anyway?" — it cannot ask that without $BIN_DIR. These are assignments
+# only: nothing is created, placed or written until well after the gate.
 SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
 # BIN_DIR and SYS_BIN_DIR are ONE destination under two names: the units and the
 # test harness spell it SYS_BIN_DIR, the placement/uninstall code below spells it
@@ -95,6 +82,88 @@ SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
 # destination, and a library sourced before the value was decided would have
 # taken the production default while this run installed somewhere else.
 BIN_DIR="$SYS_BIN_DIR"
+
+# normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
+# '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
+# directory. Root ('/') stays '/'. Used ONLY to compare two directory names.
+#
+# printf '%s', NEVER echo. dash's echo (and bash's under xpg_echo) expands
+# backslash escapes in its argument, so an echo-based normaliser reduces
+# PREFIX='/usr/local/bin\c' to '/usr/local/bin' and ACCEPTS a prefix that is not
+# this destination at all — the one thing this gate exists to catch.
+#
+# TEXTUAL ONLY — no '.'/'..' folding, no symlink resolution, no relative-path
+# anchoring. A PREFIX spelled '/usr/local/../local' or '/usr/local/.' is NOT
+# recognised as the destination and is refused. Deliberate and sufficient: the
+# one value this has to recognise is core's injected PREFIX, which is already
+# filepath.Dir-clean and absolute, and a guard that resolved symlinks would be
+# claiming to know where a path LANDS, which is a different (and racy) question
+# from the one being asked here.
+normalize_dir() {
+    _nd="$(printf '%s' "$1" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    printf '%s' "${_nd:-/}"
+}
+
+# A DIVERGENT PREFIX IS REFUSED — a PREFIX that names THIS destination is not —
+# and it is refused HERE, before a directory is created, a binary placed or a
+# unit written. Refusing the divergent one is the point: an operator who typed
+# PREFIX=$HOME/.local and got a root-owned /usr/local/bin would be handed exactly
+# the class of surprise this collapse exists to remove, one direction reversed.
+# They get told instead, and the process that set it (a shell profile, an outer
+# bootstrap, a wrapper) is the thing that has to change. The version is named
+# because the operator hitting this needs to know since when; it is asserted by
+# the suite (install_test/root_only_test.go), so it cannot drift away from the
+# release it describes without a test failing.
+#
+# But refusing EVERY set PREFIX refuses callers that are naming the one true
+# destination, which misdirects nothing — and that blanket shape is what wedged
+# relay's entire fleet on 2026-08-22: core's updater injects
+# PREFIX=<dirname²(ServeBin)> = /usr/local when it runs these scripts, so every
+# auto/push update died with "PREFIX is set to '/usr/local' … nothing has been
+# updated". Today this installer survives that only because core strips PREFIX
+# for root-only components before exec — i.e. the fresh-install path is protected
+# by a Go change rather than by the rule. The rule is the guard's subject: a copy
+# landing where the units never execute, and only that.
+if [ -n "${PREFIX:-}" ]; then
+    _prefix_bin="$(normalize_dir "$PREFIX/bin")"
+    _true_bin="$(normalize_dir "$BIN_DIR")"
+    if [ "$_prefix_bin" = "$_true_bin" ]; then
+        # printf, not echo, for every line that interpolates the caller's own
+        # value: dash's echo would expand a backslash escape inside $PREFIX and
+        # silently truncate the very line meant to quote it back.
+        printf '%s\n' "install: PREFIX ('$PREFIX') names this installer's own destination ($_true_bin) — proceeding."
+        # Absent, not empty: an ACCEPTED PREFIX is cleared right here, so nothing
+        # downstream can read it as a fallback. The migration ladder is handed
+        # its environment with the `VAR=x sh run.sh` form, which ADDS to the
+        # environment rather than replacing it, and the shared rungs read
+        # BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}" — harmless only while
+        # BIN_DIR is passed explicitly and wins, i.e. one deletion away from
+        # mattering. Cleared, never set to "": absent, not empty, as core does it.
+        unset PREFIX
+    else
+        # The refusal carries BOTH spellings of the destination: the literal
+        # /usr/local/bin (production truth, and what the suite's static pins
+        # check) and the resolved $_true_bin. They differ only when the
+        # SYS_BIN_DIR test seam is set, and an operator reading a refusal on a
+        # real host must see the real path either way.
+        #
+        # printf, not echo, on the two lines that interpolate caller-controlled
+        # text: a PREFIX containing a backslash escape ('\c' ends echo's output
+        # in dash) would otherwise truncate the refusal at the moment it quotes
+        # the offending value, hiding the component, the destination and the
+        # "nothing has been installed" line all at once.
+        printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of edge 0.2.0 this installer" >&2
+        echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
+        echo "install: flow is gone — edge's service units run as root and name the binaries" >&2
+        echo "install: absolutely, and other components resolve /usr/local/bin/burrowee by" >&2
+        echo "install: absolute path, so a per-user copy is invisible to both." >&2
+        printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
+        echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
+        exit 1
+    fi
+    unset _prefix_bin _true_bin
+fi
+
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
 SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge-updater.service"

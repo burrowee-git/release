@@ -634,6 +634,26 @@ run_upgrade() {
     RC=$?
 }
 
+# run_upgrade_with_prefix <kit> <home> <comp_home> <prefix> <floor…> — the same
+# call with NO BIN_DIR and a PREFIX instead, which is the shape the public
+# upgrade bootstrap and a hand-run `PREFIX=… sh migrations/upgrade.sh` both
+# produce. Nothing in this suite exports BIN_DIR globally, so its absence here
+# is real: the destination is whatever upgrade.sh derives from $PREFIX.
+run_upgrade_with_prefix() {
+    _rup_kit="$1"; _rup_home="$2"; _rup_comp_home="$3"; _rup_prefix="$4"; shift 4
+    OUT="$(
+        HOME="$_rup_home" \
+        COMP_HOME="$_rup_comp_home" \
+        PREFIX="$_rup_prefix" \
+        LAUNCHD_DIR="$_rup_home/no-launchd" \
+        SYSTEMD_DIR="$_rup_home/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$_rup_home/nowhere" \
+        SUDO="/nonexistent-sudo" \
+        sh "$_rup_kit/migrations/upgrade.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+
 t17="$TMP/t17"; kit "$t17" edge root installed-version $EDGE_BINS
 h17="$t17/home"; ch17="$h17/root-home/.burrowee/edge"; mkdir -p "$ch17"
 seed_ours "$h17/.local/bin" $EDGE_BINS
@@ -677,6 +697,61 @@ h17g="$t17g/home"; mkdir -p "$h17g"
 rm -f "$t17g/migrations/stale_user_bins.sh"
 run_upgrade "$t17g" "$h17g" "$h17g/absent" "$h17g/bin" 0.2.0
 assert_eq "$RC" 1 "a ladder that refuses must propagate exit 1, not be swallowed"
+
+# ---------------------------------------------------------------------------
+# 17h. THE SPELLING OF THE DESTINATION — the path with no BIN_DIR to pass.
+#
+# Every scenario above hands the ladder an explicit BIN_DIR. The bootstrap's
+# upgrade mode does not: it runs `sh ./migrations/upgrade.sh <floor>` with
+# nothing but the environment, so the destination is derived from $PREFIX — and
+# $PREFIX is whatever the operator typed. `PREFIX=$HOME/.local/` is not exotic,
+# and since the root-only installers' gate started ACCEPTING any spelling that
+# resolves to their destination, a loose one now survives the install step
+# instead of aborting it.
+#
+# Derived naively that becomes BIN_DIR=<prefix>//bin. Every filesystem call
+# tolerates the doubled slash — which is exactly why this is dangerous. The
+# stale-bin sweep's "never sweep the install destination" guard compares
+# directory NAMES: `<home>/.local/bin` != `<home>/.local//bin`, so on the CLI's
+# ORDINARY host — where the sweep dir and the install destination are one
+# directory — the guard stops recognising itself, `system_twin_exists` finds the
+# twin through the same doubled slash, and the rung deletes the live install it
+# was protecting. Exit 2, "swept", success.
+#
+# So both spellings must reach the SAME verdict, and the verdict is "decline".
+# ---------------------------------------------------------------------------
+t17h="$TMP/t17h"; kit "$t17h" cli user .installed-version $CLI_BINS
+h17h="$t17h/home"; ch17h="$h17h/.burrowee/cli"; mkdir -p "$ch17h"
+seed_ours "$h17h/.local/bin" $CLI_BINS
+
+# THE EXIT CODE IS NOT THE CLAIM HERE. upgrade.sh forces (--assume-below +
+# --rerun-recorded), so the rung is RUN whatever its --applies probe thinks and
+# the ladder reports 2 for every spelling. What separates a correct run from a
+# destructive one is whether the sweep, once running, still recognises the
+# directory it is standing in — so the files are the assertion, and the
+# destination this run resolved is asserted by NAME so a doubled slash cannot
+# hide inside a passing test.
+#
+# The control comes first: if a canonically spelled PREFIX ever starts eating
+# the install, the two cases below prove nothing.
+run_upgrade_with_prefix "$t17h" "$h17h" "$ch17h" "$h17h/.local" 0.2.0
+assert_eq "$RC" 2 "control: a forced run reports that the rung ran"
+assert_contains "$OUT" "shadow $h17h/.local/bin on PATH" "control: the sweep must name the canonical destination"
+for b in $CLI_BINS; do
+    assert_present "$h17h/.local/bin/$b" "control: the live cli install must survive a forced run"
+done
+
+run_upgrade_with_prefix "$t17h" "$h17h" "$ch17h" "$h17h/.local/" 0.2.0
+assert_contains "$OUT" "shadow $h17h/.local/bin on PATH" "a trailing-slash PREFIX must resolve to the SAME destination name"
+for b in $CLI_BINS; do
+    assert_present "$h17h/.local/bin/$b" "a trailing-slash PREFIX must not make the sweep eat the live install"
+done
+
+run_upgrade_with_prefix "$t17h" "$h17h" "$ch17h" "$h17h/.local//" 0.2.0
+assert_contains "$OUT" "shadow $h17h/.local/bin on PATH" "a doubled-slash PREFIX must resolve to the SAME destination name"
+for b in $CLI_BINS; do
+    assert_present "$h17h/.local/bin/$b" "a doubled-slash PREFIX must not make the sweep eat the live install"
+done
 
 # 17g. the command line: one version, and it must parse.
 run_upgrade "$t17" "$h17" "$ch17" "$h17/usr-local-bin"
