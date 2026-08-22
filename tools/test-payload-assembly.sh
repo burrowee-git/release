@@ -46,6 +46,28 @@ bad() { echo "FAIL: $1"; fail=1; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
+# The SHARED ladder half of a shared-ladder component's migrations/ is globbed
+# from SHARED_MIGRATIONS_DIR. Pin it to a fixture mirroring the real
+# inner/_shared/migrations file set, so the literal member lists below stay
+# hermetic — a test that globbed the real directory would drift with it and
+# assert nothing about what a kit carries.
+SHARED_FIX="${TMP}/shared-migrations"
+mkdir -p "${SHARED_FIX}"
+for f in adopt_user_tree.sh lib_paths.sh lib_stale_user_bins.sh run.sh stale_user_bins.sh upgrade.sh; do
+    printf '#!/bin/sh\n' > "${SHARED_FIX}/${f}"
+done
+SHARED_MIGRATIONS_DIR="${SHARED_FIX}"
+
+# shared_ladder_src <src> — give a shared-ladder component's fixture source its
+# OWN half of the ladder: component.conf + a ledger naming a rung the shared
+# fixture really carries (assert_payload_migrations cross-checks the ledger
+# against the finished zip).
+shared_ladder_src() {
+    mkdir -p "$1/migrations"
+    printf 'COMP=x\n' > "$1/migrations/component.conf"
+    printf '0.2.0 stale_user_bins.sh\n' > "$1/migrations/ledger"
+}
+
 # --- the code under test ------------------------------------------------------
 # Each per-target assembly block: from the line that names the staging dir
 # through the last line before the zip is recorded. Pulled out of the shipped
@@ -123,17 +145,18 @@ run_relay()  { eval "${RELAY_ASSEMBLY}"; }
 # gateway v0.2.0 without migrations/.
 # =============================================================================
 
-# --- cli: extras only, install.sh from inner/<comp>/ -------------------------
+# --- cli: shared ladder + update.sh, install.sh from inner/<comp>/ -----------
 fixture cli burrowee-cli
 printf 'inner installer\n'     > "${REPO_ROOT}/inner/cli/install.sh"
 printf 'component installer\n' > "${src}/install.sh"
 printf 'update\n'              > "${src}/update.sh"
 printf 'updater self-update\n' > "${src}/updater.update.sh"
+shared_ladder_src "${src}"
 if run_public; then ok "cli: assembly succeeds"; else bad "cli: assembly failed"; fi
 # updater.update.sh exists in this fixture's source and must NOT ship: cli
 # self-updates in-process, and the manifest is what decides that.
 check "cli payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-cli,install.sh,update.sh"
+    "burrowee,burrowee-cli,install.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh"
 check "cli install.sh comes from inner/cli/, not the component source" \
     "$(unzip -p "${stage}/${asset}" install.sh)" "inner installer"
 
@@ -144,9 +167,12 @@ printf 'update\n'          > "${src}/update.sh"
 mkdir -p "${src}/migrations"
 printf '#!/bin/sh\nMIGRATIONS="\n0.2.0 v0_1_to_v0_2.sh\n"\n' > "${src}/migrations/run.sh"
 printf '#!/bin/sh\n'                                     > "${src}/migrations/v0_1_to_v0_2.sh"
+# the sweep library install.sh sources — assert_payload_migrations (inside the
+# extracted block) requires it in the finished zip.
+printf '#!/bin/sh\n'                                     > "${src}/migrations/lib_stale_user_bins.sh"
 if run_public; then ok "gateway: assembly succeeds"; else bad "gateway: assembly failed"; fi
 check "gateway payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-gateway,install.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,update.sh"
+    "burrowee,burrowee-gateway,install.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,update.sh"
 
 # --- edge: a directory member whose content comes from another tree ----------
 fixture edge burrowee-edge
@@ -155,9 +181,10 @@ printf 'update\n'          > "${src}/update.sh"
 printf 'updater self-update\n' > "${src}/updater.update.sh"
 printf 'admin cover\n' > "${EDGE_WEB}/admin.html"
 printf 'login cover\n' > "${EDGE_WEB}/login.html"
+shared_ladder_src "${src}"
 if run_public; then ok "edge: assembly succeeds"; else bad "edge: assembly failed"; fi
 check "edge payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-edge,covers/admin.html,covers/default.html,install.sh,update.sh,updater.update.sh"
+    "burrowee,burrowee-edge,covers/admin.html,covers/default.html,install.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh,updater.update.sh"
 check "edge covers come from the edge.web tree, renamed" \
     "$(unzip -p "${stage}/${asset}" covers/default.html)" "login cover"
 
