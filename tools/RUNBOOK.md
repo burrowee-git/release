@@ -53,9 +53,12 @@ because it silently became a *relative* path whenever `HOME` was unset — launc
 cron, a detached harness session — pointing the signer at
 `./Workstation/Apple/<Account>` relative to the cwd.
 
-`tools/release.sh` keeps the operator-machine default for `APPLE_HOME` (it is
-operator tooling, which is where machine layout belongs) and hard-fails the same
-way on a missing plugin folder.
+`tools/release.sh` has **no** default of its own either, and that is the point of
+the paragraph above: `load_apple_account()` (`tools/apple_sign.sh`) resolves
+`$APPLE_HOME` first, then `config/apple-home`, and when neither answers it aborts
+with `APPLE_HOME is unresolved` — the same refusal, for the same reason, that
+`rkit build` gives. It hard-fails the same way on a missing plugin folder. Both
+entry points resolve; neither defaults.
 
 ---
 
@@ -217,7 +220,7 @@ commit**, not two: don't read a two-commit cut as this path working correctly,
 that shape is what the deadlock below used to force before the guard was
 narrowed.
 
-`assert_cut_origin`'s clean-tree check (`tools/cut_origin.sh`) tolerates
+`assert_release_origin`'s clean-tree check (`tools/release_origin.sh`) tolerates
 exactly those two staged paths, and nothing else, and only for the release
 repo, and only inside the `--distribute-only` dispatch. Every other tree a cut
 reads, and every other entry point, still gets zero tolerance. It still
@@ -250,7 +253,9 @@ unchanged by the staged-bump fix: fixing the deadlock did not remove the push
 requirement, and reading it as removed is the trap. See
 `docs/specs/2026-08-03-cut-origin-and-worktree-flow-design.md`
 (`burrowee-git/resources`) for why the flow batches the push instead of doing
-it here.
+it here. Who does it: `tools/release.command` pushes each marker between
+components (last section), because a batch cannot otherwise get past its own
+second component; cut by hand and the push is yours to make.
 
 **Residual 3 — a re-cut at an identical stamp leaves NOTHING to push.** When a
 component is re-cut at the same semver and the same stamp (its tag deleted so
@@ -283,14 +288,17 @@ and what never ran, and still exits non-zero (`tools/batch.sh`):
    the cut stopped at the first failure — the components above were NOT cut
 ```
 
-**If you write shell for `release.sh`/`tools/*.sh`: `mapfile`/`readarray` do
-not exist here.** `/usr/bin/env bash` on this machine resolves to macOS's
-system bash, 3.2.57 — there is no Homebrew bash on `PATH`, hooked or not — and
-both are bash-4+ builtins. A script that uses either will run clean under a
-newer bash on someone else's machine and crash with "command not found" the
-first time it runs for real here. Build an array from command output with the
-read-loop idiom `tools/cut_origin.sh` and `tools/cut_origin.test.sh` already
-use (`while IFS= read -r line; do … done <<EOF ... EOF`) instead.
+**If you write shell for `release.sh`/`tools/*.sh`: `mapfile`/`readarray` are
+not available.** These scripts must run under **bash 3.2** — the version macOS
+still ships as `/bin/bash`, and therefore what `/usr/bin/env bash` resolves to on
+any operator machine that has not put a newer bash ahead of it on `PATH`. Both
+builtins arrived in bash 4. A script that uses either runs clean wherever a newer
+bash happens to be first and dies with "command not found" the first time it runs
+for real somewhere it is not — and the suite will not catch that, because the
+suite runs under whatever bash the developer has. Build an array from command
+output with the read-loop idiom `tools/release_origin.sh` and
+`tools/release_origin.test.sh` already use
+(`while IFS= read -r line; do … done <<EOF ... EOF`) instead.
 
 ---
 
@@ -332,7 +340,7 @@ harmless but unnecessary.
 
 ---
 
-## Cutting from an agent session — `tools/release.command`
+## Cutting when your session is not a desktop session — `tools/release.command`
 
 **A cut needs a desktop session, and only the notarize step says so.**
 
@@ -362,15 +370,128 @@ no sudo:
 
 ```sh
 cp .release-request.example .release-request     # edit COMPONENTS / FLAGS
-chmod +x tools/release.command
 open tools/release.command                   # watch .release.log; ends in RELEASE-EXIT:<code>
 ```
 
-Machine facts (toolchain PATH, signing/notarization backends, non-interactive
-flags) load from `~/.agents/local/release.env`; this repo is public and carries
-none of them.
+The file is committed `100755`, so there is no `chmod` step — what it needs is
+the `.command` extension, so LaunchServices will open it, not the mode bit.
+
+The Aqua check is necessary, not sufficient, so three more refusals sit beside
+it and each names itself: **root** (notarization would use root's keychain, not
+yours), an **SSH** session (no console security session at all, whatever
+`managername` says), and a **non-tty stdin** (whatever started this, it was not
+LaunchServices). A daemon shell that re-execs through `launchctl asuser <uid>`
+reports Aqua and still fails at notarize — hence the extra three.
+
+Two `open`s cannot interleave: a `.release.lock` directory is taken for the run
+and released by the same exit trap that writes the sentinel. Remove it by hand
+only when you have established that no cut is live. `.release.log` is **rotated**
+rather than truncated — the previous run moves to `.release.log.prev` — so a
+refusal three seconds in never destroys the record of the last real cut, and
+there is exactly one run per log. `RELEASE_ENV`, `RELEASE_REQUEST` and
+`RELEASE_LOG` override the three input/output paths for a run that must not use
+the defaults.
+
+The same refusal now guards the other door. `tools/release.sh <comp> --public` is
+a documented entry point of its own, and it calls `require_desktop_session()`
+(`tools/apple_sign.sh`) before it resolves the Apple account — only when Apple
+signing was requested, and never on a `--dry-run`, which does not reach notarize.
+`BURROWEE_ALLOW_ANY_SESSION=1` bypasses it. That is for a machine whose session
+model this check misreads; it is not an answer to "the check refused me", which
+is the cheap version of a failure you would otherwise buy ten minutes later.
+
+**The launcher pushes — `release.sh` still does not.** Each component's
+`[RELEASED: <comp>]` marker commit is pushed to `origin/main` before the next
+component starts, and that is the only reason a batch can run unattended: by
+Residual 2 above, a cut leaves this repo one commit ahead of its remote, and the
+release-origin guard then refuses every component queued behind it. The push is
+deliberately narrow — it asserts HEAD is on `main` and not detached, over a clean
+tree, and, after a fresh fetch at the moment of the push, **exactly one** commit
+ahead of `origin/main`, then names its destination as `HEAD:refs/heads/main`
+rather than letting `HEAD`'s whole unpushed ancestry ride to whatever branch it
+happened to be on. Under `--dry-run` the push path is skipped entirely rather
+than trusted to notice it has nothing to do: a dry run makes no marker, so HEAD
+is still the *previous* marker and the subject test would have matched it.
+
+**`COMPONENTS="all"` is refused here**, though `release.sh all` is a real
+invocation: it cuts every component inside one process with no push between them,
+ending on several unpushed markers under a HEAD that reads `[RELEASED: <last>]` —
+the exact wedge this file exists to prevent. Unknown component names are refused
+the same way. Legal: `cli gateway edge agent relay`.
 
 **Do not** reach for `osascript`-to-Terminal (Apple Events time out, `-1712`),
 `sudo launchctl asuser` (needs passwordless sudo), or a different notarization
 backend. The first two fail slowly; the third is editing release tooling under
 incident pressure.
+
+### Before the first run
+
+The launcher assumes all of the following and fails at whichever one is missing.
+Everything here is set up once per machine, and none of it lives in this repo:
+
+- **`~/.agents/local/release.env`** — the machine facts, loaded before anything
+  else (contract below).
+- **The two Apple config files**, `config/apple-account` and `config/apple-home` —
+  gitignored, one line each, no defaults; see "Cutting a public release: the Apple
+  environment" at the top of this file for what they hold and why they exist.
+- **The `.dp` secrets repo and the age identity that opens it** — the real
+  minisign signing key is decrypted from there per cut (`DP_DIR`, `AGE_IDENTITY`;
+  `release.sh`'s own header names the defaults).
+- **The pre-flight tools, on the `PATH` that `release.env` sets** — `zip`,
+  `unzip`, `minisign`, `jq`, `go`, `ghp` (the account-scoped GitHub CLI wrapper),
+  the Developer-ID signer, and the `rcodesign` backend behind it.
+- **Every component source worktree in the state the release-origin guard
+  demands** — the registry main folder for that component, the *primary* checkout
+  and not a linked worktree, on `main`, clean including untracked files, and
+  exactly in sync with `origin/main`. This is the prerequisite that silently
+  blocks most first attempts: it is checked for every tree a cut reads (the
+  component, the dispatcher, `edge.web` for edge, and this repo), nothing reports
+  it until the cut starts, and a tree that is merely one commit *ahead* fails it
+  as hard as a dirty one. `tools/release_origin.sh` is the whole rule.
+
+### `release.env` — names and roles, never values
+
+Not in this repo, and it will not be: this repo is public. It is `.`-sourced
+first, before the request file, and it must set:
+
+| Name | Role |
+|---|---|
+| `PATH` | extended to reach the toolchain — the Developer-ID signer, the `rcodesign` backend behind it, `go`, `minisign`, `jq`, `zip`/`unzip`, `ghp`. The per-directory hook on this tree strips Homebrew from `PATH`, which is why `release.command` calls `git` by absolute path and why putting the rest back is this file's job |
+| `MODERNECH_SIGN` | which binary implements Developer-ID signing and notarization; `release.sh` falls back to the name on `PATH`, then `~/bin`, and aborts if neither resolves |
+| `BURROWEE_RELEASE_YES` | skips the interactive minor/major bump confirm — an unattended run that bumps anything but a patch hangs on that prompt without it |
+
+Override the file's path with `RELEASE_ENV`. Anything a cut needs that is a
+*secret* belongs in the `.dp` repo, not here — this file holds machine layout,
+not credentials.
+
+### When it fails
+
+**A batch is not atomic, and the expensive mistake is re-running it unchanged.**
+Read the failed run's `.release.log` from the bottom (`.release.log.prev` is the
+run before it):
+
+- the closing **`RELEASE-EXIT:<n>`**. It comes from a single EXIT trap rather
+  than a line at the end of whichever paths someone remembered, so it also fires
+  on Ctrl-C (130), on the Terminal window being closed (129 — SIGHUP, the usual
+  way an operator abandons a `.command`), and on `set -u` tripping inside a
+  sourced file. A watcher can therefore treat its *absence* as "still running".
+- the **`── cut: <comp> ──`** markers, one per component in request order.
+  Everything above the last one is a component that finished.
+
+**Components above the failure are PUBLISHED** — tag, GitHub Release, signed
+zips, console catalog entry, and a pushed marker. Re-running the same
+`.release-request` does not resume: the first already-cut component resolves to
+the stamp it just published, whose tag now exists, and the cut is refused there —
+never reaching the components that never ran. **Edit `COMPONENTS` down to the
+ones that did not run, then re-run.**
+
+The terminal states worth recognising:
+
+| Final line | What it means | What to do |
+|---|---|---|
+| `✗ <comp> failed (exit <n>) — later components NOT cut` | `release.sh` itself refused or died; the launcher stopped rather than cutting past a fault the later components probably share | fix the cause, drop the already-published components from `COMPONENTS` |
+| `✗ marker push failed for <comp>` | the component **is published**; its marker commit exists locally and did not land. This repo is now one commit ahead of `origin/main`, so every later cut — this batch's or next week's — is refused by the release-origin guard until the push succeeds | confirm HEAD is that marker, then `git push origin HEAD:refs/heads/main`, then re-run with the remaining components |
+| `✗ expected exactly 1 unpushed commit (the <comp> marker), found <n>` | HEAD is not the single marker the launcher is willing to publish — an earlier marker never pushed, or something else was committed into this repo | read `git log origin/main..HEAD` before pushing anything; do not widen the push to make it pass |
+| `✗ <comp> cut left an unclean tree` | the cut ran to completion, so **the release is already live**, but it wrote something it did not commit | inspect the tree; nothing was pushed, so the marker is still local and the guard will block the next cut |
+| `✗ <comp>: HEAD is not a [RELEASED: <comp>] marker … yet <n> commit(s) are unpushed` | the cut published something it did not record | inspect before pushing; this case used to print "nothing to push" and exit 0 |
+| `→ <comp>: no marker and nothing unpushed` | **not** a failure — Residual 3, a re-cut at an identical stamp, whose marker is already in history | nothing |

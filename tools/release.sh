@@ -74,13 +74,13 @@
 #   BURROWEE_SRC_GATEWAY    is refused unless the source is the registry main
 #   BURROWEE_SRC_EDGE       folder (<Brand>/<comp>/code/<comp>), primary
 #   BURROWEE_SRC_AGENT      worktree, on main, clean, == origin/main.
-#   BURROWEE_SRC_DISPATCHER See tools/cut_origin.sh.
+#   BURROWEE_SRC_DISPATCHER See tools/release_origin.sh.
 #   BURROWEE_SRC_RELAY
 #   EDGE_WEB_DIR            edge.web tree (admin.html/login.html covers baked into
 #                           the edge payload) — DRY-RUN ONLY; a real cut is refused
 #                           unless the source is the registry main folder
 #                           (<Brand>/edge.web/code/edge.web), primary worktree, on
-#                           main, clean, == origin/main. See tools/cut_origin.sh.
+#                           main, clean, == origin/main. See tools/release_origin.sh.
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
 set -euo pipefail
@@ -94,8 +94,8 @@ source "${REPO_ROOT}/tools/vulncheck.sh"
 source "${REPO_ROOT}/tools/apple_sign.sh"
 # shellcheck source=tools/updater_pin.sh
 source "${REPO_ROOT}/tools/updater_pin.sh"
-# shellcheck source=tools/cut_origin.sh
-source "${REPO_ROOT}/tools/cut_origin.sh"
+# shellcheck source=tools/release_origin.sh
+source "${REPO_ROOT}/tools/release_origin.sh"
 # shellcheck source=tools/payload.sh
 source "${REPO_ROOT}/tools/payload.sh"
 # shellcheck source=tools/binmap.sh
@@ -113,16 +113,16 @@ command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
 export GO_BIN
 
 # ---- Component source trees. REG_* are the registry main folders — the ONLY
-# paths a real cut may build from (tools/cut_origin.sh, is_registry_source).
+# paths a real cut may build from (tools/release_origin.sh, is_registry_source).
 # SRC_* keep the documented BURROWEE_SRC_*/EDGE_WEB_DIR overrides, which
-# assert_cut_origin then accepts only under --dry-run: keeping the variables
+# assert_release_origin then accepts only under --dry-run: keeping the variables
 # and refusing them is better than deleting them, because silently ignoring a
 # variable an operator set is how a cut ends up building something nobody
 # asked for.
 #
 # Defined ahead of build_register_helper/the publish intercept (below) — not in
 # their original position further down the file — so the publish entry point
-# can call assert_cut_origins (and the src_for it depends on) before it does
+# can call assert_release_origins (and the src_for it depends on) before it does
 # any work. Nothing here depends on the arg-parsing section that used to
 # precede it: every value below reads only REPO_ROOT, BB, and the operator's
 # environment.
@@ -173,7 +173,7 @@ src_for() {
 # Forwarded to the release-repo assertion ONLY: no component tree ever gets it.
 RELEASE_REPO_STAGED_OK=()
 
-# assert_cut_origins <mode> <comp...> — the guard over every tree a cut or a
+# assert_release_origins <mode> <comp...> — the guard over every tree a cut or a
 # distribute reads or writes. Called from ALL THREE entry points: `publish`
 # (below — no component trees, just the release repo itself), a
 # --distribute-only publish (mutates exactly as much as a full cut: tag,
@@ -186,23 +186,23 @@ RELEASE_REPO_STAGED_OK=()
 # down): a real edge cut reads admin.html/login.html out of that tree and
 # bakes them into the payload, so it gets the same guard as every other tree a
 # cut builds from.
-assert_cut_origins() {
+assert_release_origins() {
     local mode="$1"; shift
     local comp src
     for comp in "$@"; do
         src="$(src_for "${comp}")"
         [ -d "${src}" ] || { echo "✗ ${comp} source worktree missing: ${src}" >&2; return 1; }
-        assert_cut_origin "${comp}" "${src}" "$(registry_src_for "${comp}")" "${mode}" || return 1
+        assert_release_origin "${comp}" "${src}" "$(registry_src_for "${comp}")" "${mode}" || return 1
     done
     case " $* " in
         *" edge "*)
             [ -d "${EDGE_WEB}" ] || { echo "✗ edge.web source worktree missing: ${EDGE_WEB}" >&2; return 1; }
-            assert_cut_origin edge.web "${EDGE_WEB}" "${REG_EDGE_WEB}" "${mode}" || return 1
+            assert_release_origin edge.web "${EDGE_WEB}" "${REG_EDGE_WEB}" "${mode}" || return 1
             ;;
     esac
     [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; return 1; }
-    assert_cut_origin dispatcher "${SRC_DISPATCHER}" "${REG_DISPATCHER}" "${mode}" || return 1
-    assert_cut_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" \
+    assert_release_origin dispatcher "${SRC_DISPATCHER}" "${REG_DISPATCHER}" "${mode}" || return 1
+    assert_release_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" \
         ${RELEASE_REPO_STAGED_OK[@]+"${RELEASE_REPO_STAGED_OK[@]}"} || return 1
 }
 
@@ -225,7 +225,7 @@ build_register_helper() {
 # STRICT mode: asserted BEFORE build_register_helper compiles anything or the
 # register helper touches R2, not after. No component tree is asserted (this
 # path never reads cli/gateway/edge/agent/relay source) — only the dispatcher
-# and the release repo itself, via assert_cut_origins' unconditional tail.
+# and the release repo itself, via assert_release_origins' unconditional tail.
 #
 # After the R2 push, retention is reported (NOT applied): the R2 prune-to-10 and
 # the GitHub prune-to-10 both run DRY-RUN so the cut surfaces what is now over
@@ -236,7 +236,7 @@ if [ "${1:-}" = "publish" ]; then
     comp="${1:-}"
     [ -n "${comp}" ] || { echo "usage: release.sh publish <cli|gateway|edge|agent|all> [--version <v>]" >&2; exit 1; }
     shift || true
-    assert_cut_origins strict || exit 1
+    assert_release_origins strict || exit 1
     build_register_helper
     "${REGISTER_BIN}" publish --comp "${comp}" "$@"
     echo
@@ -355,6 +355,12 @@ if [ "${DISTRIBUTE_ONLY}" != 1 ]; then
     # outside this `if`, and left the resolution's failure as the block's exit
     # status instead of stopping the cut.
     if [ -n "${APPLE_SIGN}" ]; then
+        # Session before account: both are "can this machine do it at all", and
+        # this one is the cheaper question. A --dry-run never reaches notarize,
+        # so it is exempt.
+        if [ "${DRY_RUN}" != 1 ]; then
+            require_desktop_session || exit 1
+        fi
         load_apple_account "${REPO_ROOT}" || exit 1
     fi
 fi
@@ -367,7 +373,7 @@ DP_DIR="${DP_DIR:-${REPO_ROOT}/../../../release.dp/code/release.dp}"
 AGE_KEY_AGE="${DP_DIR}/burrowee-release.key.age"
 AGE_IDENTITY="${AGE_IDENTITY:-${HOME}/.age/burrowee-release.txt}"
 
-# REG_*/SRC_*/EDGE_WEB/registry_src_for/src_for/assert_cut_origins are defined
+# REG_*/SRC_*/EDGE_WEB/registry_src_for/src_for/assert_release_origins are defined
 # earlier in this file (right after GO_BIN is resolved) — moved there so the
 # `publish` intercept above can assert the release repo before it does any
 # work. See the comments at their definition.
@@ -539,7 +545,7 @@ TARGETS=(
     "linux amd64"
 )
 
-# src_for is defined earlier in this file, beside REG_*/SRC_*/assert_cut_origins.
+# src_for is defined earlier in this file, beside REG_*/SRC_*/assert_release_origins.
 
 # binary list per component (the dispatcher `burrowee` is added at assembly time)
 # bins_for <comp> — which binaries this component's ZIP CARRIES — is defined in
@@ -1062,12 +1068,12 @@ shred_key() {
 trap shred_key EXIT INT TERM
 
 # Where this cut (or a --distribute-only publish) is allowed to build from
-# (tools/cut_origin.sh): the registry main folder, primary worktree, on main,
+# (tools/release_origin.sh): the registry main folder, primary worktree, on main,
 # clean, and equal to origin/main — for every tree read or written. --dry-run
 # reports instead of failing. Computed once here so both entry points below
 # (distribute-only and the full cut) share the same mode.
-CUT_ORIGIN_MODE=strict
-[ "${DRY_RUN}" = 1 ] && CUT_ORIGIN_MODE=report
+RELEASE_ORIGIN_MODE=strict
+[ "${DRY_RUN}" = 1 ] && RELEASE_ORIGIN_MODE=report
 
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     # rkit build staged the bump; both files ride the [RELEASED] marker commit
@@ -1075,7 +1081,7 @@ if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     # commits the whole index). Without this the two-step path deadlocks: staged
     # counts as dirty, and committing makes the repo ahead of origin/main.
     # mapfile/readarray is a bash-4+ builtin, not present in macOS's system
-    # bash 3.2 that this script runs under (see tools/cut_origin.test.sh's own
+    # bash 3.2 that this script runs under (see tools/release_origin.test.sh's own
     # note on the same constraint) — build the array with a read loop instead.
     RELEASE_REPO_STAGED_OK=()
     while IFS= read -r line; do
@@ -1091,11 +1097,11 @@ EOF
     # agent/edge release), so edge is asserted alongside the requested component.
     # distribute_relay is the private R2 flow — it never reads edge.
     if [ "${DIST_COMP}" = relay ]; then
-        assert_cut_origins "${CUT_ORIGIN_MODE}" relay || exit 1
+        assert_release_origins "${RELEASE_ORIGIN_MODE}" relay || exit 1
     elif [ "${DIST_COMP}" = edge ]; then
-        assert_cut_origins "${CUT_ORIGIN_MODE}" edge || exit 1
+        assert_release_origins "${RELEASE_ORIGIN_MODE}" edge || exit 1
     else
-        assert_cut_origins "${CUT_ORIGIN_MODE}" "${DIST_COMP}" edge || exit 1
+        assert_release_origins "${RELEASE_ORIGIN_MODE}" "${DIST_COMP}" edge || exit 1
     fi
     distribute_only "${DIST_COMP}" "${DIST_STAMP}"
     exit 0
@@ -1113,7 +1119,7 @@ if [ "${WHAT}" = all ]; then COMPONENTS=(cli gateway edge agent); else COMPONENT
 # "relay" — WHAT is a single token) does not assert it needlessly. Surfaced
 # ahead of the DP_DIR/signing-key/ghp/ssh pre-flight below so a bad source
 # tree is reported first, not masked by an unrelated environment error.
-CUT_ORIGIN_COMPS=("${COMPONENTS[@]}")
+RELEASE_ORIGIN_COMPS=("${COMPONENTS[@]}")
 needs_edge=0
 for c in "${COMPONENTS[@]}"; do
     [ "${c}" = relay ] || { needs_edge=1; break; }
@@ -1121,10 +1127,10 @@ done
 if [ "${needs_edge}" = 1 ]; then
     case " ${COMPONENTS[*]} " in
         *" edge "*) ;;
-        *) CUT_ORIGIN_COMPS+=(edge) ;;
+        *) RELEASE_ORIGIN_COMPS+=(edge) ;;
     esac
 fi
-assert_cut_origins "${CUT_ORIGIN_MODE}" "${CUT_ORIGIN_COMPS[@]}" || exit 1
+assert_release_origins "${RELEASE_ORIGIN_MODE}" "${RELEASE_ORIGIN_COMPS[@]}" || exit 1
 
 # ---- pre-flight -------------------------------------------------------------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "✗ required tool not found: $1" >&2; exit 1; }; }
@@ -1636,7 +1642,7 @@ do_release() {
 
         # edge decoy covers (copied from the edge.web repo at package time).
         # EDGE_WEB is resolved once, near the top of this file, beside the
-        # other REG_*/SRC_* trees, and asserted by assert_cut_origins — not
+        # other REG_*/SRC_* trees, and asserted by assert_release_origins — not
         # re-resolved here.
         if [ "${comp}" = edge ]; then
             mkdir -p "${assemble}/covers"

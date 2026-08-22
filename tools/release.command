@@ -15,88 +15,205 @@
 # session — no Apple Events, no TCC prompt, no sudo. Hence the extension: this
 # file must be openable, not merely executable.
 #
-#   chmod +x tools/release.command && open tools/release.command
+#   open tools/release.command        # committed 100755; no chmod needed
 #
-# Inputs (both OUTSIDE this repo or ignored by it — this file holds flow only,
-# never a path, binary name, credential, or component list):
+# Inputs live OUTSIDE this repo or are ignored by it. This file carries flow and
+# the names of its own inputs — never a host, credential, absolute machine path,
+# or component inventory:
 #
 #   ~/.agents/local/release.env  machine facts: PATH to the toolchain, signing and
 #                             notarization backends, non-interactive flags.
 #                             Override with RELEASE_ENV.
-#   .release-request              what to cut, written per run. Override with
-#                             RELEASE_REQUEST. Shape:
+#   .release-request          what to cut, written per run. Override with
+#                             RELEASE_REQUEST. Sourced as shell. Shape:
 #                                 COMPONENTS="edge cli"
 #                                 FLAGS="--public"
 #
 # Output: .release.log, ending in RELEASE-EXIT:<code> so a watcher can block on it
-# rather than guess when the run finished.
+# rather than guess when the run finished. Exactly one run per log — the previous
+# run is rotated to .release.log.prev, so a refusal never destroys the record of
+# the last real cut. Override the log with RELEASE_LOG.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 cd "$REPO_ROOT" || exit 1
 
+# The rest of tools/ calls git by absolute path: the per-directory PATH hook on
+# this tree strips Homebrew, and release.env rewrites PATH further down. A guard
+# that silently loses its git is a guard that passes.
+GIT=/usr/bin/git
+
 LOG="${RELEASE_LOG:-$REPO_ROOT/.release.log}"
-: > "$LOG"
+[ -e "$LOG" ] && mv -f "$LOG" "${LOG}.prev" 2>/dev/null
+if ! : > "$LOG"; then
+    echo "✗ cannot write log: $LOG" >&2
+    exit 1
+fi
 
 say() { echo "$@" | tee -a "$LOG"; }
-die() { say "✗ $*"; say "RELEASE-EXIT:1"; exit 1; }
+die() { say "✗ $*"; exit 1; }
+
+# ONE emitter for the sentinel. Hand-written sentinels covered only the paths
+# someone remembered: closing the Terminal window (SIGHUP — the expected way an
+# operator abandons a .command), Ctrl-C, and `set -u` tripping inside a sourced
+# file all left a watcher blocked forever.
+LOCK=""
+on_exit() {
+    rc=$?
+    trap - EXIT
+    [ -n "$LOCK" ] && rmdir "$LOCK" 2>/dev/null
+    say "RELEASE-EXIT:${rc}"
+    exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # 1. Session. Checked FIRST and refused loudly: the whole point of this file is
 #    that the wrong session builds and signs for minutes before dying at notarize.
+#
+#    managername alone is necessary, not sufficient. A daemon shell that re-execs
+#    through `launchctl asuser <uid>` lands in the user's GUI domain and reports
+#    Aqua while still lacking the console security session AppSSO needs, and a
+#    sudo'd run inherits Aqua but notarizes against root's keychain. Each
+#    condition refuses separately so the operator learns which one it was.
 DOMAIN="$(launchctl managername 2>/dev/null || echo unknown)"
 say "session-domain: ${DOMAIN}"
 [ "${DOMAIN}" = "Aqua" ] || die "not a desktop session (need Aqua, got ${DOMAIN}) — 'open' this file, do not run it from a shell"
+[ "$(id -u)" -ne 0 ] || die "running as root — notarization would use root's keychain; open this file as your own user"
+[ -z "${SSH_CONNECTION:-}" ] || die "this is an SSH session — it has no console security session; open this file on the desktop"
+[ -t 0 ] || die "stdin is not a terminal — this was not opened by LaunchServices"
 
-# 2. Environment. Loaded, never embedded.
+# 2. One release at a time. Two `open`s (an agent racing an operator, or a
+#    double-click) would otherwise interleave into one log and race each other's
+#    marker commits and pushes.
+LOCK_DIR="$REPO_ROOT/.release.lock"
+mkdir "$LOCK_DIR" 2>/dev/null || die "a release is already running (lock: $LOCK_DIR) — remove it only if no cut is live"
+LOCK="$LOCK_DIR"
+
+# 3. Environment. Loaded, never embedded. Restore IFS afterwards: everything
+#    below splits COMPONENTS and FLAGS on whitespace, and a sourced file that
+#    leaves IFS changed would silently re-split them.
 ENV_FILE="${RELEASE_ENV:-$HOME/.agents/local/release.env}"
 [ -r "${ENV_FILE}" ] || die "env file not readable: ${ENV_FILE}"
 # shellcheck source=/dev/null
 . "${ENV_FILE}"
+IFS=$' \t\n'
 say "env: ${ENV_FILE}"
 
-# 3. Request.
+# 4. Request.
 REQUEST="${RELEASE_REQUEST:-$REPO_ROOT/.release-request}"
 [ -r "${REQUEST}" ] || die "request file not readable: ${REQUEST}"
 COMPONENTS=""; FLAGS=""
 # shellcheck source=/dev/null
 . "${REQUEST}"
+IFS=$' \t\n'
 [ -n "${COMPONENTS}" ] || die "request names no COMPONENTS: ${REQUEST}"
+
+# `all` is a real release.sh argument, and it defeats this file: it cuts every
+# component inside ONE process with no pushes between, then HEAD reads
+# [RELEASED: <last>] and the marker test below can never match `all`. The run
+# would report success sitting on four unpushed markers — the exact wedge this
+# file exists to prevent. Reject it here rather than discover it afterwards.
+set -f   # COMPONENTS/FLAGS are split on whitespace below; they must not glob
+for comp in ${COMPONENTS}; do
+    case "${comp}" in
+        cli|gateway|edge|agent|relay) ;;
+        all) die "COMPONENTS=\"all\" is not usable here: it cuts every component in one process with no push between, and leaves markers unpushed. List them instead: COMPONENTS=\"cli gateway edge agent\"" ;;
+        *)   die "unknown component: ${comp} (expected cli, gateway, edge, agent or relay)" ;;
+    esac
+done
 say "request: ${COMPONENTS} [${FLAGS}]"
 
-# 4. Cut each component, pushing its marker before the next one starts.
+# A dry run makes no marker commit, so HEAD is still the PREVIOUS marker and the
+# subject test below would match it and push whatever is unpushed. Skip the push
+# path entirely rather than rely on the marker test to notice.
+DRY=0
+case " ${FLAGS} " in *" --dry-run "*) DRY=1 ;; esac
+[ "$DRY" -eq 0 ] || say "note: --dry-run — components will be cut, no marker will be pushed"
+
+# tree_state — echoes porcelain output, non-zero if git itself failed.
 #
-#    release.sh deliberately never pushes, and its cut-origin guard refuses to
-#    cut while this repo is ahead of its remote. Both are correct on their own
-#    and together they strand a batch: component #1 publishes, leaves a marker
-#    commit unpushed, and component #2 aborts on the guard. Pushing here is what
-#    lets a batch run unattended.
+# The old `[ -n "$(git status --porcelain)" ]` failed OPEN: git's errors go to
+# stderr and stdout is left empty, so a missing git, a held index.lock or an
+# unreadable object store all read as "tree is clean" and the push proceeded.
+# --untracked-files=all for the reason release_origin.sh gives: a repo-local
+# status.showUntrackedFiles=no would otherwise retire the untracked half.
+tree_state() { $GIT status --porcelain --untracked-files=all; }
+
+# unpushed_count — commits on HEAD that origin/main does not have. Fetches
+# first: the origin guard ran before a multi-minute cut, and nothing else
+# re-verifies in-sync at the moment of the push.
+unpushed_count() {
+    $GIT fetch --quiet origin main || return 1
+    $GIT rev-list --count FETCH_HEAD..HEAD
+}
+
+# push_marker <comp> — publish exactly the marker this component just wrote.
+#
+# `git push origin HEAD` published HEAD's whole unpushed ancestry to whatever
+# branch HEAD was on, narrowed only by HEAD's subject and a clean tree. Branch,
+# detachment and ahead-count were delegated to release.sh's origin guard, which
+# is downgraded to report-only under --dry-run. Assert them here, at the moment
+# of the push, and name the destination explicitly.
+push_marker() {
+    local comp="$1" branch ahead
+    branch="$($GIT symbolic-ref --quiet --short HEAD)" \
+        || die "HEAD is detached — refusing to push"
+    [ "${branch}" = "main" ] \
+        || die "on branch '${branch}', not main — refusing to push"
+    ahead="$(unpushed_count)" \
+        || die "cannot reach origin to verify what would be pushed"
+    [ "${ahead}" = "1" ] \
+        || die "expected exactly 1 unpushed commit (the ${comp} marker), found ${ahead} — inspect before pushing"
+    $GIT push origin HEAD:refs/heads/main 2>&1 | tee -a "$LOG"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || die "marker push failed for ${comp}"
+    say "✓ ${comp} marker pushed"
+}
+
+# 5. Cut each component, pushing its marker before the next one starts.
+#
+#    release.sh deliberately never pushes, and its origin guard refuses to cut
+#    while this repo is ahead of its remote. Both are correct on their own and
+#    together they strand a batch: component #1 publishes, leaves a marker commit
+#    unpushed, and component #2 aborts on the guard. Pushing here is what lets a
+#    batch run unattended.
 for comp in ${COMPONENTS}; do
     say ""
     say "── cut: ${comp} ──"
     # shellcheck disable=SC2086
     bash tools/release.sh "${comp}" ${FLAGS} 2>&1 | tee -a "$LOG"
     rc="${PIPESTATUS[0]}"
-    [ "${rc}" -eq 0 ] || { say "✗ ${comp} failed (exit ${rc}) — later components NOT cut"; say "RELEASE-EXIT:${rc}"; exit "${rc}"; }
+    [ "${rc}" -eq 0 ] || { say "✗ ${comp} failed (exit ${rc}) — later components NOT cut"; say "   already-cut components above are PUBLISHED: drop them from COMPONENTS before re-running"; exit "${rc}"; }
 
-    # Push ONLY a marker commit over a clean tree. An unattended push to a
-    # public repo should be able to publish the thing it was built to publish
-    # and nothing else — if the cut ever leaves the tree in another shape, that
-    # is a bug to look at, not to push.
-    if [ -n "$(git status --porcelain)" ]; then
-        die "${comp} cut left an unclean tree — refusing to push; inspect before continuing"
-    fi
-    subject="$(git log -1 --format=%s)"
+    [ "$DRY" -eq 0 ] || { say "→ ${comp}: --dry-run, nothing to push"; continue; }
+
+    state="$(tree_state)" || die "cannot read git status — refusing to push (is git reachable on PATH set by ${ENV_FILE}?)"
+    [ -z "${state}" ] || die "${comp} cut left an unclean tree — refusing to push; inspect before continuing"
+
+    subject="$($GIT log -1 --format=%s)" || die "cannot read HEAD subject — refusing to push"
     case "${subject}" in
         "[RELEASED: ${comp}]"*)
-            git push origin HEAD 2>&1 | tee -a "$LOG"
-            [ "${PIPESTATUS[0]}" -eq 0 ] || die "marker push failed for ${comp}"
-            say "✓ ${comp} marker pushed"
+            push_marker "${comp}"
             ;;
         *)
-            say "→ ${comp}: HEAD is not a [RELEASED: ${comp}] marker — nothing to push"
+            # One legitimate reason HEAD is not a marker: a re-cut at an
+            # identical stamp produces a byte-identical tree, marker_commit()
+            # records nothing, and the repo is left IN SYNC (RUNBOOK, "Residual
+            # 3"). That is the only shape allowed to pass silently. Anything
+            # unpushed here means the cut published something it did not record
+            # — which used to print "nothing to push" and exit 0.
+            ahead="$(unpushed_count)" \
+                || die "cannot reach origin to check for unpushed work after ${comp}"
+            if [ "${ahead}" = "0" ]; then
+                say "→ ${comp}: no marker and nothing unpushed — re-cut at an identical stamp; the marker for it is already in history"
+            else
+                die "${comp}: HEAD is not a [RELEASED: ${comp}] marker (got: ${subject}) yet ${ahead} commit(s) are unpushed — the cut published something it did not record; inspect before continuing"
+            fi
             ;;
     esac
 done
 
 say ""
-say "RELEASE-EXIT:0"
+exit 0

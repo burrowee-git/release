@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cut_origin.test.sh — unit tests for tools/cut_origin.sh.
+# release_origin.test.sh — unit tests for tools/release_origin.sh.
 #
 # Exercises every predicate directly against throwaway repos under a temp dir.
 # NO part of the release path runs: release.sh is never invoked, nothing is
@@ -8,7 +8,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "${HERE}/cut_origin.sh"
+source "${HERE}/release_origin.sh"
 
 fail=0
 check() { # check <label> <got> <want>
@@ -233,17 +233,17 @@ check "origin: fetch-failed returns 1" "${r}" "1"
 
 # ── the composite ────────────────────────────────────────────────────────────
 COMP="$(new_origin_and_clone composite)"
-out="$(assert_cut_origin edge "${COMP}" "${COMP}" strict 2>&1)" && r=0 || r=1
+out="$(assert_release_origin edge "${COMP}" "${COMP}" strict 2>&1)" && r=0 || r=1
 check "assert: the happy path passes" "${r}" "0"
 check "assert: the happy path is silent" "${out}" ""
 
-out="$(assert_cut_origin edge "${COMP}" "/registry/edge/code/edge" strict 2>&1)" && r=0 || r=1
+out="$(assert_release_origin edge "${COMP}" "/registry/edge/code/edge" strict 2>&1)" && r=0 || r=1
 check "assert: a non-registry path is rejected" "${r}" "1"
 check_contains "assert: rejection names the override mechanism" "${out}" "BURROWEE_SRC_"
 check_contains "assert: rejection shows what was expected" "${out}" "/registry/edge/code/edge"
 
 /usr/bin/git -C "${COMP}" worktree add --quiet -b wt "${WORK}/composite-wt" >/dev/null 2>&1
-out="$(assert_cut_origin edge "${WORK}/composite-wt" "${WORK}/composite-wt" strict 2>&1)" && r=0 || r=1
+out="$(assert_release_origin edge "${WORK}/composite-wt" "${WORK}/composite-wt" strict 2>&1)" && r=0 || r=1
 check "assert: a linked worktree is rejected" "${r}" "1"
 check_contains "assert: worktree rejection says why" "${out}" "linked worktree"
 
@@ -253,22 +253,22 @@ BOTHER="${WORK}/composite-behind-other"
 echo x > "${BOTHER}/x.txt"; /usr/bin/git -C "${BOTHER}" add x.txt
 /usr/bin/git -C "${BOTHER}" commit --quiet -m x
 /usr/bin/git -C "${BOTHER}" push --quiet origin main
-out="$(assert_cut_origin edge "${BEHIND}" "${BEHIND}" strict 2>&1)" && r=0 || r=1
+out="$(assert_release_origin edge "${BEHIND}" "${BEHIND}" strict 2>&1)" && r=0 || r=1
 check "assert: behind origin is rejected" "${r}" "1"
 check_contains "assert: behind names the fix" "${out}" "git pull --ff-only"
 
-# Ahead: a local commit that was never pushed, asserted THROUGH assert_cut_origin
+# Ahead: a local commit that was never pushed, asserted THROUGH assert_release_origin
 # directly (not via the staged-tolerance narrowing suite below, and not via
 # origin_sync_status alone — check 5 above already covers that unit). Without
 # this, "ahead" was checkable only inside case (e), which is really testing the
-# tolerance not swallowing the sync check; a mutation that breaks assert_cut_origin's
+# tolerance not swallowing the sync check; a mutation that breaks assert_release_origin's
 # own ahead handling with no tolerance in play at all would have nothing else to
 # catch it at this composite level.
 AHEAD_COMPOSITE="$(new_origin_and_clone composite-ahead)"
 echo local > "${AHEAD_COMPOSITE}/local.txt"
 /usr/bin/git -C "${AHEAD_COMPOSITE}" add local.txt
 /usr/bin/git -C "${AHEAD_COMPOSITE}" commit --quiet -m "local only"
-out="$(assert_cut_origin edge "${AHEAD_COMPOSITE}" "${AHEAD_COMPOSITE}" strict 2>&1)" && r=0 || r=1
+out="$(assert_release_origin edge "${AHEAD_COMPOSITE}" "${AHEAD_COMPOSITE}" strict 2>&1)" && r=0 || r=1
 check "assert: ahead of origin is rejected" "${r}" "1"
 check_contains "assert: ahead names the fix" "${out}" "merge it through a PR first"
 
@@ -286,7 +286,7 @@ echo "1.0.1" > "${DIST}/versions/edge.stamp"
 # Positive case first: the release repo carrying exactly the two staged files
 # rkit build produces, asserted with the tolerance staged_tolerance_for hands
 # back for --distribute-only. This must pass before any negative case below
-# is trusted to mean anything (assert_cut_origin returns at its first failing
+# is trusted to mean anything (assert_release_origin returns at its first failing
 # arm, so a fixture that trips registry/worktree/branch would never reach the
 # clean-tree check at all).
 # mapfile/readarray is a bash-4+ builtin, not present in macOS's system bash
@@ -301,16 +301,16 @@ while IFS= read -r line; do
 done <<EOF
 $(staged_tolerance_for 1 edge)
 EOF
-out="$(assert_cut_origin "release repo" "${DIST}" "${DIST}" strict "${DIST_ALLOWED[@]}" 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${DIST}" "${DIST}" strict "${DIST_ALLOWED[@]}" 2>&1)" && r=0 || r=1
 check "assert: distribute-only staged bump passes under strict mode" "${r}" "0"
 check "assert: distribute-only staged bump is silent" "${out}" ""
 
 # Falsifiability: the identical fixture, asserted with NO allowed-staged
 # arguments, must fail — this is the exact defect being fixed (a full-cut
-# style call, or the pre-Task-3 assert_cut_origin, refuses a staged bump).
+# style call, or the pre-Task-3 assert_release_origin, refuses a staged bump).
 # Seeing this fail confirms the positive case above is actually exercising
 # the tolerance wiring and not passing for some unrelated reason.
-out="$(assert_cut_origin "release repo" "${DIST}" "${DIST}" strict 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${DIST}" "${DIST}" strict 2>&1)" && r=0 || r=1
 check "assert: the same staged bump fails with no tolerance argument (the pre-fix behavior)" "${r}" "1"
 check_contains "assert: the no-tolerance failure is the dirty-tree message" "${out}" "source tree is dirty"
 
@@ -319,7 +319,7 @@ check_contains "assert: the no-tolerance failure is the dirty-tree message" "${o
 # versions/edge and versions/edge.stamp are still correctly staged.
 echo "9.9.9" > "${DIST}/versions/burrowee"
 /usr/bin/git -C "${DIST}" add versions/burrowee
-out="$(assert_cut_origin "release repo" "${DIST}" "${DIST}" strict "${DIST_ALLOWED[@]}" 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${DIST}" "${DIST}" strict "${DIST_ALLOWED[@]}" 2>&1)" && r=0 || r=1
 check "assert: an additional staged versions/burrowee is still refused" "${r}" "1"
 check_contains "assert: refusal names the tolerated set" "${out}" "staged is tolerated for exactly"
 /usr/bin/git -C "${DIST}" reset --quiet -- versions/burrowee
@@ -328,7 +328,7 @@ rm -f "${DIST}/versions/burrowee"
 # Confirm the fixture is back to the passing baseline (hygiene, not a new
 # assertion) — guards against a later edit leaving DIST dirty for whatever
 # runs after it in this file.
-out="$(assert_cut_origin "release repo" "${DIST}" "${DIST}" strict "${DIST_ALLOWED[@]}" 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${DIST}" "${DIST}" strict "${DIST_ALLOWED[@]}" 2>&1)" && r=0 || r=1
 check "assert: distribute-only fixture is restored to the passing baseline" "${r}" "0"
 
 # A full cut (distribute_only=0) gets an empty tolerance list, so the SAME
@@ -346,11 +346,11 @@ check "assert: staged_tolerance_for really yields zero elements for a full cut (
 # array is genuinely empty, and bare "${arr[@]}" on a zero-element array is
 # an unbound-variable error under set -u in bash 3.2 (the shell this suite
 # runs under) — the same portability trap production code guards against.
-out="$(assert_cut_origin "release repo" "${DIST}" "${DIST}" strict ${FULLCUT_ALLOWED[@]+"${FULLCUT_ALLOWED[@]}"} 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${DIST}" "${DIST}" strict ${FULLCUT_ALLOWED[@]+"${FULLCUT_ALLOWED[@]}"} 2>&1)" && r=0 || r=1
 check "assert: the same staged bump is refused under a full-cut tolerance (empty list)" "${r}" "1"
 
 # report mode: same findings, never fatal — a dry run publishes nothing.
-out="$(assert_cut_origin edge "${BEHIND}" "/elsewhere" report 2>&1)" && r=0 || r=1
+out="$(assert_release_origin edge "${BEHIND}" "/elsewhere" report 2>&1)" && r=0 || r=1
 check "assert: report mode returns 0" "${r}" "0"
 check_contains "assert: report mode still says what is wrong" "${out}" "⚠"
 
@@ -363,7 +363,7 @@ check_contains "assert: report mode still says what is wrong" "${out}" "⚠"
 # itself gates that last dimension (g)/(h): nothing for a full cut, exactly
 # the two paths for --distribute-only.
 #
-# Case (a) is the GATE, per assert_cut_origin's own short-circuit: it returns
+# Case (a) is the GATE, per assert_release_origin's own short-circuit: it returns
 # at its FIRST failing arm, and the clean-tree check (where the tolerance
 # lives) is the fourth. A fixture that trips is_registry_source,
 # is_primary_worktree, or the on-main check would never reach the tolerance
@@ -391,7 +391,7 @@ echo "1.0.1" > "${CLI}/versions/cli.stamp"
 st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
 check_contains "case (a) fixture: versions/cli is really staged-modified (M )" "${st}" "M  versions/cli"
 check_contains "case (a) fixture: versions/cli.stamp is really staged-added (A )" "${st}" "A  versions/cli.stamp"
-out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
 check "case (a): tolerance admits the staged versions/cli + versions/cli.stamp bump" "${r}" "0"
 check "case (a): case (a) is silent" "${out}" ""
 
@@ -403,7 +403,7 @@ echo "9.9.9" > "${CLI}/versions/burrowee"
 /usr/bin/git -C "${CLI}" add versions/burrowee
 st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
 check_contains "case (b) fixture: versions/burrowee is really staged-added (A )" "${st}" "A  versions/burrowee"
-out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
 check "case (b): an unlisted staged file is refused" "${r}" "1"
 /usr/bin/git -C "${CLI}" reset --quiet -- versions/burrowee
 rm -f "${CLI}/versions/burrowee"
@@ -416,7 +416,7 @@ rm -f "${CLI}/versions/burrowee"
 echo "more" >> "${CLI}/versions/cli"
 st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
 check_contains "case (c) fixture: versions/cli is really MM (staged AND worktree-modified)" "${st}" "MM versions/cli"
-out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
 check "case (c): MM on an allowed path is refused (staged only, not staged-plus-dirty)" "${r}" "1"
 /usr/bin/git -C "${CLI}" checkout --quiet -- versions/cli
 
@@ -425,7 +425,7 @@ check "case (c): MM on an allowed path is refused (staged only, not staged-plus-
 touch "${CLI}/stray.txt"
 st="$(/usr/bin/git -C "${CLI}" status --porcelain --untracked-files=all)"
 check_contains "case (d) fixture: stray.txt is really untracked (?? )" "${st}" "?? stray.txt"
-out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
 check "case (d): an untracked file is refused even with an allow-list" "${r}" "1"
 rm -f "${CLI}/stray.txt"
 
@@ -434,18 +434,18 @@ rm -f "${CLI}/stray.txt"
 # release-repo --distribute-only one actually does, so it must refuse exactly
 # like the pre-tolerance guard did. This is the permanent proof that the
 # tolerance is opt-in per call, not a default weakening.
-out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${CLI}" "${CLI}" strict 2>&1)" && r=0 || r=1
 check "case (f): the same fixture with no trailing paths is refused (default unchanged)" "${r}" "1"
 check_contains "case (f): the no-tolerance refusal is the dirty-tree message" "${out}" "source tree is dirty"
 
 # Hygiene: (a)'s fixture is back to its passing baseline after (b)-(f), none
 # of which should have left it dirty in a way (a) itself would not pass.
-out="$(assert_cut_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${CLI}" "${CLI}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
 check "case (a)-(f): fixture restored to the passing baseline" "${r}" "0"
 
 # (e) — the bump COMMITTED instead of staged: the tree is clean (nothing
 # staged, nothing untracked), so tree_clean_except_staged passes trivially
-# regardless of the tolerance, and assert_cut_origin falls through to the
+# regardless of the tolerance, and assert_release_origin falls through to the
 # sync-status arm, where the un-pushed commit is one ahead of origin/main.
 # This is the case that proves the tolerance does not paper over the sync
 # check — a committed bump is refused for a completely different reason.
@@ -461,7 +461,7 @@ echo "1.0.1" > "${CLI_AHEAD}/versions/cli.stamp"
 /usr/bin/git -C "${CLI_AHEAD}" commit --quiet -m "bump versions/cli"
 st="$(/usr/bin/git -C "${CLI_AHEAD}" status --porcelain --untracked-files=all)"
 check "case (e) fixture: worktree is clean once the bump is committed" "${st}" ""
-out="$(assert_cut_origin "release repo" "${CLI_AHEAD}" "${CLI_AHEAD}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
+out="$(assert_release_origin "release repo" "${CLI_AHEAD}" "${CLI_AHEAD}" strict versions/cli versions/cli.stamp 2>&1)" && r=0 || r=1
 check "case (e): a committed (not staged) bump is refused, 1 ahead of origin" "${r}" "1"
 check_contains "case (e): the refusal message names 'ahead'" "${out}" "ahead"
 
