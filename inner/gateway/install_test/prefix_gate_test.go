@@ -98,6 +98,19 @@ var misdirectingPrefixes = []prefixShape{
 	// expansion) would collapse '<parent>\n/bin' to '<parent>/bin' and accept.
 	// sed on a printf'd string keeps the line break, so the comparison fails.
 	{"embedded-newline", func(home string) string { return filepath.Dir(binDir(home)) + "\n" }},
+	// The last two pin the "TEXTUAL ONLY" half of normalize_dir's contract,
+	// which until now was a comment with nothing holding it: no '.'/'..'
+	// folding, no symlink resolution, no path anchoring. A future "helpful"
+	// normaliser (filepath.Clean semantics, realpath, readlink -f) would fold
+	// '<parent>/./bin' back to '<parent>/bin' and ACCEPT — silently widening a
+	// guard whose whole value is that it recognises exactly one thing.
+	{"dot-suffix", func(home string) string { return filepath.Dir(binDir(home)) + "/." }},
+	// Root is the degenerate input normalize_dir special-cases ('/' stays '/',
+	// via the ${_nd:-/} default after sed eats every slash). It is still not
+	// this destination, so it is still refused — a normaliser whose empty-result
+	// branch collapsed to "" would compare equal against a $BIN_DIR that also
+	// normalised to "".
+	{"root", func(string) string { return "/" }},
 }
 
 // runInstallShWithPrefix runs install.sh under an explicit shell from a staged
@@ -224,8 +237,27 @@ func TestInstallShRefusesOnlyAMisdirectingPrefix(t *testing.T) {
 				// Both spellings: the production literal an operator reads on a
 				// real host, and the resolved destination this run would have
 				// used.
-				assertContains(t, out, "PREFIX", "0.2.0", wantBinDirDefault, binDir(home), "nothing has been installed")
-				for _, dir := range []string{binDir(home), devBinDir(home), filepath.Join(prefix, "bin")} {
+				//
+				// "is not it.)" is the TAIL of the second interpolating line,
+				// and it is asserted for a reason the other strings cannot
+				// cover: that line quotes $_prefix_bin, so under an echo
+				// mutation a '\c' inside the offending value truncates it AND
+				// swallows its own newline, gluing the hint line onto the
+				// wreckage — while every other assertion here still matches,
+				// because they are all satisfied by earlier lines. This is the
+				// only string that becomes unreachable when that specific line
+				// stops being printf.
+				assertContains(t, out, "PREFIX", "0.2.0", wantBinDirDefault, binDir(home),
+					"is not it.)", "nothing has been installed")
+				// The prefix's own bin dir is checked only when it is inside the
+				// sandbox: the "root" shape names /bin, and a suite that
+				// stat()s real system paths would report on whatever the host
+				// happens to have there rather than on this run.
+				candidates := []string{binDir(home), devBinDir(home)}
+				if strings.HasPrefix(prefix, home) {
+					candidates = append(candidates, filepath.Join(prefix, "bin"))
+				}
+				for _, dir := range candidates {
 					for _, b := range allBins {
 						if _, statErr := os.Stat(filepath.Join(dir, b)); statErr == nil {
 							t.Errorf("%s was placed in %s despite the refusal — the check ran too late to matter", b, dir)
