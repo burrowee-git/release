@@ -131,11 +131,29 @@ REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 # refusal they earned or, if it resolves to /usr/local/bin anyway, a line saying
 # so — never a silent override. cli/agent keep the per-user default until that
 # is decided separately. $COMP is a literal baked at render time.
+#
+# WHAT IT EXPORTS IS CANONICAL: repeated slashes collapsed, trailing ones
+# stripped (empty stays empty — it is the "operator set nothing" signal below,
+# not a path). The root-only installers' gate normalises before comparing, so it
+# accepts `PREFIX=/usr/local/` as naming its own destination — and everything
+# DOWNSTREAM of that acceptance does plain string work: the migration runner
+# derives BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}" and the stale-bin sweep
+# decides "never sweep the install destination" by comparing directory names as
+# TEXT. `/usr/local//bin` opens the same directory and matches none of those
+# names. Collapsing here means one spelling leaves this bootstrap, whatever the
+# operator typed.
 resolve_prefix() {
     case "$COMP" in
-        gateway | edge) printf '%s' "${PREFIX:-}" ;;
-        *)              printf '%s' "${PREFIX:-$HOME/.local}" ;;
+        gateway | edge) _rp="${PREFIX:-}" ;;
+        *)              _rp="${PREFIX:-$HOME/.local}" ;;
     esac
+    [ -n "$_rp" ] || return 0
+    # The same two substitutions the inner installers' normalize_dir applies,
+    # spelled the same way on purpose — this is the value that gate compares.
+    # printf, never echo: echo expands backslash escapes in dash and in macOS
+    # /bin/sh, so a PREFIX carrying one would be silently rewritten here.
+    _rp="$(printf '%s' "$_rp" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    printf '%s' "${_rp:-/}"
 }
 PREFIX="$(resolve_prefix)"
 DL_BASE="${BURROWEE_DL_BASE:-}"           # test hook (undocumented to users)

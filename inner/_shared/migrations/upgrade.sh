@@ -100,6 +100,35 @@ RUNNER="$HERE/run.sh"
 LEDGER="$HERE/ledger"
 CONF="$HERE/component.conf"
 
+# ---------------------------------------------------------------------------
+# THE DESTINATION CROSSES THIS BOUNDARY EXPLICITLY, and canonically.
+#
+# run.sh would otherwise re-derive it: BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}".
+# That was safe only while nothing could hand this script a PREFIX — and the
+# root-only installers' gate now ACCEPTS any spelling whose bin dir resolves to
+# their destination, so `PREFIX=/usr/local/` is a legal, supported invocation
+# that reaches here verbatim (the public upgrade bootstrap exports what the
+# operator set; an operator running this script by hand exports it themselves).
+# Re-derived, that becomes BIN_DIR=/usr/local//bin.
+#
+# Nothing fails to OPEN — every filesystem call tolerates the doubled slash. What
+# breaks is the string work downstream: lib_stale_user_bins.sh decides "never
+# sweep the install destination" by comparing directory NAMES, and
+# `/usr/local//bin` matches none of the spellings it knows. A guard that silently
+# stops recognising the directory it is protecting is the worst shape this can
+# take, because the sweep still reports success.
+#
+# So: resolved once, here, with the same two substitutions the installers'
+# normalize_dir applies, and exported. An explicitly-passed BIN_DIR still wins,
+# and is normalised too — a caller that spelled it loosely gets the same
+# treatment as one that spelled PREFIX loosely.
+#
+# printf, never echo: echo expands backslash escapes in dash and in macOS
+# /bin/sh, which would rewrite the path rather than normalise it.
+BIN_DIR="$(printf '%s' "${BIN_DIR:-${PREFIX:-/usr/local}/bin}" | sed -e 's|//*|/|g' -e 's|/*$||')"
+BIN_DIR="${BIN_DIR:-/}"
+export BIN_DIR
+
 # The component's own facts, for the exit-2 note only. Sourced defensively: an
 # absent or unreadable conf makes the note generic, and the runner has already
 # refused the whole run in that case anyway.
