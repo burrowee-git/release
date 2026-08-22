@@ -715,8 +715,10 @@ if ! is_root; then
     echo "install: this installer must run as root — it installs to /usr/local/bin and" >&2
     echo "install: manages a system service (systemd unit / launchd LaunchDaemon)." >&2
     echo "install: as of edge 0.2.0 there is no per-user install; nothing has been installed." >&2
-    echo "hint: re-run with sudo, e.g." >&2
-    echo "hint:   curl -fsSL https://release.burrowee.com/$COMP/install.sh | sudo sh" >&2
+    echo "install: the published installer elevates on its own — you are seeing this" >&2
+    echo "install: because you ran an unpacked kit directly. Either:" >&2
+    echo "hint:   sudo sh ./install.sh                                   # this kit" >&2
+    echo "hint:   curl -fsSL https://release.burrowee.com/$COMP/install.sh | sh   # the channel" >&2
     exit 1
 fi
 
