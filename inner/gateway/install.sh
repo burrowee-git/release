@@ -153,13 +153,18 @@ if [ -n "${PREFIX:-}" ]; then
         # silently truncate the very line meant to quote it back.
         printf '%s\n' "install: PREFIX ('$PREFIX') names this installer's own destination ($_true_bin) — proceeding."
         # Absent, not empty: an ACCEPTED PREFIX is cleared right here, so nothing
-        # downstream can read it as a fallback. migrate_from_legacy hands the
-        # shared migration runner its environment with the `VAR=x sh run.sh`
-        # form, which ADDS to the environment rather than replacing it, and the
-        # shared rungs read BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}" —
-        # harmless only while BIN_DIR is passed explicitly and wins, i.e. one
-        # deletion away from mattering. Cleared, never set to "": absent, not
-        # empty, as core does it.
+        # downstream can read it as a fallback.
+        #
+        # migrate_from_legacy is the one place downstream that cares, and it is
+        # safe for a reason SPECIFIC TO THIS FILE: it RE-SETS PREFIX on the
+        # invocation line ("PREFIX=$(dirname "$BIN_DIR") … sh $_runner"), so an
+        # inherited value is overridden rather than out-competed. That makes the
+        # clearing belt-and-braces THERE and load-bearing everywhere else: the
+        # `VAR=x sh run.sh` form ADDS to the environment rather than replacing
+        # it, so any rung or helper that reads
+        # BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}" without being handed an
+        # explicit override would otherwise see the operator's prefix. Cleared,
+        # never set to "": absent, not empty, as core does it.
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
