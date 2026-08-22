@@ -1,0 +1,13 @@
+# Copy to .cut-request (gitignored) and edit, then: open tools/cut.command
+#
+# COMPONENTS is cut in order. Each one's marker commit is pushed before the next
+# starts — release.sh never pushes, and its cut-origin guard refuses to cut while
+# this repo is ahead of its remote, so an unpushed marker strands the rest.
+#
+# A component whose source has not changed since its last cut resolves to the
+# same stamp, whose tag already exists, and is refused. That is a no-op, not a
+# failure to work around: drop it from COMPONENTS, or pass --force in FLAGS if
+# you genuinely mean to re-cut it.
+
+COMPONENTS="edge"
+FLAGS="--public"

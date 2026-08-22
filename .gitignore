@@ -18,3 +18,5 @@ dist/vulncheck/
 /release
 go.work
 go.work.sum
+.cut.log
+.cut-request
