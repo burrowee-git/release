@@ -70,11 +70,12 @@
 #   BURROWEE_<COMP>_VERSION      pin a release tag (e.g. cli/v0.1.0.…); default: latest
 #                                (<COMP> = the component name upper-cased, e.g. BURROWEE_CLI_VERSION)
 #   PREFIX                       install root (bins at PREFIX/bin). cli/agent: default
-#                                $HOME/.local. GATEWAY and EDGE: not defaulted and not
-#                                accepted — they install only to the root-owned
-#                                /usr/local/bin (gateway since 0.2.0, edge since 0.2.0),
-#                                and their inner installers REFUSE a set PREFIX rather
-#                                than quietly overriding it.
+#                                $HOME/.local. GATEWAY and EDGE: not defaulted — they
+#                                install only to the root-owned /usr/local/bin (gateway
+#                                since 0.2.0, edge since 0.2.0). Their inner installers
+#                                REFUSE a PREFIX that would MISDIRECT the install rather
+#                                than quietly overriding it; one that resolves to that
+#                                same /usr/local/bin misdirects nothing and is honoured.
 #   BURROWEE_UNINSTALL=1         pass through to the inner installer to remove bins
 #   BURROWEE_RELEASE_REPO        GitHub repo serving releases (default burrowee-git/release)
 #   BURROWEE_SKIP_PREFLIGHT=1    skip the OS-dependency preflight (manage deps yourself)
@@ -121,14 +122,15 @@ REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 #
 # PER COMPONENT, because this template is shared and they no longer agree. The
 # gateway and the edge install to /usr/local/bin, root-owned, and nowhere else:
-# their inner installers REFUSE a set PREFIX outright, so manufacturing one here
-# would make every `curl … | sh` fail — and, before that refusal existed,
-# manufacturing one is precisely what sent every bootstrap install down the
-# per-user branch, which also switched off unit rendering, migration and version
-# recording. Their PREFIX therefore stays EMPTY unless the operator set one, and
-# an operator who did set one gets the refusal they earned rather than a silent
-# override. cli/agent keep the per-user default until that is decided
-# separately. $COMP is a literal baked at render time.
+# their inner installers REFUSE a PREFIX that names anywhere else, so
+# manufacturing a per-user one here would make every `curl … | sh` fail — and,
+# before that refusal existed, manufacturing one is precisely what sent every
+# bootstrap install down the per-user branch, which also switched off unit
+# rendering, migration and version recording. Their PREFIX therefore stays EMPTY
+# unless the operator set one, and an operator who did set one gets either the
+# refusal they earned or, if it resolves to /usr/local/bin anyway, a line saying
+# so — never a silent override. cli/agent keep the per-user default until that
+# is decided separately. $COMP is a literal baked at render time.
 resolve_prefix() {
     case "$COMP" in
         gateway | edge) printf '%s' "${PREFIX:-}" ;;
