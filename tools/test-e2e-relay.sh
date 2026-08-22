@@ -38,9 +38,17 @@ GATE_PID=""
 cleanup() {
     [ -n "${GATE_PID}" ] && kill "${GATE_PID}" 2>/dev/null || true
     rm -rf "${W}"
-    # Restore any regenerated bootstraps so the worktree stays clean.
+    # Restore EVERY file gen-bootstraps.sh writes, so the worktree stays clean.
+    # This list was once install.sh-only and left agent/* and every upgrade.sh
+    # baked with the TEST pubkey after each run — a dirty tree the next
+    # `go test ./cmd/rkit` failed on (the install/upgrade pubkey-agreement
+    # check), pointing at a defect that did not exist.
     /usr/bin/git -C "${REPO_ROOT}" checkout -- \
-        relay/install.sh cli/install.sh gateway/install.sh edge/install.sh \
+        relay/install.sh \
+        cli/install.sh cli/upgrade.sh cli/preflight.sh \
+        gateway/install.sh gateway/upgrade.sh gateway/preflight.sh \
+        edge/install.sh edge/upgrade.sh edge/preflight.sh \
+        agent/install.sh agent/upgrade.sh agent/preflight.sh \
         2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -77,11 +85,21 @@ mkdir -p "${W}/releases"
 
 # Create an inner install.sh that "installs" a dummy burrowee-relay binary.
 # The inner installer checks for the binary alongside it inside the unzipped dir.
+#
+# It mirrors the REAL 0.2.2 inner installer's contract: a set PREFIX is REFUSED
+# (root-only, one destination), and the install destination is the SYS_BIN_DIR
+# test seam. That makes the happy path below a regression guard on the outer
+# bootstrap itself — if relay/install.sh went back to manufacturing a PREFIX
+# default, the stub would refuse and this test would fail.
 mkdir -p "${W}/zip-contents"
 cat > "${W}/zip-contents/install.sh" <<'INNER_EOF'
 #!/bin/sh
 set -eu
-BIN_DIR="${PREFIX:-$HOME/.local}/bin"
+if [ -n "${PREFIX:-}" ]; then
+    echo "install.sh: PREFIX is set to '$PREFIX' — the root-only installer refuses it" >&2
+    exit 1
+fi
+BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
 mkdir -p "$BIN_DIR"
 install -m 0755 ./burrowee-relay "$BIN_DIR/burrowee-relay"
 echo "installed to $BIN_DIR: burrowee-relay"
@@ -133,19 +151,23 @@ say "relay-gate up (PID ${GATE_PID})"
 # ---- (8) HAPPY PATH ---------------------------------------------------------
 say "HAPPY PATH — installing via gated relay/install.sh"
 HAPPY_HOME="${W}/home"
-HAPPY_PREFIX="${W}/prefix"
+HAPPY_BIN="${W}/bin"
 mkdir -p "${HAPPY_HOME}"
 
+# No PREFIX in the environment: the stub inner installer refuses one, exactly
+# as the real 0.2.2 installer does — so this run also proves the outer
+# bootstrap no longer manufactures a PREFIX default of its own. SYS_BIN_DIR is
+# the inner installer's test seam, inherited through the environment.
 PATH="/opt/homebrew/bin:${PATH}" \
 OPENSSL="${OPENSSL}" \
 BURROWEE_DL_BASE="http://127.0.0.1:${GATE_PORT}" \
-PREFIX="${HAPPY_PREFIX}" \
+SYS_BIN_DIR="${HAPPY_BIN}" \
 HOME="${HAPPY_HOME}" \
     sh "${REPO_ROOT}/relay/install.sh" --key "${W}/operator.key" \
     || die "happy-path install exited non-zero (expected success)"
 
-# Assert the binary landed in prefix/bin
-INSTALLED_BIN="${HAPPY_PREFIX}/bin/burrowee-relay"
+# Assert the binary landed in the seam bin dir
+INSTALLED_BIN="${HAPPY_BIN}/burrowee-relay"
 [ -x "${INSTALLED_BIN}" ] || die "burrowee-relay not found at ${INSTALLED_BIN}"
 say "binary installed at ${INSTALLED_BIN}"
 
@@ -172,14 +194,14 @@ printf '\nHAPPY-PATH OK\n'
 say "UNREGISTERED-KEY PATH — generating second key (NOT in registry)"
 "${OPENSSL}" genpkey -algorithm ed25519 -out "${W}/unreg.key" 2>/dev/null
 
-UNREG_PREFIX="${W}/unreg-prefix"
-mkdir -p "${UNREG_PREFIX}"
+UNREG_BIN="${W}/unreg-bin"
+mkdir -p "${UNREG_BIN}"
 
 set +e
 PATH="/opt/homebrew/bin:${PATH}" \
 OPENSSL="${OPENSSL}" \
 BURROWEE_DL_BASE="http://127.0.0.1:${GATE_PORT}" \
-PREFIX="${UNREG_PREFIX}" \
+SYS_BIN_DIR="${UNREG_BIN}" \
 HOME="${W}/unreg-home" \
     sh "${REPO_ROOT}/relay/install.sh" --key "${W}/unreg.key"
 UNREG_RC=$?
@@ -188,7 +210,7 @@ set -e
 if [ "${UNREG_RC}" -eq 0 ]; then
     die "unregistered-key install returned 0 — gate FAILED to reject"
 fi
-if [ -e "${UNREG_PREFIX}/bin/burrowee-relay" ]; then
+if [ -e "${UNREG_BIN}/burrowee-relay" ]; then
     die "unregistered-key install left a binary — gate FAILED to stop install"
 fi
 say "unregistered-key install aborted with rc=${UNREG_RC} and installed nothing"
