@@ -86,6 +86,15 @@ mkdir -p "$WORK/bin" "$WORK/sudobin" "$WORK/home" "$WORK/kitsrc" "$WORK/serve"
 # `exec "$@"` would try to exec the literal string "PREFIX=/usr/local" as a
 # program and fail -- so the stub parses and exports that prefix itself before
 # handing off to the real command, same as sudo/env would.
+#
+# Real sudo ALSO accepts its own flags (`-n`, `-v`, ...) ahead of the command --
+# resolve_elevate's cached-credentials probe is `sudo -n true`. Without a flag
+# skip here, `-n` falls through to the exec fallback below as the literal
+# argv[0]: `exec "$@"` on bash 3.2 (/bin/sh on this box) parses a bare `-n` as
+# an (invalid) option to the `exec` BUILTIN itself, not as a program name, and
+# errors out -- a stub artifact, not anything real sudo does. So any leading
+# `-`-prefixed token is skipped generically, the same as a NAME=value one,
+# before the exec fallback.
 make_sudo_stub() {
     cat > "$WORK/sudobin/sudo" <<'STUB'
 #!/bin/sh
@@ -96,6 +105,7 @@ if [ -n "${SUDO_FAILS:-}" ]; then
 fi
 while [ $# -gt 0 ]; do
     case "$1" in
+        -*)             shift ;;
         [A-Za-z_]*=*) eval "export $1"; shift ;;
         *) break ;;
     esac

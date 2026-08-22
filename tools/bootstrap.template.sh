@@ -243,7 +243,7 @@ resolve_elevate() {
     if ! command -v sudo >/dev/null 2>&1; then
         fail "$COMP installs to /usr/local/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
     fi
-    if ! has_tty && ! sudo true 2>/dev/null; then
+    if ! has_tty && ! sudo -n true 2>/dev/null; then
         fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
     curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sudo sh"
     fi
