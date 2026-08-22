@@ -332,7 +332,7 @@ harmless but unnecessary.
 
 ---
 
-## Cutting from an agent session — `tools/cut.command`
+## Cutting from an agent session — `tools/release.command`
 
 **A cut needs a desktop session, and only the notarize step says so.**
 
@@ -355,15 +355,15 @@ building and signing:
 launchctl managername      # Aqua = fine · System = will die at notarize
 ```
 
-`tools/cut.command` makes that check the first thing it does, then runs
+`tools/release.command` makes that check the first thing it does, then runs
 `release.sh` unmodified. `open` it — LaunchServices starts it in the desktop's
 own terminal, which is an Aqua session, with no Apple Events, no TCC prompt and
 no sudo:
 
 ```sh
-cp .cut-request.example .cut-request     # edit COMPONENTS / FLAGS
-chmod +x tools/cut.command
-open tools/cut.command                   # watch .cut.log; ends in CUT-EXIT:<code>
+cp .release-request.example .release-request     # edit COMPONENTS / FLAGS
+chmod +x tools/release.command
+open tools/release.command                   # watch .release.log; ends in RELEASE-EXIT:<code>
 ```
 
 Machine facts (toolchain PATH, signing/notarization backends, non-interactive

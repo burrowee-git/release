@@ -1,5 +1,5 @@
 #!/bin/bash
-# cut.command — run this repo's release cut in a DESKTOP session.
+# release.command — run this repo's release cut in a DESKTOP session.
 #
 # Not a release step. It launches tools/release.sh unmodified; every decision
 # about what a cut does still lives there. This exists for one reason:
@@ -15,31 +15,31 @@
 # session — no Apple Events, no TCC prompt, no sudo. Hence the extension: this
 # file must be openable, not merely executable.
 #
-#   chmod +x tools/cut.command && open tools/cut.command
+#   chmod +x tools/release.command && open tools/release.command
 #
 # Inputs (both OUTSIDE this repo or ignored by it — this file holds flow only,
 # never a path, binary name, credential, or component list):
 #
 #   ~/.agents/local/release.env  machine facts: PATH to the toolchain, signing and
 #                             notarization backends, non-interactive flags.
-#                             Override with CUT_ENV.
-#   .cut-request              what to cut, written per run. Override with
-#                             CUT_REQUEST. Shape:
+#                             Override with RELEASE_ENV.
+#   .release-request              what to cut, written per run. Override with
+#                             RELEASE_REQUEST. Shape:
 #                                 COMPONENTS="edge cli"
 #                                 FLAGS="--public"
 #
-# Output: .cut.log, ending in CUT-EXIT:<code> so a watcher can block on it
+# Output: .release.log, ending in RELEASE-EXIT:<code> so a watcher can block on it
 # rather than guess when the run finished.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
-LOG="${CUT_LOG:-$REPO_ROOT/.cut.log}"
+LOG="${RELEASE_LOG:-$REPO_ROOT/.release.log}"
 : > "$LOG"
 
 say() { echo "$@" | tee -a "$LOG"; }
-die() { say "✗ $*"; say "CUT-EXIT:1"; exit 1; }
+die() { say "✗ $*"; say "RELEASE-EXIT:1"; exit 1; }
 
 # 1. Session. Checked FIRST and refused loudly: the whole point of this file is
 #    that the wrong session builds and signs for minutes before dying at notarize.
@@ -48,14 +48,14 @@ say "session-domain: ${DOMAIN}"
 [ "${DOMAIN}" = "Aqua" ] || die "not a desktop session (need Aqua, got ${DOMAIN}) — 'open' this file, do not run it from a shell"
 
 # 2. Environment. Loaded, never embedded.
-ENV_FILE="${CUT_ENV:-$HOME/.agents/local/release.env}"
+ENV_FILE="${RELEASE_ENV:-$HOME/.agents/local/release.env}"
 [ -r "${ENV_FILE}" ] || die "env file not readable: ${ENV_FILE}"
 # shellcheck source=/dev/null
 . "${ENV_FILE}"
 say "env: ${ENV_FILE}"
 
 # 3. Request.
-REQUEST="${CUT_REQUEST:-$REPO_ROOT/.cut-request}"
+REQUEST="${RELEASE_REQUEST:-$REPO_ROOT/.release-request}"
 [ -r "${REQUEST}" ] || die "request file not readable: ${REQUEST}"
 COMPONENTS=""; FLAGS=""
 # shellcheck source=/dev/null
@@ -76,7 +76,7 @@ for comp in ${COMPONENTS}; do
     # shellcheck disable=SC2086
     bash tools/release.sh "${comp}" ${FLAGS} 2>&1 | tee -a "$LOG"
     rc="${PIPESTATUS[0]}"
-    [ "${rc}" -eq 0 ] || { say "✗ ${comp} failed (exit ${rc}) — later components NOT cut"; say "CUT-EXIT:${rc}"; exit "${rc}"; }
+    [ "${rc}" -eq 0 ] || { say "✗ ${comp} failed (exit ${rc}) — later components NOT cut"; say "RELEASE-EXIT:${rc}"; exit "${rc}"; }
 
     # Push ONLY a marker commit over a clean tree. An unattended push to a
     # public repo should be able to publish the thing it was built to publish
@@ -99,4 +99,4 @@ for comp in ${COMPONENTS}; do
 done
 
 say ""
-say "CUT-EXIT:0"
+say "RELEASE-EXIT:0"
