@@ -32,12 +32,14 @@
 #   OPENSSL                      override the openssl binary (default: openssl)
 #
 # NO PREFIX. As of relay 0.2.2 the inner installer is root-only with ONE
-# destination (/usr/local/bin) and REFUSES a set PREFIX rather than honouring
-# or silently overriding it. This bootstrap therefore never manufactures one —
-# the old `PREFIX=$HOME/.local` default sent a root install to /root/.local/bin
-# while the fleet's units named /usr/local/bin, which is exactly the split the
-# refusal makes loud. An operator-exported PREFIX still reaches the inner
-# installer through the environment, so the refusal is reachable, not silent.
+# destination (/usr/local/bin), and it REFUSES a PREFIX that would MISDIRECT the
+# install rather than honouring or silently overriding it. One that resolves to
+# that same /usr/local/bin misdirects nothing: it is honoured with a line saying
+# so, then cleared. This bootstrap therefore never manufactures one — the old
+# `PREFIX=$HOME/.local` default sent a root install to /root/.local/bin while
+# the fleet's units named /usr/local/bin, which is exactly the split the refusal
+# makes loud. An operator-exported PREFIX still reaches the inner installer
+# through the environment, so the refusal is reachable, not silent.
 
 set -eu
 
@@ -243,10 +245,11 @@ unzip -q -o "$TMP/$ZIP_FILE" -d "$TMP/x" || fail "zip extraction failed — corr
 ok "verified — running inner installer"
 # Run with cwd = the unzipped dir: the inner installer resolves the binaries
 # relative to its own location. PREFIX is deliberately NOT set or passed: the
-# 0.2.2 root-only installer has one destination (/usr/local/bin) and refuses a
-# set PREFIX loudly. An operator-exported PREFIX is inherited through the
-# environment untouched — forwarding it is what makes that refusal reachable
-# instead of a silent override. No PATH persistence either: /usr/local/bin is
+# 0.2.2 root-only installer has one destination (/usr/local/bin) and refuses,
+# loudly, any PREFIX that names somewhere else. An operator-exported PREFIX is
+# inherited through the environment untouched — forwarding it is what makes that
+# refusal reachable instead of a silent override, and what lets a PREFIX naming
+# /usr/local through as the no-op it is. No PATH persistence either: /usr/local/bin is
 # on every default PATH, so there is no rc file to edit.
 ( cd "$TMP/x" && BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh ./install.sh )
 

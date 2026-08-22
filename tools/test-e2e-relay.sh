@@ -86,20 +86,45 @@ mkdir -p "${W}/releases"
 # Create an inner install.sh that "installs" a dummy burrowee-relay binary.
 # The inner installer checks for the binary alongside it inside the unzipped dir.
 #
-# It mirrors the REAL 0.2.2 inner installer's contract: a set PREFIX is REFUSED
-# (root-only, one destination), and the install destination is the SYS_BIN_DIR
-# test seam. That makes the happy path below a regression guard on the outer
-# bootstrap itself — if relay/install.sh went back to manufacturing a PREFIX
-# default, the stub would refuse and this test would fail.
+# It mirrors the REAL inner installer's contract (relay main 8fa9a4f): root-only
+# with ONE destination, resolved through the BURROWEE_SYSTEM_BIN_DIR seam, and a
+# PREFIX gate that refuses only a MISDIRECTING one — a PREFIX whose bin dir
+# resolves to that same destination is honoured, announced and cleared. A stub
+# that blanket-refuses would keep asserting a contract the shipped installer
+# stopped having, so a bootstrap regression that re-manufactured
+# PREFIX=/usr/local would fail here for a reason no host would ever see.
+#
+# The comparison is the shipped one, printf-based: dash's echo expands backslash
+# escapes, which is how an echo-based normaliser wrongly accepts
+# PREFIX='<bindir>\c'.
+#
+# The happy path below is still a regression guard on the outer bootstrap — it
+# exports no PREFIX at all, and a bootstrap that manufactured a per-user one
+# would land in the divergent branch and fail this test.
 mkdir -p "${W}/zip-contents"
 cat > "${W}/zip-contents/install.sh" <<'INNER_EOF'
 #!/bin/sh
 set -eu
+BIN_DIR="${BURROWEE_SYSTEM_BIN_DIR:-/usr/local/bin}"
+normalize_dir() {
+    _nd="$(printf '%s' "$1" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    printf '%s' "${_nd:-/}"
+}
 if [ -n "${PREFIX:-}" ]; then
-    echo "install.sh: PREFIX is set to '$PREFIX' — the root-only installer refuses it" >&2
-    exit 1
+    _prefix_bin="$(normalize_dir "$PREFIX/bin")"
+    _true_bin="$(normalize_dir "$BIN_DIR")"
+    if [ "$_prefix_bin" = "$_true_bin" ]; then
+        printf '%s\n' "install.sh: PREFIX ('$PREFIX') names this installer's own destination ($_true_bin) — proceeding."
+        unset PREFIX
+    else
+        printf '%s\n' "install.sh: PREFIX is set to '$PREFIX', but this installer has one" >&2
+        echo "install.sh: destination: /usr/local/bin, root-owned." >&2
+        printf '%s\n' "install.sh: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
+        echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
+        exit 1
+    fi
+    unset _prefix_bin _true_bin
 fi
-BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
 mkdir -p "$BIN_DIR"
 install -m 0755 ./burrowee-relay "$BIN_DIR/burrowee-relay"
 echo "installed to $BIN_DIR: burrowee-relay"
@@ -154,14 +179,14 @@ HAPPY_HOME="${W}/home"
 HAPPY_BIN="${W}/bin"
 mkdir -p "${HAPPY_HOME}"
 
-# No PREFIX in the environment: the stub inner installer refuses one, exactly
-# as the real 0.2.2 installer does — so this run also proves the outer
-# bootstrap no longer manufactures a PREFIX default of its own. SYS_BIN_DIR is
-# the inner installer's test seam, inherited through the environment.
+# No PREFIX in the environment: a per-user one is refused by the stub exactly as
+# the real installer refuses it — so this run also proves the outer bootstrap no
+# longer manufactures a PREFIX default of its own. BURROWEE_SYSTEM_BIN_DIR is the
+# inner installer's test seam, inherited through the environment.
 PATH="/opt/homebrew/bin:${PATH}" \
 OPENSSL="${OPENSSL}" \
 BURROWEE_DL_BASE="http://127.0.0.1:${GATE_PORT}" \
-SYS_BIN_DIR="${HAPPY_BIN}" \
+BURROWEE_SYSTEM_BIN_DIR="${HAPPY_BIN}" \
 HOME="${HAPPY_HOME}" \
     sh "${REPO_ROOT}/relay/install.sh" --key "${W}/operator.key" \
     || die "happy-path install exited non-zero (expected success)"
@@ -201,7 +226,7 @@ set +e
 PATH="/opt/homebrew/bin:${PATH}" \
 OPENSSL="${OPENSSL}" \
 BURROWEE_DL_BASE="http://127.0.0.1:${GATE_PORT}" \
-SYS_BIN_DIR="${UNREG_BIN}" \
+BURROWEE_SYSTEM_BIN_DIR="${UNREG_BIN}" \
 HOME="${W}/unreg-home" \
     sh "${REPO_ROOT}/relay/install.sh" --key "${W}/unreg.key"
 UNREG_RC=$?
