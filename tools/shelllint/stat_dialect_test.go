@@ -31,8 +31,13 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// shellFiles is every *.sh in the SOURCE tree — .git, and the build output under
-// dist/, excluded.
+// shellFiles is every shell script in the SOURCE tree — .git, and the build
+// output under dist/, excluded.
+//
+// *.command counts too: tools/cut.command is bash and is opened by
+// LaunchServices, so the extension is load-bearing and cannot be .sh. Matching
+// on .sh alone would have left the one script that launches a cut as the only
+// shell in the repo this lint never read.
 //
 // dist/ is not source: it holds the staged payloads of past cuts, each carrying
 // the install.sh that shipped in it. Those copies are immutable history, and one
@@ -54,7 +59,7 @@ func shellFiles(t *testing.T, root string) []string {
 			}
 			return nil
 		}
-		if strings.HasSuffix(p, ".sh") {
+		if strings.HasSuffix(p, ".sh") || strings.HasSuffix(p, ".command") {
 			found = append(found, p)
 		}
 		return nil
@@ -108,5 +113,23 @@ func TestNoShellTriesTheBsdStatFormatBeforeTheGnuOne(t *testing.T) {
 				"blob. Probe the dialect once (see inner/gateway/install.sh), or put `-c` first and\n"+
 				"gate each branch on its own exit status.", rel, n+1, strings.TrimSpace(line))
 		}
+	}
+}
+
+// TestShellFilesCoversDotCommand pins the glob widening that brought
+// tools/cut.command under this lint. Without it the widening is invisible: both
+// lints pass either way today, because cut.command happens to be clean — so a
+// revert to `.sh`-only would go unnoticed until the one script that launches a
+// release drifted, unread.
+func TestShellFilesCoversDotCommand(t *testing.T) {
+	root := repoRoot(t)
+	var found bool
+	for _, p := range shellFiles(t, root) {
+		if strings.HasSuffix(p, "tools/cut.command") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("shellFiles must include tools/cut.command — it is bash, and .command is load-bearing (LaunchServices opens it)")
 	}
 }

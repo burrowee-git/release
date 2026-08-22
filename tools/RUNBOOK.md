@@ -329,3 +329,48 @@ So a `--dry-run` before a real cut is safe, which is the point of having one.
 There is no cache to clear by hand: a stale `dist/.dispatcher/<stamp>/` left by an
 earlier ad-hoc build is now rebuilt on demand rather than shipped. Deleting it is
 harmless but unnecessary.
+
+---
+
+## Cutting from an agent session — `tools/cut.command`
+
+**A cut needs a desktop session, and only the notarize step says so.**
+
+`rcodesign` is pure userspace and signs in any session. `notarytool` reaches
+Apple through CFNetwork/AppSSO, which needs a per-user bootstrap namespace; in a
+background/daemon-hosted shell it SIGTRAPs (`EXC_BREAKPOINT`, "API Misuse" in
+`AppSSO::shouldManageURL`) with no submission id. `release.sh` can only report
+what it got:
+
+```
+Conducting pre-submission checks … and initiating connection to the Apple notary service...
+✗ notarization not Accepted (status: unknown)
+```
+
+That reads like an Apple outage. It is not one — nothing about the key, the
+service, or the flow is broken. Check before starting, not after ten minutes of
+building and signing:
+
+```sh
+launchctl managername      # Aqua = fine · System = will die at notarize
+```
+
+`tools/cut.command` makes that check the first thing it does, then runs
+`release.sh` unmodified. `open` it — LaunchServices starts it in the desktop's
+own terminal, which is an Aqua session, with no Apple Events, no TCC prompt and
+no sudo:
+
+```sh
+cp .cut-request.example .cut-request     # edit COMPONENTS / FLAGS
+chmod +x tools/cut.command
+open tools/cut.command                   # watch .cut.log; ends in CUT-EXIT:<code>
+```
+
+Machine facts (toolchain PATH, signing/notarization backends, non-interactive
+flags) load from `~/.agents/local/release.env`; this repo is public and carries
+none of them.
+
+**Do not** reach for `osascript`-to-Terminal (Apple Events time out, `-1712`),
+`sudo launchctl asuser` (needs passwordless sudo), or a different notarization
+backend. The first two fail slowly; the third is editing release tooling under
+incident pressure.
