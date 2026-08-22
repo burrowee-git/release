@@ -76,6 +76,11 @@
 #                                REFUSE a PREFIX that would MISDIRECT the install rather
 #                                than quietly overriding it; one that resolves to that
 #                                same /usr/local/bin misdirects nothing and is honoured.
+#   (elevation)                  gateway/edge/relay need root: the bootstrap runs the
+#                                VERIFIED inner installer under sudo and says so.
+#                                Resolution, download and signature checks stay at the
+#                                invoking user. No tty + no cached creds, or no sudo at
+#                                all, is a refusal before anything is placed.
 #   BURROWEE_UNINSTALL=1         pass through to the inner installer to remove bins
 #   BURROWEE_RELEASE_REPO        GitHub repo serving releases (default burrowee-git/release)
 #   BURROWEE_SKIP_PREFLIGHT=1    skip the OS-dependency preflight (manage deps yourself)
@@ -202,6 +207,49 @@ fi
 fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
 info() { printf '  → %s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
+
+# ---- elevation ----------------------------------------------------------
+# THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
+# install to /usr/local/bin and manage a system service; they cannot install any
+# other way. So the bootstrap elevates rather than printing a one-liner for the
+# operator to retype.
+#
+# WHERE, and why it is here and not at the top: everything above this point --
+# resolving the tag, downloading, minisign, sha256, the preflight -- runs at the
+# OPERATOR's uid. Root executes only bytes already proven to be the signed
+# release. Elevating at the top would run the whole network-facing chain as root
+# for no gain, and would put the preflight's brew path (Homebrew refuses to run
+# as root) on the wrong side of the boundary. Do not reorder this.
+needs_root_comp() {
+    case "$COMP" in
+        gateway | edge) return 0 ;;
+        *)              return 1 ;;
+    esac
+}
+
+# has_tty -- copied VERBATIM from inner/gateway/install.sh, which already solves
+# the piped case: under `curl … | sh` stdin IS the script, so `[ -t 0 ]` is
+# false, and the /dev/tty probe is the only thing that finds the terminal.
+has_tty() {
+    [ -t 0 ] && return 0
+    ( exec </dev/tty ) 2>/dev/null
+}
+
+# resolve_elevate -- prints `sudo`, or nothing. Refuses (exit 1) rather than
+# proceeding toward an install that cannot finish.
+resolve_elevate() {
+    needs_root_comp || return 0
+    [ "$(id -u)" != 0 ] || return 0
+    if ! command -v sudo >/dev/null 2>&1; then
+        fail "$COMP installs to /usr/local/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
+    fi
+    if ! has_tty && ! sudo true 2>/dev/null; then
+        fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
+    curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sudo sh"
+    fi
+    printf 'sudo'
+}
+ELEVATE="$(resolve_elevate)"
 
 sha256_of() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
@@ -813,8 +861,24 @@ ok "verified — running inner installer"
 # right — while passing a defaulted one would refuse every ordinary install.
 # cli/agent always have a value here, so nothing changes for them.
 run_inner() {
-    if [ -n "$PREFIX" ]; then export PREFIX; fi
-    ( cd "$TMP/x" && BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" BURROWEE_VERSION="$TAG" sh ./install.sh )
+    # Every variable crossing the boundary is spelled as a command-prefix
+    # assignment on the `sh` invocation, NOT exported: sudo scrubs the
+    # environment, and PREFIX's empty-vs-unset distinction is load-bearing for
+    # the gateway and edge root-only gates. An exported PREFIX would arrive
+    # unset and read as "the operator set nothing", turning a deliberate
+    # PREFIX=/usr/local into a silent default.
+    if [ -n "$ELEVATE" ]; then
+        info "$COMP installs to /usr/local/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
+    fi
+    if [ -n "$PREFIX" ]; then
+        ( cd "$TMP/x" && $ELEVATE env PREFIX="$PREFIX" \
+            BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" \
+            BURROWEE_VERSION="$TAG" sh ./install.sh )
+    else
+        ( cd "$TMP/x" && $ELEVATE env \
+            BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" \
+            BURROWEE_VERSION="$TAG" sh ./install.sh )
+    fi
 }
 run_inner
 
@@ -911,7 +975,7 @@ if [ "$MODE" = upgrade ]; then
     # after a pipe is the LAST command's status, which is how an exit-mapping
     # test ends up reporting on something it never measured.
     set +e
-    ( cd "$TMP/x" && sh ./migrations/upgrade.sh "$MIG_FLOOR" )
+    ( cd "$TMP/x" && $ELEVATE sh ./migrations/upgrade.sh "$MIG_FLOOR" )
     LADDER=$?
     set -e
 
