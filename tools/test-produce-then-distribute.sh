@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # test-produce-then-distribute.sh — the two halves of a real release cut, run
 # IN SEQUENCE, against a throwaway release-repo clone: `rkit build` (produce)
-# stages a version bump, then `assert_cut_origin` (distribute's guard) is
+# stages a version bump, then `assert_release_origin` (distribute's guard) is
 # asked whether it may proceed. Each half had its own passing tests before
 # this effort; nothing exercised the SEQUENCE, which is exactly how the
 # deadlock shipped — the produce half leaves the tree in precisely the state
 # the distribute half's guard used to refuse.
 #
 # Why this cannot go through `release.sh --distribute-only --dry-run`:
-# --dry-run sets CUT_ORIGIN_MODE=report (release.sh), and assert_cut_origin
-# returns 0 unconditionally in report mode (cut_origin.sh) — a real finding
+# --dry-run sets RELEASE_ORIGIN_MODE=report (release.sh), and assert_release_origin
+# returns 0 unconditionally in report mode (release_origin.sh) — a real finding
 # only prints a "⚠" warning. tools/test-distribute-only.sh drives exactly
 # that path, so no assertion it could ever carry would go red on this. Every
-# assert_cut_origin call below passes mode=strict for that reason.
+# assert_release_origin call below passes mode=strict for that reason.
 #
 # What's real vs. fixture: STEP ONE runs the actual `rkit build` binary,
 # built from this worktree, against a real git clone and a real (if minimal)
 # Go module — the produce half is not simulated. STEP TWO sources the real,
-# unmodified tools/cut_origin.sh and calls assert_cut_origin directly (the
+# unmodified tools/release_origin.sh and calls assert_release_origin directly (the
 # same function release.sh's --distribute-only dispatch calls) against the
 # tree STEP ONE actually left behind — the input to the guard is measured,
 # not asserted to be a certain shape.
@@ -45,14 +45,14 @@ export GIT_CONFIG_GLOBAL="${W}/gitconfig"   # keep the operator's identity/hooks
 /usr/bin/git config --file "${GIT_CONFIG_GLOBAL}" init.defaultBranch main
 
 # shellcheck source=/dev/null
-source "${REPO_ROOT}/tools/cut_origin.sh"
+source "${REPO_ROOT}/tools/release_origin.sh"
 
 # ---- (1) build rkit from the worktree ----------------------------------------
 say "building rkit from the worktree"
 /opt/homebrew/bin/go build -o "${W}/rkit" ./cmd/rkit || die "go build ./cmd/rkit failed"
 
 # ---- (2) bare origin + clone, populated as a minimal release repo -----------
-# Same shape as cut_origin.test.sh's new_origin_and_clone (bare + clone, on
+# Same shape as release_origin.test.sh's new_origin_and_clone (bare + clone, on
 # main, HEAD pushed), but the seed commit IS the minimal release repo rather
 # than a throwaway README, since the fixture's post-build state is what this
 # test measures.
@@ -142,7 +142,7 @@ printf '  OK: %s and %s zip(s) under %s\n' "SHA256SUMS.txt" "${ZIP_COUNT}" "${ST
 # path set is DERIVED from staged_tolerance_for — the exact function
 # release.sh's --distribute-only dispatch calls to build its own tolerance
 # list — rather than naming versions/cli and versions/cli.stamp a second time
-# in this file; cut_origin.test.sh's case (h) already pins that function's
+# in this file; release_origin.test.sh's case (h) already pins that function's
 # exact output for a given component.
 EXPECTED_ALLOWED=()
 while IFS= read -r line; do
@@ -169,21 +169,21 @@ printf '  OK: exactly 2 staged lines, both M  — %s and %s\n' "${EXPECTED_ALLOW
 
 # ── STEP TWO (distribute's guard), for real, in STRICT mode ─────────────────
 # This is the assertion that is RED against pre-Task-3 code: the pre-fix
-# assert_cut_origin (or any call with no tolerance) refuses this exact tree
+# assert_release_origin (or any call with no tolerance) refuses this exact tree
 # with "release repo source tree is dirty" — the deadlock. Never routed
 # through --dry-run/report mode (see header) — mode is unconditionally strict.
-say "STEP TWO: assert_cut_origin(strict) against the REAL post-build tree — must return 0"
-out="$(assert_cut_origin "release repo" "${CLONE}" "${CLONE}" strict "${EXPECTED_ALLOWED[@]}" 2>&1)" && r=0 || r=1
-[ "${r}" -eq 0 ] || die "assert_cut_origin(strict, with tolerance) refused the real post-build tree:\n${out}"
-[ -z "${out}" ] || die "assert_cut_origin(strict, with tolerance) printed output on what should be a silent pass:\n${out}"
-printf '  OK: assert_cut_origin returned 0 — the produce-then-distribute sequence does not deadlock\n'
+say "STEP TWO: assert_release_origin(strict) against the REAL post-build tree — must return 0"
+out="$(assert_release_origin "release repo" "${CLONE}" "${CLONE}" strict "${EXPECTED_ALLOWED[@]}" 2>&1)" && r=0 || r=1
+[ "${r}" -eq 0 ] || die "assert_release_origin(strict, with tolerance) refused the real post-build tree:\n${out}"
+[ -z "${out}" ] || die "assert_release_origin(strict, with tolerance) printed output on what should be a silent pass:\n${out}"
+printf '  OK: assert_release_origin returned 0 — the produce-then-distribute sequence does not deadlock\n'
 
 # Falsifiability: the IDENTICAL tree, asserted with no tolerance at all, must
-# still be refused — the default call shape (every OTHER assert_cut_origins
+# still be refused — the default call shape (every OTHER assert_release_origins
 # call site) is unchanged. Confirms STEP TWO's pass above is exercising the
 # tolerance wiring, not passing for an unrelated reason.
-out2="$(assert_cut_origin "release repo" "${CLONE}" "${CLONE}" strict 2>&1)" && r2=0 || r2=1
-[ "${r2}" -eq 1 ] || die "assert_cut_origin(strict, NO tolerance) unexpectedly returned 0 — the default must remain refused"
+out2="$(assert_release_origin "release repo" "${CLONE}" "${CLONE}" strict 2>&1)" && r2=0 || r2=1
+[ "${r2}" -eq 1 ] || die "assert_release_origin(strict, NO tolerance) unexpectedly returned 0 — the default must remain refused"
 case "${out2}" in
     *"source tree is dirty"*) : ;;
     *) die "expected the no-tolerance refusal to be the dirty-tree message, got:\n${out2}" ;;
@@ -204,4 +204,4 @@ AHEAD="$(/usr/bin/git -C "${CLONE}" rev-list --count origin/main..HEAD)"
 [ "${AHEAD}" -eq 1 ] || die "expected exactly 1 commit ahead of origin/main after the marker commit, got ${AHEAD}"
 printf '  OK: marker commit names both version paths; exactly 1 commit ahead of origin/main\n'
 
-printf '\n  PRODUCE-THEN-DISTRIBUTE TEST PASSED (rkit build staged the bump for real; assert_cut_origin(strict) accepted it; no-tolerance default still refuses it; marker commit shape pinned)\n'
+printf '\n  PRODUCE-THEN-DISTRIBUTE TEST PASSED (rkit build staged the bump for real; assert_release_origin(strict) accepted it; no-tolerance default still refuses it; marker commit shape pinned)\n'

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cut_origin.sh — where a release cut is allowed to build from, as predicates
+# release_origin.sh — where a release cut is allowed to build from, as predicates
 # sourced by tools/release.sh.
 #
 # A cut stamps a version onto whatever commit it finds in the tree it was
@@ -7,7 +7,7 @@
 # not origin/main, the published version names a commit the world cannot fetch.
 # These checks are the last thing between a stale checkout and a published
 # artifact, which is why they live here as functions rather than inline in the
-# orchestrator — tools/cut_origin.test.sh exercises them directly, with no part
+# orchestrator — tools/release_origin.test.sh exercises them directly, with no part
 # of the release path running. Same split as tools/apple_sign.sh and
 # tools/vulncheck.sh.
 #
@@ -64,7 +64,7 @@ tree_clean() {
 # preceding `rkit build` staged versions/<comp> and versions/<comp>.stamp so both
 # ride the [RELEASED] marker commit (cmd/rkit `buildRun`). The full-cut path
 # already builds from a release repo that differs from origin/main by exactly that
-# bump, because it bumps AFTER this guard runs (`assert_cut_origins` at the distribute/full-cut dispatch vs
+# bump, because it bumps AFTER this guard runs (`assert_release_origins` at the distribute/full-cut dispatch vs
 # resolve_comp_stamp) — so this re-establishes an existing exemption for a bump
 # that moved into the produce half, rather than creating a new one.
 #
@@ -156,7 +156,7 @@ origin_sync_status() {
     return 1
 }
 
-# assert_cut_origin <label> <dir> <expected> <mode> [allowed-staged...] — the
+# assert_release_origin <label> <dir> <expected> <mode> [allowed-staged...] — the
 # whole guard for one tree, cheapest check first so a local mistake fails in
 # milliseconds and only a fully-local-clean tree costs a network round trip.
 #
@@ -172,7 +172,7 @@ origin_sync_status() {
 # ONE tree may carry staged instead of clean. It applies only to the clean-tree
 # check below, and only to the single <dir> being asserted here; every other
 # tree a caller asserts in the same run gets its own (typically empty) list.
-assert_cut_origin() {
+assert_release_origin() {
     local label="$1" dir="$2" expected="$3" mode="$4"; shift 4
     local -a allowed=("$@")
     local mark="✗" rc=1

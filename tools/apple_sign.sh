@@ -7,11 +7,12 @@
 # orchestrator: tools/apple_sign.test.sh exercises them directly, with no part of
 # the release path running. Same split as tools/vulncheck.sh.
 #
-# Two questions, both needed:
-#   "can this machine sign?"   load_apple_account, resolve_sign_identity,
-#                              sign_identity_reachable
-#   "is this FILE signed?"     is_macho, developer_id_signed,
-#                              assert_payload_developer_id_signed
+# Three questions, all needed:
+#   "can this SESSION notarize?"  require_desktop_session
+#   "can this machine sign?"      load_apple_account, resolve_sign_identity,
+#                                 sign_identity_reachable
+#   "is this FILE signed?"        is_macho, developer_id_signed,
+#                                 assert_payload_developer_id_signed
 
 # _first_config_line <file>
 # Prints the first non-blank, non-comment line, trimmed. Nothing when the file
@@ -60,6 +61,51 @@ _apple_fix_hint() {
 # Called only when Apple signing was requested, so every unresolved state
 # returns 1: continuing produces an AD-HOC signed cut while the operator
 # believes it is Developer-ID signed and notarized.
+# require_desktop_session
+# Refuses a session that can sign but cannot notarize. Signing and notarizing are
+# different capabilities: rcodesign is pure userspace and works anywhere, while
+# notarytool reaches Apple through CFNetwork/AppSSO, which needs a per-user
+# bootstrap namespace. In a background/daemon-hosted shell it does not fail
+# politely — it SIGTRAPs with no submission id, and the cut can only report
+# `notarization not Accepted (status: unknown)`, which reads like an Apple outage
+# and is not one.
+#
+# Called before any build or signing work, because the cost of learning this at
+# notarize time is every platform already built and signed.
+#
+# tools/release.command carries the same refusal as an early, cheap check, but
+# the guard has to live HERE too: `release.sh <comp> --public` is a documented
+# entry point of its own, and a guard on only one of two doors is not a guard.
+#
+# Override with BURROWEE_ALLOW_ANY_SESSION=1 — for a machine whose session model
+# this check misreads. It is not a fix for "the check refused me": the refusal is
+# the cheap version of a failure you would otherwise buy ten minutes later.
+require_desktop_session() {
+    local domain
+    if [ "${BURROWEE_ALLOW_ANY_SESSION:-0}" = "1" ]; then
+        echo "⚠ session check bypassed (BURROWEE_ALLOW_ANY_SESSION=1) — notarization may SIGTRAP" >&2
+        return 0
+    fi
+    domain="$(launchctl managername 2>/dev/null || echo unknown)"
+    if [ "${domain}" != "Aqua" ]; then
+        echo "✗ this session cannot notarize: launchctl managername = ${domain}, need Aqua" >&2
+        echo "  Signing would succeed and notarization would SIGTRAP after every platform is built." >&2
+        echo "  Run the cut from a desktop session instead:" >&2
+        echo "      open tools/release.command      # LaunchServices opens it in the desktop's terminal" >&2
+        echo "  (see tools/RUNBOOK.md, \"Cutting when your session is not a desktop session\")" >&2
+        return 1
+    fi
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "✗ running as root — notarization would use root's keychain, not yours" >&2
+        return 1
+    fi
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        echo "✗ SSH session — it has no console security session for notarization" >&2
+        return 1
+    fi
+    return 0
+}
+
 load_apple_account() {
     local repo_root="$1"
 

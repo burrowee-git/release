@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # marker_commit.sh — the [RELEASED: <comp>] marker commit, as a predicate
-# sourced by tools/release.sh. Same split as tools/cut_origin.sh and
+# sourced by tools/release.sh. Same split as tools/release_origin.sh and
 # tools/apple_sign.sh: the decision lives here so tools/marker_commit.test.sh
 # can exercise it against throwaway repos with no part of the release path
 # running.

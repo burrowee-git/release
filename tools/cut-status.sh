@@ -83,23 +83,23 @@ for c in ${components}; do
     fi
 
     stamp="$(cat "${stamp_file}")"
-    cut_sha="${stamp##*.}"
+    release_sha="${stamp##*.}"
     [ -n "${FETCH}" ] && git -C "${root}" fetch origin main -q 2>/dev/null
     head_sha="$(git -C "${root}" rev-parse --short=8 origin/main 2>/dev/null)"
 
     if [ -z "${head_sha}" ]; then
         unknown=$((unknown + 1))
-        [ -n "${QUIET}" ] || printf '%-10s %-10s %-10s %-9s %s\n' "${c}" "${cut_sha}" "-" "UNKNOWN" "no origin/main"
-    elif [ "${cut_sha}" = "${head_sha}" ]; then
-        [ -n "${QUIET}" ] || printf '%-10s %-10s %-10s %-9s %s\n' "${c}" "${cut_sha}" "${head_sha}" "current" "0"
+        [ -n "${QUIET}" ] || printf '%-10s %-10s %-10s %-9s %s\n' "${c}" "${release_sha}" "-" "UNKNOWN" "no origin/main"
+    elif [ "${release_sha}" = "${head_sha}" ]; then
+        [ -n "${QUIET}" ] || printf '%-10s %-10s %-10s %-9s %s\n' "${c}" "${release_sha}" "${head_sha}" "current" "0"
     else
         stale=$((stale + 1))
-        n="$(git -C "${root}" rev-list --count "${cut_sha}..origin/main" 2>/dev/null || echo '?')"
+        n="$(git -C "${root}" rev-list --count "${release_sha}..origin/main" 2>/dev/null || echo '?')"
         if [ -n "${QUIET}" ]; then
             printf '%s\n' "${c}"
         else
-            printf '%-10s %-10s %-10s %-9s %s\n' "${c}" "${cut_sha}" "${head_sha}" "STALE" "${n}"
-            git -C "${root}" log --oneline "${cut_sha}..origin/main" 2>/dev/null | sed 's/^/           /'
+            printf '%-10s %-10s %-10s %-9s %s\n' "${c}" "${release_sha}" "${head_sha}" "STALE" "${n}"
+            git -C "${root}" log --oneline "${release_sha}..origin/main" 2>/dev/null | sed 's/^/           /'
         fi
     fi
 done

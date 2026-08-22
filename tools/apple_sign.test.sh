@@ -45,6 +45,131 @@ reset_apple_env() {
     unset APPLE_ACCOUNT APPLE_ACCOUNT_DIR APPLE_HOME
 }
 
+echo "--- require_desktop_session -------------------------------------------"
+
+# require_desktop_session reads exactly three things — `launchctl managername`,
+# `id -u` and $SSH_CONNECTION — so stubs decide all three and nothing about the
+# real session leaks in. The PATH here holds ONLY the stubs, with no /bin: the
+# real launchctl lives at /bin/launchctl, and the "launchctl is absent" case
+# below has to actually mean absent. Everything else the function touches
+# (`echo`, `[`) is a shell builtin.
+only_session_stubs() { PATH="${STUBS}"; }
+# A non-root, non-SSH, unbypassed baseline, so each case below changes exactly
+# one thing.
+session_baseline() {
+    unset SSH_CONNECTION BURROWEE_ALLOW_ANY_SESSION
+    stub id 0 "501"
+}
+
+# The desktop session: accepted, and silent — this guard runs on every --public
+# cut, so a chatty pass would train the operator to ignore it.
+session_baseline
+stub launchctl 0 "Aqua"
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+check "Aqua session accepted (rc)" "${rc}" "0"
+check "Aqua session says nothing" "${out}" ""
+
+# THE BUG THIS GUARD EXISTS FOR. A daemon-hosted shell signs fine and then
+# SIGTRAPs at notarize with no submission id, ten minutes and every platform
+# later. The refusal has to name the domain it actually saw AND the one it
+# needs, or the operator cannot tell a misread session from a wrong one.
+session_baseline
+stub launchctl 0 "System"
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+check "System domain refused (rc)" "${rc}" "1"
+check_contains "System refusal names the domain it got" "${out}" "managername = System"
+check_contains "System refusal names the domain it needs" "${out}" "need Aqua"
+check_contains "System refusal names the way out" "${out}" "tools/release.command"
+
+session_baseline
+stub launchctl 0 "Background"
+only_session_stubs
+require_desktop_session >/dev/null 2>&1; rc=$?
+restore_path
+check "Background domain refused (rc)" "${rc}" "1"
+
+# FAIL CLOSED when the question cannot be answered. `launchctl managername`
+# absent or failing leaves the domain UNKNOWN, and unknown is not Aqua: a guard
+# that treats "I could not tell" as "go ahead" is the vacuous-pass shape, and
+# this one guards a ten-minute failure.
+session_baseline
+rm -f "${STUBS}/launchctl"
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+check "absent launchctl refuses (rc)" "${rc}" "1"
+check_contains "absent launchctl reads as unknown" "${out}" "managername = unknown"
+
+session_baseline
+stub launchctl 1
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+check "failing launchctl refuses (rc)" "${rc}" "1"
+check_contains "failing launchctl reads as unknown" "${out}" "managername = unknown"
+
+# launchctl exiting 0 with nothing to say is the third undeterminable shape —
+# and the one that survives a `[ "${domain}" != "Aqua" ]` written as a `case`
+# with a permissive default.
+session_baseline
+stub launchctl 0 ""
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+check "empty launchctl output refuses (rc)" "${rc}" "1"
+check_contains "empty launchctl output still names Aqua" "${out}" "need Aqua"
+
+# Aqua is necessary, not sufficient. A sudo'd cut inherits the desktop's Aqua
+# domain and then notarizes against ROOT's keychain — no stored notary
+# credential, and the failure looks like a credential problem, not a whoami one.
+# `id` is stubbed; nothing here runs as root or asks for privilege.
+session_baseline
+stub id 0 "0"
+stub launchctl 0 "Aqua"
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+check "root refused even in Aqua (rc)" "${rc}" "1"
+check_contains "root refusal names the keychain" "${out}" "root's keychain"
+
+# Same shape from the other side: `launchctl asuser <uid>` from an SSH session
+# lands in the user's GUI domain and reports Aqua while still having no console
+# security session.
+session_baseline
+stub launchctl 0 "Aqua"
+# RFC 5737 documentation addresses — the function reads only whether the
+# variable is non-empty, never what is in it.
+export SSH_CONNECTION="203.0.113.9 51234 203.0.113.1 22"
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+unset SSH_CONNECTION
+check "SSH session refused even in Aqua (rc)" "${rc}" "1"
+check_contains "SSH refusal names the missing console session" "${out}" "console security session"
+
+# The documented escape hatch, for a machine whose session model this check
+# misreads. It must pass — and it must SAY so on stderr, because the next thing
+# it can produce is the SIGTRAP this guard was written to explain.
+session_baseline
+stub launchctl 0 "System"
+export BURROWEE_ALLOW_ANY_SESSION=1
+only_session_stubs
+out="$(require_desktop_session 2>&1)"; rc=$?
+restore_path
+unset BURROWEE_ALLOW_ANY_SESSION
+check "BURROWEE_ALLOW_ANY_SESSION=1 passes a System session (rc)" "${rc}" "0"
+check_contains "the bypass warns that it is a bypass" "${out}" "BURROWEE_ALLOW_ANY_SESSION=1"
+check_contains "the bypass names what it risks" "${out}" "SIGTRAP"
+
+# Leave no session stubs behind: every section below runs with /usr/bin and /bin
+# on PATH, where a stray `id` or `launchctl` stub would be found first.
+rm -f "${STUBS}/launchctl" "${STUBS}/id"
+unset SSH_CONNECTION BURROWEE_ALLOW_ANY_SESSION
+
 echo "--- resolve_sign_identity ---------------------------------------------"
 
 # THE REGRESSION. `modernech-sign id` printing nothing is the EXPECTED outcome
