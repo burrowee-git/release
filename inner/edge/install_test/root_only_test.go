@@ -4,8 +4,9 @@
 // The literal destination is checked as SOURCE TEXT, never by running the
 // installer with it: it is a real system path, and the machines this suite runs
 // on have a live burrowee in it. Every dynamic test here redirects it with the
-// SYS_BIN_DIR seam into a fixture tree. The REFUSALS are the opposite — "a set
-// PREFIX is rejected" and "an unprivileged run is rejected" are claims about
+// SYS_BIN_DIR seam into a fixture tree. The REFUSALS are the opposite — "a
+// PREFIX naming anywhere else is rejected" and "an unprivileged run is
+// rejected" are claims about
 // behaviour at a moment (before anything is placed), so they have to be run, and
 // run under every shell a host's /bin/sh may be.
 package install_test
@@ -195,12 +196,17 @@ func TestEdgeInstallShDestinationIsTheOneSystemBinDir(t *testing.T) {
 	}
 }
 
-// TestEdgeInstallRefusesAnExplicitPrefix — silently overriding a set PREFIX
-// would be the same class of surprise as the bug this collapse fixes, pointed
-// the other way: the operator asks for one directory and a different one is
-// written, root-owned, without a word. So the run must FAIL, name what changed
-// and where things go now, and do it before anything is placed.
-func TestEdgeInstallRefusesAnExplicitPrefix(t *testing.T) {
+// TestEdgeInstallRefusesAMisdirectingPrefix — silently overriding a PREFIX that
+// names somewhere else would be the same class of surprise as the bug this
+// collapse fixes, pointed the other way: the operator asks for one directory and
+// a different one is written, root-owned, without a word. So the run must FAIL,
+// name what changed and where things go now, and do it before anything is
+// placed.
+//
+// The $HOME/.local it uses is genuinely divergent, so this stays exactly as true
+// under the divergent-only rule; prefix_gate_test.go owns the other half (a
+// PREFIX that resolves to $BIN_DIR is honoured).
+func TestEdgeInstallRefusesAMisdirectingPrefix(t *testing.T) {
 	for _, shell := range shellsUnderTest(t) {
 		t.Run(filepath.Base(shell), func(t *testing.T) {
 			sb := newSandbox(t)
