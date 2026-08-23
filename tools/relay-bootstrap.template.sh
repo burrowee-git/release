@@ -17,7 +17,7 @@
 #   5. Verify minisign signature on SHA256SUMS.txt (baked pubkey, the same
 #      minisign trust anchor used by public components); verify sha256 of zip.
 #   6. Abort before installing on any failure.
-#   7. Unzip + run inner install.sh.
+#   7. Unzip + elevate (relay is root-only) + run inner install.sh.
 #   8. Store operator key at ~/.burrowee/relay/release_dl.key (0600) for update.
 #
 # DO NOT EDIT generated copies (relay/install.sh) by hand — they are produced
@@ -30,6 +30,11 @@
 #   BURROWEE_UNINSTALL=1         pass through to the inner installer to remove bins
 #   BURROWEE_DL_BASE             (test hook) download from this base instead of release.burrowee.com
 #   OPENSSL                      override the openssl binary (default: openssl)
+#   (elevation)                  relay is root-only: the bootstrap runs the VERIFIED
+#                                inner installer under sudo and says so. Resolution,
+#                                download and signature checks stay at the invoking
+#                                user. No tty + no cached creds, or no sudo at all,
+#                                is a refusal before anything is placed.
 #
 # NO PREFIX. As of relay 0.2.2 the inner installer is root-only with ONE
 # destination (/usr/local/bin), and it REFUSES a PREFIX that would MISDIRECT the
@@ -48,6 +53,13 @@ COMP="@COMP@"
 PUBKEY="@PUBKEY@"
 BASE="${BURROWEE_DL_BASE:-https://release.burrowee.com}"
 OPENSSL="${OPENSSL:-openssl}"
+# MODE and CHANNEL_BASE exist only so the elevation block's refusal message
+# below -- pinned byte-identical with tools/bootstrap.template.sh's copy --
+# can reference $CHANNEL_BASE/$MODE.sh without an unbound-variable error under
+# `set -eu`. relay has no install/upgrade split (see the header): it always
+# installs, and its channel is the gated one this same host serves.
+MODE="install"
+CHANNEL_BASE="$BASE/$COMP"
 
 # Production downloads are pinned to HTTPS/TLS1.2 (--proto =https). The
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
@@ -63,6 +75,70 @@ fi
 fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
 info() { printf '  → %s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
+
+# ---- elevation ----------------------------------------------------------
+# THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
+# install to /usr/local/bin and manage a system service; they cannot install any
+# other way. So the bootstrap elevates rather than printing a one-liner for the
+# operator to retype.
+#
+# WHERE, and why it is here and not at the top: everything above this point --
+# resolving the tag, downloading, minisign, sha256, the preflight -- runs at the
+# OPERATOR's uid. Root executes only bytes already proven to be the signed
+# release. Elevating at the top would run the whole network-facing chain as root
+# for no gain, and would put the preflight's brew path (Homebrew refuses to run
+# as root) on the wrong side of the boundary. Do not reorder this.
+needs_root_comp() {
+    # relay is root-only as of 0.2.2 -- one destination, /usr/local/bin.
+    return 0
+}
+
+# ELEVATE_HINT -- the exact re-run command the pinned refusal below shows when
+# this run has no tty and no cached sudo credentials. Lives HERE, beside
+# needs_root_comp(), for the same reason it differs there: unlike
+# gateway/edge, relay is gated by an operator ed25519 key (--key <pem> or
+# BURROWEE_RELAY_DL_KEY) that a plain `curl … | sudo sh` cannot carry across
+# the sudo boundary -- sudo has nothing to forward it as (the pipe supplies no
+# argv for `sh -s --`), sudo scrubs BURROWEE_RELAY_DL_KEY from the child's env
+# by default, and HOME becomes /root so a key stored at the invoking user's
+# own ~/.burrowee/relay/release_dl.key is not found either. The one form that
+# genuinely works is to become root FIRST (so resolve_elevate sees uid 0 and
+# never calls sudo at all) and hand the key straight to the script as an
+# argument, the same `sh -s -- --key <pem>` shape documented at the top of
+# this file.
+ELEVATE_HINT="this needs the operator key, and sudo cannot carry it across — become root first (\`sudo -i\`), then:
+    curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sh -s -- --key <path-to-your-operator-key>"
+
+# ---- BEGIN pinned elevation literals -------------------------------------
+# Kept byte-identical between tools/bootstrap.template.sh and
+# tools/relay-bootstrap.template.sh — tools/test-elevate.sh assertion (9)
+# diffs everything between these two markers. needs_root_comp() above is
+# deliberately OUTSIDE the pinned range: it differs by design (the shared
+# template switches on $COMP; relay is root-only unconditionally).
+# has_tty -- copied VERBATIM from inner/gateway/install.sh, which already solves
+# the piped case: under `curl … | sh` stdin IS the script, so `[ -t 0 ]` is
+# false, and the /dev/tty probe is the only thing that finds the terminal.
+has_tty() {
+    [ -t 0 ] && return 0
+    ( exec </dev/tty ) 2>/dev/null
+}
+
+# resolve_elevate -- prints `sudo`, or nothing. Refuses (exit 1) rather than
+# proceeding toward an install that cannot finish.
+resolve_elevate() {
+    needs_root_comp || return 0
+    [ "$(id -u)" != 0 ] || return 0
+    if ! command -v sudo >/dev/null 2>&1; then
+        fail "$COMP installs to /usr/local/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
+    fi
+    if ! has_tty && ! sudo -n true 2>/dev/null; then
+        fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
+    $ELEVATE_HINT"
+    fi
+    printf 'sudo'
+}
+ELEVATE="$(resolve_elevate)"
+# ---- END pinned elevation literals ---------------------------------------
 
 # ---- parse argv ---------------------------------------------------------
 KEY=""
@@ -243,15 +319,32 @@ unzip -q -o "$TMP/$ZIP_FILE" -d "$TMP/x" || fail "zip extraction failed — corr
 [ -f "$TMP/x/install.sh" ] || fail "release zip missing inner install.sh — aborting"
 
 ok "verified — running inner installer"
-# Run with cwd = the unzipped dir: the inner installer resolves the binaries
-# relative to its own location. PREFIX is deliberately NOT set or passed: the
-# 0.2.2 root-only installer has one destination (/usr/local/bin) and refuses,
-# loudly, any PREFIX that names somewhere else. An operator-exported PREFIX is
-# inherited through the environment untouched — forwarding it is what makes that
-# refusal reachable instead of a silent override, and what lets a PREFIX naming
-# /usr/local through as the no-op it is. No PATH persistence either: /usr/local/bin is
-# on every default PATH, so there is no rc file to edit.
-( cd "$TMP/x" && BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh ./install.sh )
+# run_inner — exec the verified inner installer with cwd = the unzipped dir, so
+# it resolves the binaries relative to its own location. PREFIX is deliberately
+# NOT resolved or defaulted here: the 0.2.2 root-only installer has one
+# destination (/usr/local/bin) and refuses, loudly, any PREFIX that names
+# somewhere else; one that resolves to that same destination is honoured as the
+# no-op it is. An operator-exported PREFIX must still reach the inner installer
+# for that refusal to be reachable rather than silently dropped — and now that
+# the install step runs under sudo, plain environment inheritance no longer
+# carries it (sudo scrubs the environment), so it is forwarded explicitly as a
+# command-prefix assignment on the `env` invocation, the same boundary-crossing
+# pattern tools/bootstrap.template.sh uses for its own PREFIX. No PATH
+# persistence either: /usr/local/bin is on every default PATH, so there is no
+# rc file to edit.
+run_inner() {
+    if [ -n "$ELEVATE" ]; then
+        info "$COMP installs to /usr/local/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
+    fi
+    if [ -n "${PREFIX:-}" ]; then
+        ( cd "$TMP/x" && $ELEVATE env PREFIX="$PREFIX" \
+            BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh ./install.sh )
+    else
+        ( cd "$TMP/x" && $ELEVATE env \
+            BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" sh ./install.sh )
+    fi
+}
+run_inner
 
 # ---- store operator key for relay update --------------------------------
 # Store the key at the canonical path so `relay update` can find it without
