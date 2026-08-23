@@ -261,11 +261,25 @@ pass "server up"
 # assertions (1)(2)(3)(4)(5)(8) use it; a caller can equally wrap the whole
 # call in `out="$(... run_bootstrap … 2>&1)"` to capture both, matching (6)(7).
 #
-# NO_SUDO=1, SUDO_FAILS=1, FAKE_UID=<n> are read from the environment this
-# function inherits from ITS caller (a `VAR=val run_bootstrap …` prefix exports
-# VAR for exactly this call, plain bash semantics) -- none of them are ever
-# passed into the rendered bootstrap's own env; they only steer which PATH and
-# which sudo-stub behavior this harness sets up before running it.
+# NO_SUDO=1, SUDO_FAILS=1, FAKE_UID=<n>, NO_TTY=1 are read from the
+# environment this function inherits from ITS caller (a `VAR=val
+# run_bootstrap …` prefix exports VAR for exactly this call, plain bash
+# semantics) -- none of them are ever passed into the rendered bootstrap's own
+# env; they only steer which PATH, which sudo-stub behavior, and (NO_TTY) how
+# the child process is launched by this harness before running it.
+#
+# NO_TTY=1 -- actually detach the controlling terminal for the child, so
+# has_tty()'s `( exec </dev/tty )` probe genuinely fails rather than this
+# assertion happening to pass only when the suite itself runs from a session
+# with no controlling terminal (e.g. inside an agent shell) and happening to
+# fail — wrongly, on correct code — whenever it runs from an ordinary
+# terminal. macOS has no setsid(1) (Linux has one); python3, already required
+# by this suite, calling os.setsid() before exec is the portable equivalent:
+# it starts a new session with no controlling terminal at all, so opening
+# /dev/tty fails with ENXIO exactly as it would on a real headless run. `env`
+# can only exec a real binary, so the python3 -c invocation is spelled out
+# literally ahead of `sh "$_script"` in each branch below, rather than being
+# hidden behind a shell-function wrapper (which env cannot exec).
 run_bootstrap() {
     _comp="$1"
     _mode="${2:-install}"
@@ -289,7 +303,29 @@ run_bootstrap() {
         _path="$WORK/sudobin:$WORK/bin:$PATH"
     fi
 
-    if [ -n "$_floor" ]; then
+    if [ -n "${NO_TTY:-}" ]; then
+        if [ -n "$_floor" ]; then
+            env "$_pinvar=$_tag" \
+                BURROWEE_SKIP_PREFLIGHT=1 BURROWEE_GH_PROXY= \
+                BURROWEE_DL_BASE="$BASE_URL/$_comp" \
+                HOME="$WORK/home" PATH="$_path" \
+                python3 -c '
+import os, sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+' sh "$_script" "$_floor" < /dev/null
+        else
+            env "$_pinvar=$_tag" \
+                BURROWEE_SKIP_PREFLIGHT=1 BURROWEE_GH_PROXY= \
+                BURROWEE_DL_BASE="$BASE_URL/$_comp" \
+                HOME="$WORK/home" PATH="$_path" \
+                python3 -c '
+import os, sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+' sh "$_script" < /dev/null
+        fi
+    elif [ -n "$_floor" ]; then
         env "$_pinvar=$_tag" \
             BURROWEE_SKIP_PREFLIGHT=1 BURROWEE_GH_PROXY= \
             BURROWEE_DL_BASE="$BASE_URL/$_comp" \
