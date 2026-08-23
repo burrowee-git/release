@@ -183,7 +183,10 @@ for c in cli gateway edge agent; do
     [ -f "$WORK/repo/$c/install.sh" ] || die "gen-bootstraps.sh rendered no $c/install.sh"
     [ -f "$WORK/repo/$c/upgrade.sh" ] || die "gen-bootstraps.sh rendered no $c/upgrade.sh"
 done
-pass "rendered cli/gateway/edge/agent install.sh + upgrade.sh under $WORK/repo"
+# relay has no upgrade.sh (no install/upgrade split -- see the relay template
+# header), so it is checked separately from the cli/gateway/edge/agent loop.
+[ -f "$WORK/repo/relay/install.sh" ] || die "gen-bootstraps.sh rendered no relay/install.sh"
+pass "rendered cli/gateway/edge/agent install.sh + upgrade.sh, and relay/install.sh, under $WORK/repo"
 
 # ---- fabricate + sign a one-file-fixture release per component --------------
 # ONE kit shape covers every assertion in this suite: an inner install.sh that
@@ -240,6 +243,15 @@ say "FABRICATE: one signed fixture release per component"
 for c in cli gateway edge agent; do fabricate_kit "$c"; done
 pass "signed fixture kits under $WORK/serve/{cli,gateway,edge,agent}"
 
+# relay does not get a servable fixture kit here -- its refusal path
+# (assertion 10 below) exits at resolve_elevate(), before any download
+# begins, so run_bootstrap only ever needs relay's tag file to satisfy its
+# `_tag="$(cat "$WORK/tag.$_comp")"` lookup. A real relay kit is served over
+# the gated challenge-response scheme (see relay-bootstrap.template.sh's
+# header); reusing fabricate_kit's plain-GET fixture for relay would imply
+# that shape and prove nothing extra, so it is not done.
+printf '%s' "relay/v0.1.0.2026.01.01.elevatetest" > "$WORK/tag.relay"
+
 # ---- serve --------------------------------------------------------------
 say "SERVE: 127.0.0.1:$PORT"
 ( cd "$WORK/serve" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 ) >/dev/null 2>&1 &
@@ -293,7 +305,8 @@ run_bootstrap() {
         gateway) _pinvar=BURROWEE_GATEWAY_VERSION ;;
         edge)    _pinvar=BURROWEE_EDGE_VERSION ;;
         agent)   _pinvar=BURROWEE_AGENT_VERSION ;;
-        *) die "run_bootstrap: component '$_comp' is not wired into this suite (only cli/gateway/edge/agent — no assertion here exercises relay)" ;;
+        relay)   _pinvar=BURROWEE_RELAY_VERSION ;;
+        *) die "run_bootstrap: component '$_comp' is not wired into this suite (only cli/gateway/edge/agent/relay)" ;;
     esac
     _tag="$(cat "$WORK/tag.$_comp")"
 
@@ -454,5 +467,24 @@ fi
 extract_block tools/bootstrap.template.sh | grep -q '^has_tty() {$' \
     || die "extract_block found nothing -- the BEGIN/END markers are missing or misspelled"
 pass "elevation literals identical between tools/bootstrap.template.sh and tools/relay-bootstrap.template.sh"
+
+# ---- (10) relay's no-tty refusal names a command that actually works -------
+# The pinned block in (9) is byte-identical between the two templates, but it
+# only ever prints $ELEVATE_HINT -- a variable each template defines for
+# itself, above the pinned range, beside its own needs_root_comp(). This
+# assertion is what pins THAT: relay's refusal must not repeat the bare
+# `curl … | sudo sh` that works for gateway/edge but silently drops relay's
+# operator key, and it must actually name relay's own working form
+# (`sh -s -- --key`, run only after becoming root).
+say "ASSERT (10): relay's no-tty refusal names relay's own working command, not gateway/edge's"
+out="$(NO_TTY=1 SUDO_FAILS=1 run_bootstrap relay 2>&1)" && die "expected refusal, got success:\n$out"
+printf '%s' "$out" | grep -q -- '--key' \
+    || die "relay's refusal did not name --key: $out"
+printf '%s' "$out" | grep -q 'sh -s -- --key' \
+    || die "relay's refusal did not name its working sh -s -- --key form: $out"
+if printf '%s' "$out" | grep -Eq 'curl[^|]*\| sudo sh[[:space:]]*$'; then
+    die "relay's refusal still names the piped 'sudo sh' form, which cannot carry the operator key: $out"
+fi
+pass "relay's refusal named its own working command: $(printf '%s' "$out" | grep -o 'sh -s -- --key[^"]*')"
 
 printf '\n\342\234\223 ELEVATE-TEST OK\n'

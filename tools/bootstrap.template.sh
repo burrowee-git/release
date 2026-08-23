@@ -227,6 +227,15 @@ needs_root_comp() {
     esac
 }
 
+# ELEVATE_HINT -- the exact re-run command the pinned refusal below shows when
+# this run has no tty and no cached sudo credentials. Lives HERE, beside
+# needs_root_comp(), because it differs the same way and for the same reason:
+# gateway/edge take no secret on the command line, so the plain piped re-run
+# under sudo works verbatim. relay's own copy of this variable
+# (tools/relay-bootstrap.template.sh) says something else, because relay's
+# operator key cannot survive the sudo boundary -- see that file's comment.
+ELEVATE_HINT="curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sudo sh"
+
 # ---- BEGIN pinned elevation literals -------------------------------------
 # Kept byte-identical between tools/bootstrap.template.sh and
 # tools/relay-bootstrap.template.sh — tools/test-elevate.sh assertion (9)
@@ -251,7 +260,7 @@ resolve_elevate() {
     fi
     if ! has_tty && ! sudo -n true 2>/dev/null; then
         fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
-    curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sudo sh"
+    $ELEVATE_HINT"
     fi
     printf 'sudo'
 }

@@ -93,6 +93,22 @@ needs_root_comp() {
     return 0
 }
 
+# ELEVATE_HINT -- the exact re-run command the pinned refusal below shows when
+# this run has no tty and no cached sudo credentials. Lives HERE, beside
+# needs_root_comp(), for the same reason it differs there: unlike
+# gateway/edge, relay is gated by an operator ed25519 key (--key <pem> or
+# BURROWEE_RELAY_DL_KEY) that a plain `curl … | sudo sh` cannot carry across
+# the sudo boundary -- sudo has nothing to forward it as (the pipe supplies no
+# argv for `sh -s --`), sudo scrubs BURROWEE_RELAY_DL_KEY from the child's env
+# by default, and HOME becomes /root so a key stored at the invoking user's
+# own ~/.burrowee/relay/release_dl.key is not found either. The one form that
+# genuinely works is to become root FIRST (so resolve_elevate sees uid 0 and
+# never calls sudo at all) and hand the key straight to the script as an
+# argument, the same `sh -s -- --key <pem>` shape documented at the top of
+# this file.
+ELEVATE_HINT="this needs the operator key, and sudo cannot carry it across — become root first (\`sudo -i\`), then:
+    curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sh -s -- --key <path-to-your-operator-key>"
+
 # ---- BEGIN pinned elevation literals -------------------------------------
 # Kept byte-identical between tools/bootstrap.template.sh and
 # tools/relay-bootstrap.template.sh — tools/test-elevate.sh assertion (9)
@@ -117,7 +133,7 @@ resolve_elevate() {
     fi
     if ! has_tty && ! sudo -n true 2>/dev/null; then
         fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
-    curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sudo sh"
+    $ELEVATE_HINT"
     fi
     printf 'sudo'
 }
