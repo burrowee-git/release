@@ -96,6 +96,11 @@ log_text() { cat "${LOG}" 2>/dev/null; }
 # still going.
 sentinel_count() { grep -c '^RELEASE-EXIT:' "${LOG}" 2>/dev/null | tr -d '[:space:]'; }
 sentinel_code()  { sed -n 's/^RELEASE-EXIT://p' "${LOG}" 2>/dev/null | tail -1; }
+# LAST, not merely present. The launcher closes its own window after the
+# sentinel, and anything that ever printed after that line would be a line
+# written while the window was already going away — a truncated log is exactly
+# what the sentinel exists to rule out.
+sentinel_is_last() { tail -1 "${LOG}" 2>/dev/null | sed -n 's/^\(RELEASE-EXIT\):.*/\1/p'; }
 calls() { cat "${CALLS}" 2>/dev/null; }
 
 # check_refusal <label> <rc> — a refusal is not just a non-zero exit: the log
@@ -111,6 +116,7 @@ check_refusal() {
     fi
     check "${label}: exactly one RELEASE-EXIT line" "$(sentinel_count)" "1"
     check "${label}: sentinel carries the refusal code" "$(sentinel_code)" "${rc}"
+    check "${label}: sentinel is the last line" "$(sentinel_is_last)" "RELEASE-EXIT"
 }
 
 echo "--- session guard -----------------------------------------------------"
@@ -221,6 +227,53 @@ for comp in cli gateway edge agent relay; do
     check "component '${comp}' reaches release.sh" "$(calls)" "${comp} --dry-run"
 done
 
+echo "--- window close ------------------------------------------------------"
+
+# The launcher dismisses its own Terminal window on a clean finish. Nothing in
+# THIS file runs under Terminal — the harness gives the launcher a pty from
+# script(1), not a Terminal tab — so the close itself cannot fire here and the
+# guard that keeps it from firing is the thing under test: whatever the launcher
+# does at the end of a run, the log must be finished first and the exit status
+# must be the cut's, never the window's.
+run_launcher "${REQ_OK}"; rc=$?
+check "clean run still exits 0 with the close path enabled" "${rc}" "0"
+check "clean run: exactly one RELEASE-EXIT line" "$(sentinel_count)" "1"
+check "clean run: sentinel is the last line of the log" "$(sentinel_is_last)" "RELEASE-EXIT"
+check_contains "the default is announced, with the way out" "$(log_text)" \
+    "window: closes on a clean finish — set KEEP_WINDOW=1 to keep it open"
+
+# The opt-out an operator debugging a cut reaches for. It is read from the
+# request file, which is where it has to work: an opened .command does not
+# inherit the environment of whatever shell asked LaunchServices to open it.
+REQ_KEEP="${WORK}/req-keep"
+printf 'COMPONENTS="cli"\nFLAGS="--dry-run"\nKEEP_WINDOW=1\n' > "${REQ_KEEP}"
+run_launcher "${REQ_KEEP}"; rc=$?
+check "KEEP_WINDOW=1 still cuts (rc)" "${rc}" "0"
+check "KEEP_WINDOW=1 still cuts (component)" "$(calls)" "cli --dry-run"
+check_contains "KEEP_WINDOW=1 is echoed back" "$(log_text)" \
+    "window: KEEP_WINDOW=1 — staying open whatever happens"
+check "KEEP_WINDOW=1: sentinel is still the last line" "$(sentinel_is_last)" "RELEASE-EXIT"
+
+# The one property this harness cannot observe, asserted against the source
+# instead — and said out loud as such, because a grep over a file is not a
+# measurement of behaviour. The close cannot fire under script(1) (no Terminal,
+# so close_own_window returns at its first guard), which means no run here can
+# tell "closed only on success" apart from "never closed". A cut that fails and
+# then vanishes is the worst outcome this feature can produce, so the gate that
+# prevents it is pinned in place until someone can exercise it for real.
+# shellcheck disable=SC2016  # the $rc is the launcher's, matched literally
+check "the close is gated on exit 0, in the trap" \
+    "$(grep -c '^    \[ "\$rc" -eq 0 \] && close_own_window$' "${LAUNCHER}")" "1"
+
+# A refusal must keep its window too, and the launcher decides that from the
+# exit code alone — so the code has to survive to the sentinel unchanged even
+# though the close path sits between the two.
+export RELEASE_STUB_RC=7
+run_launcher "${REQ_OK}"; rc=$?
+unset RELEASE_STUB_RC
+check_refusal "failed run keeps its exit code past the close path" "${rc}"
+check "failed run: the sentinel says 7, not 0" "$(sentinel_code)" "7"
+
 echo "--- lock --------------------------------------------------------------"
 
 # Two `open`s — an agent racing an operator, or a double-click — would otherwise
@@ -273,6 +326,14 @@ check "the previous log is rotated, not overwritten" \
 check "the new log holds only the new run" "$(sentinel_count)" "1"
 
 echo
+# NOT COVERED HERE: close_own_window's Apple Event. It needs a real Terminal
+# window — a pty from script(1) is not one — and it talks to /usr/bin/osascript
+# by absolute path, so PATH stubbing cannot reach it any more than it can reach
+# git. What IS covered above is everything the rest of the launcher depends on:
+# the exit code survives it, the log is finished before it, and the opt-out is
+# read. The close itself was measured by hand against real Terminal windows;
+# what that measurement found is written up in the PR, and it is not flattering.
+#
 # NOT COVERED HERE: push_marker/tree_state/unpushed_count. They run only on a
 # non-dry cut, they talk to /usr/bin/git by absolute path (so PATH stubbing
 # cannot reach them), and exercising them means a real repository with a real

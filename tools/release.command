@@ -33,6 +33,9 @@
 # rather than guess when the run finished. Exactly one run per log — the previous
 # run is rotated to .release.log.prev, so a refusal never destroys the record of
 # the last real cut. Override the log with RELEASE_LOG.
+#
+# On a clean finish the launcher also closes the Terminal window it was opened
+# into — see close_own_window below, and KEEP_WINDOW=1 to switch that off.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 1
@@ -53,6 +56,105 @@ fi
 say() { echo "$@" | tee -a "$LOG"; }
 die() { say "✗ $*"; exit 1; }
 
+# close_own_window — dismiss the Terminal window this run was opened into, once
+# the run has finished cleanly. Called from the EXIT trap and nowhere else; it
+# reads nothing the cut depends on and changes nothing about what a cut does.
+#
+# Terminal can do this from a profile ("close if the shell exited cleanly"), but
+# a profile is a machine-local preference: it does not travel with the repo, and
+# the next machine to open this file has not set it. Asking for the close here
+# makes the behaviour a property of the launcher.
+#
+# Three rules, in order of importance:
+#
+#   1. ONLY on exit 0. A cut that fails and then vanishes is strictly worse than
+#      one that fails loudly — the operator has to be able to read which
+#      component published and which did not. Every non-zero exit leaves the
+#      window up, and the caller enforces that, not this function.
+#   2. ONLY this window. `front window` and `every window` are both wrong: the
+#      operator may have other Terminal windows open, running unrelated work.
+#      The match is this process's own tty(1) — one tty per LIVE window —
+#      against the tty of each window's selected tab, and the close only happens
+#      when that selects EXACTLY ONE window that is EXACTLY ONE tab and is still
+#      running something. Zero matches (not under Terminal at all), several, or a
+#      window shared with other tabs (someone's `open` preference made this a tab
+#      beside real work) all leave every window alone. A count is not an
+#      identity; the tty is — but only among live tabs. A window left behind at
+#      "[Process completed]" keeps reporting the tty it used to own, and the
+#      kernel hands that same pty to the next window opened, so tty alone can
+#      name two windows at once. `busy` is what tells them apart: the dead one is
+#      idle, this one is running this script. Without that test the launcher
+#      would either close a stranger's window or, having found two, decline to
+#      close its own — measured, both.
+#   3. NEVER at the cost of the exit status, and NEVER at the cost of finishing.
+#      Missing osascript, Terminal not running, a Terminal that does not answer,
+#      Apple Events held up by a consent dialog — all discarded, and all bounded.
+#      An Apple Event to an app that TCC has not cleared does not fail, it BLOCKS
+#      on a dialog; unattended, that would park the launcher after a successful
+#      cut with everything already published, waiting on a prompt nobody is
+#      watching. So the call runs as a child under a two-second deadline and is
+#      killed if it overruns. A window that fails to close is cosmetic; a
+#      published release reported as a failure, or one that never reports at all,
+#      is not.
+#
+#      In practice the event should not need a grant: osascript here is hosted by
+#      Terminal and its target IS Terminal, and an app scripting itself is exempt
+#      — measured on this machine, the close ran with no dialog and left no
+#      Automation entry behind. The deadline is for the machine where that does
+#      not hold. It cannot be probed for cheaply without risking the very prompt
+#      it would be probing for, so the launcher does not try; it just refuses to
+#      wait. See .release-request.example if a machine ever does ask.
+#
+# The sentinel is written BEFORE this runs, so .release.log is complete and
+# flushed on disk whatever happens here. Terminal performs the close
+# asynchronously and will not act on it while the tab still has a process in it
+# — which is this process, for another few milliseconds — so nothing may be
+# sequenced after this call and no part of the run may depend on it.
+close_own_window() {
+    [ "${KEEP_WINDOW:-0}" = "0" ] || return 0
+    [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ] || return 0
+    [ -x /usr/bin/osascript ] || return 0
+    local mytty
+    mytty="$(/usr/bin/tty 2>/dev/null)" || return 0
+    case "${mytty}" in /dev/tty*) ;; *) return 0 ;; esac
+    /usr/bin/osascript \
+        -e 'on run argv' \
+        -e '  set want to item 1 of argv' \
+        -e '  if application "Terminal" is not running then return' \
+        -e '  tell application "Terminal"' \
+        -e '    set hits to {}' \
+        -e '    repeat with w in windows' \
+        -e '      try' \
+        -e '        if (tty of selected tab of w) is want and (busy of selected tab of w) and (count of tabs of w) is 1 then' \
+        -e '          set end of hits to (id of w)' \
+        -e '        end if' \
+        -e '      end try' \
+        -e '    end repeat' \
+        -e '    if (count of hits) is 1 then close (window id (item 1 of hits))' \
+        -e '  end tell' \
+        -e 'end run' \
+        "${mytty}" >/dev/null 2>&1 &
+    local pid=$! waited=0 state=""
+    # The deadline. Polled through ps rather than `kill -0` because a finished
+    # child is a zombie until it is waited for, and `kill -0` cannot tell a
+    # zombie from a process still sitting on a consent dialog — it would burn the
+    # whole two seconds on every successful close.
+    while :; do
+        state="$(ps -o state= -p "${pid}" 2>/dev/null | tr -d '[:space:]')"
+        case "${state}" in
+            ""|Z*) break ;;
+        esac
+        if [ "${waited}" -ge 20 ]; then
+            kill -TERM "${pid}" 2>/dev/null
+            break
+        fi
+        /bin/sleep 0.1
+        waited=$((waited + 1))
+    done
+    wait "${pid}" 2>/dev/null
+    return 0
+}
+
 # ONE emitter for the sentinel. Hand-written sentinels covered only the paths
 # someone remembered: closing the Terminal window (SIGHUP — the expected way an
 # operator abandons a .command), Ctrl-C, and `set -u` tripping inside a sourced
@@ -63,6 +165,9 @@ on_exit() {
     trap - EXIT
     [ -n "$LOCK" ] && rmdir "$LOCK" 2>/dev/null
     say "RELEASE-EXIT:${rc}"
+    # Last, and only on success: the sentinel above is the final line of the log
+    # in every case, and a failed run keeps its window so it can be read.
+    [ "$rc" -eq 0 ] && close_own_window
     exit "$rc"
 }
 trap on_exit EXIT
@@ -125,6 +230,16 @@ for comp in ${COMPONENTS}; do
     esac
 done
 say "request: ${COMPONENTS} [${FLAGS}]"
+
+# Said out loud, and said here rather than at exit: the window is gone by the
+# time an operator would look for it, so the log has to carry why it went and
+# what to set to keep the next one. KEEP_WINDOW may come from the environment or
+# from the request file, which has just been sourced.
+if [ "${KEEP_WINDOW:-0}" = "0" ]; then
+    say "window: closes on a clean finish — set KEEP_WINDOW=1 to keep it open"
+else
+    say "window: KEEP_WINDOW=${KEEP_WINDOW} — staying open whatever happens"
+fi
 
 # A dry run makes no marker commit, so HEAD is still the PREVIOUS marker and the
 # subject test below would match it and push whatever is unpushed. Skip the push

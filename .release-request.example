@@ -5,8 +5,9 @@
 # write here executes with the toolchain on PATH. One NAME="value" per line;
 # `#` comments and blank lines are fine. LF endings only: a CRLF copy leaves a
 # trailing \r inside the last value, and the cut aborts on a component name it
-# cannot match. Only COMPONENTS and FLAGS are read — a mistyped FLAG= is not an
-# error, it is silently ignored, and the run proceeds as if you had set nothing.
+# cannot match. Only COMPONENTS, FLAGS and KEEP_WINDOW are read — a mistyped
+# FLAG= is not an error, it is silently ignored, and the run proceeds as if you
+# had set nothing.
 #
 # COMPONENTS — one or more of: cli gateway edge agent relay
 #
@@ -57,6 +58,46 @@
 # run by hand. --distribute-only is recognised only as release.sh's FIRST
 # argument, because it takes its component and stamp positionally — so it cannot
 # be expressed in FLAGS at all.
+#
+# KEEP_WINDOW — leave the Terminal window open even when the cut succeeds.
+#
+# Unset (the default), the launcher closes its own window on a clean finish, so
+# a batch you walked away from does not leave a dead window behind. It closes
+# ONLY on RELEASE-EXIT:0 and ONLY the window whose tty is this process's own —
+# a failed cut always stays on screen, and no other Terminal window is ever
+# touched. .release.log is written and flushed before the close is even asked
+# for, so nothing is lost either way; the log is the record, the window is not.
+#
+# Set KEEP_WINDOW=1 when you are debugging the cut itself and want the scrollback
+# in front of you rather than in a file — release.sh's own output, the notarize
+# chatter, and anything you were about to run in that window by hand. It is also
+# the right setting when you are watching a run you may want to interrupt.
+#
+#     KEEP_WINDOW=1
+#
+# The launcher reads it from the environment too, but an opened .command does not
+# inherit your shell's environment — LaunchServices does not carry it across — so
+# this file is the setting that actually reaches a double-clicked or `open`ed run.
+#
+# Nothing to set to make the close happen: it is the default, and where it cannot
+# work the window simply stays. That is a cosmetic outcome, never a failed
+# release — a window that would not close never changes the status the launcher
+# exits with, and never delays it by more than the two seconds it allows itself.
+#
+# IF A MACHINE EVER ASKS FOR PERMISSION. The close is an Apple Event, and Apple
+# Events between applications are gated by Automation consent. This one should
+# not be: osascript runs hosted by Terminal and its target is Terminal, and an
+# app scripting itself is exempt — the close was measured here with no dialog and
+# no Automation entry created. If some future macOS decides otherwise you will
+# see, once, "Terminal wants to control Terminal". Allow it in
+#
+#     System Settings → Privacy & Security → Automation → Terminal → Terminal
+#
+# and it is not asked again. Deny it, or leave the dialog standing, and nothing
+# breaks: the launcher gives the event two seconds, kills it, and exits with the
+# code the cut earned. It will not sit on that dialog with a release already
+# published — which is exactly why the deadline is there, and why the launcher
+# never probes for the grant: probing for it is the thing that raises the prompt.
 
 COMPONENTS="edge"
 FLAGS="--public"
