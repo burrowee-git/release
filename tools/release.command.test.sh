@@ -85,6 +85,8 @@ run_launcher() {
     RELEASE_ENV="${2:-${ENV_FILE}}" \
     RELEASE_REQUEST="$1" \
     RELEASE_LOG="${LOG}" \
+    TERM_PROGRAM="${TEST_TERM_PROGRAM:-}" \
+    RELEASE_TERMINAL_PREFS="${TEST_TERMINAL_PREFS:-${WORK}/no-such-prefs.plist}" \
     PATH="${STUBS}:/usr/bin:/bin" \
         /usr/bin/script -q /dev/null /bin/bash "${REPO}/tools/release.command" \
         </dev/null >/dev/null 2>&1
@@ -96,10 +98,10 @@ log_text() { cat "${LOG}" 2>/dev/null; }
 # still going.
 sentinel_count() { grep -c '^RELEASE-EXIT:' "${LOG}" 2>/dev/null | tr -d '[:space:]'; }
 sentinel_code()  { sed -n 's/^RELEASE-EXIT://p' "${LOG}" 2>/dev/null | tail -1; }
-# LAST, not merely present. The launcher closes its own window after the
-# sentinel, and anything that ever printed after that line would be a line
-# written while the window was already going away — a truncated log is exactly
-# what the sentinel exists to rule out.
+# LAST, not merely present. KEEP_WINDOW holds the run open AFTER the sentinel,
+# and the prompt it prints must go to the terminal and not into the file: a
+# watcher that reads the log has to be able to stop at RELEASE-EXIT: while the
+# window is still sitting there waiting for a human.
 sentinel_is_last() { tail -1 "${LOG}" 2>/dev/null | sed -n 's/^\(RELEASE-EXIT\):.*/\1/p'; }
 calls() { cat "${CALLS}" 2>/dev/null; }
 
@@ -227,52 +229,146 @@ for comp in cli gateway edge agent relay; do
     check "component '${comp}' reaches release.sh" "$(calls)" "${comp} --dry-run"
 done
 
-echo "--- window close ------------------------------------------------------"
+echo "--- window disposition ---------------------------------------------"
 
-# The launcher dismisses its own Terminal window on a clean finish. Nothing in
-# THIS file runs under Terminal — the harness gives the launcher a pty from
-# script(1), not a Terminal tab — so the close itself cannot fire here and the
-# guard that keeps it from firing is the thing under test: whatever the launcher
-# does at the end of a run, the log must be finished first and the exit status
-# must be the cut's, never the window's.
-run_launcher "${REQ_OK}"; rc=$?
-check "clean run still exits 0 with the close path enabled" "${rc}" "0"
-check "clean run: exactly one RELEASE-EXIT line" "$(sentinel_count)" "1"
-check "clean run: sentinel is the last line of the log" "$(sentinel_is_last)" "RELEASE-EXIT"
-check_contains "the default is announced, with the way out" "$(log_text)" \
-    "window: closes on a clean finish — set KEEP_WINDOW=1 to keep it open"
+# NOTHING here reads the operator's real Terminal preferences: every case points
+# the launcher at a plist this test built, and the default for every OTHER case
+# in this file is a path that does not exist. The launcher only ever reads that
+# file — it must never write it, and a test that could write the live one would
+# be editing the machine's settings to check a message.
 
-# The opt-out an operator debugging a cut reaches for. It is read from the
-# request file, which is where it has to work: an opened .command does not
-# inherit the environment of whatever shell asked LaunchServices to open it.
+# make_prefs <file> <profile> [action] — a Terminal prefs plist shaped like the
+# real one. Omit <action> for a profile that has no shellExitAction at all, which
+# is how Terminal leaves a profile nobody has touched.
+make_prefs() {
+    local f="$1" profile="$2" action="${3:-}"
+    rm -f "${f}"
+    /usr/libexec/PlistBuddy -c "Add :\"Default Window Settings\" string ${profile}" "${f}" >/dev/null
+    /usr/libexec/PlistBuddy -c "Add :\"Window Settings\" dict" "${f}" >/dev/null
+    /usr/libexec/PlistBuddy -c "Add :\"Window Settings\":\"${profile}\" dict" "${f}" >/dev/null
+    [ -z "${action}" ] || /usr/libexec/PlistBuddy \
+        -c "Add :\"Window Settings\":\"${profile}\":shellExitAction integer ${action}" "${f}" >/dev/null
+}
+
+TEST_TERM_PROGRAM="Apple_Terminal"
+
+# 1 — measured to mean "close the window, however the run ended": a .command
+# exiting 0 and one exiting 3 both had their window closed under it. That makes
+# it the DANGEROUS setting, not the good one — the obvious reading of the number
+# is backwards, and a note that got this backwards would tell an operator their
+# failures are safe on screen when they are not.
+PREFS_ALWAYS="${WORK}/prefs-1.plist"
+make_prefs "${PREFS_ALWAYS}" "Cut Profile" 1
+TEST_TERMINAL_PREFS="${PREFS_ALWAYS}" run_launcher "${REQ_OK}"; rc=$?
+check "shellExitAction=1 still cuts — it is a note, not a gate" "${rc}" "0"
+check "shellExitAction=1 still reaches release.sh" "$(calls)" "cli --dry-run"
+check_contains "shellExitAction=1 warns that a failure would vanish" "$(log_text)" \
+    "a FAILED cut would vanish off the screen"
+check_contains "the profile is named, so the right one gets fixed" "$(log_text)" "'Cut Profile'"
+check_contains "the note says where the setting lives" "$(log_text)" "When the shell exits"
+
+# 2 — measured to mean "never close the window": a shell that exited 0 under it
+# stayed. The operator gets a dead window after every cut, which is safe but
+# needs saying or it looks like the launcher hung.
+PREFS_STAY="${WORK}/prefs-2.plist"
+make_prefs "${PREFS_STAY}" "Cut Profile" 2
+TEST_TERMINAL_PREFS="${PREFS_STAY}" run_launcher "${REQ_OK}"; rc=$?
+check "shellExitAction=2 still cuts" "${rc}" "0"
+check_contains "shellExitAction=2 is reported" "$(log_text)" "never closes this window"
+
+# Absent — a profile nobody has touched carries no key at all, and Terminal's own
+# default is to leave the window. Reading the key is not enough; its absence is a
+# branch of its own, worded as the absence it is.
+PREFS_UNSET="${WORK}/prefs-unset.plist"
+make_prefs "${PREFS_UNSET}" "Cut Profile"
+TEST_TERMINAL_PREFS="${PREFS_UNSET}" run_launcher "${REQ_OK}"; rc=$?
+check "no shellExitAction key still cuts" "${rc}" "0"
+check_contains "an absent setting is reported as absent" "$(log_text)" \
+    'has no "When the shell exits" setting'
+
+# A value nobody measured. "Close if the shell exited cleanly" is in Terminal's
+# menu but no profile on the machine this was written on used it, so its tag was
+# never observed. An unmeasured value must be reported as unmeasured — sorting it
+# into whichever branch looks plausible is how a note starts lying.
+PREFS_ODD="${WORK}/prefs-9.plist"
+make_prefs "${PREFS_ODD}" "Cut Profile" 9
+TEST_TERMINAL_PREFS="${PREFS_ODD}" run_launcher "${REQ_OK}"; rc=$?
+check "an unknown shellExitAction still cuts" "${rc}" "0"
+check_contains "an unknown value is admitted, not guessed" "$(log_text)" \
+    "something this launcher has not measured (shellExitAction=9)"
+
+# A prefs file that is not there at all — Terminal never launched on this
+# machine, or the path moved. Silence, and a cut that does not care.
+TEST_TERMINAL_PREFS="${WORK}/no-such-prefs.plist" run_launcher "${REQ_OK}"; rc=$?
+check "missing prefs file still cuts" "${rc}" "0"
+check "missing prefs file says nothing" \
+    "$(log_text | grep -c '^note: Terminal profile' | tr -d '[:space:]')" "0"
+
+# The guard that keeps all of the above off a non-Terminal terminal. Driven the
+# other way on purpose: if TERM_PROGRAM were ignored, the four cases above would
+# be measuring a check that fires for everyone, and the note would appear in
+# iTerm, in Ghostty and under script(1).
+TEST_TERM_PROGRAM="ghostty" TEST_TERMINAL_PREFS="${PREFS_STAY}" run_launcher "${REQ_OK}"; rc=$?
+check "not Apple_Terminal: no note" \
+    "$(log_text | grep -c '^note: Terminal profile' | tr -d '[:space:]')" "0"
+check "not Apple_Terminal: cuts anyway" "${rc}" "0"
+
+unset TEST_TERM_PROGRAM TEST_TERMINAL_PREFS
+
+# The property the whole check exists for. Under shellExitAction=1 a failed cut
+# would be closed off the screen, so the launcher holds the window itself —
+# without being asked, because nobody asks in advance for the run that fails.
+# Under a profile that keeps the window there is nothing to hold and it must not.
+export RELEASE_STUB_RC=5
+TEST_TERMINAL_PREFS="${PREFS_ALWAYS}" run_launcher "${REQ_OK}"; rc=$?
+check_refusal "failed cut under a closing profile" "${rc}"
+check "failed cut under a closing profile keeps its code" "$(sentinel_code)" "5"
+TEST_TERMINAL_PREFS="${PREFS_STAY}" run_launcher "${REQ_OK}"; rc=$?
+check_refusal "failed cut under a keeping profile" "${rc}"
+unset RELEASE_STUB_RC
+# Whether the hold actually happened is not observable from the log — it prints
+# to the terminal, and the harness answers it instantly with EOF. What IS pinned
+# is that it is reached only on the closing profile and only on a failure, and
+# that neither case can alter the exit status or the last line of the log.
+# shellcheck disable=SC2016  # $rc and $WINDOW_CLOSES_REGARDLESS are the launcher's
+check "the failure hold is gated on both the code and the profile" \
+    "$(grep -c 'elif \[ "\$rc" -ne 0 \] && \[ "\${WINDOW_CLOSES_REGARDLESS}" = "1" \]; then' "${LAUNCHER}")" "1"
+
+echo "--- KEEP_WINDOW -------------------------------------------------------"
+
+# The sentinel and the hold are ordered, and the order is the point: the log is
+# finished before anything blocks, so an agent watching for RELEASE-EXIT: is
+# never left waiting on an operator who has walked away from a held window.
 REQ_KEEP="${WORK}/req-keep"
 printf 'COMPONENTS="cli"\nFLAGS="--dry-run"\nKEEP_WINDOW=1\n' > "${REQ_KEEP}"
 run_launcher "${REQ_KEEP}"; rc=$?
 check "KEEP_WINDOW=1 still cuts (rc)" "${rc}" "0"
 check "KEEP_WINDOW=1 still cuts (component)" "$(calls)" "cli --dry-run"
+check "KEEP_WINDOW=1: exactly one RELEASE-EXIT line" "$(sentinel_count)" "1"
+check "KEEP_WINDOW=1: sentinel is still the LAST line of the log" "$(sentinel_is_last)" "RELEASE-EXIT"
 check_contains "KEEP_WINDOW=1 is echoed back" "$(log_text)" \
-    "window: KEEP_WINDOW=1 — staying open whatever happens"
-check "KEEP_WINDOW=1: sentinel is still the last line" "$(sentinel_is_last)" "RELEASE-EXIT"
+    "window: KEEP_WINDOW=1 — held at the end until you press Return"
 
-# The one property this harness cannot observe, asserted against the source
-# instead — and said out loud as such, because a grep over a file is not a
-# measurement of behaviour. The close cannot fire under script(1) (no Terminal,
-# so close_own_window returns at its first guard), which means no run here can
-# tell "closed only on success" apart from "never closed". A cut that fails and
-# then vanishes is the worst outcome this feature can produce, so the gate that
-# prevents it is pinned in place until someone can exercise it for real.
-# shellcheck disable=SC2016  # the $rc is the launcher's, matched literally
-check "the close is gated on exit 0, in the trap" \
-    "$(grep -c '^    \[ "\$rc" -eq 0 \] && close_own_window$' "${LAUNCHER}")" "1"
+# The hold prints to the terminal, not through say(). If it ever went to the log
+# the check above would fail — this asserts the other half: the prompt is not in
+# the file, so the file still ends where a watcher expects it to.
+check "the hold prompt never reaches the log" \
+    "$(log_text | grep -c 'let this window close' | tr -d '[:space:]')" "0"
 
-# A refusal must keep its window too, and the launcher decides that from the
-# exit code alone — so the code has to survive to the sentinel unchanged even
-# though the close path sits between the two.
-export RELEASE_STUB_RC=7
+# Left unset, nothing is held and the default is announced with the way out.
 run_launcher "${REQ_OK}"; rc=$?
+check "default run: exits 0" "${rc}" "0"
+check "default run: sentinel is the last line" "$(sentinel_is_last)" "RELEASE-EXIT"
+check_contains "default run: the opt-out is advertised" "$(log_text)" \
+    "KEEP_WINDOW=1 holds it open regardless"
+
+# The hold must not swallow the exit code — a failed cut that reported 0 because
+# somebody pressed Return is the worst outcome this file can produce.
+export RELEASE_STUB_RC=7
+run_launcher "${REQ_KEEP}"; rc=$?
 unset RELEASE_STUB_RC
-check_refusal "failed run keeps its exit code past the close path" "${rc}"
-check "failed run: the sentinel says 7, not 0" "$(sentinel_code)" "7"
+check_refusal "KEEP_WINDOW=1 on a failed cut" "${rc}"
+check "KEEP_WINDOW=1 on a failed cut: the sentinel still says 7" "$(sentinel_code)" "7"
 
 echo "--- lock --------------------------------------------------------------"
 

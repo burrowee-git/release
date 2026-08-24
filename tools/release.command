@@ -34,8 +34,15 @@
 # run is rotated to .release.log.prev, so a refusal never destroys the record of
 # the last real cut. Override the log with RELEASE_LOG.
 #
-# On a clean finish the launcher also closes the Terminal window it was opened
-# into — see close_own_window below, and KEEP_WINDOW=1 to switch that off.
+#   ~/Library/Preferences/com.apple.Terminal.plist
+#                             read, never written: which profile a new window
+#                             opens with, and whether that profile closes the
+#                             window when the shell exits. Override the path with
+#                             RELEASE_TERMINAL_PREFS.
+#
+# The window closes on a clean cut because the SHELL EXITS CLEANLY and Terminal's
+# profile acts on it — see window_note below. Nothing here scripts Terminal;
+# KEEP_WINDOW=1 holds the window instead.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 1
@@ -56,102 +63,22 @@ fi
 say() { echo "$@" | tee -a "$LOG"; }
 die() { say "✗ $*"; exit 1; }
 
-# close_own_window — dismiss the Terminal window this run was opened into, once
-# the run has finished cleanly. Called from the EXIT trap and nowhere else; it
-# reads nothing the cut depends on and changes nothing about what a cut does.
+# hold_window — keep this window on screen after a run that would otherwise take
+# it away. The only lever a script has over that is not finishing: the window
+# goes when the shell exits, so to keep it the shell has to still be here.
 #
-# Terminal can do this from a profile ("close if the shell exited cleanly"), but
-# a profile is a machine-local preference: it does not travel with the repo, and
-# the next machine to open this file has not set it. Asking for the close here
-# makes the behaviour a property of the launcher.
+# Runs AFTER the sentinel, deliberately. .release.log is complete and flushed
+# before this blocks, so a watching agent session reads RELEASE-EXIT: and moves
+# on while the operator still has the scrollback in front of them. It prints to
+# the terminal only — never through say() — because the sentinel is the last line
+# of the log and nothing may be written past it.
 #
-# Three rules, in order of importance:
-#
-#   1. ONLY on exit 0. A cut that fails and then vanishes is strictly worse than
-#      one that fails loudly — the operator has to be able to read which
-#      component published and which did not. Every non-zero exit leaves the
-#      window up, and the caller enforces that, not this function.
-#   2. ONLY this window. `front window` and `every window` are both wrong: the
-#      operator may have other Terminal windows open, running unrelated work.
-#      The match is this process's own tty(1) — one tty per LIVE window —
-#      against the tty of each window's selected tab, and the close only happens
-#      when that selects EXACTLY ONE window that is EXACTLY ONE tab and is still
-#      running something. Zero matches (not under Terminal at all), several, or a
-#      window shared with other tabs (someone's `open` preference made this a tab
-#      beside real work) all leave every window alone. A count is not an
-#      identity; the tty is — but only among live tabs. A window left behind at
-#      "[Process completed]" keeps reporting the tty it used to own, and the
-#      kernel hands that same pty to the next window opened, so tty alone can
-#      name two windows at once. `busy` is what tells them apart: the dead one is
-#      idle, this one is running this script. Without that test the launcher
-#      would either close a stranger's window or, having found two, decline to
-#      close its own — measured, both.
-#   3. NEVER at the cost of the exit status, and NEVER at the cost of finishing.
-#      Missing osascript, Terminal not running, a Terminal that does not answer,
-#      Apple Events held up by a consent dialog — all discarded, and all bounded.
-#      An Apple Event to an app that TCC has not cleared does not fail, it BLOCKS
-#      on a dialog; unattended, that would park the launcher after a successful
-#      cut with everything already published, waiting on a prompt nobody is
-#      watching. So the call runs as a child under a two-second deadline and is
-#      killed if it overruns. A window that fails to close is cosmetic; a
-#      published release reported as a failure, or one that never reports at all,
-#      is not.
-#
-#      In practice the event should not need a grant: osascript here is hosted by
-#      Terminal and its target IS Terminal, and an app scripting itself is exempt
-#      — measured on this machine, the close ran with no dialog and left no
-#      Automation entry behind. The deadline is for the machine where that does
-#      not hold. It cannot be probed for cheaply without risking the very prompt
-#      it would be probing for, so the launcher does not try; it just refuses to
-#      wait. See .release-request.example if a machine ever does ask.
-#
-# The sentinel is written BEFORE this runs, so .release.log is complete and
-# flushed on disk whatever happens here. Terminal performs the close
-# asynchronously and will not act on it while the tab still has a process in it
-# — which is this process, for another few milliseconds — so nothing may be
-# sequenced after this call and no part of the run may depend on it.
-close_own_window() {
-    [ "${KEEP_WINDOW:-0}" = "0" ] || return 0
-    [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ] || return 0
-    [ -x /usr/bin/osascript ] || return 0
-    local mytty
-    mytty="$(/usr/bin/tty 2>/dev/null)" || return 0
-    case "${mytty}" in /dev/tty*) ;; *) return 0 ;; esac
-    /usr/bin/osascript \
-        -e 'on run argv' \
-        -e '  set want to item 1 of argv' \
-        -e '  if application "Terminal" is not running then return' \
-        -e '  tell application "Terminal"' \
-        -e '    set hits to {}' \
-        -e '    repeat with w in windows' \
-        -e '      try' \
-        -e '        if (tty of selected tab of w) is want and (busy of selected tab of w) and (count of tabs of w) is 1 then' \
-        -e '          set end of hits to (id of w)' \
-        -e '        end if' \
-        -e '      end try' \
-        -e '    end repeat' \
-        -e '    if (count of hits) is 1 then close (window id (item 1 of hits))' \
-        -e '  end tell' \
-        -e 'end run' \
-        "${mytty}" >/dev/null 2>&1 &
-    local pid=$! waited=0 state=""
-    # The deadline. Polled through ps rather than `kill -0` because a finished
-    # child is a zombie until it is waited for, and `kill -0` cannot tell a
-    # zombie from a process still sitting on a consent dialog — it would burn the
-    # whole two seconds on every successful close.
-    while :; do
-        state="$(ps -o state= -p "${pid}" 2>/dev/null | tr -d '[:space:]')"
-        case "${state}" in
-            ""|Z*) break ;;
-        esac
-        if [ "${waited}" -ge 20 ]; then
-            kill -TERM "${pid}" 2>/dev/null
-            break
-        fi
-        /bin/sleep 0.1
-        waited=$((waited + 1))
-    done
-    wait "${pid}" 2>/dev/null
+# `read` returns non-zero at EOF, which is what makes this safe when stdin is not
+# a person: it falls through instead of hanging forever.
+hold_window() {
+    [ -t 0 ] || return 0
+    printf '\n── %s — press Return to let this window close ──\n' "$1"
+    read -r _
     return 0
 }
 
@@ -165,15 +92,96 @@ on_exit() {
     trap - EXIT
     [ -n "$LOCK" ] && rmdir "$LOCK" 2>/dev/null
     say "RELEASE-EXIT:${rc}"
-    # Last, and only on success: the sentinel above is the final line of the log
-    # in every case, and a failed run keeps its window so it can be read.
-    [ "$rc" -eq 0 ] && close_own_window
+    # Last, and after the sentinel: the log is finished and on disk before this
+    # can block, so holding the window never holds up whoever is reading the log.
+    #
+    # The second branch is the one that matters. A profile set to "Close the
+    # window" closes it on a FAILED cut too — measured, not assumed — and a cut
+    # that fails and then disappears off the screen is the worst thing this
+    # launcher can do. When that is the setting and the cut failed, the run holds
+    # the window whether or not anyone asked for it. Nothing to hold when the
+    # profile was unreadable or would have kept the window anyway.
+    if [ "${KEEP_WINDOW:-0}" != "0" ]; then
+        hold_window "KEEP_WINDOW=${KEEP_WINDOW}"
+    elif [ "$rc" -ne 0 ] && [ "${WINDOW_CLOSES_REGARDLESS}" = "1" ]; then
+        hold_window "this cut FAILED (exit ${rc}) and your Terminal profile would close the window on it"
+    fi
     exit "$rc"
 }
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# 0. What happens to this window afterwards. A note, never a gate: a Terminal
+#     preference has no business failing a release. It runs BEFORE the session
+#     guard so that the guard's own refusals are covered by it too.
+#
+#     There is no scripted close here and there deliberately never was. The first
+#     attempt asked Terminal to close the window over an Apple Event and it made
+#     things WORSE: sent from inside the running .command it left the window
+#     pinned open — Terminal will not close a window whose tab still holds a
+#     process, and that process is this script — and a window asked once then
+#     stopped closing by any route, including the shell-exit setting that had
+#     been working. Measured against a control that only exited 0 and closed in
+#     under five seconds every time. So the launcher exits cleanly, which is the
+#     thing that actually works, and reads the preference to say what that will
+#     mean. No Apple Events, nothing for TCC to gate.
+#
+#     Which profile: `Default Window Settings` is Terminal ▸ Settings ▸ General ▸
+#     "New windows open with", and a .command opened by LaunchServices IS a new
+#     window; `Startup Window Settings` is the separate "On startup, open" popup,
+#     used only for the window Terminal makes when it launches. Default is read
+#     first, Startup stands in when Default is absent, and Terminal's own
+#     fallback when neither is set is the Basic profile.
+#
+#     shellExitAction — the tag behind Terminal ▸ Settings ▸ Profiles ▸ Shell ▸
+#     "When the shell exits". MEASURED on this machine, because the numbers are
+#     menu tags and not the menu order, and guessing them the obvious way gets
+#     them backwards:
+#
+#       1  closes the window HOWEVER the run ended. A .command exiting 0 and one
+#          exiting 3 both had their window closed. This is the dangerous one: it
+#          takes a failed cut off the screen, so the trap holds the window itself
+#          when a run fails under it.
+#       2  never closes the window. A shell that exited 0 under it stayed.
+#       absent  Terminal's default, which is also to leave the window open.
+#       anything else  NOT determined here. "Close if the shell exited cleanly"
+#          exists in the menu but no profile on the machine used it, so its tag
+#          was never observed and this file will not invent one — an unknown
+#          value is reported as unknown rather than guessed into a branch.
+TERMINAL_PREFS="${RELEASE_TERMINAL_PREFS:-$HOME/Library/Preferences/com.apple.Terminal.plist}"
+PLIST=/usr/libexec/PlistBuddy
+
+# Set by window_note when the profile will close this window even on a failure,
+# which is what the EXIT trap needs to know. Default 0: unreadable prefs, another
+# terminal, or a setting that keeps the window all mean "nothing to hold".
+WINDOW_CLOSES_REGARDLESS=0
+
+# plist_get <path> — one value out of the prefs, empty if it is not there. Keys
+# are quoted because every one of them has spaces in it and PlistBuddy splits a
+# path on them. Read only: this file must never write the operator's settings.
+plist_get() { "$PLIST" -c "Print :$1" "${TERMINAL_PREFS}" 2>/dev/null; }
+
+window_note() {
+    [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ] || return 0
+    [ -x "$PLIST" ] || return 0
+    [ -r "${TERMINAL_PREFS}" ] || return 0
+    local profile action where
+    profile="$(plist_get '"Default Window Settings"')"
+    [ -n "${profile}" ] || profile="$(plist_get '"Startup Window Settings"')"
+    [ -n "${profile}" ] || profile="Basic"
+    action="$(plist_get "\"Window Settings\":\"${profile}\":shellExitAction")"
+    where="Terminal ▸ Settings ▸ Profiles ▸ ${profile} ▸ Shell ▸ \"When the shell exits\""
+    case "${action}" in
+        1)  WINDOW_CLOSES_REGARDLESS=1
+            say "note: Terminal profile '${profile}' closes this window however the cut ends — a FAILED cut would vanish off the screen, so this run will hold the window itself if it fails. To stop that being necessary: ${where}" ;;
+        2)  say "note: Terminal profile '${profile}' never closes this window — close it yourself when the cut is done (${where})" ;;
+        "") say "note: Terminal profile '${profile}' has no \"When the shell exits\" setting, so Terminal will leave this window open — close it yourself, or set it in ${where}" ;;
+        *)  say "note: Terminal profile '${profile}' has \"When the shell exits\" set to something this launcher has not measured (shellExitAction=${action}); check what it does with a failed cut before trusting this window to stay (${where})" ;;
+    esac
+}
+window_note
 
 # 1. Session. Checked FIRST and refused loudly: the whole point of this file is
 #    that the wrong session builds and signs for minutes before dying at notarize.
@@ -231,14 +239,14 @@ for comp in ${COMPONENTS}; do
 done
 say "request: ${COMPONENTS} [${FLAGS}]"
 
-# Said out loud, and said here rather than at exit: the window is gone by the
-# time an operator would look for it, so the log has to carry why it went and
-# what to set to keep the next one. KEEP_WINDOW may come from the environment or
-# from the request file, which has just been sourced.
+# Said out loud, and said here rather than at exit: the window may be gone by the
+# time an operator would look for it, so the log has to carry what was decided
+# and how to decide otherwise. KEEP_WINDOW may come from the environment or from
+# the request file, which has just been sourced.
 if [ "${KEEP_WINDOW:-0}" = "0" ]; then
-    say "window: closes on a clean finish — set KEEP_WINDOW=1 to keep it open"
+    say "window: closing is your Terminal profile's business — KEEP_WINDOW=1 holds it open regardless"
 else
-    say "window: KEEP_WINDOW=${KEEP_WINDOW} — staying open whatever happens"
+    say "window: KEEP_WINDOW=${KEEP_WINDOW} — held at the end until you press Return"
 fi
 
 # A dry run makes no marker commit, so HEAD is still the PREVIOUS marker and the
