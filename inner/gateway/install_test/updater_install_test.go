@@ -170,9 +170,27 @@ type updaterFixture struct {
 	unitDir     string // SYSTEMD_UNIT_DIR
 	launchdDir  string // LAUNCHD_PLIST_DIR
 	stubLog     string
-	compHomeDir string // fixture stand-in for BURROWEE_SYSTEM_CONFIG_DIR
+	compHomeDir string // fixture stand-in for BURROWEE_SYSTEM_CONFIG_DIR (the config home)
 	canaryPath  string
 	canaryBody  []byte
+	// dataHomeDir is the SECOND protected path the header names:
+	// BURROWEE_SYSTEM_DATA_DIR (SYS_DATA_DIR in install.sh's own terms) —
+	// /usr/local/var/burrowee/gateway in production. This is the exact
+	// directory ensure_system_log_dir creates and chmods in gateway's own
+	// install.sh, which is precisely what this script's log-path omission
+	// (see updater.install.sh's header) exists to stay away from; it gets
+	// the SAME before/after canary treatment as compHomeDir, not a lesser
+	// one.
+	dataHomeDir    string // fixture stand-in for BURROWEE_SYSTEM_DATA_DIR (the data home)
+	dataCanaryPath string
+	dataCanaryBody []byte
+	// userHomeDir is the THIRD path the header names: $HOME/.burrowee/gateway
+	// (GW_HOME in install.sh's own terms) — lower risk (nothing in a
+	// system-only script reads $HOME except via `id -u`), included anyway
+	// since the helper makes it free.
+	userHomeDir        string
+	userHomeCanaryPath string
+	userHomeCanaryBody []byte
 }
 
 // newUpdaterFixture lays out the sandbox, seeds the updater binary, and
@@ -193,7 +211,9 @@ func newUpdaterFixture(t *testing.T) *updaterFixture {
 		stubLog:    filepath.Join(home, "stub-calls.log"),
 	}
 	f.compHomeDir = sysConfigDir(home)
-	for _, d := range []string{f.compHomeDir, f.unitDir, f.launchdDir} {
+	f.dataHomeDir = sysDataDir(home)
+	f.userHomeDir = filepath.Join(home, ".burrowee", "gateway")
+	for _, d := range []string{f.compHomeDir, f.dataHomeDir, f.userHomeDir, f.unitDir, f.launchdDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
@@ -202,6 +222,16 @@ func newUpdaterFixture(t *testing.T) *updaterFixture {
 	f.canaryBody = []byte("do-not-touch: this is the component home; updater.install.sh must never write here\n")
 	if err := os.WriteFile(f.canaryPath, f.canaryBody, 0o644); err != nil {
 		t.Fatalf("write canary: %v", err)
+	}
+	f.dataCanaryPath = filepath.Join(f.dataHomeDir, "identity.canary")
+	f.dataCanaryBody = []byte("do-not-touch: this is the component DATA home; updater.install.sh must never write here\n")
+	if err := os.WriteFile(f.dataCanaryPath, f.dataCanaryBody, 0o644); err != nil {
+		t.Fatalf("write data canary: %v", err)
+	}
+	f.userHomeCanaryPath = filepath.Join(f.userHomeDir, "identity.canary")
+	f.userHomeCanaryBody = []byte("do-not-touch: this is the per-user component home; updater.install.sh must never write here\n")
+	if err := os.WriteFile(f.userHomeCanaryPath, f.userHomeCanaryBody, 0o644); err != nil {
+		t.Fatalf("write user-home canary: %v", err)
 	}
 	return f
 }
@@ -218,7 +248,7 @@ func (f *updaterFixture) env(stub string, extra ...string) []string {
 		"SYSTEMD_UNIT_DIR=" + f.unitDir,
 		"LAUNCHD_PLIST_DIR=" + f.launchdDir,
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + f.compHomeDir,
-		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(f.home),
+		"BURROWEE_SYSTEM_DATA_DIR=" + f.dataHomeDir,
 	}
 	return append(e, extra...)
 }
@@ -248,33 +278,57 @@ func (f *updaterFixture) assertPlacedAndStarted(t *testing.T, out, unitPath stri
 	}
 }
 
-// assertEnrollmentPromise is THE canary check the header promises: byte-
-// compared content, plus a file count, both on the FILESYSTEM — never on
-// exit status.
-func (f *updaterFixture) assertEnrollmentPromise(t *testing.T) {
+// assertDirUntouched is the shared shape of a protected-path check: the
+// canary's content must be byte-identical to what was written before the
+// run, and it must be the ONLY file under dir — both facts read off the
+// FILESYSTEM, never off exit status. Used for BOTH protected paths the
+// header names (config home and data home) so neither gets a lesser check
+// than the other.
+func assertDirUntouched(t *testing.T, label, dir, canaryPath string, canaryBody []byte) {
 	t.Helper()
-	after, err := os.ReadFile(f.canaryPath)
+	after, err := os.ReadFile(canaryPath)
 	if err != nil {
-		t.Fatalf("canary missing after run: %v", err)
+		t.Fatalf("%s canary missing after run: %v", label, err)
 	}
-	if string(after) != string(f.canaryBody) {
-		t.Errorf("canary changed — updater.install.sh touched the component home.\nbefore:\n%s\nafter:\n%s", f.canaryBody, after)
+	if string(after) != string(canaryBody) {
+		t.Errorf("%s canary changed — updater.install.sh touched %s.\nbefore:\n%s\nafter:\n%s", label, dir, canaryBody, after)
 	}
+	// Count EVERY entry under dir except dir itself — files AND
+	// directories. A bare subdirectory with nothing inside it (e.g. an
+	// empty "logs" dir a log-path regression would mkdir -p, with no file
+	// written into it yet) is still a write to this tree and must fail
+	// this check exactly as a stray file would — counting non-dir entries
+	// only would let that mutation through uncaught.
 	var count int
-	if err := filepath.Walk(f.compHomeDir, func(_ string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
-			count++
+		if p == dir {
+			return nil
 		}
+		count++
 		return nil
 	}); err != nil {
-		t.Fatalf("walk compHomeDir: %v", err)
+		t.Fatalf("walk %s: %v", dir, err)
 	}
 	if count != 1 {
-		t.Errorf("component home has %d files after the run, want 1 (only the canary) — updater.install.sh wrote something there", count)
+		t.Errorf("%s has %d entries after the run (files+dirs), want 1 (only the canary) — updater.install.sh wrote something there", dir, count)
 	}
+}
+
+// assertEnrollmentPromise is THE canary check the header promises, covering
+// all three protected paths it names: the config home
+// (BURROWEE_SYSTEM_CONFIG_DIR), the data home (BURROWEE_SYSTEM_DATA_DIR),
+// and the per-user home ($HOME/.burrowee/gateway). The data home is the
+// exact directory ensure_system_log_dir creates and chmods in gateway's own
+// install.sh — omitting it from this check would leave the log-path
+// omission decision with no regression protection at all.
+func (f *updaterFixture) assertEnrollmentPromise(t *testing.T) {
+	t.Helper()
+	assertDirUntouched(t, "config home", f.compHomeDir, f.canaryPath, f.canaryBody)
+	assertDirUntouched(t, "data home", f.dataHomeDir, f.dataCanaryPath, f.dataCanaryBody)
+	assertDirUntouched(t, "per-user home", f.userHomeDir, f.userHomeCanaryPath, f.userHomeCanaryBody)
 }
 
 func (f *updaterFixture) assertServeBinAbsent(t *testing.T) {
