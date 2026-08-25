@@ -191,6 +191,9 @@
 #   ROOT_HOME                   root's home (the `root` COMP_HOME scheme)
 #   SUDO                        elevation command (default "sudo")
 #   BURROWEE_LEGACY_HOME_PARENTS  where to look for an account's home
+#   LEDGER_FILE                 which ladder to walk (default $HERE/ledger — the
+#                                serve ladder; the updater track points this at
+#                                $HERE/updater-ledger instead)
 set -eu
 
 HERE="$(dirname "$0")"
@@ -312,7 +315,17 @@ SUDO="${SUDO:-sudo}"
 # them; a component with no such rung is unaffected by their presence.
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
-LEDGER_FILE="$HERE/ledger"
+
+# LEDGER_FILE — which ladder this run walks, INSIDE $HERE (this runner's own
+# migrations/ directory). Defaults to the serve ladder, migrations/ledger, so
+# every caller before Task 10 is unaffected. The UPDATER track is the one
+# override: <comp>/updater.update.sh points this at migrations/updater-ledger
+# — a second, separate ladder walked by this SAME runner, because it is the
+# one script permitted to bounce the updater's own service (see
+# adopt_updater_unit.sh's header). Never a second runner file: the gate logic,
+# the receipt shape and the exit contract must not be free to drift between
+# the two ladders a component can have.
+LEDGER_FILE="${LEDGER_FILE:-$HERE/ledger}"
 
 # SERVICE_STOP_RUNGS — the rungs on THIS component's ladder that leave its daemon
 # stopped. Declared in migrations/component.conf; empty for every component that

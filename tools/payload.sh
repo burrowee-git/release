@@ -167,7 +167,7 @@ payload_manifest() {
     done
     case "${comp}" in
         gateway)
-            for p in "${src}"/migrations/*.sh; do
+            for p in "${src}"/migrations/*; do
                 [ -f "${p}" ] || continue
                 printf 'migrations/%s\n' "$(basename "${p}")"
             done
@@ -249,11 +249,11 @@ stage_component_migrations() {
         done
         return 0
     fi
-    for p in "${src}"/migrations/*.sh; do
+    for p in "${src}"/migrations/*; do
         [ -f "${p}" ] || continue
         base="$(basename "${p}")"
         cp "${p}" "${dest}/migrations/${base}"
-        chmod 0755 "${dest}/migrations/${base}"
+        case "${base}" in *.sh) chmod 0755 "${dest}/migrations/${base}" ;; esac
         found=1
     done
     if [ "${found}" != 1 ]; then

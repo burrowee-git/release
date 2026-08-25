@@ -445,18 +445,23 @@ else bad "gate: updater-ledger check leaked to cli"; fi
 # gateway takes the updater-ledger check too, through the NON-shared-ladder tail
 # of assert_payload_migrations — its own runner/ledger shape, exercised earlier.
 #
-# stage_gateway_migrations copies only migrations/*.sh (gateway's ledger has
-# always lived INSIDE run.sh — see ledger_migrations above — so its migrations/
-# has never before held a plain data file). updater-ledger is staged BY HAND
-# here for the same reason it is for edge above: this section proves the
-# ASSERTION's own logic, not the staging path a future change may still owe
-# gateway's migrations/updater-ledger (flagged in the task report).
+# stage_gateway_migrations now globs migrations/* (Task 10's staging fix,
+# tools/payload.sh lines ~170/252) rather than migrations/*.sh — gateway's own
+# ledger has always lived INSIDE run.sh (see ledger_migrations above), so its
+# migrations/ never held a plain data file before updater-ledger. No manual cp
+# here: this proves the STAGING path actually carries the data file into the
+# zip, not just the assertion's own logic in isolation.
 GW_UL_SRC="$(gateway_src updater-ledger-gw v0_1_to_v0_2.sh lib_stale_user_bins.sh)"
 printf '0.2.0 adopt_updater_unit.sh\n' > "${GW_UL_SRC}/migrations/updater-ledger"
 GW_UL_ASM="${TMP}/updater-ledger-gw-asm"; mkdir -p "${GW_UL_ASM}"
 : > "${GW_UL_ASM}/install.sh"
 stage_gateway_migrations "${GW_UL_SRC}" "${GW_UL_ASM}" >/dev/null
-cp "${GW_UL_SRC}/migrations/updater-ledger" "${GW_UL_ASM}/migrations/updater-ledger"
+if [ -f "${GW_UL_ASM}/migrations/updater-ledger" ]; then
+    ok "staging: gateway's *-glob fix carries migrations/updater-ledger (data file) into the assemble dir"
+else bad "staging: gateway migrations/updater-ledger was NOT staged (glob still *.sh-only)"; fi
+if [ ! -x "${GW_UL_ASM}/migrations/updater-ledger" ]; then
+    ok "staging: gateway's staged updater-ledger is not executable (data file, not a script)"
+else bad "staging: gateway's staged updater-ledger was wrongly made executable"; fi
 ( cd "${GW_UL_ASM}" && zip -r -q "${TMP}/updater-ledger-gw-gap.zip" migrations/ )
 if assert_payload_migrations gateway "${TMP}/updater-ledger-gw-gap.zip" "${GW_UL_SRC}" 2>/dev/null; then
     bad "gate: accepted a gateway payload missing its updater-ledger-named rung"
