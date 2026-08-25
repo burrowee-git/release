@@ -498,3 +498,121 @@ func TestUpdaterInstallConvergesLegacyUpdaterToTheSystemUnit(t *testing.T) {
 		t.Errorf("legacy per-user updater agent is still loaded after the run — TWO updaters remain: %v", statErr)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Task 10 — gateway is not a shared-ladder component (cmd/rkit/assemble.go's
+// takesSharedLadder), so migrations/updater-ledger never ships in gateway's
+// zip and the ladder block above can never converge a legacy PER-USER
+// updater agent for gateway. install.sh's own remove_legacy_user_units
+// already converges exactly that class of legacy agent (the pre-system-level
+// com.burrowee.gateway* / burrowee-gateway*.service per-user units) for the
+// FULL installer; these tests pin an inline, updater-scoped mirror of that
+// function for the NARROW updater.install.sh, which today has no such step
+// at all.
+//
+// FILESYSTEM STATE ONLY, deliberately: updater.install.sh's own final step
+// unconditionally calls bootstrap/bootout on the SYSTEM label regardless of
+// whether any legacy convergence ran, so a log-substring assertion on
+// "bootout" would pass even with no convergence code present at all. Only
+// the legacy per-user unit FILE actually disappearing (and, critically, the
+// SERVE legacy unit surviving) is evidence of the real thing.
+// ---------------------------------------------------------------------------
+
+// TestUpdaterInstallConvergesLegacyPerUserUpdaterDarwin: a host still running
+// the pre-system-level per-user updater agent (gui/<uid>/com.burrowee.gateway.updater,
+// $HOME/Library/LaunchAgents/com.burrowee.gateway.updater.plist) must end
+// with that plist gone. The sibling SERVE legacy plist
+// (com.burrowee.gateway.plist) must survive untouched — updater.install.sh
+// must never touch the serve unit.
+func TestUpdaterInstallConvergesLegacyPerUserUpdaterDarwin(t *testing.T) {
+	f := newUpdaterFixture(t)
+
+	agentDir := filepath.Join(f.home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir LaunchAgents: %v", err)
+	}
+	legacyUpdaterPlist := filepath.Join(agentDir, "com.burrowee.gateway.updater.plist")
+	legacyServePlist := filepath.Join(agentDir, "com.burrowee.gateway.plist")
+	for _, p := range []string{legacyUpdaterPlist, legacyServePlist} {
+		if err := os.WriteFile(p, []byte("<plist/>"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+
+	out, err := f.run(t, stubInitSystemFor(t, "darwin"))
+	if err != nil {
+		t.Fatalf("updater.install.sh failed: %v\noutput:\n%s", err, out)
+	}
+
+	if _, statErr := os.Stat(legacyUpdaterPlist); statErr == nil {
+		t.Errorf("legacy per-user updater plist still present after run: %s", legacyUpdaterPlist)
+	}
+	if _, statErr := os.Stat(legacyServePlist); statErr != nil {
+		t.Errorf("legacy SERVE plist was removed (or never existed) — updater.install.sh must not touch it: %v", statErr)
+	}
+
+	f.assertPlacedAndStarted(t, out, updaterUnitPathFor(f.home, "darwin"))
+	f.assertEnrollmentPromise(t)
+	f.assertServeBinAbsent(t)
+}
+
+// TestUpdaterInstallConvergesLegacyPerUserUpdaterLinux is the Linux twin:
+// $HOME/.config/systemd/user/burrowee-gateway-updater.service must be gone
+// after the run; the sibling serve unit
+// ($HOME/.config/systemd/user/burrowee-gateway.service) must survive.
+func TestUpdaterInstallConvergesLegacyPerUserUpdaterLinux(t *testing.T) {
+	f := newUpdaterFixture(t)
+
+	userUnitDir := filepath.Join(f.home, ".config", "systemd", "user")
+	if err := os.MkdirAll(userUnitDir, 0o755); err != nil {
+		t.Fatalf("mkdir systemd user dir: %v", err)
+	}
+	legacyUpdaterUnit := filepath.Join(userUnitDir, "burrowee-gateway-updater.service")
+	legacyServeUnit := filepath.Join(userUnitDir, "burrowee-gateway.service")
+	for _, p := range []string{legacyUpdaterUnit, legacyServeUnit} {
+		if err := os.WriteFile(p, []byte("[Service]\n"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+
+	out, err := f.run(t, stubInitSystemFor(t, "linux"))
+	if err != nil {
+		t.Fatalf("updater.install.sh failed: %v\noutput:\n%s", err, out)
+	}
+
+	if _, statErr := os.Stat(legacyUpdaterUnit); statErr == nil {
+		t.Errorf("legacy per-user updater unit still present after run: %s", legacyUpdaterUnit)
+	}
+	if _, statErr := os.Stat(legacyServeUnit); statErr != nil {
+		t.Errorf("legacy SERVE unit was removed (or never existed) — updater.install.sh must not touch it: %v", statErr)
+	}
+
+	f.assertPlacedAndStarted(t, out, updaterUnitPathFor(f.home, "linux"))
+	f.assertEnrollmentPromise(t)
+	f.assertServeBinAbsent(t)
+}
+
+// TestUpdaterInstallSkipsLadderSilentlyWithNoLedger pins the OTHER half of
+// Task 10: with migrations/ shipped (gateway carries its whole migrations/
+// dir wholesale — cmd/rkit/assemble.go's extraPayload) but no
+// migrations/updater-ledger inside it (reverted; gateway is not a
+// shared-ladder component and can never stage adopt_updater_unit.sh), the
+// ladder block's own documented guard
+// ([ -f "$MIGRATIONS_DIR/updater-ledger" ]) must make it a SILENT no-op —
+// no warning, no failure, nothing printed about the ladder at all.
+func TestUpdaterInstallSkipsLadderSilentlyWithNoLedger(t *testing.T) {
+	f := newUpdaterFixture(t)
+	stageSharedMigrations(t, f.staging) // run.sh present; deliberately no updater-ledger written
+
+	out, err := f.run(t, stubInitSystemFor(t, "linux"))
+	if err != nil {
+		t.Fatalf("updater.install.sh failed: %v\noutput:\n%s", err, out)
+	}
+
+	assertNotContains(t, out,
+		"could not create a scratch tree for the updater ladder",
+		"the updater's own state migration refused or failed",
+		"migrate: ",
+	)
+	f.assertPlacedAndStarted(t, out, updaterUnitPathFor(f.home, "linux"))
+}
