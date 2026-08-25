@@ -117,6 +117,10 @@ func ledgerMigrations(runSh string) ([]string, error) {
 //     cover pages copied from the edge.web repo at package time (release.sh lines
 //     1063-1068): admin.html → covers/admin.html, login.html → covers/default.html.
 //     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/edge.web (release.sh line 1064).
+//   - edge + gateway carry updater.install.sh, copied from THIS repo's own
+//     inner/<comp>/ (not the component source worktree) if it exists there —
+//     see updaterInstallPayload. cli's updater is a one-shot binary with no
+//     service, and agent has no updater installer, so neither carries one.
 //
 // The remaining component (agent) has no extras.
 // takesSharedLadder reports whether this component's migrations/ is assembled
@@ -295,6 +299,43 @@ func sharedLadderPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	return extras, nil
 }
 
+// updaterInstallPayload returns the updater.install.sh member for this
+// component — inner/<comp>/updater.install.sh, if it exists in the release
+// repo — or nil.
+//
+// Present for edge and gateway only: cli's updater is a one-shot binary with
+// no service to reinstall, and agent has no updater installer at all. FILE
+// PRESENCE is the guard, not a hardcoded component allowlist — exactly like
+// preflight.sh's `[ -f … ]` guard in tools/release.sh's outer bootstrap
+// staging, and unlike install.sh's per-component, unconditionally REQUIRED
+// resolution one level up in build.go. A component that never grows the file
+// is simply unaffected; nothing here needs to change to add or drop one.
+// Mirrors updater_install_src in tools/payload.sh.
+//
+// THE EXEC BIT IS FORCED, exactly like install.sh (copyExecutable, below in
+// build.go): release-kit's pack.Content carries no mode field, and pack.Zip
+// preserves whatever os.Stat reports on Content.Src verbatim — it forces
+// nothing. inner/gateway/updater.install.sh is committed as 0644, same as
+// every other inner/ script; left unforced, `rkit build` — the produce half
+// of every cut (tools/release.sh) — would ship a gateway recovery script an
+// operator cannot execute. Copied to a temp file at 0755 rather than mutating
+// the checked-in source in place, same shape as install.sh's own copy.
+func updaterInstallPayload(comp, repoDir string) (*pack.Content, error) {
+	p := filepath.Join(repoDir, "inner", comp, "updater.install.sh")
+	if _, err := os.Stat(p); err != nil {
+		return nil, nil
+	}
+	dir, err := os.MkdirTemp("", "rkit-updater-install-*")
+	if err != nil {
+		return nil, fmt.Errorf("updater.install.sh temp dir: %w", err)
+	}
+	dst := filepath.Join(dir, "updater.install.sh")
+	if err := copyExecutable(p, dst); err != nil {
+		return nil, fmt.Errorf("updater.install.sh: %w", err)
+	}
+	return &pack.Content{Src: dst, Name: "updater.install.sh"}, nil
+}
+
 func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	var extras []pack.Content
 	switch comp {
@@ -313,6 +354,15 @@ func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 			return nil, fmt.Errorf("%s update script missing in source %s: %w", comp, p, err)
 		}
 		extras = append(extras, pack.Content{Src: p, Name: s})
+	}
+	// updater.install.sh comes from THIS repo's inner/<comp>/, like install.sh
+	// one level up in build.go — not from srcDir like the members staged just
+	// above — so it is resolved separately here rather than folded into the
+	// switch. See updaterInstallPayload for the presence guard.
+	if ui, err := updaterInstallPayload(comp, repoDir); err != nil {
+		return nil, err
+	} else if ui != nil {
+		extras = append(extras, *ui)
 	}
 	if comp == "gateway" {
 		// The whole migrations/ dir rides along: migrations/run.sh is the runner

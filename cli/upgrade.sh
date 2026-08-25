@@ -3,28 +3,40 @@
 #
 #   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/install.sh | sh
 #   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/upgrade.sh | sh -s -- 0.2.0
+#   curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/cli/updater.install.sh | sh   (edge/gateway only)
 #
 # This is the stable, curl'd-alone entry point for the `cli` component
 # (which bundles the `burrowee` dispatcher). It NEVER runs an unverified byte:
 # it downloads the release zip + SHA256SUMS.txt + its minisig, verifies the
 # minisign signature with a baked-in PUBLIC key, verifies the zip's sha256
 # against the now-trusted sums file, and ONLY THEN unzips and execs the inner
-# per-release install.sh. Any failure aborts before anything is installed.
+# script the baked mode names. Any failure aborts before anything is installed.
 #
-# TWO MODES, ONE TEMPLATE. upgrade is substituted at render time and decides
-# whether this file stops after the inner installer (install.sh) or goes on to
-# run `migrations/upgrade.sh <floor>` out of the SAME verified kit (upgrade.sh):
+# THREE MODES, ONE TEMPLATE. upgrade is substituted at render time and decides
+# which inner script this file hands off to once the release is verified:
 #
-#   install.sh   resolve + verify + unzip  →  ./install.sh
-#   upgrade.sh   resolve + verify + unzip  →  ./install.sh  →  ./migrations/upgrade.sh <floor>
+#   install.sh          resolve + verify + unzip  →  ./install.sh
+#   upgrade.sh           resolve + verify + unzip  →  ./install.sh  →  ./migrations/upgrade.sh <floor>
+#   updater.install.sh  resolve + verify + unzip  →  ./updater.install.sh
 #
-# The composition lives HERE, one layer above both, so neither the installer nor
-# the migration script grows a second job: install.sh is still the only thing
-# that places binaries, and migrations/upgrade.sh is still migrations-only. And
-# it is the SAME FILE, not a fork: everything that makes this script a trust
-# anchor — the pinned preflight sha256, the baked pubkey, the v0.2.5.2026.08.25.2d1503e6
-# floor, the SHA256SUMS.txt minisign gate — is the same lines for both modes,
-# because a copy of a trust anchor is a copy that drifts from it.
+# install.sh and upgrade.sh place (or update) the WHOLE component. updater.install.sh
+# is the narrow RECOVERY path: it reinstalls ONLY the updater (binary + unit) on
+# a host that already has the component, for when the updater itself is stale,
+# stopped, or was never installed — the one situation the updater cannot fix by
+# shipping itself an update, because the thing that would fetch it is the thing
+# that is broken. It is rendered for edge and gateway ONLY
+# (tools/gen-bootstraps.sh's UPDATER_INSTALL_COMPONENTS): those are the two
+# components with a supervised updater SERVICE to recover — cli's updater is a
+# one-shot binary with no service, and agent has no updater installer either.
+#
+# The composition lives HERE, one layer above every inner script, so none of
+# them grows a second job: install.sh is still the only thing that places
+# binaries, migrations/upgrade.sh is still migrations-only, and
+# updater.install.sh still touches only the updater. And it is the SAME FILE,
+# not a fork per mode: everything that makes this script a trust anchor — the
+# pinned preflight sha256, the baked pubkey, the v0.2.5.2026.08.25.2d1503e6 floor, the
+# SHA256SUMS.txt minisign gate — is the same lines for all three modes, because
+# a copy of a trust anchor is a copy that drifts from it.
 #
 # WHY upgrade.sh EXISTS AT ALL, given install.sh already runs the ladder gated:
 # the ladder's gate compares only MAJOR.MINOR.PATCH and deliberately ignores the
@@ -32,17 +44,22 @@
 # 0.2.0.2026.08.08.79a5cfd7 → 0.2.0.2026.08.17.4e43c2ed — is invisible to it and
 # looks already migrated. upgrade.sh is the one-liner for that case.
 #
-# IT IS RENDERED FOR EVERY PUBLIC COMPONENT, not only for those shipping a
-# ladder today. Which kits carry migrations/ is decided in the COMPONENT repos
-# at their cut; this repo renders a static file at ITS cut and serves it from a
-# URL we advertise. A conditional render would put a "does cli have a ladder"
-# belief in this repo that nothing keeps in step with the zips, and the first
-# time it was wrong the URL would 404. So the file always exists, and a kit with
-# no migrations/upgrade.sh is a RUNTIME refusal naming the component and the
-# version just installed — a message an operator can act on.
+# install.sh AND upgrade.sh ARE RENDERED FOR EVERY PUBLIC COMPONENT, not only
+# for those shipping a ladder today. Which kits carry migrations/ is decided in
+# the COMPONENT repos at their cut; this repo renders a static file at ITS cut
+# and serves it from a URL we advertise. A conditional render would put a "does
+# cli have a ladder" belief in this repo that nothing keeps in step with the
+# zips, and the first time it was wrong the URL would 404. So the file always
+# exists, and a kit with no migrations/upgrade.sh is a RUNTIME refusal naming
+# the component and the version just installed — a message an operator can act
+# on. updater.install.sh is different: it is NOT rendered for every public
+# component, because "has a supervised updater service" is a fixed fact about
+# the component itself, decided at design time — not about what a release zip
+# happens to ship this cut.
 #
-# DO NOT EDIT generated copies (cli/install.sh, cli/upgrade.sh) by hand —
-# they are produced from tools/bootstrap.template.sh by tools/gen-bootstraps.sh.
+# DO NOT EDIT generated copies (cli/install.sh, cli/upgrade.sh, and for
+# edge/gateway cli/updater.install.sh) by hand — they are produced from
+# tools/bootstrap.template.sh by tools/gen-bootstraps.sh.
 #
 # Arguments (upgrade.sh only; install.sh takes none and REJECTS any):
 #   <floor>                      the migration floor, e.g. 0.2.0 — an INCLUSIVE
@@ -454,15 +471,28 @@ case "$PUBKEY" in
         fail "this installer was built without a real signing key — refusing to verify against a placeholder (regenerate with tools/gen-bootstraps.sh)" ;;
 esac
 
-# ---- guard against an unbaked mode --------------------------------------
+# BEGIN mode-dispatch  (cmd/rkit's updater-install bootstrap test extracts this
+# block verbatim and drives it directly — keep it self-contained between the
+# markers, and keep the markers.)
+# ---- guard against an unbaked mode, and resolve which inner script runs ----
 # Fails closed for the same reason the pubkey guard does: an unsubstituted
-# upgrade would fall through every `[ "$MODE" = upgrade ]` test below, so an
-# upgrade.sh rendered by a broken generator would install and then silently skip
-# the migration half it exists for — the one failure this file must never have.
+# upgrade would fall through every mode check below, so a bootstrap rendered by a
+# broken generator would install and then silently skip a step it exists for —
+# or, worse, run the WRONG inner script — instead of refusing outright.
+#
+# INNER is the one thing $MODE ultimately controls that changes what gets
+# EXECUTED. install and upgrade both hand off to the full component installer
+# (./install.sh — upgrade additionally forces migrations afterward, further
+# down); updater.install hands off to the narrow recovery script
+# (./updater.install.sh) instead. Nothing about resolve, download, minisign or
+# sha256 differs by mode — those all run identically above this point,
+# regardless of which inner script INNER ends up naming.
 case "$MODE" in
-    install|upgrade) : ;;
+    install|upgrade) INNER="install.sh" ;;
+    updater.install)  INNER="updater.install.sh" ;;
     *) fail "this bootstrap was generated without a mode (got \"$MODE\") — regenerate with tools/gen-bootstraps.sh" ;;
 esac
+# END mode-dispatch
 
 # BEGIN mode-args
 # ---- the command line ---------------------------------------------------
@@ -480,21 +510,31 @@ esac
 # block for the floor's meaning.
 usage() {
     printf 'usage: curl -fsSL https://release.burrowee.com/%s/%s.sh | sh' "$COMP" "$MODE"
-    if [ "$MODE" = upgrade ]; then
-        printf ' -s -- [<floor>]\n\n'
-        printf 'Install the newest %s release and then FORCE its state migrations from the\n' "$COMP"
-        printf 'same verified kit. <floor> is an INCLUSIVE floor, MAJOR.MINOR.PATCH (e.g. 0.2.0;\n'
-        printf 'a leading "v" and a release stamp'"'"'s trailing .date.sha are accepted): rungs\n'
-        printf 'targeting it or newer are forced, older targets are treated as done. Omitted,\n'
-        printf 'the kit'"'"'s whole shipped ladder is forced. The floor never changes which release\n'
-        printf 'installs — pin that with the BURROWEE_<COMP>_VERSION environment variable.\n\n'
-        printf 'exit: 0 installed (ladder applied nothing, or its rungs ran) · 1 the ladder\n'
-        printf 'refused or failed · 3 the ladder ran but a receipt was lost · 64 bad command line.\n'
-    else
-        printf '\n\nInstall the latest %s release. Takes no arguments; pin a specific release with\n' "$COMP"
-        printf 'the BURROWEE_<COMP>_VERSION environment variable. To force the kit'"'"'s state\n'
-        printf 'migrations as well, use upgrade.sh instead.\n'
-    fi
+    case "$MODE" in
+        upgrade)
+            printf ' -s -- [<floor>]\n\n'
+            printf 'Install the newest %s release and then FORCE its state migrations from the\n' "$COMP"
+            printf 'same verified kit. <floor> is an INCLUSIVE floor, MAJOR.MINOR.PATCH (e.g. 0.2.0;\n'
+            printf 'a leading "v" and a release stamp'"'"'s trailing .date.sha are accepted): rungs\n'
+            printf 'targeting it or newer are forced, older targets are treated as done. Omitted,\n'
+            printf 'the kit'"'"'s whole shipped ladder is forced. The floor never changes which release\n'
+            printf 'installs — pin that with the BURROWEE_<COMP>_VERSION environment variable.\n\n'
+            printf 'exit: 0 installed (ladder applied nothing, or its rungs ran) · 1 the ladder\n'
+            printf 'refused or failed · 3 the ladder ran but a receipt was lost · 64 bad command line.\n'
+            ;;
+        updater.install)
+            printf '\n\nReinstall ONLY the %s updater (binary + unit) on a host that already has\n' "$COMP"
+            printf '%s installed. This is the RECOVERY path for when the updater itself is stale,\n' "$COMP"
+            printf 'stopped, or was never installed — it never touches %s'"'"'s serve binary or its\n' "$COMP"
+            printf 'enrollment/config state. Takes no arguments. To install %s itself, use\n' "$COMP"
+            printf 'install.sh instead.\n'
+            ;;
+        *)
+            printf '\n\nInstall the latest %s release. Takes no arguments; pin a specific release with\n' "$COMP"
+            printf 'the BURROWEE_<COMP>_VERSION environment variable. To force the kit'"'"'s state\n'
+            printf 'migrations as well, use upgrade.sh instead.\n'
+            ;;
+    esac
 }
 
 # usage_error — stderr and 64 (EX_USAGE). 64 rather than 1 so a typo can never
@@ -545,8 +585,11 @@ while [ $# -gt 0 ]; do
         -*)
             usage_error "unknown option '$1'" ;;
         *)
-            [ "$MODE" = upgrade ] \
-                || usage_error "$COMP/install.sh takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?"
+            case "$MODE" in
+                upgrade) : ;;
+                install) usage_error "$COMP/install.sh takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?" ;;
+                *)       usage_error "$COMP/$MODE.sh takes no arguments, and was given '$1'" ;;
+            esac
             [ -z "$FLOOR" ] \
                 || usage_error "unexpected extra argument '$1' — upgrade.sh takes at most one, the migration floor"
             FLOOR="$(norm_line "$1")" \
@@ -863,9 +906,9 @@ ok "checksum verified"
 command -v unzip >/dev/null 2>&1 \
     || fail "unzip not found — install it (\`brew install unzip\` / \`apt-get install unzip\`) and retry"
 unzip -q -o "$TMP/$ZIP" -d "$TMP/x" || fail "zip extraction failed — corrupt download?"
-[ -f "$TMP/x/install.sh" ] || fail "release zip missing inner install.sh — aborting"
+[ -f "$TMP/x/$INNER" ] || fail "release zip missing inner $INNER — aborting"
 
-ok "verified — running inner installer"
+ok "verified — running inner $INNER"
 # run_inner — exec the verified inner installer with cwd = the unzipped dir, so
 # it resolves the binaries relative to its own location (./burrowee,
 # ./burrowee-cli, …).
@@ -889,11 +932,11 @@ run_inner() {
     if [ -n "$PREFIX" ]; then
         ( cd "$TMP/x" && $ELEVATE env PREFIX="$PREFIX" \
             BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" \
-            BURROWEE_VERSION="$TAG" sh ./install.sh )
+            BURROWEE_VERSION="$TAG" sh "./$INNER" )
     else
         ( cd "$TMP/x" && $ELEVATE env \
             BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" \
-            BURROWEE_VERSION="$TAG" sh ./install.sh )
+            BURROWEE_VERSION="$TAG" sh "./$INNER" )
     fi
 }
 run_inner
