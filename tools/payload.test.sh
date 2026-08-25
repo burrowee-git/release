@@ -372,4 +372,99 @@ if assert_payload_migrations relay "${TMP}/relay-norung.zip" "${RELAY_MIG_SRC}" 
     bad "gate: accepted a relay payload missing its ledger-named adoption rung"
 else ok "gate: rejects a relay payload missing its ledger-named adoption rung"; fi
 
+# --- the gate on the UPDATER LEDGER (edge/gateway/relay only) ---------------
+# migrations/updater-ledger is a SECOND, SEPARATE ledger for the updater's own
+# track (Task 10, elsewhere: edge, gateway, relay — cli and agent have no
+# updater). No component in this repo's own fixtures ships one yet, so absence
+# is a no-op; the check fires the moment a source carries one.
+
+# No updater-ledger in EDGE_SRC: the gate stayed silent about it in the
+# "accepts a complete shared-ladder payload" case above. Asserted directly too.
+if assert_updater_ledger edge "${EDGE_SRC}" "${TMP}/shared-good.zip" "$(unzip -Z1 "${TMP}/shared-good.zip")"; then
+    ok "gate: no updater-ledger in source is a no-op"
+else bad "gate: fired with no updater-ledger in source"; fi
+
+UL_SRC="${TMP}/updater-ledger-edge"
+mkdir -p "${UL_SRC}/migrations"
+: > "${UL_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${UL_SRC}/migrations/ledger"
+printf '# updater track\n0.2.0 adopt_updater_unit.sh\n' > "${UL_SRC}/migrations/updater-ledger"
+
+# stage_component_migrations copies updater-ledger too — it is just another
+# file under the component's own migrations/, discovered by the same glob as
+# component.conf and ledger. adopt_updater_unit.sh itself is normally staged
+# from inner/_shared/migrations (SHARED_MIGRATIONS_DIR), which this suite
+# points at a fixture (SHARED_FIX) that predates this rung; added here by hand
+# rather than widening SHARED_FIX and re-pinning every manifest string above
+# that already asserts its exact sorted contents.
+UL_ASM="${TMP}/updater-ledger-asm"; mkdir -p "${UL_ASM}"
+stage_component_migrations edge "${UL_SRC}" "${UL_ASM}" >/dev/null
+: > "${UL_ASM}/migrations/adopt_updater_unit.sh"
+( cd "${UL_ASM}" && zip -r -q "${TMP}/updater-ledger-good.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/updater-ledger-good.zip" "${UL_SRC}"; then
+    ok "gate: accepts a payload whose updater-ledger row is present"
+else bad "gate: rejected a payload whose updater-ledger row is present"; fi
+
+# updater-ledger exists in source but was never staged into the zip — the
+# "row check" reasoning applied one level up, to the ledger file itself.
+UL_ASM2="${TMP}/updater-ledger-asm2"; mkdir -p "${UL_ASM2}"
+stage_component_migrations edge "${UL_SRC}" "${UL_ASM2}" >/dev/null
+: > "${UL_ASM2}/migrations/adopt_updater_unit.sh"
+rm -f "${UL_ASM2}/migrations/updater-ledger"
+( cd "${UL_ASM2}" && zip -r -q "${TMP}/updater-ledger-notstaged.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/updater-ledger-notstaged.zip" "${UL_SRC}" 2>/dev/null; then
+    bad "gate: accepted a payload with updater-ledger in source but not in the zip"
+else ok "gate: rejects a payload with updater-ledger in source but not in the zip"; fi
+
+# updater-ledger staged, but the rung it NAMES is missing from the zip — a row
+# the updater's run.sh would refuse on, on every host, after the cut.
+UL_ASM3="${TMP}/updater-ledger-asm3"; mkdir -p "${UL_ASM3}"
+stage_component_migrations edge "${UL_SRC}" "${UL_ASM3}" >/dev/null
+( cd "${UL_ASM3}" && zip -r -q "${TMP}/updater-ledger-gap.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/updater-ledger-gap.zip" "${UL_SRC}" 2>/dev/null; then
+    bad "gate: accepted a payload missing its updater-ledger-named rung"
+else ok "gate: rejects a payload missing its updater-ledger-named rung"; fi
+
+# cli takes the shared ladder but has no updater — an updater-ledger in its
+# source (however unlikely) must never be checked; the requirement stays
+# scoped to edge/gateway/relay, same reasoning as relay's own adopt-rung check.
+CLI_UL_SRC="${TMP}/updater-ledger-cli"
+mkdir -p "${CLI_UL_SRC}/migrations"
+: > "${CLI_UL_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${CLI_UL_SRC}/migrations/ledger"
+printf '0.2.0 adopt_updater_unit.sh\n' > "${CLI_UL_SRC}/migrations/updater-ledger"
+CLI_UL_ASM="${TMP}/updater-ledger-cli-asm"; mkdir -p "${CLI_UL_ASM}"
+stage_component_migrations cli "${CLI_UL_SRC}" "${CLI_UL_ASM}" >/dev/null
+# deliberately NOT staging adopt_updater_unit.sh — if the cli exemption ever
+# regressed, this zip would fail the row check and this case would catch it.
+( cd "${CLI_UL_ASM}" && zip -r -q "${TMP}/updater-ledger-cli.zip" migrations/ )
+if assert_payload_migrations cli "${TMP}/updater-ledger-cli.zip" "${CLI_UL_SRC}"; then
+    ok "gate: updater-ledger check stays scoped to edge/gateway/relay (cli exempt)"
+else bad "gate: updater-ledger check leaked to cli"; fi
+
+# gateway takes the updater-ledger check too, through the NON-shared-ladder tail
+# of assert_payload_migrations — its own runner/ledger shape, exercised earlier.
+#
+# stage_gateway_migrations copies only migrations/*.sh (gateway's ledger has
+# always lived INSIDE run.sh — see ledger_migrations above — so its migrations/
+# has never before held a plain data file). updater-ledger is staged BY HAND
+# here for the same reason it is for edge above: this section proves the
+# ASSERTION's own logic, not the staging path a future change may still owe
+# gateway's migrations/updater-ledger (flagged in the task report).
+GW_UL_SRC="$(gateway_src updater-ledger-gw v0_1_to_v0_2.sh lib_stale_user_bins.sh)"
+printf '0.2.0 adopt_updater_unit.sh\n' > "${GW_UL_SRC}/migrations/updater-ledger"
+GW_UL_ASM="${TMP}/updater-ledger-gw-asm"; mkdir -p "${GW_UL_ASM}"
+: > "${GW_UL_ASM}/install.sh"
+stage_gateway_migrations "${GW_UL_SRC}" "${GW_UL_ASM}" >/dev/null
+cp "${GW_UL_SRC}/migrations/updater-ledger" "${GW_UL_ASM}/migrations/updater-ledger"
+( cd "${GW_UL_ASM}" && zip -r -q "${TMP}/updater-ledger-gw-gap.zip" migrations/ )
+if assert_payload_migrations gateway "${TMP}/updater-ledger-gw-gap.zip" "${GW_UL_SRC}" 2>/dev/null; then
+    bad "gate: accepted a gateway payload missing its updater-ledger-named rung"
+else ok "gate: rejects a gateway payload missing its updater-ledger-named rung"; fi
+: > "${GW_UL_ASM}/migrations/adopt_updater_unit.sh"
+( cd "${GW_UL_ASM}" && zip -r -q "${TMP}/updater-ledger-gw-good.zip" migrations/ )
+if assert_payload_migrations gateway "${TMP}/updater-ledger-gw-good.zip" "${GW_UL_SRC}"; then
+    ok "gate: accepts a complete gateway payload with an updater-ledger row"
+else bad "gate: rejected a complete gateway payload with an updater-ledger row"; fi
+
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
