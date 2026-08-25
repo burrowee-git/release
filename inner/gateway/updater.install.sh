@@ -34,10 +34,21 @@
 # field mirrors install.sh's own renderer exactly (see the render step below).
 #
 # It also converges a legacy PER-USER updater agent onto the managed system
-# unit, by running the same ladder update.sh runs (migrations/updater-ledger).
-# Installing the system unit beside a live legacy agent would leave TWO
-# updaters running — worse than the stale/missing one this script exists to
-# fix — so that convergence rung is not optional here.
+# unit — installing the system unit beside a live legacy agent would leave
+# TWO updaters running, worse than the stale/missing one this script exists
+# to fix. UNLIKE edge/cli/relay's updater.install.sh siblings, gateway does
+# this INLINE (remove_legacy_updater_unit, below) rather than through the
+# shared migrations/updater-ledger ladder: gateway is not a shared-ladder
+# component (cmd/rkit/assemble.go's takesSharedLadder), so
+# inner/_shared/migrations/adopt_updater_unit.sh — the ladder rung that would
+# do this — is never staged into gateway's zip, and gateway's own
+# migrations/run.sh has no LEDGER_FILE seam to point at a second ledger even
+# when one is. gateway/install.sh's own remove_legacy_user_units is the
+# authority on which per-user labels exist; the function below mirrors it
+# scoped to the updater's label ONLY — it must never touch the serve unit.
+# The ladder block further down is kept for parity with the sibling scripts
+# and degrades to a documented, silent no-op here (no migrations/updater-ledger
+# ever ships for gateway) rather than being deleted outright.
 #
 # Unlike install.sh's default (the updater unit is rendered but left owner
 # opt-in), this script ENABLES and STARTS it: an operator running this one
@@ -213,6 +224,36 @@ place_bin() {
     fi
 }
 
+# remove_legacy_updater_unit — tear down the PER-USER updater agent
+# gateway/install.sh once wrote before the system-level model, SCOPED TO THE
+# UPDATER LABEL ONLY. install.sh's own remove_legacy_user_units is the
+# authority on which legacy per-user labels exist for gateway: on Darwin it
+# tears down com.burrowee.gateway, com.burrowee.gateway.updater and
+# org.burrowee.gateway (all three, gui/<uid> domain); on Linux,
+# burrowee-gateway.service and burrowee-gateway-updater.service (systemd
+# --user). The first and third Darwin labels and the serve .service name are
+# the SERVE unit's — this script must never touch those (see header) — so
+# only the updater's own label/unit name is handled here, byte-matching the
+# updater half of install.sh's cases exactly.
+#
+# Unprivileged, same as install.sh's own version: a gui-domain bootout and a
+# --user systemctl call belong to the invoking user's session and must run
+# as that user, never elevated. Every step best-effort (|| true) — "was
+# never installed" is the common case here, not an error.
+remove_legacy_updater_unit() {
+    case "$(uname -s)" in
+    Darwin)
+        launchctl bootout "gui/$(id -u)/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/$LAUNCHD_UPDATER_LABEL.plist"
+        ;;
+    Linux)
+        "$SYSTEMCTL" --user disable --now burrowee-gateway-updater.service 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/burrowee-gateway-updater.service"
+        "$SYSTEMCTL" --user daemon-reload 2>/dev/null || true
+        ;;
+    esac
+}
+
 # ── place ONLY the updater binary (fail loudly if missing) ────────────────────
 [ -f "./burrowee-gateway-updater" ] || {
     echo "updater.install.sh: missing burrowee-gateway-updater in release dir" >&2
@@ -220,6 +261,12 @@ place_bin() {
 }
 place_bin "./burrowee-gateway-updater" "$BIN_DIR/burrowee-gateway-updater"
 echo "updater.install.sh: placed $BIN_DIR/burrowee-gateway-updater"
+
+# ── converge any legacy PER-USER updater agent onto the managed system unit,
+# before the new unit below is written/loaded — same ordering install.sh's
+# own remove_legacy_user_units call keeps relative to its render/load steps,
+# so a system unit is never installed beside a still-live legacy one. ───────
+remove_legacy_updater_unit
 
 # ── write the updater unit (system-scope). Rendering ONLY — no load/start
 # here; that happens after the ladder below, same reason install.sh keeps
