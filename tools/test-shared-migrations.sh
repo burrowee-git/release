@@ -589,6 +589,37 @@ assert_contains "$OUT" "NOT recorded" "exit 3 must name the unrecorded rung"
 assert_gone "$h15/.local/bin/burrowee-edge" "exit 3 still means the rung RAN"
 
 # ---------------------------------------------------------------------------
+# 15b. A DEFERRED RUNG IS ALSO EXIT 3 — it did not run, and nothing above it may
+#
+# A rung that exits 3 is saying "this host needs me, I could not run, and I
+# changed nothing" — the shape adopt_updater_unit.sh uses when it cannot reach
+# root on a host with no tty. Every non-zero rung exit used to become the
+# runner's exit 1, which callers treat as fatal: updater.update.sh stops there,
+# BEFORE it restarts the updater, and the updater is the only automatic delivery
+# channel a host has. So the two have to be told apart here.
+# ---------------------------------------------------------------------------
+t15b="$TMP/t15b"; kit "$t15b" edge root installed-version $EDGE_BINS
+h15b="$t15b/home"; ch15b="$h15b/root-home/.burrowee/edge"; mkdir -p "$ch15b"
+seed_ours "$h15b/.local/bin" $EDGE_BINS
+seed_twins "$h15b/usr-local-bin" $EDGE_BINS
+# A rung that defers, ordered BELOW the sweep, so the sweep is the evidence that
+# the walk stopped: its stale per-user binaries must still be there afterwards.
+{
+    echo '#!/bin/sh'
+    echo '[ "${1:-}" = --applies ] && exit 0'
+    echo 'echo "defer_me: an operator has to do something first" >&2'
+    echo 'exit 3'
+} > "$t15b/migrations/defer_me.sh"
+chmod 0755 "$t15b/migrations/defer_me.sh"
+printf '0.2.0 defer_me.sh\n0.2.0 stale_user_bins.sh\n' > "$t15b/migrations/ledger"
+run_ladder "$t15b" "$h15b" "$ch15b" "$h15b/usr-local-bin"
+assert_eq "$RC" 3 "a rung that DEFERRED must exit 3 (still pending), not 1 (failed)"
+assert_contains "$OUT" "defer_me.sh DEFERRED" "exit 3 must name the deferred rung"
+assert_contains "$OUT" "nothing above it ran" "the runner must say the walk stopped"
+assert_gone "$ch15b/migration-receipts/defer_me.sh@0.2.0.done" "a deferred rung must earn no receipt"
+assert_present "$h15b/.local/bin/burrowee-edge" "the rung ABOVE a deferred one must not have run"
+
+# ---------------------------------------------------------------------------
 # 16. A RECEIPT FOR ANOTHER TREE SETTLES NOTHING HERE
 # ---------------------------------------------------------------------------
 t16="$TMP/t16"; kit "$t16" edge root installed-version $EDGE_BINS

@@ -118,10 +118,22 @@ SHARED_MIGRATIONS_DIR="${SHARED_MIGRATIONS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0
 # the shared ladder, one basename per line, sorted. Discovered by glob rather
 # than listed, so adding one stays a one-file change; mirrors sharedMigration
 # Scripts in cmd/rkit/assemble.go.
+#
+# TEST SUITES ARE NOT PAYLOAD. The glob ships whatever is in the directory, and
+# a suite written beside its subject put 25 KB of test harness, chmod 0755, into
+# every edge, cli and relay zip. Suites belong in tools/<name>.test.sh — which
+# is where every other shell suite in this repo lives, and where the one that
+# got in has been moved to — and this exclusion is the second lock on that
+# door: a *.test.sh or *_test.sh under inner/_shared/migrations is never staged.
+# cmd/rkit/assemble.go's sharedMigrationScripts drops the same two patterns, and
+# cmd/rkit/payload_manifest_test.go compares the two lists name-for-name.
 shared_migration_scripts() {
     local p
     for p in "${SHARED_MIGRATIONS_DIR}"/*.sh; do
         [ -f "${p}" ] || continue
+        case "$(basename "${p}")" in
+            *.test.sh | *_test.sh) continue ;;
+        esac
         printf '%s\n' "$(basename "${p}")"
     done | sort
 }
@@ -167,7 +179,7 @@ payload_manifest() {
     done
     case "${comp}" in
         gateway)
-            for p in "${src}"/migrations/*.sh; do
+            for p in "${src}"/migrations/*; do
                 [ -f "${p}" ] || continue
                 printf 'migrations/%s\n' "$(basename "${p}")"
             done
@@ -249,11 +261,11 @@ stage_component_migrations() {
         done
         return 0
     fi
-    for p in "${src}"/migrations/*.sh; do
+    for p in "${src}"/migrations/*; do
         [ -f "${p}" ] || continue
         base="$(basename "${p}")"
         cp "${p}" "${dest}/migrations/${base}"
-        chmod 0755 "${dest}/migrations/${base}"
+        case "${base}" in *.sh) chmod 0755 "${dest}/migrations/${base}" ;; esac
         found=1
     done
     if [ "${found}" != 1 ]; then
@@ -347,6 +359,46 @@ ledger_file_migrations() {
     ' "$1"
 }
 
+# assert_updater_ledger <comp> <src-dir> <zip> <members> — the UPDATER track's
+# own ledger, migrations/updater-ledger: a second, separate invocation of the
+# same shared run.sh that walks migrations/ledger, created per component by
+# Task 10 (edge, gateway, relay — cli and agent have no updater and are never
+# checked here). First row: adopt_updater_unit.sh.
+#
+# OPTIONAL TODAY, CHECKED THE MOMENT ONE EXISTS: no component in this repo's
+# own fixtures ships one yet, so a source tree without migrations/updater-ledger
+# is not an error — nothing here names it. The moment a component's source DOES
+# carry one, the same reasoning as the serve ledger applies verbatim: a row
+# naming a script the zip does not carry is a rung run.sh refuses on, on every
+# host, after the cut — and a release that cannot migrate must not be signed.
+assert_updater_ledger() {
+    local comp="$1" src="$2" zip_path="$3" members="$4"
+    case "${comp}" in edge|gateway|relay) ;; *) return 0 ;; esac
+
+    local ledger="${src}/migrations/updater-ledger"
+    [ -f "${ledger}" ] || return 0
+
+    if ! printf '%s\n' "${members}" | grep -qxF 'migrations/updater-ledger'; then
+        echo "✗ ${comp} payload has no migrations/updater-ledger: ${zip_path}" >&2
+        echo "  ${ledger} exists in source but was not staged into the zip; the updater" >&2
+        echo "  track's ladder invocation would refuse on every host." >&2
+        return 1
+    fi
+
+    local named name
+    if ! named="$(ledger_file_migrations "${ledger}")"; then
+        echo "✗ unparseable ${comp} updater ledger in ${ledger}" >&2
+        return 1
+    fi
+    # shellcheck disable=SC2086  # ${named} is an intentional newline-list of script names; word-splitting is the point.
+    for name in ${named}; do
+        if ! printf '%s\n' "${members}" | grep -qxF "migrations/${name}"; then
+            echo "✗ ${comp} updater migration \"${name}\" is named in the ledger of ${ledger} but is not in ${zip_path}" >&2
+            return 1
+        fi
+    done
+}
+
 assert_payload_migrations() {
     local comp="$1" zip_path="$2" src="$3"
     case "${comp}" in gateway|edge|cli|relay) ;; *) return 0 ;; esac
@@ -404,6 +456,7 @@ assert_payload_migrations() {
                 return 1
             fi
         done
+        assert_updater_ledger "${comp}" "${src}" "${zip_path}" "${members}" || return 1
         return 0
     fi
 
@@ -452,4 +505,5 @@ assert_payload_migrations() {
             return 1
         fi
     done
+    assert_updater_ledger "${comp}" "${src}" "${zip_path}" "${members}" || return 1
 }
