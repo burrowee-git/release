@@ -585,7 +585,11 @@ start_unit_darwin() {
             return 1
             ;;
     esac
-    launchctl enable "system/$_label"
+    # enable + kickstart ALWAYS run, and their failures are deliberately funnelled
+    # into the probe below rather than aborting under set -e: the probe is the only
+    # thing that reports the label and a recovery command. `|| true` is safe here
+    # ONLY because a verification immediately follows it — never widen it further.
+    launchctl enable "system/$_label" 2>/dev/null || true
     launchctl kickstart -k "system/$_label" 2>/dev/null || true
     if launchctl print "system/$_label" >/dev/null 2>&1; then
         echo "launchd service $_label enabled + started"
@@ -601,8 +605,12 @@ start_unit_darwin() {
 # reported as a started service.
 start_unit_linux() {
     _unit="$1"
-    systemctl enable --now "$_unit"
-    systemctl restart "$_unit"
+    # Failures here are funnelled into the is-active probe below rather than
+    # aborting under set -e: the probe is the only thing that reports the unit and
+    # a recovery command. `|| true` is safe here ONLY because a verification
+    # immediately follows it — never widen it further.
+    systemctl enable --now "$_unit" 2>/dev/null || true
+    systemctl restart "$_unit" 2>/dev/null || true
     if systemctl is-active --quiet "$_unit"; then
         echo "systemd service $_unit enabled + (re)started"
     else
