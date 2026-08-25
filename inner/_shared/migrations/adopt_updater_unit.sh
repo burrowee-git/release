@@ -20,27 +20,35 @@
 # which is already permitted to bounce the updater's own service — the one
 # track that is.
 #
-# IT IS BOOTING OUT THE SUPERVISOR OF THE PROCESS RUNNING IT. On the host this
-# exists for, the process walking this ladder IS the legacy per-user agent (that
-# is what "restarts whichever supervisor answers first" means): a launchd job in
-# the invoking user's gui/<uid> domain, or a systemd --user unit. Every query and
-# every mutation of THAT domain below therefore runs UNPRIVILEGED, as whichever
-# identity is already running this script — never elevated, and never resolved
-# through a second guess at "which user" the way adopt_user_tree.sh has to for a
-# tree it did not just read itself out of. Only the SYSTEM side (the new unit)
-# needs root, and only those specific steps elevate — mirrors adopt_user_tree.sh:
-# "it elevates individual steps rather than running wholesale as root."
+# IT IS BOOTING OUT THE SUPERVISOR OF THE PROCESS RUNNING IT — IN EITHER OF TWO
+# DOMAINS. On the host this exists for, the process walking this ladder IS one
+# of two legacy agents (see NAMING below for exactly which): a launchd job in
+# the invoking user's gui/<uid> domain, unprivileged, OR a launchd job in the
+# SYSTEM domain — a pre-rename system LaunchDaemon, which requires root like
+# any other system-domain unit. So the two legacy bootouts below are NOT
+# uniformly privileged: the gui-domain one runs as whichever identity is
+# already running this script — never elevated, and never resolved through a
+# second guess at "which user" the way adopt_user_tree.sh has to for a tree it
+# did not just read itself out of — while the system-domain one elevates, same
+# as every other system-domain mutation here (the new unit's own write/enable
+# steps included). Both are still "individual steps elevate, not the whole
+# script" — mirrors adopt_user_tree.sh — it is just that STEP 3 now has one
+# elevated half and one unprivileged half instead of being uniformly one or
+# the other.
 #
 # THE ORDER IS THE WHOLE SAFETY ARGUMENT AND MUST NOT BE REORDERED:
 #
-#     write the system unit → verify it loads → bootout the legacy unit → receipt
+#     write the system unit → verify it loads → bootout BOTH legacy domains → receipt
 #
 # Reversing steps 1 and 3 would boot the only supervisor keeping this component
-# updated before a replacement is confirmed live — a host stuck between agents
-# converges on nothing. The receipt (step 4) is written by run.sh, not here,
-# after this script exits 0; see EVERY STEP IS IDEMPOTENT below for why a run
-# killed between any two of the first three steps still converges cleanly on
-# re-run, with no receipt recorded for the partial attempt.
+# updated — in WHICHEVER domain it currently lives — before a replacement is
+# confirmed live: a host stuck between agents converges on nothing. This holds
+# identically for both legacy domains; neither bootout may run before the new
+# unit is loaded and verified. The receipt (step 4) is written by run.sh, not
+# here, after this script exits 0; see EVERY STEP IS IDEMPOTENT below for why a
+# run killed at ANY point among the first three steps — including between the
+# two legacy domains' bootouts — still converges cleanly on re-run, with no
+# receipt recorded for the partial attempt.
 #
 # EVERY STEP IS IDEMPOTENT.
 #   1. write_system_unit    overwrites the unit file with the same content every
@@ -48,14 +56,25 @@
 #   2. enable_system_unit   bootstrap/enable/kickstart (launchd) or
 #                            daemon-reload + enable --now (systemd) are each
 #                            safe to repeat on an already-loaded unit.
-#   3. bootout_legacy        `bootout`/`disable --now` on a unit that is already
-#                            gone is a normal, silent no-op (`|| true`).
-# A run killed after step 1 or 2 leaves the legacy agent still up (it has not
-# been touched yet) and the system unit already written/loading — re-running
-# from the top repeats 1-2 harmlessly and reaches 3. A run killed after step 3
-# leaves both units in their FINAL state; run.sh recorded no receipt (the
-# script had not exited yet), so a re-run repeats all three steps and finds
-# nothing left to do — never a state with neither unit up.
+#   3. bootout_legacy        `bootout`/`disable --now`, in EACH domain, on a
+#                            target that is already gone is a normal, silent
+#                            no-op (`|| true`) — true independently for the
+#                            gui-domain call and the system-domain call, so
+#                            the two may complete in either order relative to
+#                            each other and a kill between them still leaves a
+#                            re-run with exactly one thing left to do.
+# A run killed after step 1 or 2 leaves BOTH legacy domains still up (neither
+# has been touched yet) and the system unit already written/loading —
+# re-running from the top repeats 1-2 harmlessly and reaches 3. A run killed
+# DURING step 3 — including strictly between the gui-domain bootout completing
+# and the system-domain one starting — leaves whichever domain's bootout had
+# already completed gone and the other still up; re-running repeats the
+# completed one (a no-op, per above) and finishes the interrupted one. A run
+# killed after step 3 leaves both units in their FINAL state; run.sh recorded
+# no receipt (the script had not exited yet), so a re-run repeats all three
+# steps and finds nothing left to do — never a state with neither unit up, and
+# never a state where one legacy domain is swept but the other was silently
+# skipped.
 #
 # --applies ANSWERS "STILL NEEDED" WHENEVER IT CANNOT TELL, matching
 # adopt_user_tree.sh: legacy_unit_present() below returns true (needs
@@ -68,18 +87,56 @@
 # leaves it. (2) idempotency: a second real run (e.g. --rerun-recorded) with
 # the legacy agent already gone has nothing left to converge and says so.
 #
-# NAMING. The system unit mirrors inner/edge/install.sh's setup_root_service
-# exactly (same label/path shape, same [Service] block, same
-# HOME=<root's home> so console.json + identity resolve under the root-owned
-# tree): launchd label "com.burrowee.<comp>.updater" at
-# $LAUNCHD_PLIST_DIR/com.burrowee.<comp>.updater.plist; systemd unit
-# "burrowee-<comp>-updater.service" at $SYSTEMD_UNIT_DIR/. Rendered here too,
-# not merely enabled, because this migration must converge a host regardless of
-# which install.sh last ran on it. The legacy PER-USER labels swept are
-# "org.burrowee.<comp>-updater" (the label named in the 2026-08-24 design spec)
-# and "com.burrowee.<comp>-updater" (the same org→com rename the serve daemon
-# went through, mirrored here defensively); on Linux the legacy unit is the
-# systemd --user instance of the same unit name the system unit now takes.
+# NAMING — GROUND TRUTH, NOT INFERRED FROM THE SPEC. An earlier draft of this
+# rung guessed at the legacy labels from the design spec's prose and got it
+# wrong in both directions; the names below are read from the actual code
+# that mints and kickstarts them.
+#
+# core/setup/system_service.go:31-37 —
+#
+#     func (s SystemService) LaunchdLabel() string {
+#         return "com.burrowee." + strings.ReplaceAll(s.Name, "-", ".")
+#     }
+#     // legacyGuiLabel is the pre-rename per-user launchd agent label
+#     // (org.burrowee.edge, org.burrowee.edge-updater — hyphen preserved).
+#     func (s SystemService) legacyGuiLabel() string { return "org.burrowee." + s.Name }
+#
+# With Name="<comp>-updater" that gives the SYSTEM target
+# "com.burrowee.<comp>.updater" (dots — mirrors inner/edge/install.sh's
+# setup_root_service exactly: same label/path shape, same [Service] block,
+# same HOME=<root's home> so console.json + identity resolve under the
+# root-owned tree) and the legacy GUI-domain label
+# "org.burrowee.<comp>-updater" (HYPHEN preserved — the comment above is
+# explicit that this is deliberate, not a typo to "fix").
+#
+# edge/updater.update.sh:140-142 shows a SECOND legacy label actually
+# kickstarted in the field today, in the SYSTEM domain:
+#
+#     launchctl kickstart -k "gui/$(id -u)/org.burrowee.edge-updater"
+#     elevate launchctl kickstart -k "system/com.burrowee.edge.updater"
+#     elevate launchctl kickstart -k "system/org.burrowee.edge.updater"
+#
+# — "org.burrowee.<comp>.updater" (DOTTED, system domain): a pre-rename
+# SYSTEM LaunchDaemon, distinct from the pre-rename PER-USER agent above.
+# Two legacy labels, two domains, and this rung sweeps both:
+#
+#     org.burrowee.<comp>-updater   gui/<uid>/…   the per-user agent
+#     org.burrowee.<comp>.updater   system/…      the pre-rename system unit
+#
+# "com.burrowee.<comp>-updater" (hyphenated, com prefix) is NOT a real label
+# anywhere in edge, gateway, relay or core — that earlier draft invented it
+# and would have chased a phantom while missing the real system-domain
+# survivor. On Linux the legacy unit is the systemd --user instance of the
+# same unit name the system unit now takes; systemd has no second legacy
+# domain to sweep.
+#
+# THE SYSTEM-DOMAIN LEGACY LABEL CAN ITSELF BE THE SUPERVISOR OF THE PROCESS
+# RUNNING THIS SCRIPT, exactly like the gui-domain one — a host still on the
+# pre-rename "org.burrowee.<comp>.updater" SYSTEM LaunchDaemon runs its
+# update.sh under THAT unit. So its bootout is elevated (it is a system-domain
+# mutation, like every other write below) but still ordered strictly after
+# the new system unit is written and verified loaded — the same reason the
+# gui-domain bootout is ordered there, applied to the second domain.
 #
 # THE COPY IS NOT REIMPLEMENTED HERE, and neither is any state migration — this
 # rung touches no file under $COMP_HOME or $COMP_DATA. Only the supervisor
@@ -140,7 +197,10 @@ case "$(uname -s)" in
 Darwin)
     SYS_LABEL="com.burrowee.$COMP.updater"
     SYS_PLIST="$LAUNCHD_PLIST_DIR/$SYS_LABEL.plist"
-    LEGACY_LABELS="org.burrowee.$COMP-updater com.burrowee.$COMP-updater"
+    # See the NAMING section above: core/setup/system_service.go:31-37 +
+    # edge/updater.update.sh:140-142. Two legacy labels, two domains.
+    LEGACY_GUI_LABEL="org.burrowee.$COMP-updater"
+    LEGACY_SYS_LABEL="org.burrowee.$COMP.updater"
     ;;
 *)
     SYS_UNIT_NAME="burrowee-$COMP-updater.service"
@@ -150,18 +210,23 @@ Darwin)
 esac
 
 # ---------------------------------------------------------------------------
-# legacy_unit_present — whether the legacy PER-USER updater agent still
-# exists, answering YES whenever it cannot positively confirm NO. Unprivileged
-# on purpose: see the header on why this runs as whichever identity is already
-# running the script, never elevated.
+# legacy_unit_present — whether EITHER legacy agent still exists (gui-domain
+# per-user, or system-domain pre-rename unit — see NAMING above), answering
+# YES whenever it cannot positively confirm NO for both. The queries
+# themselves are unprivileged in both domains — a read, unlike the
+# system-domain BOOTOUT in bootout_legacy below, needs no elevation on either
+# platform.
 # ---------------------------------------------------------------------------
 legacy_unit_present() {
     case "$(uname -s)" in
     Darwin)
         command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 0
-        for _lup in $LEGACY_LABELS; do
-            "$LAUNCHCTL" print "gui/$(id -u)/$_lup" >/dev/null 2>&1 && return 0
-        done
+        # BOTH legacy domains are checked — a host running only the
+        # system-domain survivor (org.burrowee.<comp>.updater) and never the
+        # gui-domain agent must still be recognised, or this rung silently
+        # matches nothing on exactly the hosts it exists for.
+        "$LAUNCHCTL" print "gui/$(id -u)/$LEGACY_GUI_LABEL" >/dev/null 2>&1 && return 0
+        "$LAUNCHCTL" print "system/$LEGACY_SYS_LABEL" >/dev/null 2>&1 && return 0
         return 1
         ;;
     *)
@@ -298,14 +363,20 @@ verify_system_unit_loaded() {
     esac
 }
 
-# bootout_legacy — STEP 3. Never elevated (see the header); a target that is
-# already gone is a normal no-op.
+# bootout_legacy — STEP 3, both legacy domains. A target that is already gone
+# is a normal no-op in either. The gui-domain call is NEVER elevated (see the
+# header: this runs as whichever identity is already running the script, and
+# on the host this rung exists for that IS the gui-domain agent). The
+# system-domain call IS elevated, like every other system-domain mutation
+# above — and for the same self-referential reason: a host still on the
+# pre-rename system LaunchDaemon runs THIS script under it, so that bootout
+# must come after the new system unit is written and verified loaded, never
+# before, exactly like the gui-domain one.
 bootout_legacy() {
     case "$(uname -s)" in
     Darwin)
-        for _bl in $LEGACY_LABELS; do
-            "$LAUNCHCTL" bootout "gui/$(id -u)/$_bl" 2>/dev/null || true
-        done
+        "$LAUNCHCTL" bootout "gui/$(id -u)/$LEGACY_GUI_LABEL" 2>/dev/null || true
+        elevate "$LAUNCHCTL" bootout "system/$LEGACY_SYS_LABEL" 2>/dev/null || true
         ;;
     *)
         "$SYSTEMCTL" --user disable --now "$LEGACY_UNIT_NAME" 2>/dev/null || true
