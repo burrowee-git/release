@@ -312,22 +312,81 @@ if [ -n "$MIGRATIONS_DIR" ] && [ -f "$MIGRATIONS_DIR/run.sh" ] && [ -f "$MIGRATI
 	fi
 fi
 
+# start_unit_darwin <label> <plist> — start a launchd system unit and verify it
+# took. bootstrap's codes 5 (already loaded) and 37 are benign races against an
+# async bootout — every other code is a real failure and must not be swallowed.
+# enable + kickstart ALWAYS run: a bootstrap that no-ops on an already-loaded
+# label still needs both.
+#
+# The status is captured with `|| _rc=$?`, NOT inside `if ! ...`: POSIX makes $?
+# the NEGATED status of a `!` pipeline, so an `if !` branch would read 0 for
+# every failure and tolerate nothing.
+start_unit_darwin() {
+    _label="$1"; _plist="$2"
+    _rc=0
+    launchctl bootstrap system "$_plist" 2>/dev/null || _rc=$?
+    case "$_rc" in
+        0 | 5 | 37) ;; # started / already loaded / async bootout still settling
+        *)
+            echo "error: launchctl bootstrap $_label failed (exit $_rc)" >&2
+            echo "hint: sudo launchctl bootstrap system $_plist" >&2
+            return 1
+            ;;
+    esac
+    # enable + kickstart ALWAYS run, and their failures are deliberately funnelled
+    # into the probe below rather than aborting under set -e: the probe is the only
+    # thing that reports the label and a recovery command. `|| true` is safe here
+    # ONLY because a verification immediately follows it — never widen it further.
+    launchctl enable "system/$_label" 2>/dev/null || true
+    launchctl kickstart -k "system/$_label" 2>/dev/null || true
+    if launchctl print "system/$_label" >/dev/null 2>&1; then
+        echo "launchd service $_label enabled + started"
+    else
+        echo "error: $_label did not come up after bootstrap" >&2
+        echo "hint: sudo launchctl print system/$_label" >&2
+        return 1
+    fi
+}
+
+# start_unit_linux <unit> — enable, (re)start and verify a systemd system unit.
+# The probe is the point: enable --now on a unit that then dies must not be
+# reported as a started service.
+start_unit_linux() {
+    _unit="$1"
+    # Failures here are funnelled into the is-active probe below rather than
+    # aborting under set -e: the probe is the only thing that reports the unit and
+    # a recovery command. `|| true` is safe here ONLY because a verification
+    # immediately follows it — never widen it further.
+    systemctl enable --now "$_unit" 2>/dev/null || true
+    systemctl restart "$_unit" 2>/dev/null || true
+    if systemctl is-active --quiet "$_unit"; then
+        echo "systemd service $_unit enabled + (re)started"
+    else
+        echo "error: $_unit is not active after enable --now" >&2
+        echo "hint: sudo systemctl status $_unit" >&2
+        return 1
+    fi
+}
+
 # ── start the updater. Unlike install.sh's default (rendered but left owner
 # opt-in), this script enables and starts it — an operator running this one
 # specifically wants the updater running now. Bootout-then-reload (Darwin) /
 # daemon-reload+enable+restart (Linux) mirrors install.sh's own idempotent
-# reload of the serve unit, applied here to the updater's. ───────────────────
+# reload of the serve unit, applied here to the updater's. This is a recovery
+# tool run precisely on hosts where the label is already loaded, so the
+# bootstrap's benign-already-loaded codes must not abort before enable/
+# kickstart ever run — routed through start_unit_darwin / start_unit_linux
+# (copied byte-identical from inner/edge/install.sh) for that reason. These
+# unconditionally start the updater — that is this script's entire purpose —
+# and deliberately do NOT honour BURROWEE_NO_UPDATER: running the updater
+# installer while asking for no updater is a contradiction that flag does not
+# reach here. ──────────────────────────────────────────────────────────────
 if [ "$(uname -s)" = "Darwin" ]; then
     elevate launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
-    elevate launchctl bootstrap system "$LAUNCHD_UPDATER_PLIST"
-    elevate launchctl enable "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
-    elevate launchctl kickstart -k "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
-    echo "updater.install.sh: launchd service $LAUNCHD_UPDATER_LABEL enabled + started"
+    start_unit_darwin "$LAUNCHD_UPDATER_LABEL" "$LAUNCHD_UPDATER_PLIST"
 else
     elevate "$SYSTEMCTL" daemon-reload
-    elevate "$SYSTEMCTL" enable --now burrowee-edge-updater
-    elevate "$SYSTEMCTL" restart burrowee-edge-updater
-    echo "updater.install.sh: systemd service burrowee-edge-updater enabled + (re)started"
+    start_unit_linux burrowee-edge-updater
 fi
 
 echo "updater.install.sh: updater install complete."
