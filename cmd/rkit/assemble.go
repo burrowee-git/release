@@ -142,14 +142,34 @@ func takesSharedLadder(comp string) bool {
 // <repoDir>/inner/_shared/migrations, sorted by basename. Discovered by glob
 // rather than listed, so adding one stays a one-file change; mirrors
 // shared_migration_scripts in tools/payload.sh.
+//
+// TEST SUITES ARE NOT PAYLOAD. The glob ships whatever is in the directory, and
+// a suite written beside its subject put 25 KB of test harness, chmod 0755, into
+// every edge, cli and relay zip. Suites belong in tools/<name>.test.sh — which
+// is where every other shell suite in this repo lives — and this exclusion is
+// the second lock on that door. tools/payload.sh drops the same two patterns.
 func sharedMigrationScripts(repoDir string) ([]string, error) {
 	dir := filepath.Join(repoDir, "inner", "_shared", "migrations")
 	paths, err := filepath.Glob(filepath.Join(dir, "*.sh"))
 	if err != nil {
 		return nil, fmt.Errorf("shared migrations glob %s: %w", dir, err)
 	}
-	sort.Strings(paths)
-	return paths, nil
+	kept := paths[:0:0]
+	for _, p := range paths {
+		if isShellTestFile(filepath.Base(p)) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	sort.Strings(kept)
+	return kept, nil
+}
+
+// isShellTestFile reports whether a basename names a shell test suite rather
+// than something a host runs. Mirrors the case pattern in tools/payload.sh's
+// shared_migration_scripts.
+func isShellTestFile(base string) bool {
+	return strings.HasSuffix(base, ".test.sh") || strings.HasSuffix(base, "_test.sh")
 }
 
 // componentMigrationFiles returns the component's OWN half of its ladder —
@@ -305,10 +325,28 @@ func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 		// run.sh is REQUIRED: a gateway zip without it turns every upgrade that
 		// needs a migration into a daemon that comes back without its state, which
 		// is far worse than a build that stops here.
+		//
+		// EVERY FILE, NOT EVERY *.sh. tools/payload.sh globs migrations/* here
+		// and this side globbed migrations/*.sh, which is invisible only for as
+		// long as the gateway's migrations/ holds nothing but scripts — the day
+		// it grows a ledger data file or a component.conf, the shell path ships
+		// it and this one does not, and the two zips differ. Both sides carry a
+		// "mirrors X in Y" comment; that is not a mechanism, so
+		// cmd/rkit/payload_manifest_test.go's gateway fixture now carries a
+		// non-.sh member to make this a red test rather than a comment.
 		mig := filepath.Join(srcDir, "migrations")
-		scripts, globErr := filepath.Glob(filepath.Join(mig, "*.sh"))
+		globbed, globErr := filepath.Glob(filepath.Join(mig, "*"))
 		if globErr != nil {
 			return nil, fmt.Errorf("gateway migrations glob %s: %w", mig, globErr)
+		}
+		var scripts []string
+		for _, p := range globbed {
+			// Directories are not payload members, and tools/payload.sh's
+			// `[ -f "${p}" ] || continue` skips them the same way.
+			if st, statErr := os.Stat(p); statErr != nil || st.IsDir() {
+				continue
+			}
+			scripts = append(scripts, p)
 		}
 		sort.Strings(scripts)
 		shipped := map[string]bool{}

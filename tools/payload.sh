@@ -118,10 +118,22 @@ SHARED_MIGRATIONS_DIR="${SHARED_MIGRATIONS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0
 # the shared ladder, one basename per line, sorted. Discovered by glob rather
 # than listed, so adding one stays a one-file change; mirrors sharedMigration
 # Scripts in cmd/rkit/assemble.go.
+#
+# TEST SUITES ARE NOT PAYLOAD. The glob ships whatever is in the directory, and
+# a suite written beside its subject put 25 KB of test harness, chmod 0755, into
+# every edge, cli and relay zip. Suites belong in tools/<name>.test.sh — which
+# is where every other shell suite in this repo lives, and where the one that
+# got in has been moved to — and this exclusion is the second lock on that
+# door: a *.test.sh or *_test.sh under inner/_shared/migrations is never staged.
+# cmd/rkit/assemble.go's sharedMigrationScripts drops the same two patterns, and
+# cmd/rkit/payload_manifest_test.go compares the two lists name-for-name.
 shared_migration_scripts() {
     local p
     for p in "${SHARED_MIGRATIONS_DIR}"/*.sh; do
         [ -f "${p}" ] || continue
+        case "$(basename "${p}")" in
+            *.test.sh | *_test.sh) continue ;;
+        esac
         printf '%s\n' "$(basename "${p}")"
     done | sort
 }

@@ -131,7 +131,14 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		comp  string
 		files []string
 	}{
-		{"gateway", []string{"update.sh", "migrations/run.sh", "migrations/v0_1_to_v0_2.sh"}},
+		// migrations/component.conf is NOT scenery: it is a NON-.sh member, and
+		// it is the only thing in this table that can tell the two globs
+		// apart. tools/payload.sh globs migrations/* while assemble.go globbed
+		// migrations/*.sh, and with a fixture made of nothing but scripts the
+		// two lists agreed while the shipped sets would not have. The gateway's
+		// migrations/ is all scripts TODAY; the first data file added to it is
+		// the release where they diverge.
+		{"gateway", []string{"update.sh", "migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/component.conf"}},
 		// edge and cli take the SHARED ladder: the runner and rungs come from
 		// inner/_shared/migrations (both manifests glob the real directory), and
 		// component.conf + ledger come from the component source. Both are
@@ -213,6 +220,69 @@ func TestPayloadManifestsAgreeOnANewMigration(t *testing.T) {
 	want := []string{"migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh", "update.sh"}
 	if !reflect.DeepEqual(shell, want) {
 		t.Errorf("manifest = %v, want %v", shell, want)
+	}
+}
+
+// TestPayloadManifestsAgreeOnANonScriptMigrationMember is the same property for
+// the file that is NOT a script. A ladder directory holds more than rungs — a
+// ledger, a component.conf — and each side globbing a different pattern
+// produces two zips that differ by exactly those files, with both sides still
+// carrying a comment claiming they mirror each other. Stated on its own so the
+// reason survives a rewrite of the table above.
+func TestPayloadManifestsAgreeOnANonScriptMigrationMember(t *testing.T) {
+	src := srcFixture(t, "update.sh",
+		"migrations/run.sh", "migrations/v0_1_to_v0_2.sh",
+		"migrations/component.conf", "migrations/ledger-notes.txt")
+	ledgerRunner(t, src, "v0_1_to_v0_2.sh")
+
+	shell := shellManifest(t, "gateway", src)
+	goSide := goManifest(t, "gateway", src)
+	if !reflect.DeepEqual(shell, goSide) {
+		t.Fatalf("assembly paths disagree on a non-script migrations/ member:\n  tools/payload.sh: %v\n  assemble.go:      %v",
+			shell, goSide)
+	}
+	for _, want := range []string{"migrations/component.conf", "migrations/ledger-notes.txt"} {
+		var found bool
+		for _, m := range shell {
+			if m == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("neither manifest ships %s: %v", want, shell)
+		}
+	}
+}
+
+// TestSharedMigrationScriptsExcludeTestSuites states what the shared ladder's
+// glob must NOT pick up. adopt_updater_unit_test.sh sat beside its subject and
+// was staged, chmod 0755, into every edge, cli and relay zip — 25 KB of test
+// harness on every production host. The suite has moved to
+// tools/adopt_updater_unit.test.sh; this is the lock that keeps the next one
+// out, and tools/payload.test.sh asserts the same thing on the shell side.
+func TestSharedMigrationScriptsExcludeTestSuites(t *testing.T) {
+	repo := t.TempDir()
+	dir := filepath.Join(repo, "inner", "_shared", "migrations")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"run.sh", "lib_paths.sh", "adopt_updater_unit.test.sh", "adopt_updater_unit_test.sh"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := sharedMigrationScripts(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, p := range got {
+		names = append(names, filepath.Base(p))
+	}
+	sort.Strings(names)
+	want := []string{"lib_paths.sh", "run.sh"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("sharedMigrationScripts staged %v, want %v — a test suite is not payload", names, want)
 	}
 }
 

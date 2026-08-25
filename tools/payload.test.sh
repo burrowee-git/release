@@ -76,6 +76,14 @@ check "manifest: gateway" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" 
 check "manifest: picks up a new migration" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
     "update.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
 
+# …AND A NON-SCRIPT MEMBER TOO. The gateway's migrations/ holds only scripts
+# today, which is the only reason a `*.sh` glob on the rkit side and a `*` glob
+# here looked identical for so long. cmd/rkit/payload_manifest_test.go pins the
+# two lists together; this states the shell side's own expectation.
+: > "${SRC}/migrations/component.conf"
+check "manifest: ships a non-script migrations member" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
+    "update.sh,migrations/component.conf,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
+
 # edge's manifest carries the SHARED ladder's members plus its own two files.
 # The shared half is discovered by glob from inner/_shared/migrations, so it is
 # pinned here against a fixture rather than against the real directory — a test
@@ -86,7 +94,18 @@ mkdir -p "${SHARED_FIX}"
 : > "${SHARED_FIX}/run.sh"; : > "${SHARED_FIX}/upgrade.sh"; : > "${SHARED_FIX}/lib_paths.sh"
 : > "${SHARED_FIX}/lib_stale_user_bins.sh"; : > "${SHARED_FIX}/stale_user_bins.sh"
 : > "${SHARED_FIX}/adopt_user_tree.sh"
+# A TEST SUITE IS NOT PAYLOAD. Both spellings go into the fixture and NEITHER
+# may appear in any manifest below — the expectations that follow are unchanged
+# by their presence, which is the assertion. adopt_updater_unit_test.sh really
+# did sit in inner/_shared/migrations and really was staged, chmod 0755, into
+# every edge, cli and relay zip; it now lives in tools/adopt_updater_unit.test.sh
+# and cmd/rkit/assemble.go drops the same two patterns.
+: > "${SHARED_FIX}/adopt_updater_unit.test.sh"
+: > "${SHARED_FIX}/adopt_updater_unit_test.sh"
 SHARED_MIGRATIONS_DIR="${SHARED_FIX}"
+check "shared scripts: test suites are not staged" \
+    "$(shared_migration_scripts | paste -sd, -)" \
+    "adopt_user_tree.sh,lib_paths.sh,lib_stale_user_bins.sh,run.sh,stale_user_bins.sh,upgrade.sh"
 EDGE_SRC="${TMP}/manifest-edge"
 mkdir -p "${EDGE_SRC}/migrations"
 : > "${EDGE_SRC}/migrations/component.conf"; : > "${EDGE_SRC}/migrations/ledger"
