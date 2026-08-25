@@ -50,6 +50,32 @@
 # two legacy domains' bootouts — still converges cleanly on re-run, with no
 # receipt recorded for the partial attempt.
 #
+# STEP 2 PERFORMS A BOOTOUT OF ITS OWN, AND ORDERING DOES NOT PROTECT IT. The
+# argument above is about steps 1→3; it says nothing about the fact that
+# reloading a launchd system unit is spelled `bootout` + `bootstrap`, and that
+# the job being booted out there is $SYS_LABEL — the NEW unit. On a host that is
+# already PARTIALLY converged (the new system daemon loaded, a legacy agent
+# still around — the state a killed earlier run leaves, and the state this
+# rung's own suite constructs), the process walking this ladder is a child of
+# THAT job, so an unconditional `bootout system/$SYS_LABEL` here kills its own
+# process tree in the middle of step 2: `bootstrap` never runs, the plist is on
+# disk with no loaded unit behind it, and recovery needs a reboot or a manual
+# bootstrap. Ordering cannot fix this — the kill is inside a step, not between
+# two of them — so enable_system_unit below never boots out blind:
+#
+#   * unit already loaded AND the plist is byte-identical to what this run
+#     renders → there is nothing to reload. Ensure it is enabled; return.
+#   * unit already loaded, plist CHANGED, and this process's own job IS
+#     $SYS_LABEL (launchctl procinfo) → the reload would kill the reloader.
+#     Leave it to the caller: <comp>/updater.update.sh's restart_updater runs
+#     LAST for exactly this reason, and the next start reads the new plist.
+#   * unit not loaded, or loaded from different content under some OTHER job →
+#     reload for real; nothing being killed is running this script.
+#
+# On Linux there is no equivalent hazard: `systemctl enable --now` on an
+# already-active unit does not restart it, so step 2 cannot stop the unit
+# supervising this process.
+#
 # EVERY STEP IS IDEMPOTENT.
 #   1. write_system_unit    overwrites the unit file with the same content every
 #                            time; never appends, never reads what was there.
@@ -86,6 +112,66 @@
 # auto-updater stays owner opt-in, exactly as install.sh's setup_root_service
 # leaves it. (2) idempotency: a second real run (e.g. --rerun-recorded) with
 # the legacy agent already gone has nothing left to converge and says so.
+#
+# "CANNOT TELL" IS A THIRD ANSWER, NOT A SYNONYM FOR "GONE". legacy_unit_state()
+# below returns present | absent | unknown, and legacy_unit_present() — the
+# --applies predicate — is "not absent", so the contract above holds verbatim.
+# The distinction is not academic on Linux: `systemctl --user is-active` exits
+# NON-ZERO IDENTICALLY for "the manager says inactive" and "there is no user bus
+# to ask", and an earlier draft read both as a confirmed absence. It is told
+# apart by the STATE WORD on stdout: a reachable manager always prints one
+# (`inactive` even for a unit it has never heard of), an unreachable one prints
+# nothing at all. `is-enabled` cannot be used for that test — it prints nothing
+# for an unknown unit on a perfectly healthy bus — so is-active is the probe
+# that decides reachability and is-enabled only ever adds a "present".
+#
+# LINUX SCOPE — SYSTEM-SCOPE ONLY. THE PER-USER LINUX CASE IS UNHANDLED, AND
+# THAT IS A DECISION, NOT AN OVERSIGHT. The decision is: converge on Linux only
+# what this process can POSITIVELY OBSERVE, and say out loud when it cannot
+# observe anything. Why the alternative — probing the enrolling user's manager —
+# is not available here:
+#
+#   * <comp>/updater.update.sh installs into $PREFIX/bin unelevated and REFUSES
+#     any other destination, so the updater ladder completes on Linux only when
+#     it is already root.
+#   * root's `systemctl --user` addresses ROOT's user manager, never the
+#     enrolling account's. On a stock host root has no user manager at all, so
+#     the probe returns "unknown" rather than an answer about the account that
+#     actually ran `systemctl --user enable burrowee-<comp>-updater`.
+#   * Reaching that account's manager needs its uid (`XDG_RUNTIME_DIR=/run/user/
+#     <uid>`, or `systemctl --user -M <user>@`). run.sh exports no account to a
+#     rung — see run_migration's env block — and relay, the only component on
+#     this ladder that is Linux-first, collapsed to root-only at 0.2.2, so there
+#     is no enrolling account recorded anywhere for this rung to read. Guessing
+#     one is precisely the "second guess at which user" adopt_user_tree.sh
+#     refuses to make.
+#   * And a blind convergence would be worse than none: on Linux the legacy unit
+#     NAME and the target unit NAME are the same string
+#     (burrowee-<comp>-updater.service, differing only in scope), so converging
+#     on a "cannot tell" would overwrite the very unit the installer manages
+#     with this rung's rendering of it, on every Linux host, forever.
+#
+# So: unknown on Linux is reported and the run stops, having written nothing —
+# a Linux host still running a per-user `systemctl --user`
+# burrowee-<comp>-updater is NOT converged by this rung, and the line it prints
+# on every update says so. The Darwin branch is unaffected: both of its queries
+# (gui/<uid>/… for the running identity, system/… ) are readable without a bus
+# and without elevation, so it can always tell.
+#
+# AN UNELEVATABLE HOST IS DEFERRED (EXIT 3), NEVER FAILED. The headline case for
+# this rung is a legacy launchd GUI agent: no tty, no cached sudo credential,
+# and $SUDO is `sudo -n`, which never prompts. Every system-domain write below
+# therefore fails on exactly the hosts this rung exists for. Failing (exit 1) is
+# the one outcome that must not happen: updater.update.sh treats a non-{0,2,3}
+# ladder result as fatal and returns BEFORE restart_updater, so the host ends up
+# with a new updater binary on disk and its updater service never restarted —
+# and the updater is the only automatic delivery channel, so no later release can
+# reach it to fix it. A stranded convergence is recoverable; a stopped updater is
+# not. The elevate pre-flight below (modelled on adopt_user_tree.sh's) therefore
+# detects an unreachable root UP FRONT, before the first write, prints the exact
+# command an operator must run, and exits 3 — which run.sh reports as DEFERRED
+# (ran nothing, recorded nothing, still pending) and updater.update.sh treats as
+# non-fatal, so the service is restarted and the host stays reachable.
 #
 # NAMING — GROUND TRUTH, NOT INFERRED FROM THE SPEC. An earlier draft of this
 # rung guessed at the legacy labels from the design spec's prose and got it
@@ -145,6 +231,11 @@
 set -eu
 
 HERE="$(dirname "$0")"
+# The absolute form is only ever used in the operator-facing DEFERRED message
+# below: "re-run this" is not actionable when the path is relative to a working
+# directory the operator never had. Falls back to $HERE if the cd fails.
+HERE_ABS="$(cd "$HERE" 2>/dev/null && pwd)" || HERE_ABS="$HERE"
+[ -n "$HERE_ABS" ] || HERE_ABS="$HERE"
 
 say()  { echo "adopt_updater_unit: $*"; }
 warn() { echo "adopt_updater_unit: $*" >&2; }
@@ -210,32 +301,71 @@ Darwin)
 esac
 
 # ---------------------------------------------------------------------------
-# legacy_unit_present — whether EITHER legacy agent still exists (gui-domain
-# per-user, or system-domain pre-rename unit — see NAMING above), answering
-# YES whenever it cannot positively confirm NO for both. The queries
-# themselves are unprivileged in both domains — a read, unlike the
-# system-domain BOOTOUT in bootout_legacy below, needs no elevation on either
-# platform.
+# legacy_unit_state — THREE answers, printed on stdout:
+#
+#   present   a legacy agent was positively observed (gui-domain per-user, or
+#             system-domain pre-rename unit — see NAMING above).
+#   absent    the supervisor answered, and neither legacy agent is there.
+#   unknown   nothing could be asked. NOT the same as absent — see "CANNOT TELL
+#             IS A THIRD ANSWER" in the header.
+#
+# The queries are unprivileged on both platforms — a read, unlike the
+# system-domain BOOTOUT in bootout_legacy below, needs no elevation.
 # ---------------------------------------------------------------------------
-legacy_unit_present() {
+legacy_unit_state() {
     case "$(uname -s)" in
     Darwin)
-        command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 0
+        command -v "$LAUNCHCTL" >/dev/null 2>&1 || { echo unknown; return 0; }
         # BOTH legacy domains are checked — a host running only the
         # system-domain survivor (org.burrowee.<comp>.updater) and never the
         # gui-domain agent must still be recognised, or this rung silently
         # matches nothing on exactly the hosts it exists for.
-        "$LAUNCHCTL" print "gui/$(id -u)/$LEGACY_GUI_LABEL" >/dev/null 2>&1 && return 0
-        "$LAUNCHCTL" print "system/$LEGACY_SYS_LABEL" >/dev/null 2>&1 && return 0
-        return 1
+        if "$LAUNCHCTL" print "gui/$(id -u)/$LEGACY_GUI_LABEL" >/dev/null 2>&1; then
+            echo present; return 0
+        fi
+        if "$LAUNCHCTL" print "system/$LEGACY_SYS_LABEL" >/dev/null 2>&1; then
+            echo present; return 0
+        fi
+        echo absent
         ;;
     *)
-        command -v "$SYSTEMCTL" >/dev/null 2>&1 || return 0
-        "$SYSTEMCTL" --user is-active "$LEGACY_UNIT_NAME" >/dev/null 2>&1 && return 0
-        "$SYSTEMCTL" --user is-enabled "$LEGACY_UNIT_NAME" >/dev/null 2>&1 && return 0
-        return 1
+        command -v "$SYSTEMCTL" >/dev/null 2>&1 || { echo unknown; return 0; }
+        # THE STATE WORD, NOT THE EXIT CODE, is what says whether anyone was
+        # home: `is-active` exits non-zero both for "inactive" and for "failed
+        # to connect to bus", and only the first of those prints a word. Its
+        # stdout is therefore the bus probe as well as the state read, and it
+        # has to be the one that decides — `is-enabled` prints nothing for a
+        # unit a reachable manager has simply never heard of.
+        _lus_active="$("$SYSTEMCTL" --user is-active "$LEGACY_UNIT_NAME" 2>/dev/null || true)"
+        if [ -z "$_lus_active" ]; then
+            echo unknown; return 0
+        fi
+        case "$_lus_active" in
+        active | activating | reloading | deactivating)
+            echo present; return 0
+            ;;
+        esac
+        # The manager answered, so a stopped-but-installed legacy unit is still
+        # something to converge — and now `is-enabled`'s silence really does
+        # mean "no such unit file" rather than "no bus".
+        _lus_enabled="$("$SYSTEMCTL" --user is-enabled "$LEGACY_UNIT_NAME" 2>/dev/null || true)"
+        case "$_lus_enabled" in
+        "" | disabled | masked* | not-found | bad | invalid)
+            echo absent
+            ;;
+        *)
+            echo present
+            ;;
+        esac
         ;;
     esac
+}
+
+# legacy_unit_present — the --applies predicate: "still needed" is anything
+# that is not a positively confirmed absence, so `unknown` answers YES. See the
+# header.
+legacy_unit_present() {
+    [ "$(legacy_unit_state)" != absent ]
 }
 
 # ---------------------------------------------------------------------------
@@ -301,6 +431,27 @@ EOF
 
 # write_system_unit — STEP 1. Idempotent: overwrites unconditionally with the
 # same content every time.
+#
+# It also RECORDS WHETHER THAT OVERWRITE CHANGED ANYTHING, in
+# SYS_UNIT_CHANGED, because this is the last moment the previous content still
+# exists to be compared: enable_system_unit runs after the file has already
+# been replaced, and "the unit on disk is what I would have written" is the
+# fact that lets it skip a reload that would kill the process running it (see
+# STEP 2 PERFORMS A BOOTOUT OF ITS OWN in the header). An unreadable existing
+# file counts as CHANGED — the conservative direction, since the second guard
+# (running_under_sys_label) still stops a self-inflicted bootout.
+SYS_UNIT_CHANGED=1
+
+# note_unit_change <rendered> <path> — set SYS_UNIT_CHANGED from a comparison
+# of what this run renders against what is already there.
+note_unit_change() {
+    if [ -f "$2" ] && [ "$1" = "$(cat "$2" 2>/dev/null)" ]; then
+        SYS_UNIT_CHANGED=0
+    else
+        SYS_UNIT_CHANGED=1
+    fi
+}
+
 write_system_unit() {
     case "$(uname -s)" in
     Darwin)
@@ -308,7 +459,9 @@ write_system_unit() {
             warn "could not create $LAUNCHD_PLIST_DIR"
             return 1
         fi
-        if ! render_launchd_plist | elevate tee "$SYS_PLIST" >/dev/null; then
+        _wsu_body="$(render_launchd_plist)"
+        note_unit_change "$_wsu_body" "$SYS_PLIST"
+        if ! printf '%s\n' "$_wsu_body" | elevate tee "$SYS_PLIST" >/dev/null; then
             warn "could not write $SYS_PLIST"
             return 1
         fi
@@ -320,7 +473,9 @@ write_system_unit() {
             warn "could not create $SYSTEMD_UNIT_DIR"
             return 1
         fi
-        if ! render_systemd_unit | elevate tee "$SYS_UNIT" >/dev/null; then
+        _wsu_body="$(render_systemd_unit)"
+        note_unit_change "$_wsu_body" "$SYS_UNIT"
+        if ! printf '%s\n' "$_wsu_body" | elevate tee "$SYS_UNIT" >/dev/null; then
             warn "could not write $SYS_UNIT"
             return 1
         fi
@@ -330,13 +485,58 @@ write_system_unit() {
     esac
 }
 
+# system_unit_loaded — is the NEW system unit already loaded? Read-only, and
+# the same query verify_system_unit_loaded makes, kept in one place so "loaded"
+# cannot come to mean two different things one line apart.
+system_unit_loaded() {
+    case "$(uname -s)" in
+    Darwin) elevate "$LAUNCHCTL" print "system/$SYS_LABEL" >/dev/null 2>&1 ;;
+    *)      elevate "$SYSTEMCTL" is-active "$SYS_UNIT_NAME" >/dev/null 2>&1 ;;
+    esac
+}
+
+# running_under_sys_label — Darwin only: is THIS process a child of the very
+# job a reload would boot out? `launchctl procinfo <pid>` names the job a pid
+# belongs to; anything it cannot answer reads as "yes, it might be", because
+# the cost of a wrong "no" is a killed process tree mid-convergence and the
+# cost of a wrong "yes" is a reload deferred to the caller's restart.
+running_under_sys_label() {
+    [ "$(uname -s)" = Darwin ] || return 1
+    _rus_info="$(elevate "$LAUNCHCTL" procinfo "$$" 2>/dev/null || true)"
+    [ -n "$_rus_info" ] || return 0
+    case "$_rus_info" in
+    *"$SYS_LABEL"*) return 0 ;;
+    esac
+    return 1
+}
+
 # enable_system_unit — STEP 2 (load). Idempotent: bootstrap/enable/kickstart
 # and daemon-reload + enable --now are each safe to repeat on an already-loaded
 # unit.
+#
+# IT NEVER BOOTS OUT BLIND. See STEP 2 PERFORMS A BOOTOUT OF ITS OWN in the
+# header for the whole argument; the three branches below are its three cases.
 enable_system_unit() {
     case "$(uname -s)" in
     Darwin)
-        elevate "$LAUNCHCTL" bootout "system/$SYS_LABEL" 2>/dev/null || true
+        if system_unit_loaded; then
+            if [ "$SYS_UNIT_CHANGED" = 0 ]; then
+                say "the system updater unit is already loaded from identical content —"
+                say "not reloading it (a bootout here would kill the process running this)."
+                elevate "$LAUNCHCTL" enable "system/$SYS_LABEL" 2>/dev/null || true
+                return 0
+            fi
+            if running_under_sys_label; then
+                say "the system updater unit is already loaded and THIS process runs under it —"
+                say "leaving the reload to the caller's restart, which runs last. The new plist"
+                say "is on disk and takes effect on that restart."
+                elevate "$LAUNCHCTL" enable "system/$SYS_LABEL" 2>/dev/null || true
+                return 0
+            fi
+            # Loaded, changed, and not this process's own job: a real reload,
+            # killing nothing that is running this script.
+            elevate "$LAUNCHCTL" bootout "system/$SYS_LABEL" 2>/dev/null || true
+        fi
         if ! elevate "$LAUNCHCTL" bootstrap system "$SYS_PLIST"; then
             warn "launchctl bootstrap system $SYS_PLIST failed"
             return 1
@@ -345,6 +545,8 @@ enable_system_unit() {
         elevate "$LAUNCHCTL" kickstart -k "system/$SYS_LABEL" 2>/dev/null || true
         ;;
     *)
+        # No self-kill hazard here: `enable --now` on an already-active unit
+        # does not restart it, and daemon-reload restarts nothing.
         elevate "$SYSTEMCTL" daemon-reload 2>/dev/null || true
         if ! elevate "$SYSTEMCTL" enable --now "$SYS_UNIT_NAME"; then
             warn "systemctl enable --now $SYS_UNIT_NAME failed"
@@ -357,10 +559,7 @@ enable_system_unit() {
 # verify_system_unit_loaded — STEP 2 (verify), the gate before step 3 ever
 # runs. Read-only.
 verify_system_unit_loaded() {
-    case "$(uname -s)" in
-    Darwin) elevate "$LAUNCHCTL" print "system/$SYS_LABEL" >/dev/null 2>&1 ;;
-    *)      elevate "$SYSTEMCTL" is-active "$SYS_UNIT_NAME" >/dev/null 2>&1 ;;
-    esac
+    system_unit_loaded
 }
 
 # bootout_legacy — STEP 3, both legacy domains. A target that is already gone
@@ -392,9 +591,31 @@ bootout_legacy() {
 # forced run must still see a clean no-op here rather than being silently
 # opted into the auto-updater.
 # ---------------------------------------------------------------------------
-if ! legacy_unit_present; then
+LEGACY_STATE="$(legacy_unit_state)"
+
+if [ "$LEGACY_STATE" = absent ]; then
     say "no legacy per-user updater agent found for burrowee-$COMP — nothing to converge."
     say "(the auto-updater stays owner opt-in; this migration does not enable it on its own.)"
+    exit 0
+fi
+
+# UNKNOWN IS NOT A LICENCE TO WRITE, on the platform where "unknown" is the
+# permanent answer. See LINUX SCOPE in the header: root cannot reach the
+# enrolling account's systemd user manager, the runner has no account to hand
+# this rung, and the Linux legacy unit and the target unit share a NAME — so
+# converging on a guess would overwrite the installer's own unit on every Linux
+# host. Said out loud rather than skipped silently: an operator reading an
+# update log must be able to see that this rung did not cover their host.
+if [ "$LEGACY_STATE" = unknown ] && [ "$(uname -s)" != Darwin ]; then
+    say "cannot reach a systemd USER manager from this process, so whether"
+    say "burrowee-$COMP-updater still runs as a per-user unit is unknowable here."
+    say "OUT OF SCOPE — this rung converges a Linux host only from what it can"
+    say "positively observe (see its header, LINUX SCOPE). Nothing has been written"
+    say "and nothing legacy has been touched."
+    say "IF this host still runs burrowee-$COMP-updater as a per-user unit, run this"
+    say "rung AS THAT ACCOUNT — from there its manager IS reachable, and it elevates"
+    say "for the system-side writes on its own:"
+    say "    sh $HERE_ABS/adopt_updater_unit.sh"
     exit 0
 fi
 
@@ -406,6 +627,24 @@ if [ ! -x "$UPDATER_BIN" ]; then
     warn "$UPDATER_BIN is missing — cannot write a system unit that execs it."
     warn "nothing has been written and the legacy per-user updater is untouched."
     exit 1
+fi
+
+# ROOT IS REACHED, OR THIS RUN IS DEFERRED — never failed. adopt_user_tree.sh
+# models the probe; the exit code is what differs, and why is the header's
+# "AN UNELEVATABLE HOST IS DEFERRED" section: exit 1 here would abort
+# updater.update.sh before it restarts the updater service, on precisely the
+# hosts whose legacy gui agent has no tty and no cached sudo credential, and a
+# host whose updater never restarts cannot be reached by any later release.
+if ! elevate true >/dev/null 2>&1; then
+    warn "this run cannot reach root ('$SUDO' did not run for us), and every step of"
+    warn "this convergence writes into a system domain."
+    warn "DEFERRED — nothing has been written, nothing has been loaded, and the legacy"
+    warn "updater agent is UNTOUCHED, so this host keeps updating exactly as it did."
+    warn "AN OPERATOR MUST RUN THIS ONCE, ON THIS HOST:"
+    warn "    sudo sh $HERE_ABS/adopt_updater_unit.sh"
+    warn "until then every update re-attempts it and re-prints this — a deferred rung"
+    warn "records no version and stays pending."
+    exit 3
 fi
 
 say "writing the system updater unit for burrowee-$COMP"

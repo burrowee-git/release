@@ -1,10 +1,17 @@
 #!/bin/sh
-# _shared/migrations/adopt_updater_unit_test.sh — the suite for
-# adopt_updater_unit.sh: the rung that converges a legacy PER-USER updater
-# agent onto the SYSTEM unit.
+# tools/adopt_updater_unit.test.sh — the suite for
+# inner/_shared/migrations/adopt_updater_unit.sh: the rung that converges a
+# legacy PER-USER updater agent onto the SYSTEM unit.
 #
-#     sh inner/_shared/migrations/adopt_updater_unit_test.sh          # this shell
-#     dash inner/_shared/migrations/adopt_updater_unit_test.sh        # and this one, always
+#     sh tools/adopt_updater_unit.test.sh          # this shell
+#     dash tools/adopt_updater_unit.test.sh        # and this one, always
+#
+# IT LIVES IN tools/, NOT BESIDE THE RUNG. Everything under
+# inner/_shared/migrations/ is STAGED INTO EVERY KIT by tools/payload.sh and
+# cmd/rkit/assemble.go, which glob the directory rather than list it — so a
+# suite beside its subject shipped 25 KB of test harness, chmod 0755, to every
+# edge, cli and relay host. Every other shell suite in this repo is
+# tools/<name>.test.sh for the same reason; this one is now no different.
 #
 # NEVER TOUCHES A REAL SUPERVISOR, A REAL /usr/local, OR ANY PATH OUTSIDE ITS
 # OWN TEMP DIR. LAUNCHCTL and SYSTEMCTL are both pointed at one fake
@@ -21,7 +28,7 @@
 # without needing two machines.
 set -u
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")/../inner/_shared/migrations" && pwd)"
 
 FAILED=0
 CASES=0
@@ -68,6 +75,7 @@ trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 # never actually uses) execs the real one directly rather than searching PATH
 # again — which would find itself first and recurse.
 REAL_UNAME="$(command -v uname)"
+REAL_ID="$(command -v id)"
 
 stub_uname() {
     mkdir -p "$1"
@@ -79,34 +87,103 @@ stub_uname() {
     chmod 0755 "$1/uname"
 }
 
+# ---------------------------------------------------------------------------
+# stub_id <dir> <uid> — a fake `id` first on PATH, so `id -u` answers the same
+# thing no matter who runs this suite.
+#
+# NOT COSMETIC. adopt_updater_unit.sh's elevate() runs the command DIRECTLY
+# when `id -u` says 0 and through $SUDO otherwise, so a suite run as root
+# (every CI container) would never touch the sudo stub at all: the sudo-failure
+# case below would silently prove nothing, and every ordering assertion that
+# reads a `sudo …` line out of the log would be asserting about the developer's
+# account rather than about the rung.
+# ---------------------------------------------------------------------------
+stub_id() {
+    mkdir -p "$1"
+    {
+        echo '#!/bin/sh'
+        echo "if [ \"\$1\" = -u ] && [ \$# = 1 ]; then echo $2; exit 0; fi"
+        echo "exec $REAL_ID \"\$@\""
+    } > "$1/id"
+    chmod 0755 "$1/id"
+}
+
 # make_supervisor_stub <dir> — a stand-in for BOTH launchctl and systemctl.
-# Logs every invocation (to $SUP_LOG, read from its own environment). THREE
-# legacy surfaces, matching adopt_updater_unit.sh's own three (gui-domain,
-# system-domain, and systemd --user), each independently controllable:
+# Logs every invocation (to $SUP_LOG, read from its own environment). FOUR
+# surfaces, matching adopt_updater_unit.sh's own — the three legacy ones
+# (gui-domain, system-domain, systemd --user) and, since the coordinator's
+# final review, THE NEW SYSTEM UNIT ITSELF:
 #   * gui/<uid>/… (Darwin gui-domain, e.g. org.burrowee.edge-updater):
 #     print/etc succeed iff $SUP_FLAGS/legacy-gui-present exists; a bootout
 #     touches $SUP_FLAGS/reached-bootout-gui and, when
 #     $SUP_FLAGS/slow-bootout-gui exists, sleeps 2s first.
 #   * system/org.burrowee.… (Darwin system-domain legacy, e.g.
-#     org.burrowee.edge.updater — NOT the new com.burrowee.* target, which
-#     falls through to the optimistic catch-all below): print/etc succeed iff
+#     org.burrowee.edge.updater): print/etc succeed iff
 #     $SUP_FLAGS/legacy-sys-present exists; a bootout touches
 #     $SUP_FLAGS/reached-bootout-sys and sleeps when
 #     $SUP_FLAGS/slow-bootout-sys exists.
-#   * --user … (Linux, the systemd --user instance): succeeds iff
-#     $SUP_FLAGS/legacy-present exists; a disable --now touches
-#     $SUP_FLAGS/reached-bootout-user and sleeps when
+#   * system/com.burrowee.… (Darwin, THE NEW UNIT — the surface an
+#     optimistic catch-all used to answer for, which is why no test could see
+#     enable_system_unit booting out its own job): print/enable/kickstart
+#     succeed iff $SUP_FLAGS/sys-unit-loaded exists, and a successful
+#     `bootstrap system …` CREATES that flag, so a converged fixture re-runs
+#     as a genuinely partially-converged host. A bootout touches
+#     $SUP_FLAGS/reached-bootout-self and, when
+#     $SUP_FLAGS/bootout-self-kills exists, SIGKILLs $PPID — the rung's own
+#     shell — because that is what launchd does to the process tree of the job
+#     it boots out, and the rung runs under that job. `procinfo <pid>` names
+#     SOME OTHER job by default, the new unit's own label when
+#     $SUP_FLAGS/procinfo-self exists, and nothing at all (exit 1) when
+#     $SUP_FLAGS/procinfo-silent does — the three answers the rung's
+#     running_under_sys_label has to tell apart.
+#   * --user … (Linux, the systemd --user instance). The BUS and the UNIT are
+#     separate facts here, because `systemctl --user is-active` exits non-zero
+#     identically for both and only one of them prints a word:
+#       $SUP_FLAGS/no-user-bus  → every query prints NOTHING and exits 1
+#                                 (systemd's "Failed to connect to bus").
+#       otherwise               → is-active prints `active` (exit 0) when
+#                                 $SUP_FLAGS/legacy-present exists and
+#                                 `inactive` (exit 3) when it does not — a
+#                                 reachable manager always answers, even about
+#                                 a unit it has never heard of. is-enabled
+#                                 prints `enabled` for legacy-present or
+#                                 $SUP_FLAGS/legacy-enabled, and nothing (exit
+#                                 1) otherwise.
+#     A disable --now touches $SUP_FLAGS/reached-bootout-user and sleeps when
 #     $SUP_FLAGS/slow-bootout-user exists.
-#   * everything else (the NEW system unit's own bootstrap/enable/kickstart/
-#     print/daemon-reload/enable --now — Darwin's "system/com.burrowee.…" and
-#     Linux's non---user calls) always succeeds — the system side of every
-#     case below is optimistic.
+#   * everything else (daemon-reload, `enable --now <unit>`) always succeeds.
 make_supervisor_stub() {
     mkdir -p "$1"
     cat > "$1/supervisor" <<'STUB'
 #!/bin/sh
 printf 'supervisor %s\n' "$*" >> "$SUP_LOG"
 case "$*" in
+*procinfo*)
+    if [ -f "$SUP_FLAGS/procinfo-silent" ]; then exit 1; fi
+    if [ -f "$SUP_FLAGS/procinfo-self" ]; then
+        echo 'label = com.burrowee.edge.updater'
+    else
+        echo 'label = com.apple.Terminal'
+    fi
+    exit 0
+    ;;
+*'bootstrap system'*)
+    : > "$SUP_FLAGS/sys-unit-loaded"
+    exit 0
+    ;;
+*'system/com.burrowee.'*)
+    case "$*" in
+    *bootout*)
+        : > "$SUP_FLAGS/reached-bootout-self"
+        if [ -f "$SUP_FLAGS/bootout-self-kills" ]; then
+            kill -KILL "$PPID" 2>/dev/null
+        fi
+        exit 0
+        ;;
+    esac
+    [ -f "$SUP_FLAGS/sys-unit-loaded" ] && exit 0
+    exit 1
+    ;;
 *'gui/'*)
     case "$*" in
     *bootout*)
@@ -137,8 +214,26 @@ case "$*" in
         exit 0
         ;;
     esac
-    [ -f "$SUP_FLAGS/legacy-present" ] && exit 0
-    exit 1
+    if [ -f "$SUP_FLAGS/no-user-bus" ]; then
+        echo 'Failed to connect to bus: No medium found' >&2
+        exit 1
+    fi
+    case "$*" in
+    *is-active*)
+        if [ -f "$SUP_FLAGS/legacy-present" ]; then echo active; exit 0; fi
+        echo inactive
+        exit 3
+        ;;
+    *is-enabled*)
+        if [ -f "$SUP_FLAGS/legacy-present" ] || [ -f "$SUP_FLAGS/legacy-enabled" ]; then
+            echo enabled
+            exit 0
+        fi
+        echo 'Failed to get unit file state: No such file or directory' >&2
+        exit 1
+        ;;
+    esac
+    exit 0
     ;;
 esac
 exit 0
@@ -150,11 +245,21 @@ STUB
 # calls actually write into the fixture paths this suite points it at, and any
 # supervisor call made THROUGH sudo still reaches the stub above (and so still
 # gets logged by it too — harmless duplication, never a second code path).
+#
+# IT CAN ALSO FAIL, and until it could there was no way to express the host
+# this rung exists for. The headline legacy case is a launchd GUI agent: no
+# tty, no cached credential, and $SUDO is `sudo -n`, which never prompts — so
+# EVERY elevated step fails there, and a stub that always exec'd made that
+# state untestable. $SUP_FLAGS/sudo-fails turns it on per case.
 make_sudo_stub() {
     mkdir -p "$1"
     cat > "$1/sudo" <<'STUB'
 #!/bin/sh
 printf 'sudo %s\n' "$*" >> "$SUP_LOG"
+if [ -f "$SUP_FLAGS/sudo-fails" ]; then
+    echo 'sudo: a password is required' >&2
+    exit 1
+fi
 exec "$@"
 STUB
     chmod 0755 "$1/sudo"
@@ -190,6 +295,9 @@ seed_home() {
     : > "$_sh_home/log"
     make_supervisor_stub "$_sh_home/stubs"
     make_sudo_stub "$_sh_home/stubs"
+    # A NON-ROOT uid for every case: see stub_id. The per-case stub_uname call
+    # writes into the same directory and does not disturb this.
+    stub_id "$_sh_home/platform" 501
 }
 
 # ---------------------------------------------------------------------------
@@ -547,6 +655,217 @@ fi
 # own no-op-when-gone contract, AND system-domain, completing what the kill
 # interrupted) — proven by the "converged" line above, which this rung only
 # ever prints after bootout_legacy returns having attempted both.
+
+# ---------------------------------------------------------------------------
+# Case (d): SUDO FAILS — the host this rung exists for.
+#
+# A legacy launchd GUI agent has no tty and no cached credential, and $SUDO is
+# `sudo -n`, which never prompts. Every elevated step below therefore fails on
+# exactly the hosts the rung is aimed at. Until the sudo stub could fail, this
+# state was not expressible at all — which is why the rung shipped writing
+# /Library/LaunchDaemons through a sudo that could not work, failing deep in
+# step 1 with "could not create /Library/LaunchDaemons" and exiting 1.
+#
+# EXIT 1 IS THE OUTCOME THAT MUST NOT HAPPEN. updater.update.sh treats any
+# ladder result outside {0,2,3} as fatal and returns BEFORE restart_updater, so
+# the host keeps a freshly-placed updater binary and a never-restarted updater
+# service — and the updater is the only automatic delivery channel, so no later
+# release can reach it. 3 (DEFERRED) is non-fatal there: the binary lands, the
+# service restarts, the operator is told.
+# ---------------------------------------------------------------------------
+run_no_root_case() {
+    _nr_goos="$1"
+    h="$TMP/no-root-$_nr_goos"
+    seed_home "$h" edge
+    stub_uname "$h/platform" "$_nr_goos"
+    : > "$h/flags/legacy-present"
+    : > "$h/flags/legacy-gui-present"
+    : > "$h/flags/legacy-sys-present"
+    : > "$h/flags/sudo-fails"
+
+    OUT="$(run_rung "$h" edge 2>&1)"; RC=$?
+    assert_eq "$RC" "3" "no-root ($_nr_goos): an unelevatable host must DEFER (exit 3), never fail (1)"
+    assert_contains "$OUT" "cannot reach root" \
+        "no-root ($_nr_goos): it must say root could not be reached, up front"
+    assert_contains "$OUT" "DEFERRED" "no-root ($_nr_goos): the outcome must be named"
+    assert_contains "$OUT" "sudo sh $HERE/adopt_updater_unit.sh" \
+        "no-root ($_nr_goos): it must name the exact command an operator has to run"
+    # Nothing written and nothing touched: the pre-flight runs BEFORE step 1,
+    # so this is a refusal that cost the host nothing.
+    if [ -e "$h/Library/LaunchDaemons/com.burrowee.edge.updater.plist" ] ||
+        [ -e "$h/etc/systemd/system/burrowee-edge-updater.service" ]; then
+        fail "no-root ($_nr_goos): a deferred run must not have written a system unit"
+    else CASES=$((CASES + 1)); fi
+    for _nr_f in reached-bootout-gui reached-bootout-sys reached-bootout-user reached-bootout-self; do
+        if [ -e "$h/flags/$_nr_f" ]; then
+            fail "no-root ($_nr_goos): a deferred run must not have booted anything out ($_nr_f)"
+        else CASES=$((CASES + 1)); fi
+    done
+}
+run_no_root_case Darwin
+run_no_root_case Linux
+
+# (d2) …AND THE RUNNER TURNS THAT INTO ITS OWN EXIT 3, not exit 1. The rung's
+# code is only half the contract: run.sh maps a rung's exit to the code
+# updater.update.sh switches on, and before this fix every non-zero rung exit
+# became exit 1 there — the fatal one.
+h_defer="$TMP/defer-run-sh"
+seed_home "$h_defer" edge
+stub_uname "$h_defer/platform" Linux
+: > "$h_defer/flags/legacy-present"
+: > "$h_defer/flags/sudo-fails"
+mkdir -p "$h_defer/comp-home"
+DEFER_OUT="$(
+    SUP_LOG="$h_defer/log" \
+    SUP_FLAGS="$h_defer/flags" \
+    COMP_HOME="$h_defer/comp-home" \
+    BIN_DIR="$h_defer/bin" \
+    SUDO="$h_defer/stubs/sudo" \
+    LAUNCHCTL="$h_defer/stubs/supervisor" \
+    SYSTEMCTL="$h_defer/stubs/supervisor" \
+    LAUNCHD_PLIST_DIR="$h_defer/Library/LaunchDaemons" \
+    SYSTEMD_UNIT_DIR="$h_defer/etc/systemd/system" \
+    ROOT_HOME="$h_defer/root-home" \
+    PATH="$h_defer/platform:$PATH" \
+        sh "$h_kit/migrations/run.sh" --installed-version 0.1.0 2>&1
+)"; DEFER_RC=$?
+assert_eq "$DEFER_RC" "3" "defer: run.sh must report a deferred rung as 3 (still pending), not 1 (failed)"
+assert_contains "$DEFER_OUT" "DEFERRED" "defer: the runner must name the deferral"
+if [ -e "$h_defer/comp-home/migration-receipts/adopt_updater_unit.sh@0.2.0.done" ]; then
+    fail "defer: a deferred rung must earn NO receipt — it did not run"
+else CASES=$((CASES + 1)); fi
+
+# ---------------------------------------------------------------------------
+# Case (e): A PARTIALLY CONVERGED HOST — the new system unit is loaded, a
+# legacy agent is still around, and the process walking this ladder is a child
+# of that new unit's own job. Reloading it there (bootout + bootstrap) kills
+# the process tree mid-step-2: bootstrap never runs, the plist sits on disk
+# with nothing loaded behind it, and only a reboot or a manual bootstrap
+# recovers. The stub now makes that kill REAL (SIGKILL to the rung's own shell,
+# which is what launchd does), so the case can be red.
+#
+# (e1) IDENTICAL CONTENT: there is nothing to reload, so nothing is booted out.
+# ---------------------------------------------------------------------------
+h_pc="$TMP/partial-converged"
+seed_home "$h_pc" edge
+stub_uname "$h_pc/platform" Darwin
+: > "$h_pc/flags/legacy-gui-present"
+OUT_PC1="$(run_rung "$h_pc" edge 2>&1)"; RC_PC1=$?
+assert_eq "$RC_PC1" "0" "partial (e1): the first run must converge normally"
+assert_present "$h_pc/flags/sys-unit-loaded" \
+    "partial (e1): a successful bootstrap must leave the new unit loaded"
+# Now it IS the partially-converged host: unit loaded, legacy still present —
+# and this time a bootout of the new unit kills the caller.
+: > "$h_pc/flags/bootout-self-kills"
+rm -f "$h_pc/flags/reached-bootout-self"
+OUT_PC2="$(run_rung "$h_pc" edge 2>&1)"; RC_PC2=$?
+assert_eq "$RC_PC2" "0" "partial (e1): the re-run must survive and converge, not be killed by its own bootout"
+assert_contains "$OUT_PC2" "converged burrowee-edge-updater to the system unit" \
+    "partial (e1): the re-run must reach the end"
+assert_contains "$OUT_PC2" "already loaded from identical content" \
+    "partial (e1): it must say why it did not reload"
+if [ -e "$h_pc/flags/reached-bootout-self" ]; then
+    fail "partial (e1): the rung booted out its OWN job — the process running it"
+else CASES=$((CASES + 1)); fi
+
+# (e2) THE POSITIVE CONTROL, so (e1) is not passing because the stub's kill is
+# inert: same partially-converged host, but the plist on disk no longer matches
+# what this run renders AND procinfo names some other job — the one shape where
+# a real reload is both needed and safe. The bootout happens, and the stub's
+# SIGKILL lands, proving the kill is real and that (e1) survived on the guard
+# rather than on a stub that never fires.
+h_pc2="$TMP/partial-converged-changed"
+seed_home "$h_pc2" edge
+stub_uname "$h_pc2/platform" Darwin
+: > "$h_pc2/flags/legacy-gui-present"
+run_rung "$h_pc2" edge >/dev/null 2>&1
+printf '\n<!-- drifted -->\n' >> "$h_pc2/Library/LaunchDaemons/com.burrowee.edge.updater.plist"
+: > "$h_pc2/flags/bootout-self-kills"
+rm -f "$h_pc2/flags/reached-bootout-self"
+OUT_PC3="$(run_rung "$h_pc2" edge 2>&1)"; RC_PC3=$?
+assert_present "$h_pc2/flags/reached-bootout-self" \
+    "partial (e2): a changed plist under ANOTHER job must still be reloaded for real"
+if [ "$RC_PC3" = 0 ]; then
+    fail "partial (e2): the stub's self-kill never fired — (e1) proves nothing while this passes"
+else CASES=$((CASES + 1)); fi
+
+# (e3) CHANGED CONTENT, BUT IT IS OUR OWN JOB: the reload is still the caller's
+# to do — updater.update.sh's restart_updater runs last for exactly this
+# reason — so the rung leaves the plist on disk and does not bootout.
+h_pc3="$TMP/partial-converged-ours"
+seed_home "$h_pc3" edge
+stub_uname "$h_pc3/platform" Darwin
+: > "$h_pc3/flags/legacy-gui-present"
+run_rung "$h_pc3" edge >/dev/null 2>&1
+printf '\n<!-- drifted -->\n' >> "$h_pc3/Library/LaunchDaemons/com.burrowee.edge.updater.plist"
+: > "$h_pc3/flags/bootout-self-kills"
+: > "$h_pc3/flags/procinfo-self"
+rm -f "$h_pc3/flags/reached-bootout-self"
+OUT_PC4="$(run_rung "$h_pc3" edge 2>&1)"; RC_PC4=$?
+assert_eq "$RC_PC4" "0" "partial (e3): a changed plist under OUR OWN job must not be reloaded here"
+assert_contains "$OUT_PC4" "leaving the reload to the caller" \
+    "partial (e3): it must say who reloads instead"
+if [ -e "$h_pc3/flags/reached-bootout-self" ]; then
+    fail "partial (e3): the rung booted out the job it is running under"
+else CASES=$((CASES + 1)); fi
+
+# ---------------------------------------------------------------------------
+# Case (f): LINUX — "cannot connect to the bus" is not "the unit is gone".
+#
+# `systemctl --user is-active` exits non-zero identically for both, and the
+# rung used to read that as a confirmed absence — the opposite of its own
+# documented contract. The stub now separates the two facts: an unreachable
+# manager prints NOTHING, a reachable one always prints a state word.
+#
+# (f1) UNREACHABLE BUS: --applies must still answer "still needed".
+# ---------------------------------------------------------------------------
+h_bus="$TMP/no-user-bus"
+seed_home "$h_bus" edge
+stub_uname "$h_bus/platform" Linux
+: > "$h_bus/flags/no-user-bus"
+run_rung "$h_bus" edge --applies >/dev/null 2>&1; RC_BUS_APPLIES=$?
+assert_eq "$RC_BUS_APPLIES" "0" \
+    "linux (f1): with no user bus, --applies must answer 'still needed', not 'gone'"
+
+# (f2) …and the REAL run must neither converge blind nor pretend it converged:
+# on Linux the legacy unit name and the target unit name are the same string,
+# so a blind write would overwrite the installer's own unit on every host. It
+# says the case is out of scope and writes nothing.
+OUT_BUS="$(run_rung "$h_bus" edge 2>&1)"; RC_BUS=$?
+assert_eq "$RC_BUS" "0" "linux (f2): an unobservable host must not fail the ladder"
+assert_contains "$OUT_BUS" "OUT OF SCOPE" \
+    "linux (f2): the unhandled per-user Linux case must be named in the output, not silently skipped"
+assert_contains "$OUT_BUS" "cannot reach a systemd USER manager" \
+    "linux (f2): it must say WHY it cannot answer"
+if [ -e "$h_bus/etc/systemd/system/burrowee-edge-updater.service" ]; then
+    fail "linux (f2): it must not write a system unit off a guess"
+else CASES=$((CASES + 1)); fi
+
+# (f3) A REACHABLE MANAGER THAT SAYS `inactive` IS A REAL ABSENCE — the answer
+# that must NOT be conflated with (f1). Same exit code from is-active, opposite
+# meaning, and only the state word tells them apart.
+h_inactive="$TMP/user-bus-inactive"
+seed_home "$h_inactive" edge
+stub_uname "$h_inactive/platform" Linux
+# no legacy-present, no no-user-bus: the manager answers "inactive"/nothing-enabled.
+run_rung "$h_inactive" edge --applies >/dev/null 2>&1; RC_INACT_APPLIES=$?
+assert_eq "$RC_INACT_APPLIES" "1" \
+    "linux (f3): a manager that answers 'inactive' is a confirmed absence — --applies must decline"
+OUT_INACT="$(run_rung "$h_inactive" edge 2>&1)"; RC_INACT=$?
+assert_eq "$RC_INACT" "0" "linux (f3): a confirmed absence is a clean no-op"
+assert_contains "$OUT_INACT" "nothing to converge" "linux (f3): it must say so"
+
+# (f4) INSTALLED BUT STOPPED still needs converging: is-active says `inactive`,
+# is-enabled says `enabled`, and the unit is exactly the thing this rung
+# retires. A predicate that stopped at is-active would strand it.
+h_enabled="$TMP/user-bus-enabled-only"
+seed_home "$h_enabled" edge
+stub_uname "$h_enabled/platform" Linux
+: > "$h_enabled/flags/legacy-enabled"
+OUT_EN="$(run_rung "$h_enabled" edge 2>&1)"; RC_EN=$?
+assert_eq "$RC_EN" "0" "linux (f4): an enabled-but-stopped legacy unit must converge"
+assert_contains "$OUT_EN" "converged burrowee-edge-updater to the system unit" \
+    "linux (f4): a stopped legacy unit is still a legacy unit"
 
 echo "cases: $CASES  failed: $FAILED"
 if [ "$FAILED" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
