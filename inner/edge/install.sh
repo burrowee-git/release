@@ -551,11 +551,59 @@ migrate_config() {
     fi
 }
 
+# start_unit_darwin <label> <plist> — start a launchd system unit and verify it
+# took. bootstrap's codes 5 (already loaded) and 37 are benign races against an
+# async bootout — every other code is a real failure and must not be swallowed.
+# enable + kickstart ALWAYS run: a bootstrap that no-ops on an already-loaded
+# label still needs both.
+#
+# The status is captured with `|| _rc=$?`, NOT inside `if ! ...`: POSIX makes $?
+# the NEGATED status of a `!` pipeline, so an `if !` branch would read 0 for
+# every failure and tolerate nothing.
+start_unit_darwin() {
+    _label="$1"; _plist="$2"
+    _rc=0
+    launchctl bootstrap system "$_plist" 2>/dev/null || _rc=$?
+    case "$_rc" in
+        0 | 5 | 37) ;; # started / already loaded / async bootout still settling
+        *)
+            echo "error: launchctl bootstrap $_label failed (exit $_rc)" >&2
+            echo "hint: sudo launchctl bootstrap system $_plist" >&2
+            return 1
+            ;;
+    esac
+    launchctl enable "system/$_label"
+    launchctl kickstart -k "system/$_label" 2>/dev/null || true
+    if launchctl print "system/$_label" >/dev/null 2>&1; then
+        echo "launchd service $_label enabled + started"
+    else
+        echo "error: $_label did not come up after bootstrap" >&2
+        echo "hint: sudo launchctl print system/$_label" >&2
+        return 1
+    fi
+}
+
+# start_unit_linux <unit> — enable, (re)start and verify a systemd system unit.
+# The probe is the point: enable --now on a unit that then dies must not be
+# reported as a started service.
+start_unit_linux() {
+    _unit="$1"
+    systemctl enable --now "$_unit"
+    systemctl restart "$_unit"
+    if systemctl is-active --quiet "$_unit"; then
+        echo "systemd service $_unit enabled + (re)started"
+    else
+        echo "error: $_unit is not active after enable --now" >&2
+        echo "hint: sudo systemctl status $_unit" >&2
+        return 1
+    fi
+}
+
 # setup_root_service — render BOTH managed SYSTEM service units for the host init
-# system and (re)load the serve unit (the updater unit is rendered but left
-# opt-in). Root-only caller. Renders unit FILES pointing at $SYS_BIN_DIR; it
-# never places binaries, so it is safe to call from the units-only reinstall
-# path as well as fresh install / update.
+# system and (re)load BOTH of them: the serve unit always, the updater unit
+# unless BURROWEE_NO_UPDATER is set. Root-only caller. Renders unit FILES
+# pointing at $SYS_BIN_DIR; it never places binaries, so it is safe to call from
+# the units-only reinstall path as well as fresh install / update.
 setup_root_service() {
     if [ "$(uname -s)" = "Darwin" ]; then
         # ── macOS: root LaunchDaemon ──────────────────────────────────────────
@@ -581,9 +629,10 @@ EOF
         chmod 0644 "$LAUNCHD_PLIST"
         echo "wrote LaunchDaemon → $LAUNCHD_PLIST"
 
-        # Updater LaunchDaemon (mirrors the disabled systemd updater unit; HOME
-        # so its console.json + identity resolve under $ROOT_HOME/.burrowee/edge).
-        # Rendered but NOT bootstrapped — the auto-updater is owner opt-in.
+        # Updater LaunchDaemon (mirrors the systemd updater unit; HOME so its
+        # console.json + identity resolve under $ROOT_HOME/.burrowee/edge).
+        # Started below unless BURROWEE_NO_UPDATER is set — the auto-updater is
+        # opt-OUT: an install leaves it running so the host keeps receiving fixes.
         cat > "$LAUNCHD_UPDATER_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -597,27 +646,27 @@ EOF
 </dict></plist>
 EOF
         chmod 0644 "$LAUNCHD_UPDATER_PLIST"
-        echo "wrote LaunchDaemon → $LAUNCHD_UPDATER_PLIST (not bootstrapped — enable with: launchctl bootstrap system $LAUNCHD_UPDATER_PLIST)"
+        echo "wrote LaunchDaemon → $LAUNCHD_UPDATER_PLIST"
 
         # Migrate away the pre-rename org.burrowee.* units before loading the
         # com.burrowee.* ones — two labels must never run the same daemon.
         remove_legacy_launchd_units
 
         launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
-        launchctl bootstrap system "$LAUNCHD_PLIST"
-        launchctl enable "system/$LAUNCHD_LABEL"
-        launchctl kickstart -k "system/$LAUNCHD_LABEL" 2>/dev/null || true
-        echo "launchd service $LAUNCHD_LABEL enabled + started"
+        start_unit_darwin "$LAUNCHD_LABEL" "$LAUNCHD_PLIST"
 
-        # If the owner opted the auto-updater in (its LaunchDaemon is already
-        # loaded), a reinstall must advance THAT daemon too — otherwise a stale
-        # updater keeps running old code and future pushes deadlock. Restart it
-        # ONLY when already loaded; never bootstrap a not-loaded updater here (it
-        # stays owner opt-in). The updater's own push path runs update.sh, not this
-        # installer, so this can never self-kill.
-        if launchctl print "system/$LAUNCHD_UPDATER_LABEL" >/dev/null 2>&1; then
-            launchctl kickstart -k "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
-            echo "restarted $LAUNCHD_UPDATER_LABEL (opted in) to pick up new binary"
+        # The updater starts with the serve unit — it is the only automatic
+        # delivery channel, so an install that leaves it down leaves the host
+        # unreachable by fixes. BURROWEE_NO_UPDATER=1 stages the unit without
+        # starting it, for an owner who pins deliberately. A reinstall restarts
+        # it either way, so a stale updater cannot keep running old code and
+        # deadlock future pushes; the updater's own push path runs update.sh, not
+        # this installer, so this can never self-kill.
+        if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
+            echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
+        else
+            launchctl bootout "system/$LAUNCHD_UPDATER_LABEL" 2>/dev/null || true
+            start_unit_darwin "$LAUNCHD_UPDATER_LABEL" "$LAUNCHD_UPDATER_PLIST"
         fi
     else
         # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
@@ -649,9 +698,9 @@ EOF
         echo "wrote systemd unit → $SYSTEMD_UNIT"
 
         # Updater system unit ([Service] mirrors the serve unit; HOME=/root so its
-        # console.json + identity resolve to /root/.burrowee/edge). Rendered but
-        # left DISABLED — the auto-updater is owner opt-in (enable + start it with
-        # `systemctl enable --now burrowee-edge-updater`).
+        # console.json + identity resolve to /root/.burrowee/edge). Started below
+        # unless BURROWEE_NO_UPDATER is set — the auto-updater is opt-OUT: an
+        # install leaves it running so the host keeps receiving fixes.
         cat > "$SYSTEMD_UPDATER_UNIT" <<EOF
 [Unit]
 Description=burrowee edge updater
@@ -670,22 +719,22 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 EOF
         chmod 0644 "$SYSTEMD_UPDATER_UNIT"
-        echo "wrote systemd unit → $SYSTEMD_UPDATER_UNIT (disabled — enable with: systemctl enable --now burrowee-edge-updater)"
+        echo "wrote systemd unit → $SYSTEMD_UPDATER_UNIT"
 
         systemctl daemon-reload
-        systemctl enable --now burrowee-edge
-        systemctl restart burrowee-edge
-        echo "systemd service burrowee-edge enabled + (re)started"
+        start_unit_linux burrowee-edge
 
-        # If the owner opted the auto-updater in, a reinstall must advance THAT
-        # daemon too — otherwise a stale updater keeps running old code and future
-        # pushes deadlock. Restart it ONLY when already enabled/active; never enable
-        # a disabled updater here (it stays owner opt-in). The updater's own push
-        # path runs update.sh, not this installer, so this can never self-kill.
-        if systemctl is-enabled burrowee-edge-updater >/dev/null 2>&1 \
-            || systemctl is-active burrowee-edge-updater >/dev/null 2>&1; then
-            systemctl restart burrowee-edge-updater 2>/dev/null || true
-            echo "restarted burrowee-edge-updater (opted in) to pick up new binary"
+        # The updater starts with the serve unit — it is the only automatic
+        # delivery channel, so an install that leaves it down leaves the host
+        # unreachable by fixes. BURROWEE_NO_UPDATER=1 stages the unit without
+        # starting it, for an owner who pins deliberately. A reinstall restarts
+        # it either way, so a stale updater cannot keep running old code and
+        # deadlock future pushes; the updater's own push path runs update.sh, not
+        # this installer, so this can never self-kill.
+        if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
+            echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
+        else
+            start_unit_linux burrowee-edge-updater
         fi
     fi
 }
