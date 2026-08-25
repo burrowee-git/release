@@ -46,8 +46,8 @@ cleanup() {
     /usr/bin/git -C "${REPO_ROOT}" checkout -- \
         relay/install.sh \
         cli/install.sh cli/upgrade.sh cli/preflight.sh \
-        gateway/install.sh gateway/upgrade.sh gateway/preflight.sh \
-        edge/install.sh edge/upgrade.sh edge/preflight.sh \
+        gateway/install.sh gateway/upgrade.sh gateway/preflight.sh gateway/updater.install.sh \
+        edge/install.sh edge/upgrade.sh edge/preflight.sh edge/updater.install.sh \
         agent/install.sh agent/upgrade.sh agent/preflight.sh \
         2>/dev/null || true
 }

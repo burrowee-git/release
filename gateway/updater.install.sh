@@ -12,7 +12,7 @@
 # against the now-trusted sums file, and ONLY THEN unzips and execs the inner
 # script the baked mode names. Any failure aborts before anything is installed.
 #
-# THREE MODES, ONE TEMPLATE. upgrade is substituted at render time and decides
+# THREE MODES, ONE TEMPLATE. updater.install is substituted at render time and decides
 # which inner script this file hands off to once the release is verified:
 #
 #   install.sh          resolve + verify + unzip  →  ./install.sh
@@ -125,7 +125,7 @@ COMP="gateway"
 # "install" or "upgrade" — see the two-modes note in the header. Baked, never
 # read from the environment: the mode is a property of the URL the operator
 # curl'd, and a runtime override would make one file behave as the other.
-MODE="upgrade"
+MODE="updater.install"
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
 PREFLIGHT_SHA256="d10032f3773183d8fdce1648fd70f39609018cb5d32e4fd3bd2a938316a57420"
 # The version floor: the stamp this component was at when THIS installer was
@@ -476,7 +476,7 @@ esac
 # markers, and keep the markers.)
 # ---- guard against an unbaked mode, and resolve which inner script runs ----
 # Fails closed for the same reason the pubkey guard does: an unsubstituted
-# upgrade would fall through every mode check below, so a bootstrap rendered by a
+# updater.install would fall through every mode check below, so a bootstrap rendered by a
 # broken generator would install and then silently skip a step it exists for —
 # or, worse, run the WRONG inner script — instead of refusing outright.
 #

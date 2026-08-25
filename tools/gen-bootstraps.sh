@@ -6,17 +6,33 @@
 #   <comp>/install.sh    resolve + verify + unzip + run the inner installer
 #   <comp>/upgrade.sh    the same, then migrations/upgrade.sh out of the same kit
 #   <comp>/preflight.sh  the OS-dependency installer both of the above sha256-pin
+# plus, for edge and gateway ONLY, a FOURTH:
+#   <comp>/updater.install.sh  the same resolve + verify + unzip, then run the
+#                               inner updater.install.sh instead of install.sh —
+#                               the narrow recovery tool that reinstalls only the
+#                               updater (binary + unit) on a host that already
+#                               has the component. edge and gateway are the two
+#                               components with a supervised updater SERVICE to
+#                               recover; cli's updater is a one-shot binary with
+#                               no service, and agent has no updater installer
+#                               at all — see UPDATER_INSTALL_COMPONENTS below.
 # plus relay/install.sh, from the private gated-channel template.
 #
-# install.sh and upgrade.sh are ONE template under a @MODE@ substitution, not
-# two files: the pinned preflight sha256, the baked pubkey, the version floor
-# and the minisign gate are what make it the trust anchor, and a second copy of
-# those is a copy that drifts.
+# install.sh, upgrade.sh and updater.install.sh are ONE template under a @MODE@
+# substitution, not three files: the pinned preflight sha256, the baked pubkey,
+# the version floor and the minisign gate are what make it the trust anchor, and
+# a second (or third) copy of those is a copy that drifts. @MODE@ decides only
+# which inner script the verified kit hands off to at the end — see
+# tools/bootstrap.template.sh's own header for the three-way table.
 #
 # cli/gateway/edge/agent use tools/bootstrap.template.sh (public GitHub-release
 # channel) + tools/preflight.template.sh (OS-dep installer). relay uses
 # tools/relay-bootstrap.template.sh (private gated channel: challenge-response
-# ed25519 signing + gated downloads) and has no preflight.
+# ed25519 signing + gated downloads) and has no preflight — and no
+# updater.install mode either: relay is a different CHANNEL (gated,
+# challenge-response), not a different mode of the public template, so it is
+# excluded by construction (its own loop below) rather than by an exception
+# threaded through this one.
 #
 # Each generated file is byte-identical within its template family except for
 # the @COMP@ and @PUBKEY@ substitutions. The outer bootstrap is THE TRUST
@@ -121,6 +137,15 @@ min_version_of() {
     printf '%s' "$_mv"
 }
 
+# updater.install.sh is rendered for edge and gateway ONLY — named explicitly
+# here, not left to whichever components the loop below happens to reach. edge
+# and gateway are the two components with a supervised updater SERVICE to
+# recover: cli's updater is a one-shot binary with no service
+# (inner/cli/install.sh writes no unit and never elevates), and agent has no
+# updater installer either. See inner/edge/updater.install.sh and
+# inner/gateway/updater.install.sh.
+UPDATER_INSTALL_COMPONENTS="edge gateway"
+
 # ---- generate cli/gateway/edge/agent (public GitHub-release channel) ----
 # ORDER per comp: render <comp>/preflight.sh FIRST (so we can sha256 it), then
 # render <comp>/install.sh baking that hash as @PREFLIGHT_SHA256@. @NGINX@ is 1
@@ -141,22 +166,35 @@ for comp in cli gateway edge agent; do
     pf_sha="$(sha256_of "$pf_out")"
     echo "✓ wrote $pf_out  (sha256 $pf_sha)"
 
-    # (2) install.sh AND upgrade.sh — the same template under @MODE@, baking
-    # @COMP@, @PUBKEY@, the preflight's @PREFLIGHT_SHA256@ and the
-    # @MIN_VERSION@ version floor identically into both. None of these values
-    # contains another's placeholder. tmp-then-mv atomic.
+    # (2) install.sh, upgrade.sh, and — for edge/gateway only —
+    # updater.install.sh: all rendered from the SAME template under @MODE@,
+    # baking @COMP@, @PUBKEY@, the preflight's @PREFLIGHT_SHA256@ and the
+    # @MIN_VERSION@ version floor identically into every one of them. None of
+    # these values contains another's placeholder. tmp-then-mv atomic.
     #
-    # BOTH MODES FOR EVERY PUBLIC COMPONENT, not only for those whose release
-    # zip ships a migrations/ ladder. Which kits carry one is decided in the
-    # COMPONENT repos at their cut; this generator runs at THIS repo's cut and
-    # writes a static file served from a URL we advertise. A conditional render
-    # would encode a "does <comp> have a ladder" belief here that nothing keeps
-    # in step with the zips, and the first time it was wrong the URL would 404 —
-    # a 404 being strictly worse than the shipped bootstrap's own refusal, which
-    # names the component and the version it just installed. cmd/rkit's
-    # TestUpgradeBootstrapsAreExactlyThePublicComponents pins the set.
+    # install/upgrade: BOTH MODES FOR EVERY PUBLIC COMPONENT, not only for
+    # those whose release zip ships a migrations/ ladder. Which kits carry one
+    # is decided in the COMPONENT repos at their cut; this generator runs at
+    # THIS repo's cut and writes a static file served from a URL we advertise.
+    # A conditional render would encode a "does <comp> have a ladder" belief
+    # here that nothing keeps in step with the zips, and the first time it was
+    # wrong the URL would 404 — a 404 being strictly worse than the shipped
+    # bootstrap's own refusal, which names the component and the version it
+    # just installed. cmd/rkit's TestUpgradeBootstrapsAreExactlyThePublicComponents
+    # pins the set.
+    #
+    # updater.install: ONLY for UPDATER_INSTALL_COMPONENTS (edge gateway),
+    # named explicitly above rather than left to whichever components this loop
+    # happens to reach — "has a supervised updater service to recover" is a
+    # fixed fact about the component, decided at design time, unlike "ships a
+    # ladder this cut" above. cmd/rkit's
+    # TestUpdaterInstallBootstrapsAreExactlyEdgeAndGateway pins this set too.
     min_version="$(min_version_of "$comp")"
-    for mode in install upgrade; do
+    modes="install upgrade"
+    case " $UPDATER_INSTALL_COMPONENTS " in
+        *" $comp "*) modes="$modes updater.install" ;;
+    esac
+    for mode in $modes; do
         out="$ROOT/$comp/$mode.sh"
         tmp="$out.tmp.$$"
         sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
