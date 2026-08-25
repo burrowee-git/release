@@ -337,3 +337,77 @@ func TestGatewayManifestCarriesTheRunner(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdaterInstallPayloadForcesExecutable is the mode-forcing fix round:
+// release-kit's pack.Content carries no mode field, and pack.Zip preserves
+// whatever os.Stat reports on Content.Src with no forcing of its own —
+// updaterInstallPayload must therefore force the exec bit itself, exactly like
+// install.sh does one level up in build.go (copyExecutable).
+//
+// GATEWAY IS THE CASE THAT CAN ACTUALLY FAIL: inner/gateway/updater.install.sh
+// is committed as 0644 (like every other inner/ script). A test that only
+// covered edge would prove nothing — edge's copy happens to be 0644 too now
+// (normalized alongside this fix; it used to be 0755 "by luck", which is
+// exactly what let a gateway-only regression hide behind an edge-only test).
+// Both are asserted so neither component can regress unnoticed.
+func TestUpdaterInstallPayloadForcesExecutable(t *testing.T) {
+	root := repoRoot(t)
+	for _, comp := range []string{"edge", "gateway"} {
+		t.Run(comp, func(t *testing.T) {
+			c, err := updaterInstallPayload(comp, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c == nil {
+				t.Fatalf("%s: updaterInstallPayload returned nil — expected inner/%s/updater.install.sh to be found", comp, comp)
+			}
+			info, statErr := os.Stat(c.Src)
+			if statErr != nil {
+				t.Fatalf("%s: stat %s: %v", comp, c.Src, statErr)
+			}
+			if info.Mode().Perm()&0o111 == 0 {
+				t.Errorf("%s: updaterInstallPayload's Content.Src %s is mode %v, not executable — pack.Zip preserves this verbatim, so a gateway cut would publish a recovery script an operator cannot run", comp, c.Src, info.Mode())
+			}
+		})
+	}
+}
+
+// TestUpdaterInstallPayloadIsPresenceDriven is the Go-side twin of
+// tools/payload.test.sh's widget/gadget proof: the guard is FILE PRESENCE
+// under repoDir/inner/<comp>/, not a hardcoded "edge"/"gateway" switch,
+// proven against a component name this codebase has never heard of. Without
+// this, a future regression to `case "edge", "gateway":` would only surface
+// the day some THIRD real component grows the file — an unbounded window.
+func TestUpdaterInstallPayloadIsPresenceDriven(t *testing.T) {
+	repo := t.TempDir()
+	widgetDir := filepath.Join(repo, "inner", "widget")
+	if err := os.MkdirAll(widgetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(widgetDir, "updater.install.sh"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := updaterInstallPayload("widget", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c == nil {
+		t.Fatal("widget: updaterInstallPayload returned nil for a component with a real, on-disk updater.install.sh")
+	}
+	if c.Name != "updater.install.sh" {
+		t.Errorf("widget: Content.Name = %q, want updater.install.sh", c.Name)
+	}
+
+	// gadget has no file at all — must resolve to nothing, not an error, same
+	// as cli/agent/relay in the real tree today.
+	if err := os.MkdirAll(filepath.Join(repo, "inner", "gadget"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := updaterInstallPayload("gadget", repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2 != nil {
+		t.Errorf("gadget: updaterInstallPayload returned %v, want nil (no file)", c2)
+	}
+}

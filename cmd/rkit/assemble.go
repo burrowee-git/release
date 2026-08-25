@@ -311,12 +311,29 @@ func sharedLadderPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 // resolution one level up in build.go. A component that never grows the file
 // is simply unaffected; nothing here needs to change to add or drop one.
 // Mirrors updater_install_src in tools/payload.sh.
-func updaterInstallPayload(comp, repoDir string) *pack.Content {
+//
+// THE EXEC BIT IS FORCED, exactly like install.sh (copyExecutable, below in
+// build.go): release-kit's pack.Content carries no mode field, and pack.Zip
+// preserves whatever os.Stat reports on Content.Src verbatim — it forces
+// nothing. inner/gateway/updater.install.sh is committed as 0644, same as
+// every other inner/ script; left unforced, `rkit build` — the produce half
+// of every cut (tools/release.sh) — would ship a gateway recovery script an
+// operator cannot execute. Copied to a temp file at 0755 rather than mutating
+// the checked-in source in place, same shape as install.sh's own copy.
+func updaterInstallPayload(comp, repoDir string) (*pack.Content, error) {
 	p := filepath.Join(repoDir, "inner", comp, "updater.install.sh")
 	if _, err := os.Stat(p); err != nil {
-		return nil
+		return nil, nil
 	}
-	return &pack.Content{Src: p, Name: "updater.install.sh"}
+	dir, err := os.MkdirTemp("", "rkit-updater-install-*")
+	if err != nil {
+		return nil, fmt.Errorf("updater.install.sh temp dir: %w", err)
+	}
+	dst := filepath.Join(dir, "updater.install.sh")
+	if err := copyExecutable(p, dst); err != nil {
+		return nil, fmt.Errorf("updater.install.sh: %w", err)
+	}
+	return &pack.Content{Src: dst, Name: "updater.install.sh"}, nil
 }
 
 func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
@@ -342,7 +359,9 @@ func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	// one level up in build.go — not from srcDir like the members staged just
 	// above — so it is resolved separately here rather than folded into the
 	// switch. See updaterInstallPayload for the presence guard.
-	if ui := updaterInstallPayload(comp, repoDir); ui != nil {
+	if ui, err := updaterInstallPayload(comp, repoDir); err != nil {
+		return nil, err
+	} else if ui != nil {
 		extras = append(extras, *ui)
 	}
 	if comp == "gateway" {
