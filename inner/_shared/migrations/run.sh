@@ -170,11 +170,23 @@
 #      in the component's $SERVICE_STOP_RUNGS, the component's daemon is STOPPED
 #      and the caller must start it — the runner starts nothing. The last line of
 #      output says which of the two happened, every time.
-#   3  migrations ran, but at least one RECEIPT was not written. Do NOT record
-#      the version. The receipt and the version anchor are the two gates on a
-#      rung; with the receipt lost, recording the version closes the last one on
-#      work nothing can prove finished. Leaving the version alone keeps the rung
-#      re-runnable, and every migration is idempotent.
+#   3  THE LADDER IS STILL PENDING, in one of two ways, and the caller must NOT
+#      record the version in either:
+#        (a) migrations ran, but at least one RECEIPT was not written. The
+#            receipt and the version anchor are the two gates on a rung; with
+#            the receipt lost, recording the version closes the last one on work
+#            nothing can prove finished.
+#        (b) a rung DEFERRED — it exited 3, meaning "this host needs me, I could
+#            not run, and I have changed nothing". The walk stops there (a rung
+#            above a rung that did not run has no business running), and the
+#            rung says on stderr what an operator has to do.
+#      Both leave the version alone, which keeps the ladder re-runnable, and
+#      every migration is idempotent. They are one exit code because callers act
+#      on them identically: do not record, do not treat as fatal, carry on with
+#      whatever else you were doing. <comp>/updater.update.sh in particular
+#      treats 3 as non-fatal and still restarts the updater — the difference
+#      between a host that converges next release and a host no release can
+#      reach again.
 #  64  the command line was wrong (EX_USAGE). Nothing was evaluated. Deliberately
 #      outside 0-3 so a typo can never be mistaken for one of the four states
 #      above by a caller that switches on the code.
@@ -444,8 +456,8 @@ not mean everything is still up.
 Environment seams (the installers set these; see the file header):
   COMP_HOME  COMP_DATA  PREFIX  BIN_DIR  ROOT_HOME  SUDO
 
-Exit codes: 0 nothing applied · 1 refused/failed · 2 ran · 3 ran but a receipt
-was lost · 64 the command line was wrong.
+Exit codes: 0 nothing applied · 1 refused/failed · 2 ran · 3 still pending (a
+receipt was lost, or a rung deferred) · 64 the command line was wrong.
 EOF
 }
 
@@ -1164,11 +1176,33 @@ for _item in $_pending; do
 done
 
 _unrecorded=""
+_deferred=""
 for _item in $_pending; do
     _p_script="${_item%@*}"
     _p_target="${_item##*@}"
     say "running $_p_script (target $_p_target)"
-    if ! run_migration "$_p_script"; then
+    # EXIT 3 FROM A RUNG IS "DEFERRED", NOT "FAILED", and the distinction is the
+    # whole point of it existing: a rung that refuses BEFORE its first write,
+    # for a reason only an operator can clear (no reachable root, on a host with
+    # no tty), has left this host exactly as it found it. Reporting that as a
+    # failure makes callers that stop on failure — updater.update.sh stops
+    # before it restarts the updater — do real damage over a condition that
+    # damaged nothing. So: no receipt, no version, the walk STOPS here (nothing
+    # above a rung that did not run may run), and the exit code is 3.
+    if run_migration "$_p_script"; then
+        _rm_rc=0
+    else
+        _rm_rc=$?
+    fi
+    if [ "$_rm_rc" = 3 ]; then
+        warn "$_p_script DEFERRED — it did not run and changed nothing on this host."
+        warn "see its own output above for what has to happen first. The ladder stops"
+        warn "here: no version is recorded, and every rung from this one up stays"
+        warn "pending, so a later run picks up exactly where this one left off."
+        _deferred="$_p_script"
+        break
+    fi
+    if [ "$_rm_rc" != 0 ]; then
         warn "$_p_script FAILED. fix the cause above and re-run the installer;"
         warn "completed migrations are recorded and will not be repeated."
         if stops_the_service "$_p_script"; then
@@ -1188,6 +1222,23 @@ for _item in $_pending; do
     fi
     say "$_p_script complete"
 done
+
+# A DEFERRED RUNG IS REPORTED BEFORE A LOST RECEIPT, because it is the reason
+# the walk ended early and the lost receipt (if any) belongs to a rung that DID
+# run before it. Both exit 3; both mean "do not record the version".
+if [ -n "$_deferred" ]; then
+    warn "the ladder is INCOMPLETE: $_deferred deferred, and nothing above it ran."
+    warn "the caller must NOT record the new version — the rung is still pending and"
+    warn "every run repeats it until the condition it named is cleared."
+    if [ -n "$_unrecorded" ]; then
+        warn "migrations that ran before it were also NOT recorded: $_unrecorded"
+    fi
+    if [ -n "$_stopped" ]; then
+        warn "burrowee-$COMP is also STOPPED (by $_stopped) — start it. A deferred rung"
+        warn "does not bring a daemon back up."
+    fi
+    exit 3
+fi
 
 if [ -n "$_unrecorded" ]; then
     warn "migrations RAN but were NOT recorded: $_unrecorded"

@@ -178,6 +178,14 @@ mutate lost-receipt-reports-2 run.sh \
     "s|^    exit 3|    exit 2|" \
     "a rung that ran but could not be recorded exits 3, not 2 (case 15)"
 
+mutate deferred-rung-reports-1 run.sh \
+    "s|^    if \[ \"\$_rm_rc\" = 3 \]; then|    if false; then|" \
+    "a rung that DEFERRED exits 3 (still pending), not 1 (failed) (case 15b)"
+
+mutate deferred-rung-does-not-stop-the-walk run.sh \
+    "s|^        break\$|        :|" \
+    "nothing above a deferred rung runs (case 15b)"
+
 mutate named-version-reads-file run.sh \
     "s|^    _version=\"\$NAMED_VERSION\"|    _version=\"\$(installed_version)\"|" \
     "--installed-version REPLACES the anchor rather than merging with it (case 5b)"
