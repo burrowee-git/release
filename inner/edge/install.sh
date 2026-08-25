@@ -362,8 +362,21 @@ run_migration_ladder() {
     3) MIGRATE_UNRECORDED=1 ;;
     *)
         echo "error: a state migration refused or failed — stopping before the service" >&2
-        echo "error: units are written. The binaries are in $BIN_DIR; nothing else on this" >&2
-        echo "error: host has been changed." >&2
+        echo "error: units are written and the binaries are in $BIN_DIR." >&2
+        # NOT "nothing else has been changed": edge declares
+        # SERVICE_STOP_RUNGS="adopt_user_tree.sh", so a rung MAY have stopped the
+        # daemon before the ladder failed. The runner says on stderr when it did;
+        # this message must not contradict that by claiming the host is untouched,
+        # and must not claim the stop happened either — re-running the installer
+        # is the fix in both cases, and the start command is here for an operator
+        # who needs the daemon up before that.
+        echo "error: a migration may have STOPPED the $COMP service before failing —" >&2
+        echo "error: check the runner's output above." >&2
+        if [ "$(uname -s)" = "Darwin" ]; then
+            echo "hint: start it with: sudo launchctl kickstart -k system/$LAUNCHD_LABEL" >&2
+        else
+            echo "hint: start it with: sudo systemctl start burrowee-edge" >&2
+        fi
         echo "hint: fix the cause reported above and re-run this installer." >&2
         exit 1
         ;;
