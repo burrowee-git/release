@@ -117,6 +117,10 @@ func ledgerMigrations(runSh string) ([]string, error) {
 //     cover pages copied from the edge.web repo at package time (release.sh lines
 //     1063-1068): admin.html → covers/admin.html, login.html → covers/default.html.
 //     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/edge.web (release.sh line 1064).
+//   - edge + gateway carry updater.install.sh, copied from THIS repo's own
+//     inner/<comp>/ (not the component source worktree) if it exists there —
+//     see updaterInstallPayload. cli's updater is a one-shot binary with no
+//     service, and agent has no updater installer, so neither carries one.
 //
 // The remaining component (agent) has no extras.
 // takesSharedLadder reports whether this component's migrations/ is assembled
@@ -295,6 +299,26 @@ func sharedLadderPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	return extras, nil
 }
 
+// updaterInstallPayload returns the updater.install.sh member for this
+// component — inner/<comp>/updater.install.sh, if it exists in the release
+// repo — or nil.
+//
+// Present for edge and gateway only: cli's updater is a one-shot binary with
+// no service to reinstall, and agent has no updater installer at all. FILE
+// PRESENCE is the guard, not a hardcoded component allowlist — exactly like
+// preflight.sh's `[ -f … ]` guard in tools/release.sh's outer bootstrap
+// staging, and unlike install.sh's per-component, unconditionally REQUIRED
+// resolution one level up in build.go. A component that never grows the file
+// is simply unaffected; nothing here needs to change to add or drop one.
+// Mirrors updater_install_src in tools/payload.sh.
+func updaterInstallPayload(comp, repoDir string) *pack.Content {
+	p := filepath.Join(repoDir, "inner", comp, "updater.install.sh")
+	if _, err := os.Stat(p); err != nil {
+		return nil
+	}
+	return &pack.Content{Src: p, Name: "updater.install.sh"}
+}
+
 func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	var extras []pack.Content
 	switch comp {
@@ -313,6 +337,13 @@ func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 			return nil, fmt.Errorf("%s update script missing in source %s: %w", comp, p, err)
 		}
 		extras = append(extras, pack.Content{Src: p, Name: s})
+	}
+	// updater.install.sh comes from THIS repo's inner/<comp>/, like install.sh
+	// one level up in build.go — not from srcDir like the members staged just
+	// above — so it is resolved separately here rather than folded into the
+	// switch. See updaterInstallPayload for the presence guard.
+	if ui := updaterInstallPayload(comp, repoDir); ui != nil {
+		extras = append(extras, *ui)
 	}
 	if comp == "gateway" {
 		// The whole migrations/ dir rides along: migrations/run.sh is the runner

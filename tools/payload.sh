@@ -30,6 +30,29 @@ payload_file_extras() {
     esac
 }
 
+# INNER_DIR — this repo's inner/, the same tree cmd/rkit/build.go resolves
+# install.sh from (inner/<comp>/install.sh). Resolved from this file's own
+# location so a caller does not have to know it, and overridable only for the
+# suite — same pattern as SHARED_MIGRATIONS_DIR below.
+INNER_DIR="${INNER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/inner}"
+
+# updater_install_src <comp> — inner/<comp>/updater.install.sh if it exists,
+# nothing otherwise.
+#
+# Present for edge and gateway only: cli's updater is a one-shot binary with no
+# service to reinstall, and agent has no updater installer at all. The guard
+# here is FILE PRESENCE under INNER_DIR, not a hardcoded component allowlist —
+# exactly like preflight.sh's `[ -f … ]` guard in tools/release.sh's outer
+# bootstrap staging, and unlike install.sh's per-component, unconditionally
+# REQUIRED resolution (cmd/rkit/build.go line ~394). A component that never
+# grows the file is simply unaffected; nothing here needs to change to add or
+# drop one. Mirrors updaterInstallPayload in cmd/rkit/assemble.go.
+updater_install_src() {
+    local p="${INNER_DIR}/$1/updater.install.sh"
+    [ -f "${p}" ] && printf '%s\n' "${p}"
+    return 0
+}
+
 # stage_payload_extras <comp> <src-dir> <assemble-dir> — copy the component's
 # flat payload extras into the staged bundle, executable.
 #
@@ -48,10 +71,15 @@ payload_file_extras() {
 # each caller keeps ownership of where its own install.sh comes from. That is
 # what lets relay share the manifest without changing a byte of its payload.
 #
-# Every extra comes from the component source tree on both paths, so <src-dir>
-# is the whole provenance. A declared extra missing from the source is a hard
-# error: a payload whose updater then dies on "cannot open ./update.sh" is the
-# same class of defect as a gateway shipped without migrations/.
+# payload_file_extras's members all come from the component source tree on
+# both paths, so <src-dir> is their whole provenance. A declared one missing
+# from the source is a hard error: a payload whose updater then dies on
+# "cannot open ./update.sh" is the same class of defect as a gateway shipped
+# without migrations/.
+#
+# updater.install.sh is the ONE exception: like install.sh, it comes from THIS
+# repo's own inner/<comp>/ rather than <src-dir>, so it is staged separately,
+# right below, and its absence is never an error — see updater_install_src.
 stage_payload_extras() {
     local comp="$1" src="$2" dest="$3" s
     for s in $(payload_file_extras "${comp}"); do
@@ -62,6 +90,12 @@ stage_payload_extras() {
         cp "${src}/${s}" "${dest}/${s}"
         chmod 0755 "${dest}/${s}"
     done
+    local ui
+    ui="$(updater_install_src "${comp}")"
+    if [ -n "${ui}" ]; then
+        cp "${ui}" "${dest}/updater.install.sh"
+        chmod 0755 "${dest}/updater.install.sh"
+    fi
     # The SHARED ladder is staged HERE, from the one function both of release.sh's
     # assembly sites already call, rather than as a third open-coded copy beside
     # them — the open-coded copy is exactly what shipped a gateway with no
@@ -173,10 +207,19 @@ takes_shared_ladder() {
 # gateway-repo change. edge's covers come from the separate edge.web tree and
 # are emitted by name (their content, not their names, depends on that tree).
 payload_manifest() {
-    local comp="$1" src="$2" s p
+    local comp="$1" src="$2" s p ui
     for s in $(payload_file_extras "${comp}"); do
         printf '%s\n' "${s}"
     done
+    # updater.install.sh: sourced from THIS repo's inner/<comp>/, like
+    # install.sh — not from <src-dir> like payload_file_extras' members — so it
+    # is resolved via updater_install_src rather than folded into that list.
+    # Emitted for whichever components actually have it (edge, gateway today);
+    # see updater_install_src for the presence guard.
+    ui="$(updater_install_src "${comp}")"
+    if [ -n "${ui}" ]; then
+        printf 'updater.install.sh\n'
+    fi
     case "${comp}" in
         gateway)
             for p in "${src}"/migrations/*; do

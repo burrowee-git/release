@@ -67,14 +67,18 @@ check "dir extras: agent"    "$(payload_dir_extras agent   | paste -sd, -)" ""
 
 # --- payload_manifest -------------------------------------------------------
 SRC="$(gateway_src manifest-gw v0_1_to_v0_2.sh)"
+# updater.install.sh rides in these too: inner/gateway/updater.install.sh is a
+# real, committed file (Ruling E — edge and gateway only), resolved out of
+# INNER_DIR regardless of the fixture SRC above, exactly like install.sh is
+# resolved out of inner/<comp>/ rather than <src-dir>.
 check "manifest: gateway" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
-    "update.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh"
+    "update.sh,updater.install.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh"
 
 # Discovery, not declaration: a migration added to the gateway repo appears with
 # no edit to payload.sh.
 : > "${SRC}/migrations/v2_to_v3.sh"
 check "manifest: picks up a new migration" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
-    "update.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
+    "update.sh,updater.install.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
 
 # …AND A NON-SCRIPT MEMBER TOO. The gateway's migrations/ holds only scripts
 # today, which is the only reason a `*.sh` glob on the rkit side and a `*` glob
@@ -82,7 +86,7 @@ check "manifest: picks up a new migration" "$(payload_manifest gateway "${SRC}" 
 # two lists together; this states the shell side's own expectation.
 : > "${SRC}/migrations/component.conf"
 check "manifest: ships a non-script migrations member" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
-    "update.sh,migrations/component.conf,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
+    "update.sh,updater.install.sh,migrations/component.conf,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
 
 # edge's manifest carries the SHARED ladder's members plus its own two files.
 # The shared half is discovered by glob from inner/_shared/migrations, so it is
@@ -109,8 +113,12 @@ check "shared scripts: test suites are not staged" \
 EDGE_SRC="${TMP}/manifest-edge"
 mkdir -p "${EDGE_SRC}/migrations"
 : > "${EDGE_SRC}/migrations/component.conf"; : > "${EDGE_SRC}/migrations/ledger"
+# edge carries updater.install.sh (real inner/edge/updater.install.sh); cli
+# does NOT (no inner/cli/updater.install.sh exists — it gets no updater
+# installer, Ruling E) even though it shares the same EDGE_SRC fixture below —
+# the one thing that differs between these two checks is the component name.
 check "manifest: edge"  "$(payload_manifest edge  "${EDGE_SRC}" | paste -sd, -)" \
-    "update.sh,updater.update.sh,covers/admin.html,covers/default.html,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
+    "update.sh,updater.update.sh,updater.install.sh,covers/admin.html,covers/default.html,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
 check "manifest: cli"   "$(payload_manifest cli   "${EDGE_SRC}" | paste -sd, -)" \
     "update.sh,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
 
@@ -193,13 +201,68 @@ check "stage extras: relay copies content verbatim" \
 GW_SRC="$(comp_src gw-extras-src install.sh update.sh)"
 GW_ASM="${TMP}/gw-extras-asm"; mkdir -p "${GW_ASM}"
 stage_payload_extras gateway "${GW_SRC}" "${GW_ASM}"
-check "stage extras: gateway takes update.sh only" "$(staged "${GW_ASM}")" "update.sh"
+# updater.install.sh comes from THIS repo's inner/gateway/, not GW_SRC — it
+# rides even though GW_SRC never declared it.
+check "stage extras: gateway takes update.sh + updater.install.sh" \
+    "$(staged "${GW_ASM}")" "update.sh,updater.install.sh"
+if [ -x "${GW_ASM}/updater.install.sh" ]; then
+    ok "stage extras: gateway's staged updater.install.sh is executable"
+else bad "stage extras: gateway's staged updater.install.sh is not executable"; fi
+
+# edge takes the shared ladder too, so this fixture needs the shared half
+# (component.conf + ledger) as well as update.sh/updater.update.sh — same
+# shape as EDGE_SRC above, just with the root-level extras stage_payload_extras
+# actually requires.
+EDGE_EXTRAS_SRC="$(comp_src edge-extras-src update.sh updater.update.sh)"
+mkdir -p "${EDGE_EXTRAS_SRC}/migrations"
+: > "${EDGE_EXTRAS_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${EDGE_EXTRAS_SRC}/migrations/ledger"
+EDGE_EXTRAS_ASM="${TMP}/edge-extras-asm"; mkdir -p "${EDGE_EXTRAS_ASM}"
+if stage_payload_extras edge "${EDGE_EXTRAS_SRC}" "${EDGE_EXTRAS_ASM}"; then
+    ok "stage extras: edge succeeds"
+else bad "stage extras: edge failed"; fi
+if [ -f "${EDGE_EXTRAS_ASM}/updater.install.sh" ] && [ -x "${EDGE_EXTRAS_ASM}/updater.install.sh" ]; then
+    ok "stage extras: edge stages an executable updater.install.sh"
+else bad "stage extras: edge did not stage an executable updater.install.sh"; fi
+
+# cli MUST NOT get one — it has no updater installer (Ruling E). Same shape of
+# fixture as edge's above (cli takes the shared ladder too), so the only
+# difference between this case and edge's is the component name — proving the
+# guard, not just the happy path.
+CLI_EXTRAS_SRC="$(comp_src cli-extras-src update.sh)"
+mkdir -p "${CLI_EXTRAS_SRC}/migrations"
+: > "${CLI_EXTRAS_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${CLI_EXTRAS_SRC}/migrations/ledger"
+CLI_EXTRAS_ASM="${TMP}/cli-extras-asm"; mkdir -p "${CLI_EXTRAS_ASM}"
+if stage_payload_extras cli "${CLI_EXTRAS_SRC}" "${CLI_EXTRAS_ASM}"; then
+    ok "stage extras: cli succeeds"
+else bad "stage extras: cli failed"; fi
+if [ -e "${CLI_EXTRAS_ASM}/updater.install.sh" ]; then
+    bad "stage extras: cli wrongly got updater.install.sh — it has no updater installer"
+else ok "stage extras: cli stages no updater.install.sh"; fi
 
 AGENT_ASM="${TMP}/agent-asm"; mkdir -p "${AGENT_ASM}"
 if stage_payload_extras agent "${TMP}/nope" "${AGENT_ASM}"; then
     ok "stage extras: agent (no extras) succeeds without a source tree"
 else bad "stage extras: agent failed"; fi
 check "stage extras: agent stages nothing" "$(staged "${AGENT_ASM}")" ""
+
+# --- updater_install_src: presence-driven, not a hardcoded component switch -
+# Proven against component names payload_file_extras/payload_dir_extras have
+# never heard of, so this guard would also catch a DIFFERENT file staged for
+# only some components going missing — not just updater.install.sh, named by
+# luck. If this were instead an `edge|gateway) …` switch, "widget" below would
+# never be reached and this would pass for the wrong reason.
+GENERIC_INNER="${TMP}/generic-inner"
+mkdir -p "${GENERIC_INNER}/widget"
+: > "${GENERIC_INNER}/widget/updater.install.sh"
+SAVED_INNER_DIR="${INNER_DIR}"
+INNER_DIR="${GENERIC_INNER}"
+check "updater_install_src: presence-driven for an unlisted component" \
+    "$(updater_install_src widget)" "${GENERIC_INNER}/widget/updater.install.sh"
+check "updater_install_src: absent for a sibling with no file" \
+    "$(updater_install_src gadget)" ""
+INNER_DIR="${SAVED_INNER_DIR}"
 
 # Fail closed. A relay source missing updater.update.sh must stop the cut: the
 # payload would extract and verify, then die on "cannot open ./updater.update.sh"

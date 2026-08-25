@@ -128,8 +128,15 @@ func ledgerRunner(t *testing.T, dir string, scripts ...string) {
 // shell path silently dropped.
 func TestPayloadManifestsAgree(t *testing.T) {
 	cases := []struct {
-		comp  string
-		files []string
+		comp string
+		// wantUpdaterInstall is checked against the REAL inner/<comp>/ tree,
+		// not a fixture: updater.install.sh comes from this repo's own inner/
+		// (like install.sh), not from the srcFixture files below, so both
+		// manifest functions resolve it independent of `files`. edge and
+		// gateway carry a real, committed inner/<comp>/updater.install.sh
+		// (Ruling E); cli, agent and relay do not.
+		wantUpdaterInstall bool
+		files              []string
 	}{
 		// migrations/component.conf is NOT scenery: it is a NON-.sh member, and
 		// it is the only thing in this table that can tell the two globs
@@ -138,14 +145,14 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		// two lists agreed while the shipped sets would not have. The gateway's
 		// migrations/ is all scripts TODAY; the first data file added to it is
 		// the release where they diverge.
-		{"gateway", []string{"update.sh", "migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/component.conf"}},
+		{"gateway", true, []string{"update.sh", "migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/component.conf"}},
 		// edge and cli take the SHARED ladder: the runner and rungs come from
 		// inner/_shared/migrations (both manifests glob the real directory), and
 		// component.conf + ledger come from the component source. Both are
 		// required — the shared runner has no component defaults — so the fixture
 		// carries them.
-		{"cli", []string{"update.sh", "migrations/component.conf", "migrations/ledger"}},
-		{"edge", []string{"update.sh", "updater.update.sh", "migrations/component.conf", "migrations/ledger"}},
+		{"cli", false, []string{"update.sh", "migrations/component.conf", "migrations/ledger"}},
+		{"edge", true, []string{"update.sh", "updater.update.sh", "migrations/component.conf", "migrations/ledger"}},
 		// relay is PRIVATE and gated, and was the last component left out of
 		// this comparison: tools/release.sh's do_release_relay open-coded
 		// `install.sh update.sh updater.update.sh` instead of reading the
@@ -159,10 +166,10 @@ func TestPayloadManifestsAgree(t *testing.T) {
 		// Since the 0.2.2 root-only collapse relay also takes the SHARED
 		// ladder, contributing its own component.conf + ledger + the
 		// unit-derived adoption rung.
-		{"relay", []string{"update.sh", "updater.update.sh",
+		{"relay", false, []string{"update.sh", "updater.update.sh",
 			"migrations/component.conf", "migrations/ledger",
 			"migrations/adopt_unit_home_tree.sh"}},
-		{"agent", nil},
+		{"agent", false, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.comp, func(t *testing.T) {
@@ -198,8 +205,28 @@ func TestPayloadManifestsAgree(t *testing.T) {
 				t.Errorf("assembly paths disagree for %s:\n  tools/payload.sh: %v\n  assemble.go:      %v",
 					tc.comp, shell, goSide)
 			}
+			// Both sides agreeing is not the same as both sides being RIGHT —
+			// they could agree by both having silently stopped staging the
+			// file. Assert membership directly, against the real inner/
+			// tree, so removing inner/edge or inner/gateway's committed
+			// updater.install.sh (or wrongly adding one under inner/cli)
+			// reddens here by name, not just as a disagreement.
+			if got := hasMember(shell, "updater.install.sh"); got != tc.wantUpdaterInstall {
+				t.Errorf("%s manifest has updater.install.sh=%v, want %v (real inner/%s/updater.install.sh presence): %v",
+					tc.comp, got, tc.wantUpdaterInstall, tc.comp, shell)
+			}
 		})
 	}
+}
+
+// hasMember reports whether name is in list.
+func hasMember(list []string, name string) bool {
+	for _, m := range list {
+		if m == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TestPayloadManifestsAgreeOnANewMigration is the property the file-set
@@ -217,7 +244,10 @@ func TestPayloadManifestsAgreeOnANewMigration(t *testing.T) {
 		t.Fatalf("assembly paths disagree after a migration was added:\n  tools/payload.sh: %v\n  assemble.go:      %v",
 			shell, goSide)
 	}
-	want := []string{"migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh", "update.sh"}
+	// updater.install.sh rides too: gateway's real, committed
+	// inner/gateway/updater.install.sh, resolved independent of this
+	// fixture's srcDir — same as install.sh's own provenance.
+	want := []string{"migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh", "update.sh", "updater.install.sh"}
 	if !reflect.DeepEqual(shell, want) {
 		t.Errorf("manifest = %v, want %v", shell, want)
 	}
