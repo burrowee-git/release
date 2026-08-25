@@ -1173,6 +1173,62 @@ EOF
     esac
 }
 
+# start_unit_darwin <label> <plist> — start a launchd system unit and verify it
+# took. bootstrap's codes 5 (already loaded) and 37 are benign races against an
+# async bootout — every other code is a real failure and must not be swallowed.
+# enable + kickstart ALWAYS run: a bootstrap that no-ops on an already-loaded
+# label still needs both.
+#
+# The status is captured with `|| _rc=$?`, NOT inside `if ! ...`: POSIX makes $?
+# the NEGATED status of a `!` pipeline, so an `if !` branch would read 0 for
+# every failure and tolerate nothing.
+start_unit_darwin() {
+    _label="$1"; _plist="$2"
+    _rc=0
+    launchctl bootstrap system "$_plist" 2>/dev/null || _rc=$?
+    case "$_rc" in
+        0 | 5 | 37) ;; # started / already loaded / async bootout still settling
+        *)
+            echo "error: launchctl bootstrap $_label failed (exit $_rc)" >&2
+            echo "hint: sudo launchctl bootstrap system $_plist" >&2
+            return 1
+            ;;
+    esac
+    # enable + kickstart ALWAYS run, and their failures are deliberately funnelled
+    # into the probe below rather than aborting under set -e: the probe is the only
+    # thing that reports the label and a recovery command. `|| true` is safe here
+    # ONLY because a verification immediately follows it — never widen it further.
+    launchctl enable "system/$_label" 2>/dev/null || true
+    launchctl kickstart -k "system/$_label" 2>/dev/null || true
+    if launchctl print "system/$_label" >/dev/null 2>&1; then
+        echo "launchd service $_label enabled + started"
+    else
+        echo "error: $_label did not come up after bootstrap" >&2
+        echo "hint: sudo launchctl print system/$_label" >&2
+        return 1
+    fi
+}
+
+# start_unit_linux <unit> — enable, (re)start and verify a systemd system unit.
+# The probe is the point: enable --now on a unit that then dies must not be
+# reported as a started service.
+start_unit_linux() {
+    _unit="$1"
+    # Failures here are funnelled into the is-active probe below rather than
+    # aborting under set -e: the probe is the only thing that reports the unit and
+    # a recovery command. `|| true` is safe here ONLY because a verification
+    # immediately follows it — never widen it further.
+    systemctl enable --now "$_unit" 2>/dev/null || true
+    systemctl restart "$_unit" 2>/dev/null || true
+    if systemctl is-active --quiet "$_unit"; then
+        echo "systemd service $_unit enabled + (re)started"
+    else
+        echo "error: $_unit is not active after enable --now" >&2
+        echo "hint: sudo systemctl status $_unit" >&2
+        return 1
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # load_units — (re)load the rendered SYSTEM service units (root). Separated
 # from render_units so update mode can refresh the unit FILES without
@@ -1220,10 +1276,14 @@ load_units() {
             run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
             echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
         else
-            run_root launchctl bootout   "system/com.burrowee.gateway"          2>/dev/null || true
-            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
-            run_root launchctl bootout   "system/com.burrowee.gateway.updater"  2>/dev/null || true
-            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+            run_root launchctl bootout "system/com.burrowee.gateway" 2>/dev/null || true
+            start_unit_darwin "com.burrowee.gateway" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
+            if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
+                echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
+            else
+                run_root launchctl bootout "system/com.burrowee.gateway.updater" 2>/dev/null || true
+                start_unit_darwin "com.burrowee.gateway.updater" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist"
+            fi
         fi
         ;;
     Linux)
@@ -1279,7 +1339,6 @@ load_units() {
                 echo "hint: restart it by hand: sudo systemctl restart burrowee-gateway.service" >&2
             fi
 
-            run_root systemctl enable --now burrowee-gateway-updater.service 2>/dev/null || true
             # A reinstall over an already-running (possibly stale) updater must advance
             # it to the freshly-installed binary — `enable --now` no-ops a running unit,
             # so restart it explicitly. Otherwise the stale updater keeps running old
@@ -1287,7 +1346,11 @@ load_units() {
             # updater's own push path — BURROWEE_UPDATE renders units without loading
             # them — so this can never self-kill. The Darwin branch above already
             # advances the updater via its bootout+bootstrap.)
-            run_root systemctl restart burrowee-gateway-updater.service 2>/dev/null || true
+            if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
+                echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
+            else
+                start_unit_linux burrowee-gateway-updater.service
+            fi
         fi
         ;;
     esac
