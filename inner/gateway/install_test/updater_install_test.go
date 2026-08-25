@@ -1,0 +1,446 @@
+// updater_install_test.go — inner/gateway/updater.install.sh: the narrow,
+// UPDATER-ONLY installer. It exists because the updater is the only
+// automatic delivery channel on a node and has no path back to itself: a
+// service push updates the serve binary, never the updater, and the
+// updater's own binary + unit are otherwise placed only by the full
+// install.sh (this file's sibling suite).
+//
+// What is asserted here, mirroring the edge sibling suite's own scope note,
+// is the WIRING — the binary lands, the unit is written, the shared ladder
+// runs unconditionally and this script acts on its exit code rather than
+// merely observing it, the service is started — and the ENROLLMENT PROMISE:
+// nothing under the component home is ever touched. It is NOT
+// adopt_updater_unit.sh's own convergence logic, which has its own suite
+// (tools/adopt_updater_unit.test.sh);
+// TestUpdaterInstallConvergesLegacyUpdaterToTheSystemUnit below drives the
+// real rung end-to-end exactly once, to prove the WIRING reaches a
+// convergence a caller can observe — not to re-litigate that rung's own
+// preconditions.
+//
+// EVERY PATH HERE IS A FIXTURE TREE under t.TempDir(), same discipline as the
+// rest of this package.
+package install_test
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// updaterInstallShPath resolves inner/gateway/updater.install.sh relative to
+// this file.
+func updaterInstallShPath(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join("..", "updater.install.sh"))
+	if err != nil {
+		t.Fatalf("resolve updater.install.sh: %v", err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("updater.install.sh not found at %s: %v", p, err)
+	}
+	return p
+}
+
+// stagedUpdaterInstaller copies updater.install.sh INTO dir and returns the
+// copy's path. It matters that the script runs from inside the bundle, same
+// reason as stageInstaller (render_test.go): it resolves migrations/
+// relative to its OWN path.
+func stagedUpdaterInstaller(t *testing.T, dir string) string {
+	t.Helper()
+	body, err := os.ReadFile(updaterInstallShPath(t))
+	if err != nil {
+		t.Fatalf("read updater.install.sh: %v", err)
+	}
+	p := filepath.Join(dir, "updater.install.sh")
+	if err := os.WriteFile(p, body, 0o755); err != nil {
+		t.Fatalf("stage updater.install.sh: %v", err)
+	}
+	return p
+}
+
+// seedUpdaterBin lays a dummy updater executable into dir (the install cwd;
+// updater.install.sh copies from "./burrowee-gateway-updater"). Stamped the
+// same way seedDummyBins stamps its binaries, for parity even though this
+// script's own logic does not read it.
+func seedUpdaterBin(t *testing.T, dir string) {
+	t.Helper()
+	body := "#!/bin/sh\n# github.com/burrowee-git/gateway/cmd/burrowee-gateway-updater\necho burrowee-gateway-updater\n"
+	if err := os.WriteFile(filepath.Join(dir, "burrowee-gateway-updater"), []byte(body), 0o755); err != nil {
+		t.Fatalf("seed updater bin: %v", err)
+	}
+}
+
+// sharedMigrationsDir resolves inner/_shared/migrations relative to this
+// file.
+func sharedMigrationsDir(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join("..", "..", "_shared", "migrations"))
+	if err != nil {
+		t.Fatalf("resolve shared migrations: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p, "run.sh")); err != nil {
+		t.Fatalf("shared migrations/run.sh not found under %s: %v", p, err)
+	}
+	return p
+}
+
+// stageSharedMigrations lays a kit's migrations/ into staging exactly as
+// tools/payload.sh assembles one: every shared script, plus the component's
+// own component.conf. The ledger is written separately by the caller (either
+// a synthetic one, via stageUpdaterMigrations, or the real one, via
+// writeRealUpdaterLedger) — mirroring the edge sibling suite's stageMigrations
+// split.
+func stageSharedMigrations(t *testing.T, staging string) string {
+	t.Helper()
+	dst := filepath.Join(staging, "migrations")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir migrations: %v", err)
+	}
+	src := sharedMigrationsDir(t)
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read shared migrations: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sh") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(dst, e.Name()), body, 0o755); err != nil {
+			t.Fatalf("stage %s: %v", e.Name(), err)
+		}
+	}
+	conf := "COMP=gateway\nCOMP_HOME_SCHEME=root\nVERSION_FILE=installed-version\n" +
+		"STALE_USER_BINS=\"burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater\"\n"
+	if err := os.WriteFile(filepath.Join(dst, "component.conf"), []byte(conf), 0o644); err != nil {
+		t.Fatalf("write component.conf: %v", err)
+	}
+	return dst
+}
+
+// stageUpdaterMigrations lays rungScript (rungBody) beside the shared ladder
+// staged by stageSharedMigrations, and points migrations/updater-ledger at it
+// alone — a minimal, synthetic ladder used ONLY to pin how THIS installer
+// reacts to the shared runner's exit codes (0/2/3), independent of which real
+// rung eventually ships in migrations/updater-ledger.
+func stageUpdaterMigrations(t *testing.T, staging, rungScript, rungBody string) string {
+	t.Helper()
+	dst := stageSharedMigrations(t, staging)
+	if err := os.WriteFile(filepath.Join(dst, rungScript), []byte(rungBody), 0o755); err != nil {
+		t.Fatalf("stage %s: %v", rungScript, err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "updater-ledger"), []byte("0.2.0 "+rungScript+"\n"), 0o644); err != nil {
+		t.Fatalf("write updater-ledger: %v", err)
+	}
+	return dst
+}
+
+// writeRealUpdaterLedger points the shared migrations dir's updater-ledger at
+// the REAL convergence rung, adopt_updater_unit.sh, exactly as the shipped
+// kit's migrations/updater-ledger will.
+func writeRealUpdaterLedger(t *testing.T, migDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(migDir, "updater-ledger"), []byte("0.2.0 adopt_updater_unit.sh\n"), 0o644); err != nil {
+		t.Fatalf("write updater-ledger: %v", err)
+	}
+}
+
+// updaterFixture is one sandboxed host for updater.install.sh: the system
+// paths it writes to, redirected into a temp tree. updater.install.sh's own
+// BIN_DIR seam matches gateway/install.sh's (BURROWEE_BIN_DIR, forced by the
+// byte-identical guard), but its SYSTEMD_UNIT_DIR / LAUNCHD_PLIST_DIR seams
+// deliberately keep the SHARED migrations ladder's generic names (see
+// updater.install.sh's own env-seams header comment) rather than
+// render_test.go's BURROWEE_SYSTEMD_DIR / BURROWEE_LAUNCHD_DIR — reusing
+// launchdDir/systemdDir/binDir/sysConfigDir/sysDataDir (render_test.go) only
+// for their PATH computation, not their env var names. Plus a CANARY standing
+// in for the component home install.sh resolves as
+// BURROWEE_SYSTEM_CONFIG_DIR (/usr/local/etc/burrowee/gateway) —
+// updater.install.sh must never so much as look at it. Nothing here resolves
+// outside t.TempDir().
+type updaterFixture struct {
+	home        string
+	staging     string
+	sysBinDir   string
+	unitDir     string // SYSTEMD_UNIT_DIR
+	launchdDir  string // LAUNCHD_PLIST_DIR
+	stubLog     string
+	compHomeDir string // fixture stand-in for BURROWEE_SYSTEM_CONFIG_DIR
+	canaryPath  string
+	canaryBody  []byte
+}
+
+// newUpdaterFixture lays out the sandbox, seeds the updater binary, and
+// writes the canary BEFORE the installer ever runs — so assertions after the
+// run have a known-good "before" to compare against.
+func newUpdaterFixture(t *testing.T) *updaterFixture {
+	t.Helper()
+	home := t.TempDir()
+	staging := t.TempDir()
+	seedUpdaterBin(t, staging)
+
+	f := &updaterFixture{
+		home:       home,
+		staging:    staging,
+		sysBinDir:  binDir(home),
+		unitDir:    systemdDir(home),
+		launchdDir: launchdDir(home),
+		stubLog:    filepath.Join(home, "stub-calls.log"),
+	}
+	f.compHomeDir = sysConfigDir(home)
+	for _, d := range []string{f.compHomeDir, f.unitDir, f.launchdDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	f.canaryPath = filepath.Join(f.compHomeDir, "identity.canary")
+	f.canaryBody = []byte("do-not-touch: this is the component home; updater.install.sh must never write here\n")
+	if err := os.WriteFile(f.canaryPath, f.canaryBody, 0o644); err != nil {
+		t.Fatalf("write canary: %v", err)
+	}
+	return f
+}
+
+// env is the environment every run in this file uses: sandboxed system paths
+// plus the (today unread by the script, kept so a future regression that
+// starts reading it is still caught) component-home seams.
+func (f *updaterFixture) env(stub string, extra ...string) []string {
+	e := []string{
+		"HOME=" + f.home,
+		"PATH=" + stub + ":/usr/bin:/bin",
+		"STUB_LOG=" + f.stubLog,
+		"BURROWEE_BIN_DIR=" + f.sysBinDir,
+		"SYSTEMD_UNIT_DIR=" + f.unitDir,
+		"LAUNCHD_PLIST_DIR=" + f.launchdDir,
+		"BURROWEE_SYSTEM_CONFIG_DIR=" + f.compHomeDir,
+		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(f.home),
+	}
+	return append(e, extra...)
+}
+
+func (f *updaterFixture) run(t *testing.T, stub string, extra ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("sh", stagedUpdaterInstaller(t, f.staging))
+	cmd.Dir = f.staging
+	cmd.Env = f.env(stub, extra...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// assertPlacedAndStarted is the shared shape of "the updater landed, the
+// unit was written, the service was asked to start" every scenario checks.
+func (f *updaterFixture) assertPlacedAndStarted(t *testing.T, out, unitPath string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(f.sysBinDir, "burrowee-gateway-updater")); err != nil {
+		t.Errorf("updater binary not placed: %v\noutput:\n%s", err, out)
+	}
+	if _, err := os.Stat(unitPath); err != nil {
+		t.Errorf("updater unit not written at %s: %v\noutput:\n%s", unitPath, err, out)
+	}
+	log := readFile(t, f.stubLog)
+	if !strings.Contains(log, "start") {
+		t.Errorf("service was never asked to start; supervisor log:\n%s", log)
+	}
+}
+
+// assertEnrollmentPromise is THE canary check the header promises: byte-
+// compared content, plus a file count, both on the FILESYSTEM — never on
+// exit status.
+func (f *updaterFixture) assertEnrollmentPromise(t *testing.T) {
+	t.Helper()
+	after, err := os.ReadFile(f.canaryPath)
+	if err != nil {
+		t.Fatalf("canary missing after run: %v", err)
+	}
+	if string(after) != string(f.canaryBody) {
+		t.Errorf("canary changed — updater.install.sh touched the component home.\nbefore:\n%s\nafter:\n%s", f.canaryBody, after)
+	}
+	var count int
+	if err := filepath.Walk(f.compHomeDir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk compHomeDir: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("component home has %d files after the run, want 1 (only the canary) — updater.install.sh wrote something there", count)
+	}
+}
+
+func (f *updaterFixture) assertServeBinAbsent(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(f.sysBinDir, "burrowee-gateway")); err == nil {
+		t.Errorf("burrowee-gateway (the SERVE binary) was placed — updater.install.sh must place ONLY the updater")
+	}
+}
+
+// TestUpdaterInstallPlacesUnitAndStartsWithoutTouchingComponentHome is the
+// headline scenario: no migrations/ shipped at all (the simplest bundle
+// shape a kit can have), so the ladder step is a structural no-op — this
+// pins the install itself, independent of the ladder, and the enrollment
+// promise together with it.
+func TestUpdaterInstallPlacesUnitAndStartsWithoutTouchingComponentHome(t *testing.T) {
+	f := newUpdaterFixture(t)
+
+	out, err := f.run(t, stubInitSystemFor(t, "linux"))
+	if err != nil {
+		t.Fatalf("updater.install.sh failed: %v\noutput:\n%s", err, out)
+	}
+
+	f.assertPlacedAndStarted(t, out, updaterUnitPathFor(f.home, "linux"))
+	f.assertEnrollmentPromise(t)
+	f.assertServeBinAbsent(t)
+}
+
+// updaterUnitPathFor is updaterUnitPath (migration_gate_test.go), but for a
+// FORCED platform rather than runtime.GOOS — this suite forces both branches
+// with stubInitSystemFor, same reason render_test.go does.
+func updaterUnitPathFor(home, goos string) string {
+	if goos == "darwin" {
+		return filepath.Join(launchdDir(home), "com.burrowee.gateway.updater.plist")
+	}
+	return filepath.Join(systemdDir(home), "burrowee-gateway-updater.service")
+}
+
+// TestUpdaterInstallRunsTheRealLadderAndStillInstalls exercises the REAL
+// shared ladder with the REAL convergence rung (migrations/updater-ledger =
+// "0.2.0 adopt_updater_unit.sh"), under the ordinary generic systemctl/id
+// stub every other Linux-shaped test in this package uses — which answers
+// "unknown" to a --user systemd query, exactly as a real host where this
+// process cannot reach a user manager does. That is itself a legitimate,
+// common real-world outcome (see adopt_updater_unit.sh's own "LINUX SCOPE"
+// reasoning): the rung declines gracefully, and the install still completes
+// end to end.
+func TestUpdaterInstallRunsTheRealLadderAndStillInstalls(t *testing.T) {
+	f := newUpdaterFixture(t)
+	migDir := stageSharedMigrations(t, f.staging)
+	writeRealUpdaterLedger(t, migDir)
+
+	out, err := f.run(t, stubInitSystemFor(t, "linux"))
+	if err != nil {
+		t.Fatalf("updater.install.sh failed: %v\noutput:\n%s", err, out)
+	}
+
+	assertContains(t, out, "migrate: ")
+	f.assertPlacedAndStarted(t, out, updaterUnitPathFor(f.home, "linux"))
+}
+
+// alwaysDefersRung is a synthetic migration used ONLY to pin how
+// updater.install.sh reacts to a DEFERRED (exit 3) ladder — not to exercise
+// adopt_updater_unit.sh's own "cannot reach root" precondition for a real
+// exit 3, which requires a non-root invocation this package's sandboxes do
+// not model (every other scenario here runs under the stubbed root-passthrough
+// sudo, like the rest of the suite). This is the same "test the wiring, not
+// the rung" split the edge sibling suite's header describes.
+const alwaysDefersRung = "#!/bin/sh\nif [ \"${1:-}\" = --applies ]; then exit 0; fi\nexit 3\n"
+
+// TestUpdaterInstallDeferredLadderDoesNotAbortInstall: a rung returning 3
+// must still complete the install and start the service — 3 means the rung
+// ran nothing and stopped nothing.
+func TestUpdaterInstallDeferredLadderDoesNotAbortInstall(t *testing.T) {
+	f := newUpdaterFixture(t)
+	stageUpdaterMigrations(t, f.staging, "always_defers.sh", alwaysDefersRung)
+
+	out, err := f.run(t, stubInitSystemFor(t, "linux"))
+	if err != nil {
+		t.Fatalf("a deferred (exit 3) rung must not abort the install: %v\noutput:\n%s", err, out)
+	}
+
+	f.assertPlacedAndStarted(t, out, updaterUnitPathFor(f.home, "linux"))
+}
+
+// convergenceDarwinStub builds a PATH dir for the legacy-convergence
+// scenario: id -> uid 0, uname -s -> Darwin, and a STATEFUL launchctl close
+// enough to a real supervisor for adopt_updater_unit.sh's own gates to clear:
+//
+//   - `print gui/<uid>/org.burrowee.gateway-updater` succeeds (legacy PRESENT)
+//     until `bootout` targets that same gui/ job, after which it fails
+//     (legacy GONE) — legacyGoneMarker is that state.
+//   - `print system/com.burrowee.gateway.updater` fails until `bootstrap`
+//     writes sysLoadedMarker. Required: adopt_updater_unit.sh never boots the
+//     legacy agent out until it can positively confirm the system unit it
+//     just wrote is loaded (its header, "IT NEVER BOOTS OUT BLIND") — a
+//     stub that always answered "loaded" would let the rung skip straight to
+//     bootout without that confirmation ever being real, which is not the
+//     path a live host takes.
+//
+// legacyGoneMarker doubles as this suite's answer to the brief's undefined
+// count_loaded helper: a filesystem fact recording whether the legacy
+// gui-domain job is still there, kept by the SAME stub state
+// adopt_updater_unit.sh's own verify-before-bootout gate already requires —
+// not a second, invented bookkeeping mechanism.
+func convergenceDarwinStub(t *testing.T, legacyGoneMarker, sysLoadedMarker string) string {
+	t.Helper()
+	stub := t.TempDir()
+	writeStub := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(stub, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write stub %s: %v", name, err)
+		}
+	}
+	writeStub("id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo 0; else echo \"id $*\" >> \"$STUB_LOG\"; fi\n")
+	writeStub("uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo Darwin; else /usr/bin/uname \"$@\"; fi\n")
+	body := "#!/bin/sh\n" +
+		"echo \"launchctl $*\" >> \"$STUB_LOG\"\n" +
+		"case \"$1\" in\n" +
+		"print)\n" +
+		"    case \"$2\" in\n" +
+		"    gui/*) [ -f '" + legacyGoneMarker + "' ] && exit 1; exit 0 ;;\n" +
+		"    system/*) [ -f '" + sysLoadedMarker + "' ] && exit 0; exit 1 ;;\n" +
+		"    esac\n" +
+		"    ;;\n" +
+		"bootstrap)\n" +
+		"    : > '" + sysLoadedMarker + "'\n" +
+		"    ;;\n" +
+		"bootout)\n" +
+		"    case \"$2\" in\n" +
+		"    gui/*) : > '" + legacyGoneMarker + "' ;;\n" +
+		"    esac\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	writeStub("launchctl", body)
+	writeStub("xattr", "#!/bin/sh\nexit 0\n")
+	return stub
+}
+
+// TestUpdaterInstallConvergesLegacyUpdaterToTheSystemUnit: a host with a
+// legacy per-user updater agent must end with ONE updater, not two. Runs the
+// REAL adopt_updater_unit.sh (see the package-level comment for why this one
+// scenario earns that, unlike the deferred-ladder test above).
+func TestUpdaterInstallConvergesLegacyUpdaterToTheSystemUnit(t *testing.T) {
+	f := newUpdaterFixture(t)
+	migDir := stageSharedMigrations(t, f.staging)
+	writeRealUpdaterLedger(t, migDir)
+
+	legacyGoneMarker := filepath.Join(f.home, "legacy-gone.marker")
+	sysLoadedMarker := filepath.Join(f.home, "sys-loaded.marker")
+	stub := convergenceDarwinStub(t, legacyGoneMarker, sysLoadedMarker)
+
+	out, err := f.run(t, stub)
+	if err != nil {
+		t.Fatalf("updater.install.sh failed converging the legacy updater: %v\noutput:\n%s", err, out)
+	}
+
+	f.assertPlacedAndStarted(t, out, updaterUnitPathFor(f.home, "darwin"))
+
+	log := readFile(t, f.stubLog)
+	if !strings.Contains(log, "bootout") {
+		t.Errorf("legacy per-user updater was never booted out; launchctl log:\n%s", log)
+	}
+	if !strings.Contains(log, "system/com.burrowee.gateway.updater") {
+		t.Errorf("system updater unit was never addressed; launchctl log:\n%s", log)
+	}
+	if _, statErr := os.Stat(legacyGoneMarker); statErr != nil {
+		t.Errorf("legacy per-user updater agent is still loaded after the run — TWO updaters remain: %v", statErr)
+	}
+}
