@@ -221,9 +221,11 @@ else
 fi
 
 # ---- helpers ------------------------------------------------------------
+# BEGIN helpers
 fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
 info() { printf '  → %s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
+# END helpers
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
@@ -284,11 +286,16 @@ resolve_elevate() {
 ELEVATE="$(resolve_elevate)"
 # ---- END pinned elevation literals ---------------------------------------
 
+# BEGIN sha256
+# sha256 of a file, as a bare hex digest. shasum on macOS, sha256sum on stock
+# Debian/Ubuntu (which ships no perl and therefore no shasum). Both spellings
+# are pre-2016-safe: no --ignore-missing, no --check.
 sha256_of() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
     elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
     else return 1; fi
 }
+# END sha256
 
 # BEGIN release-resolver  (tools/test-version-floor.sh extracts this block — and
 # the version-resolve block further down — verbatim and drives them against a
@@ -452,6 +459,7 @@ assert_version_floor() {
 # END version-floor
 
 # ---- platform detection -------------------------------------------------
+# BEGIN platform-detect
 case "$(uname -s)" in
     Darwin) OS=darwin ;;
     Linux)  OS=linux ;;
@@ -464,12 +472,15 @@ case "$(uname -m)" in
 esac
 
 printf '\n  burrowee %s installer  (%s/%s)\n\n' "$COMP" "$OS" "$ARCH"
+# END platform-detect
 
 # ---- guard against a TEMP / unbaked pubkey ------------------------------
+# BEGIN pubkey-guard
 case "$PUBKEY" in
     ""|*REPLACE*|*PLACEHOLDER*|*TEMP*)
         fail "this installer was built without a real signing key — refusing to verify against a placeholder (regenerate with tools/gen-bootstraps.sh)" ;;
 esac
+# END pubkey-guard
 
 # BEGIN mode-dispatch  (cmd/rkit's updater-install bootstrap test extracts this
 # block verbatim and drives it directly — keep it self-contained between the
@@ -600,8 +611,10 @@ done
 # END mode-args
 
 # ---- temp workspace -----------------------------------------------------
+# BEGIN tmp-workspace
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/burrowee-${COMP}-XXXXXX")" || fail "could not create temp dir"
 trap 'rm -rf "$TMP"' EXIT INT TERM
+# END tmp-workspace
 
 # ---- preflight (install OS deps before the trust gate) ------------------
 # preflight.sh installs minisign/unzip/curl (the trust gate's deps) + nginx for
@@ -729,6 +742,7 @@ fi
 # END version-resolve
 
 # ---- download -----------------------------------------------------------
+# BEGIN download
 if [ -n "$DL_BASE" ]; then
     BASE="$DL_BASE"
 else
@@ -826,8 +840,10 @@ dl "$ZIP" "$ZIP"
 info "downloading SHA256SUMS.txt + signature"
 dl "SHA256SUMS.txt"         "SHA256SUMS.txt"
 dl "SHA256SUMS.txt.minisig" "SHA256SUMS.txt.minisig"
+# END download
 
 # ---- require minisign ---------------------------------------------------
+# BEGIN require-minisign
 # minisign is the trust root: it must already be on PATH from a trusted source
 # (your package manager). We never auto-fetch the verifier — a binary pulled
 # over the network and run unverified would itself become an unverified trust
@@ -847,8 +863,10 @@ else
     upstream: https://github.com/jedisct1/minisign
     Verification is mandatory; this installer will NOT run an unverified verifier."
 fi
+# END require-minisign
 
 # ---- VERIFY (the trust gate) --------------------------------------------
+# BEGIN verify-signature
 info "verifying signature"
 # 1) signature over the sums file, using the baked pubkey (inline, no key fetch).
 # Capture stdout — minisign prints the SIGNED "Trusted comment:" line there, and
@@ -858,6 +876,7 @@ info "verifying signature"
 verify_out="$("$MINISIGN" -V -P "$PUBKEY" -m "$TMP/SHA256SUMS.txt" -x "$TMP/SHA256SUMS.txt.minisig")" \
     || fail "signature verification failed — aborting (refusing to install unverified bytes)"
 ok "minisign signature valid"
+# END verify-signature
 
 # 1b) BIND the verified bytes to the resolved $TAG. Signature + checksum alone
 # prove the bytes are a genuine Burrowee release — NOT that they are the release
@@ -889,17 +908,26 @@ ok "version binding verified ($TAG)"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
-grep -qF "$ZIP" "$TMP/SHA256SUMS.txt" \
+# BEGIN verify-checksum
+# v4: declares needs: helpers too — the block below calls fail(), which lives
+# in the helpers module, not sha256. Under-declaring it was latent only because
+# every current template happens to splice helpers before this module.
+# Compare ONE hash directly instead of `-c --ignore-missing` over the whole
+# sums file: --ignore-missing is a 2016-era addition (Digest::SHA 5.96 /
+# coreutils 8.25) and the stock shasum on an older macOS rejects it outright
+# ("Unknown option: ignore-missing"). That non-zero exit came back through the
+# `||` as "checksum mismatch", so every install on such a host accused a
+# perfectly good zip of tampering. Picking the line by EXACT filename (awk, both
+# the "hash  name" and binary "hash *name" spellings) is also stricter than the
+# substring grep this replaces.
+want="$(awk -v f="$ZIP" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/SHA256SUMS.txt")"
+[ -n "$want" ] \
     || fail "no checksum entry for $ZIP — release incomplete or tampered; aborting"
-if command -v shasum >/dev/null 2>&1; then
-    ( cd "$TMP" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-elif command -v sha256sum >/dev/null 2>&1; then
-    ( cd "$TMP" && sha256sum -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-else
-    fail "neither shasum nor sha256sum found — cannot verify; aborting"
-fi
+got="$(sha256_of "$TMP/$ZIP")" \
+    || fail "neither shasum nor sha256sum found — cannot verify; aborting"
+[ -n "$got" ] && [ "$want" = "$got" ] \
+    || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
+# END verify-checksum
 ok "checksum verified"
 
 # ---- unzip + exec the verified inner installer --------------------------

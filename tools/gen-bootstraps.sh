@@ -87,6 +87,47 @@ sha256_of() {
     else echo "✗ neither shasum nor sha256sum found — cannot compute preflight pin" >&2; exit 1; fi
 }
 
+MODDIR="$ROOT/tools/modules"
+
+# expand_includes <template> — write <template> to stdout with every line that is
+# exactly `@INCLUDE:<name>@` replaced by tools/modules/<name>.sh, wrapped in
+# `# BEGIN <name>` / `# END <name>` markers and with the module's own header
+# lines dropped. Runs BEFORE the sed substitution pass, so a module may contain
+# @COMP@ / @MODE@ / @BRAND@ / @brand@ like any other template text.
+#
+# The bootstrap is the trust anchor: it is delivered as `curl … | sh` and fetches
+# no code. Modules are therefore spliced HERE, at generation time, and never
+# sourced at runtime.
+#
+# The emitted `# BEGIN <name>` / `# END <name>` markers are LOAD-BEARING: one
+# or more tools/test-*.sh scripts (e.g. tools/test-checksum-verify.sh) extract
+# a module's spliced block out of a GENERATED bootstrap by matching these exact
+# marker names verbatim. Renaming a module (and therefore its markers) without
+# first grepping tools/test-*.sh for the old name will silently break that
+# extraction.
+expand_includes() {
+    awk -v moddir="$MODDIR" '
+        /^@INCLUDE:[a-z0-9-]+@$/ {
+            name = substr($0, 10, length($0) - 9 - 1)
+            path = moddir "/" name ".sh"
+            if ((getline probe < path) < 0) {
+                printf("✗ @INCLUDE:%s@ but %s does not exist\n", name, path) > "/dev/stderr"
+                exit 1
+            }
+            close(path)
+            printf("# BEGIN %s\n", name)
+            while ((getline line < path) > 0) {
+                if (line ~ /^# (module|needs|since):/) continue
+                print line
+            }
+            close(path)
+            printf("# END %s\n", name)
+            next
+        }
+        { print }
+    ' "$1"
+}
+
 # ---- resolve the pubkey -------------------------------------------------
 pubfile=""
 for cand in "${BURROWEE_PUBKEY_FILE:-}" "$ROOT/burrowee-release.pub" "$ROOT/tools/testkeys/test.pub"; do
@@ -157,10 +198,19 @@ for comp in cli gateway edge agent; do
         *)    nginx=0 ;;
     esac
 
-    # (1) preflight — tmp-then-mv atomic write.
+    # (1) preflight — tmp-then-mv atomic write. expand_includes runs OFF the left
+    # of any pipeline (assigned via its own redirection) so `set -e` sees its
+    # exit status directly — a pipeline's left-hand failure is otherwise
+    # invisible under plain `set -eu`. The @INCLUDE: guard runs against the tmp
+    # file BEFORE the mv, so a bad render never reaches the file preflight.sh's
+    # sha256 gets pinned from, let alone the published path.
     pf_out="$ROOT/$comp/preflight.sh"
     pf_tmp="$pf_out.tmp.$$"
-    sed -e "s|@COMP@|$comp|g" -e "s|@NGINX@|$nginx|g" "$PREFLIGHT_TEMPLATE" > "$pf_tmp"
+    pf_exp="$pf_out.exp.$$"
+    expand_includes "$PREFLIGHT_TEMPLATE" > "$pf_exp"
+    sed -e "s|@COMP@|$comp|g" -e "s|@NGINX@|$nginx|g" "$pf_exp" > "$pf_tmp"
+    rm -f "$pf_exp"
+    grep -q '@INCLUDE:' "$pf_tmp" && { rm -f "$pf_tmp"; echo "✗ unexpanded @INCLUDE in $pf_out" >&2; exit 1; }
     chmod +x "$pf_tmp"
     mv -f "$pf_tmp" "$pf_out"
     pf_sha="$(sha256_of "$pf_out")"
@@ -197,9 +247,22 @@ for comp in cli gateway edge agent; do
     for mode in $modes; do
         out="$ROOT/$comp/$mode.sh"
         tmp="$out.tmp.$$"
+        exp="$out.exp.$$"
+        # expand_includes runs OFF the left of the pipeline (its own redirection,
+        # not a pipe) so `set -e` sees its exit status: a missing module makes
+        # awk exit 1 without ever printing the `@INCLUDE:` line, so the
+        # post-render grep guard below has nothing left to catch — only a
+        # directly-checked exit status catches that failure. The guard still
+        # runs, against the tmp file BEFORE the mv, to catch the OTHER failure
+        # shape: a malformed include name (e.g. `@INCLUDE:Helpers@`) that the
+        # awk regex declines to match and so passes through literally.
+        expand_includes "$TEMPLATE" > "$exp"
         sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
             -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
-            "$TEMPLATE" > "$tmp"
+            -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+            "$exp" > "$tmp"
+        rm -f "$exp"
+        grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
         chmod +x "$tmp"
         mv -f "$tmp" "$out"
         echo "✓ wrote $out  (mode $mode, version floor $min_version)"
@@ -213,7 +276,13 @@ comp=relay
 out="$ROOT/$comp/install.sh"
 mkdir -p "$ROOT/$comp"
 tmp="$out.tmp.$$"
-sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" "$RELAY_TEMPLATE" > "$tmp"
+exp="$out.exp.$$"
+expand_includes "$RELAY_TEMPLATE" > "$exp"
+sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+    -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+    "$exp" > "$tmp"
+rm -f "$exp"
+grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
 chmod +x "$tmp"
 mv -f "$tmp" "$out"
 echo "✓ wrote $out  (relay gated-channel bootstrap)"

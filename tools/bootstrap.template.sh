@@ -221,9 +221,7 @@ else
 fi
 
 # ---- helpers ------------------------------------------------------------
-fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
-info() { printf '  → %s\n' "$*"; }
-ok()   { printf '  ✓ %s\n' "$*"; }
+@INCLUDE:helpers@
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
@@ -284,11 +282,7 @@ resolve_elevate() {
 ELEVATE="$(resolve_elevate)"
 # ---- END pinned elevation literals ---------------------------------------
 
-sha256_of() {
-    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-    else return 1; fi
-}
+@INCLUDE:sha256@
 
 # BEGIN release-resolver  (tools/test-version-floor.sh extracts this block — and
 # the version-resolve block further down — verbatim and drives them against a
@@ -452,24 +446,10 @@ assert_version_floor() {
 # END version-floor
 
 # ---- platform detection -------------------------------------------------
-case "$(uname -s)" in
-    Darwin) OS=darwin ;;
-    Linux)  OS=linux ;;
-    *)      fail "unsupported OS: $(uname -s) (burrowee ships darwin + linux only)" ;;
-esac
-case "$(uname -m)" in
-    arm64|aarch64) ARCH=arm64 ;;
-    x86_64|amd64)  ARCH=amd64 ;;
-    *)             fail "unsupported arch: $(uname -m) (burrowee ships arm64 + amd64 only)" ;;
-esac
-
-printf '\n  burrowee %s installer  (%s/%s)\n\n' "$COMP" "$OS" "$ARCH"
+@INCLUDE:platform-detect@
 
 # ---- guard against a TEMP / unbaked pubkey ------------------------------
-case "$PUBKEY" in
-    ""|*REPLACE*|*PLACEHOLDER*|*TEMP*)
-        fail "this installer was built without a real signing key — refusing to verify against a placeholder (regenerate with tools/gen-bootstraps.sh)" ;;
-esac
+@INCLUDE:pubkey-guard@
 
 # BEGIN mode-dispatch  (cmd/rkit's updater-install bootstrap test extracts this
 # block verbatim and drives it directly — keep it self-contained between the
@@ -600,8 +580,7 @@ done
 # END mode-args
 
 # ---- temp workspace -----------------------------------------------------
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/burrowee-${COMP}-XXXXXX")" || fail "could not create temp dir"
-trap 'rm -rf "$TMP"' EXIT INT TERM
+@INCLUDE:tmp-workspace@
 
 # ---- preflight (install OS deps before the trust gate) ------------------
 # preflight.sh installs minisign/unzip/curl (the trust gate's deps) + nginx for
@@ -627,237 +606,16 @@ if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_SKIP_PREFLIGHT:-}" ]; th
 fi
 
 # ---- version resolution -------------------------------------------------
-# BEGIN version-resolve
-# Read the per-component pin env var by name (no eval). $COMP is a baked
-# literal, so a direct case over the four known components is exhaustive.
-case "$COMP" in
-    cli)     PIN="${BURROWEE_CLI_VERSION:-}" ;;
-    gateway) PIN="${BURROWEE_GATEWAY_VERSION:-}" ;;
-    edge)    PIN="${BURROWEE_EDGE_VERSION:-}" ;;
-    agent)   PIN="${BURROWEE_AGENT_VERSION:-}" ;;
-    *)       fail "unknown component '$COMP' — cannot resolve its version pin" ;;
-esac
-# An explicit pin is the operator's own answer, not a resolver's — it is used
-# verbatim and is NOT held to the version floor below. Pinning an older release
-# is a deliberate, local downgrade (debugging, staged rollback); refusing it
-# would take away the only lever an operator has when a new cut misbehaves.
-if [ -n "$PIN" ]; then
-    TAG="$PIN"
-    info "using pinned version: $TAG"
-else
-    info "resolving latest ${COMP} release"
-    # Who answered? "github" = api.github.com, or a GH_PROXY mirror standing in
-    # for it; "catalog" = the first-party console. Only the github answer is held
-    # to the version floor — see the choke point at the end of this block.
-    TAG_SOURCE=github
-    # GH_ANSWERED separates "nobody could be reached" from "the source was
-    # reached and answered empty" — the two want different advice.
-    GH_ANSWERED=0
-    if TAG="$(resolve_latest '')"; then GH_ANSWERED=1; else TAG=""; fi
-    # GitHub API unreachable/empty — retry through each mirror in turn BEFORE the
-    # console catalog (mirrors need no authorized burrowee, so they serve fresh
-    # hosts). Skipped under the DL_BASE test hook and when mirrors are disabled.
-    if [ -z "$TAG" ] && [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
-        for _proxy in $GH_PROXIES; do
-            info "GitHub API unreachable — retrying via mirror $_proxy"
-            if TAG="$(resolve_latest "$_proxy/")"; then GH_ANSWERED=1; else TAG=""; fi
-            if [ -n "$TAG" ]; then info "mirror resolved: $TAG"; break; fi
-        done
-    fi
-    if [ -z "$TAG" ]; then
-        TAG_SOURCE=catalog
-        # GitHub unreachable or no releases published. Try the console catalog
-        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/@COMP@/current.
-        # This is the R2 fallback path — assets are served via `burrowee download-url`
-        # (see the dl() function below), which requires a device grant.
-        info "GitHub unreachable — trying console catalog for latest @COMP@ version"
-        catalog_url="${CONSOLE_URL}/api/v1/releases/@COMP@/current"
-        # Use plain curl (no TLS-only flags) when DL_BASE is set for tests, else
-        # standard hardened curl.
-        # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-        catalog_body="$($CURL "$catalog_url" 2>/dev/null)" || true
-        # Resolve the tag the SAME hardened way as latest_tag(): prefer jq
-        # (structural — reads only the top-level "version" field). Without jq,
-        # split the body on field boundaries FIRST (tr , and { → newlines): the
-        # console serves MINIFIED single-line JSON, so a line-anchored grep
-        # would never match it. The field-anchored grep plus the @COMP@/v… shape
-        # check below keep a "version":"…" substring buried in notes or nested
-        # metadata from spoofing the tag. (Bytes are still minisign+sha256
-        # verified downstream; this closes a downgrade / wrong-version vector
-        # at the resolution step.)
-        if command -v jq >/dev/null 2>&1; then
-            TAG="$(printf '%s' "$catalog_body" | jq -r '.version // empty' 2>/dev/null)" || true
-        else
-            TAG="$(printf '%s' "$catalog_body" \
-                | tr ',{' '\n\n' \
-                | grep -E '^[[:space:]]*"version"[[:space:]]*:' \
-                | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
-                | head -n1)" || true
-        fi
-        case "$TAG" in
-            "$COMP"/v*) : ;;
-            *) TAG="" ;;
-        esac
-        [ -n "$TAG" ] \
-            || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest @COMP@ version; retry when either is available"
-        info "console catalog: $TAG"
-    fi
-    info "latest: $TAG"
-    # A resolver that also serves the artifacts must not get to pick the version
-    # too — GitHub's answer, and a mirror's answer standing in for it, are held
-    # to the baked floor. See assert_version_floor.
-    #
-    # The console catalog is EXEMPT, deliberately. $MIN_VERSION is baked from
-    # versions/<comp>.stamp — the version at CUT time — while the catalog serves
-    # the last PROMOTED release, and cut and promote are separate steps that
-    # legitimately lag each other. Holding the catalog to the cut floor aborts
-    # every install in that window, on the only path a GitHub-blocked host has,
-    # with advice ("retry when github.com is reachable") that host cannot act on.
-    # The catalog is also not a third party: it is the same first-party control
-    # plane the static channel and $PUBKEY come from, so exempting it costs no
-    # trust this installer had not already extended. The bytes it leads to are
-    # still minisign + sha256 verified and still bound to the resolved tag by the
-    # signed trusted comment, so the catalog can at worst name an older release
-    # OF OURS — never a forged one.
-    if [ "$TAG_SOURCE" = catalog ]; then
-        info "version floor not applied to the console catalog (first-party; serves the last PROMOTED release)"
-    else
-        assert_version_floor "$TAG"
-    fi
-fi
-
-# END version-resolve
+@INCLUDE:version-resolve@
 
 # ---- download -----------------------------------------------------------
-if [ -n "$DL_BASE" ]; then
-    BASE="$DL_BASE"
-else
-    BASE="https://github.com/${REPO}/releases/download/${TAG}"
-fi
-ZIP="burrowee-${COMP}-${OS}-${ARCH}.zip"
-# gh-proxy mirrors route a release download by treating the release TAG as a
-# SINGLE path segment. Our tags contain a slash (<comp>/v…), so a LITERAL slash
-# splits the tag across two path segments and some mirror edges then fail to
-# serve the asset (or return wrong bytes that later fail verification). Build a
-# mirror-only base with the tag's slash percent-encoded (%2F) so the tag stays
-# one segment. Direct GitHub ($BASE) keeps the literal slash (it 404s on %2F).
-MIRROR_BASE="https://github.com/${REPO}/releases/download/$(printf '%s' "${TAG}" | sed 's#/#%2F#g')"
-
-dl() {
-    # dl <remote-name> <local-name>  (local goes under $TMP)
-    #
-    # Primary: download from $BASE (GitHub release or $BURROWEE_DL_BASE test hook).
-    # Mirror fallback: if the primary fails, retry the SAME GitHub URL through each
-    # GH_PROXIES HTTP mirror in turn (no auth, helps GitHub-blocked networks).
-    # R2 fallback (grant gate): if all fail AND `burrowee download-url` is
-    # available with a device grant, resolve a presigned URL and download from it.
-    # Verification (minisign + sha256 + tag binding) is unchanged regardless of
-    # download source, so neither the mirror nor R2 can inject tampered bytes or
-    # substitute an older signed release undetected.
-    #
-    # Only the grant-gated R2 fallback relies on `burrowee` being on PATH. A plain
-    # `curl install.sh | sh` with GitHub down and no `burrowee` fails with a clear
-    # message — the fallback is for hosts that have already installed burrowee.
-    _asset="$1"
-    _local="$2"
-    info "GET $BASE/$_asset"
-    # Primary (GitHub) gets a tight 30s cap (the trailing --max-time overrides
-    # $CURL's baked --max-time 300 — curl honours the last occurrence) so a slow or
-    # throttled GitHub fails over to the mirrors fast instead of creeping for minutes.
-    # The mirror attempts below keep the longer budget: they're the fallback of last
-    # resort, so abandoning a working-but-slow mirror at 30s would risk failing the
-    # whole install. --connect-timeout 15 + --speed-time 20 (stall) still apply.
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    if $CURL --max-time 30 -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
-        return 0
-    fi
-    # Mirror fallback: route the %2F-encoded GitHub URL (MIRROR_BASE) through each
-    # mirror in turn. Only for the real GitHub BASE (skip under the DL_BASE test
-    # hook) and when enabled. Each full mirror URL is printed so a stalled download
-    # is diagnosable from the installer output.
-    if [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
-        for _proxy in $GH_PROXIES; do
-            info "primary failed; trying mirror: $_proxy/$MIRROR_BASE/$_asset"
-            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            if $CURL -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset" 2>/dev/null; then
-                ok "downloaded $_asset via mirror $_proxy"
-                return 0
-            fi
-        done
-    fi
-    # Primary + mirrors failed. Attempt R2 fallback only when `burrowee` is on PATH.
-    if command -v burrowee >/dev/null 2>&1; then
-        info "primary download failed for $_asset; trying R2 fallback via burrowee"
-        _r2url="$(burrowee download-url @COMP@ "$TAG" "$_asset" 2>/dev/null)" || true
-        if [ -n "$_r2url" ]; then
-            # Scheme guard: the resolved URL MUST be https:// in production, or
-            # https:// / http:// in test mode (BURROWEE_DL_BASE set). This prevents
-            # a compromised `burrowee` from redirecting to file://, ftp://, or
-            # other unsafe schemes. Fail the fallback (not the whole install) if
-            # the URL doesn't pass this check — user will see the no-burrowee error path.
-            _valid_scheme=0
-            case "$_r2url" in
-                https://*)
-                    _valid_scheme=1
-                    ;;
-                http://*)
-                    # Allow http:// only in test mode (when DL_BASE is set).
-                    if [ -n "$DL_BASE" ]; then
-                        _valid_scheme=1
-                    fi
-                    ;;
-            esac
-            if [ "$_valid_scheme" -eq 1 ]; then
-                # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-                $CURL -o "$TMP/$_local" "$_r2url" 2>/dev/null \
-                    || fail "R2 fallback download failed for $_asset — check device grant and retry"
-                ok "downloaded $_asset via R2 fallback"
-                return 0
-            fi
-            # URL scheme invalid — treat as a fallback failure so the caller
-            # sees the standard "no authorized burrowee" error.
-        fi
-        fail "burrowee download-url returned no URL for $_asset — device grant may be expired; run 'burrowee login' to renew, or retry when GitHub is reachable"
-    fi
-    fail "download failed: $_asset (from $BASE; mirrors: $GH_PROXIES) — GitHub and all mirrors are unreachable and there is no authorized burrowee on PATH — install burrowee + run 'burrowee login' to enable the backup channel, or retry when GitHub is reachable"
-}
-info "downloading $ZIP"
-dl "$ZIP" "$ZIP"
-info "downloading SHA256SUMS.txt + signature"
-dl "SHA256SUMS.txt"         "SHA256SUMS.txt"
-dl "SHA256SUMS.txt.minisig" "SHA256SUMS.txt.minisig"
+@INCLUDE:download@
 
 # ---- require minisign ---------------------------------------------------
-# minisign is the trust root: it must already be on PATH from a trusted source
-# (your package manager). We never auto-fetch the verifier — a binary pulled
-# over the network and run unverified would itself become an unverified trust
-# root, defeating the whole signature chain. Verification is mandatory and is
-# only ever performed by a minisign the operator already trusts.
-if command -v minisign >/dev/null 2>&1; then
-    MINISIGN=minisign
-else
-    case "$OS" in
-        darwin) hint="install Homebrew if you don't have it, then minisign:
-      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
-      brew install minisign" ;;
-        *)      hint="apt-get install minisign  (or your distro's package manager)" ;;
-    esac
-    fail "minisign is required and is not installed — install it and re-run.
-    $hint
-    upstream: https://github.com/jedisct1/minisign
-    Verification is mandatory; this installer will NOT run an unverified verifier."
-fi
+@INCLUDE:require-minisign@
 
 # ---- VERIFY (the trust gate) --------------------------------------------
-info "verifying signature"
-# 1) signature over the sums file, using the baked pubkey (inline, no key fetch).
-# Capture stdout — minisign prints the SIGNED "Trusted comment:" line there, and
-# that comment is the only version-bearing field in the whole verified set (the
-# zip name and SHA256SUMS.txt are both version-independent). stderr is left
-# attached so a verification failure still shows minisign's own diagnostics.
-verify_out="$("$MINISIGN" -V -P "$PUBKEY" -m "$TMP/SHA256SUMS.txt" -x "$TMP/SHA256SUMS.txt.minisig")" \
-    || fail "signature verification failed — aborting (refusing to install unverified bytes)"
-ok "minisign signature valid"
+@INCLUDE:verify-signature@
 
 # 1b) BIND the verified bytes to the resolved $TAG. Signature + checksum alone
 # prove the bytes are a genuine Burrowee release — NOT that they are the release
@@ -889,17 +647,7 @@ ok "version binding verified ($TAG)"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
-grep -qF "$ZIP" "$TMP/SHA256SUMS.txt" \
-    || fail "no checksum entry for $ZIP — release incomplete or tampered; aborting"
-if command -v shasum >/dev/null 2>&1; then
-    ( cd "$TMP" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-elif command -v sha256sum >/dev/null 2>&1; then
-    ( cd "$TMP" && sha256sum -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-else
-    fail "neither shasum nor sha256sum found — cannot verify; aborting"
-fi
+@INCLUDE:verify-checksum@
 ok "checksum verified"
 
 # ---- unzip + exec the verified inner installer --------------------------
