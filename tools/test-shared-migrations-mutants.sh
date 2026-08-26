@@ -472,5 +472,24 @@ mutate forced-run-says-nothing adopt_user_tree.sh \
     "s|^    say \"FORCED RUN|    : \"FORCED RUN|" \
     "a forced run announces itself before the stop (case 30b)"
 
+# --- the 0.2.11 repoint rung ------------------------------------------------
+#
+# @-DELIMITED throughout: these lines carry `/` (paths) and `|` (the `||` in the
+# guards), either of which makes sed refuse the expression and leaves an empty
+# file the harness would have to score as broken.
+
+# The one that matters most. With the pair check gone the rung "repairs" a host
+# by pointing lan_cert at a directory holding nothing — which is the crash loop
+# again, now with the migration reporting success.
+mutate repoints-without-a-pair repoint_lan_cert.sh \
+    "s@^    pair_present \"\$CANONICAL\"@    true@" \
+    "a broken lan_cert with NO pair to repoint to is left alone (case 35c)"
+
+# The guard that keeps the rung inert on a working relocated cert. Without it a
+# host gets moved off the cert its peers pinned, for no reason at all.
+mutate repoints-a-working-value repoint_lan_cert.sh \
+    "s@^    if elevate test -r \"\$_cur/cert.pem\"; then return 1; fi@    if false; then return 1; fi@" \
+    "a relocated lan_cert whose cert.pem is readable is not touched (case 35d)"
+
 echo "== $RUN mutants, $SURVIVORS survived =="
 [ "$SURVIVORS" = 0 ] || exit 1

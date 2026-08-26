@@ -2275,5 +2275,106 @@ assert_contains "$OUT" "nothing applied" "and say it evaluated and declined"
 assert_eq "$(wc -l < "$ch34b/twice_listed.sh.ran" | tr -d ' ')" 1 "and must not have run the file again"
 
 # ---------------------------------------------------------------------------
+# 35. repoint_lan_cert.sh — the 0.2.11 rung that repairs what the 0.2.0 adoption
+# left behind: a lan_cert still naming the tree the adoption retired.
+#
+# EVERY CASE DRIVES THE REAL RUNG, not the ladder: the runner's gate, receipts
+# and ordering are cases 1-34's subject, and re-proving them here would only
+# prove the fixture. What is under test is the rung's own decision.
+#
+# THE SUDO STUB EXECS. Every read and the write go through elevate, because the
+# tree this rung repairs is root-owned 0700 — a rung that read as the invoking
+# user would see "no config" on exactly the hosts it exists for. The stub also
+# RECORDS, so a case can prove the elevation happened rather than assuming it.
+lc_fixture() {
+    # lc_fixture <dir> <lan_cert-value> — a component tree with a config in the
+    # shape a pre-collapse enrolled host actually held.
+    _lcf="$1"
+    mkdir -p "$_lcf/home" "$_lcf/stubs"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/stubs/sudo.log"\nexec "$@"\n' "$_lcf" > "$_lcf/stubs/sudo"
+    chmod 755 "$_lcf/stubs/sudo"
+    printf '# edge config\ntls_listen=:8448\nserve_mode=lan\nlan_cert=%s\nlan_listen=127.0.0.1:9448\n' "$2" > "$_lcf/home/config"
+}
+lc_pair() { mkdir -p "$1"; printf 'cert\n' > "$1/cert.pem"; printf 'key\n' > "$1/key.pem"; }
+run_repoint() {
+    # run_repoint <dir> [args…]
+    _rr="$1"; shift
+    OUT="$(
+        COMP=edge COMP_HOME="$_rr/home" COMP_DATA="$_rr/home" \
+        BIN_DIR="$_rr/bin" SUDO="$_rr/stubs/sudo" \
+        sh "$SHARED/repoint_lan_cert.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+lc_value() { sed -n 's/^lan_cert=//p' "$1/home/config"; }
+
+# 35a. THE LIVE DEFECT. The value names a retired tree; the carried pair is at
+# the canonical name. The probe must select it and the run must repoint.
+t35a="$TMP/t35a"; lc_fixture "$t35a" "$TMP/t35a-retired/.burrowee/edge/lan-cert"
+lc_pair "$t35a/home/lan-cert"
+run_repoint "$t35a" --applies
+assert_eq "$RC" 0 "a lan_cert naming the retired tree, with a pair to repoint to, must select the rung"
+run_repoint "$t35a"
+assert_eq "$RC" 0 "the repoint must succeed"
+assert_eq "$(lc_value "$t35a")" "$t35a/home/lan-cert" "the config must name the carried pair"
+assert_contains "$OUT" "the fingerprint peers pinned is unchanged" "the run must say the identity peers trust did not move"
+assert_contains "$(cat "$t35a/home/config")" "lan_listen=127.0.0.1:9448" "every other config line must survive the rewrite"
+assert_contains "$(cat "$t35a/home/config")" "# edge config" "including the comments"
+assert_contains "$(cat "$t35a/stubs/sudo.log")" "cat" "the reads must go through elevate — the real tree is root-owned 0700"
+
+# 35b. IDEMPOTENT. A second run finds the value already right and declines.
+run_repoint "$t35a" --applies
+assert_eq "$RC" 1 "a repointed host must no longer select the rung"
+run_repoint "$t35a"
+assert_eq "$RC" 0 "and a forced re-run must be a clean no-op"
+assert_eq "$(lc_value "$t35a")" "$t35a/home/lan-cert" "which must not have changed the value again"
+
+# 35c. IT NEVER MINTS. Broken value, NO pair at the canonical name: the rung must
+# do nothing, exit 0, and say why — a new pair would change the fingerprint every
+# peer has pinned, which is not a repair.
+t35c="$TMP/t35c"; lc_fixture "$t35c" "$TMP/t35c-retired/lan-cert"
+run_repoint "$t35c" --applies
+assert_eq "$RC" 1 "with no pair to repoint to there is nothing this rung can do"
+run_repoint "$t35c"
+assert_eq "$RC" 0 "and it must not fail the ladder over a state only an operator can resolve"
+assert_eq "$(lc_value "$t35c")" "$TMP/t35c-retired/lan-cert" "the broken value must be left exactly as it was"
+assert_contains "$OUT" "NOT repairing" "the unrepairable state must be named, not inferred from silence"
+assert_contains "$OUT" "re-pin" "and the cost of minting must be stated"
+
+# 35d. INERT ON A WORKING RELOCATED VALUE. lan_cert may legitimately name another
+# directory INSIDE the component dir; a rung that repointed it would move a host
+# off the cert its peers pinned for no reason at all.
+t35d="$TMP/t35d"; lc_fixture "$t35d" "$TMP/t35d/home/pinned"
+lc_pair "$t35d/home/pinned"; lc_pair "$t35d/home/lan-cert"
+run_repoint "$t35d" --applies
+assert_eq "$RC" 1 "a relocated lan_cert whose cert.pem is readable is not broken"
+run_repoint "$t35d"
+assert_eq "$(lc_value "$t35d")" "$TMP/t35d/home/pinned" "and must be left pointing where the operator put it"
+
+# 35e. UNSET IS NOT BROKEN. No lan_cert means the daemon pins no LAN cert and the
+# startup guard never fires; selecting the rung here would be a permanent
+# false positive on every frontier edge that never had one.
+t35e="$TMP/t35e"; lc_fixture "$t35e" "unused"
+printf '# edge config\nserve_mode=frontier\n' > "$t35e/home/config"
+lc_pair "$t35e/home/lan-cert"
+run_repoint "$t35e" --applies
+assert_eq "$RC" 1 "an unset lan_cert must not select the rung"
+
+# 35f. A VALUE HOLDING awk/sed METACHARACTERS. `&` is the sed replacement's
+# whole-match reference, so a rung that spliced the path into a sed expression
+# would corrupt the config here rather than repoint it.
+t35f="$TMP/t35f-a&b"; lc_fixture "$t35f" "$TMP/t35f-retired/lan-cert"
+lc_pair "$t35f/home/lan-cert"
+run_repoint "$t35f"
+assert_eq "$RC" 0 "a component dir holding a metacharacter must still repoint"
+assert_eq "$(lc_value "$t35f")" "$t35f/home/lan-cert" "and the value must be the literal path, not a sed expansion of it"
+
+# 35g. BAD ARGUMENT. Same contract as its siblings in this directory: a typo can
+# never wear a state the runner reads as a decision.
+run_repoint "$t35a" --bogus
+assert_eq "$RC" 2 "an unknown argument must exit 2, like the other shared rungs"
+assert_contains "$OUT" "unknown argument" "and say so"
+
+# ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="
 [ "$FAILED" = 0 ] || exit 1
