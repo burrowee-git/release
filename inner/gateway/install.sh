@@ -211,6 +211,30 @@ SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
 SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
+
+# ---------------------------------------------------------------------------
+# The post-start daemon wait (see wait_for_running_version, and the tail of this
+# script). WAIT_CEILING is a CEILING, not a sleep: the wait returns the instant
+# the daemon reports the version being installed, and $WAIT_INTERVAL is only how
+# often it looks.
+#
+# Overridable for the shell test harnesses, exactly like SYS_BIN_DIR above, and
+# for nothing else — an operator has no reason to retune this and no documented
+# knob to do it with. Deliberately NOT spelled BURROWEE_*: those are the
+# published knobs the bootstrap forwards across its sudo boundary
+# (tools/bootstrap-env-forwarding.test.sh), and these two are not published.
+#
+# SERVE_UNIT_STARTED is the wait's gate — 1 only once the SERVE unit has been
+# (re)started AND verified up by start_unit_darwin / start_unit_linux. There is
+# nothing to wait for when nothing was restarted, when BURROWEE_NO_RESTART
+# staged the units without starting them, or when the start already failed: that
+# path has already said so, and spending the ceiling to rediscover a known
+# failure is noise on top of it. A started UPDATER never sets it — a live updater
+# says nothing about the daemon that serves.
+# ---------------------------------------------------------------------------
+WAIT_INTERVAL="${WAIT_INTERVAL:-2}"
+WAIT_CEILING="${WAIT_CEILING:-60}"
+SERVE_UNIT_STARTED=0
 # THE PRIVILEGED EXECUTION SURFACE, collapsed into $BIN_DIR (formerly a separate
 # root-owned tree at /usr/local/libexec/burrowee/gateway, sibling of the system
 # config/data roots — retired now that $BIN_DIR's own default is root-owned; see
@@ -1229,6 +1253,67 @@ start_unit_linux() {
     fi
 }
 
+# binary_version_stamp <binary> — the version token a binary reports for ITSELF,
+# or "" when it cannot be read.
+#
+# THIS, and not $BURROWEE_VERSION, is what the wait below compares against,
+# because it is literally the same string the daemon writes: core's
+# runtime_version.WriteRunning records the serve binary's `version` variable, and
+# `<bin> version` prints that same variable as its first version-shaped token
+# (the parse runtime_version.InstalledVersion does, in shell). $BURROWEE_VERSION
+# is the release tag the bootstrap resolved, and it is empty whenever an operator
+# runs an unpacked kit by hand.
+#
+# BURROWEE_DISPATCHER_VERSION is blanked for the probe, exactly as
+# InstalledVersion strips it: inherited, the binary prints a dispatcher row
+# FIRST, and the first token would be the dispatcher's stamp rather than this
+# binary's.
+binary_version_stamp() {
+    # shellcheck disable=SC2020  # the repeated '\n' is deliberate: BOTH space and tab map to a newline.
+    BURROWEE_DISPATCHER_VERSION="" "$1" version 2>/dev/null \
+        | tr ' \t' '\n\n' \
+        | grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$' \
+        | head -n 1
+}
+
+# wait_for_running_version <running-json-dir> <expected-version> — block until
+# the daemon reports it is serving <expected-version>, polling every
+# $WAIT_INTERVAL seconds up to $WAIT_CEILING.
+#
+# running.json is written BY THE DAEMON at serve start (core
+# runtime_version.WriteRunning) and carries {"version","pid","started_at"}, so a
+# match is positive proof the NEW binary is the one serving. The installed-version
+# marker is NOT usable as this predicate: THIS script writes it, so comparing it
+# to the version being installed matches instantly — including on a host where
+# the daemon never started, which is the only case worth asking about.
+#
+# The sed parse is deliberate, not laziness. running.json is json.Marshal of a
+# flat three-field struct: no nesting, no indentation, and nothing escapable in a
+# release stamp. An installer does not acquire a JSON dependency for that.
+#
+# BEST-EFFORT BY CONTRACT: a timeout warns and returns 1, and the caller ignores
+# that status. "Did the unit come up at all" was already answered by
+# start_unit_*, which fails the install. This is the softer second question — the
+# unit is active, but is it serving the NEW binary? — and an operator whose
+# daemon is slow to bind must not have a finished install fail retroactively.
+wait_for_running_version() {
+    _dir="$1"; _want="$2"; _waited=0
+    while [ "$_waited" -lt "$WAIT_CEILING" ]; do
+        _got="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$_dir/running.json" 2>/dev/null || true)"
+        if [ -n "$_got" ] && [ "$_got" = "$_want" ]; then
+            echo "daemon is serving $_want (after ${_waited}s)"
+            return 0
+        fi
+        sleep "$WAIT_INTERVAL"
+        _waited=$((_waited + WAIT_INTERVAL))
+        echo "  waiting for the daemon to report $_want … ${_waited}s/${WAIT_CEILING}s"
+    done
+    echo "warning: the daemon did not report version $_want within ${WAIT_CEILING}s" >&2
+    echo "hint: it may still be starting; 'doctor' below reports the live state" >&2
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # load_units — (re)load the rendered SYSTEM service units (root). Separated
 # from render_units so update mode can refresh the unit FILES without
@@ -1278,6 +1363,12 @@ load_units() {
         else
             run_root launchctl bootout "system/com.burrowee.gateway" 2>/dev/null || true
             start_unit_darwin "com.burrowee.gateway" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
+            # Reached only when the serve unit verified up: start_unit_darwin
+            # returns non-zero otherwise, and under `set -e` that ends this
+            # script. The flag is the only thing that arms the post-start wait at
+            # the tail — the BURROWEE_NO_RESTART branch above never sets it, and
+            # neither does the updater's own start.
+            SERVE_UNIT_STARTED=1
             if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
                 echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
             else
@@ -1337,6 +1428,16 @@ load_units() {
                 echo "error: until it is restarted, and a unit rewritten to a new ExecStart has" >&2
                 echo "error: not taken effect." >&2
                 echo "hint: restart it by hand: sudo systemctl restart burrowee-gateway.service" >&2
+            else
+                # The Linux serve unit is the one start that does NOT go through
+                # start_unit_linux — `restart` carries its own diagnosis above,
+                # and it already fails when the unit does not come back. So the
+                # flag is set on its success branch, for the same reason and with
+                # the same meaning as the Darwin one: a restart was attempted and
+                # the daemon is up. The failure branch leaves it 0 — it has warned
+                # already, and spending the ceiling to rediscover a known failure
+                # is noise on top of it.
+                SERVE_UNIT_STARTED=1
             fi
 
             # A reinstall over an already-running (possibly stale) updater must advance
@@ -1896,3 +1997,52 @@ elif ( exec 3<>/dev/tty ) 2>/dev/null; then
 else
     echo "next: burrowee $COMP bootstrap <blob> <pin>"
 fi
+
+# ---------------------------------------------------------------------------
+# Prove the NEW daemon is serving, then report — the last thing this script does
+# on the full-install path, because "hands back" is where the claim is made.
+#
+# THE PATH. burrowee-gateway writes running.json into
+# runtime_version.WriteRunning(cfg.paths.Home, version)
+# (cmd/burrowee-gateway/main.go), and GwPaths.Home is the DATA dir, not the
+# config dir (internal/gateway/home.go: GatewayPaths sets Home: dataDir) — so it
+# is $SYS_DATA_DIR here, never $SYS_CONFIG_DIR. Edge's own recordRunningVersion
+# header records what the second spelling of this decision cost, one component
+# over: a doctor reporting "the daemon is not running" about a daemon that was,
+# for 35h on a production node. These two names must stay in step;
+# tools/install-waits-for-daemon.test.sh asserts they do.
+#
+# Not on the BURROWEE_UNITS_ONLY, BURROWEE_UPDATE or BURROWEE_UNINSTALL paths:
+# each exits above. Update mode in particular renders units and deliberately
+# never loads them, so there is nothing there that a wait could be waiting for.
+# ---------------------------------------------------------------------------
+if [ "$SERVE_UNIT_STARTED" = 1 ]; then
+    WANT_VERSION="$(binary_version_stamp "$BIN_DIR/burrowee-gateway")"
+    if [ -n "$WANT_VERSION" ]; then
+        # The timeout's status is deliberately dropped: this wait never fails an
+        # install (see wait_for_running_version's contract).
+        wait_for_running_version "$SYS_DATA_DIR" "$WANT_VERSION" || true
+    else
+        echo "note: could not read the installed binary's version stamp — not waiting" >&2
+    fi
+else
+    echo "note: the serve unit was not (re)started by this run — not waiting on it"
+fi
+
+# ---- doctor, unconditionally ------------------------------------------------
+# On the match path, the timeout path and the skipped path alike. The wait
+# answers one bit; doctor is the report an operator acts on, and after a timeout
+# it is the only thing that says what the daemon is actually doing.
+#
+# ITS EXIT STATUS IS NOT THIS INSTALL'S. The verdict was decided by start_unit_*
+# further up; a read-only `doctor` reports failing rows through its exit code,
+# which is a diagnostic doing its job and not a failed install. Hence the guard.
+#
+# STDIN IS /dev/null so it can neither prompt nor elevate. doctor's elevation
+# gate is `euid != 0 && stdin is a terminal` (gw.MayElevate,
+# cmd/burrowee-gateway-cli/doctor_elevate.go), and a non-terminal stdin makes it
+# false whoever is running — which matters here more than for the other two
+# components, since this script does not require root of itself and reaches
+# privileged work through run_root. Only `--fix` remediates or prompts, and this
+# is the read-only verb.
+"$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
