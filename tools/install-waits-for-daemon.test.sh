@@ -37,8 +37,15 @@ EDGE="$HERE/inner/edge/install.sh"
 GW="$HERE/inner/gateway/install.sh"
 
 FAIL=0
+SKIP=0
 SECTION_FAIL=0
 note() { echo "FAIL: $1"; FAIL=1; }
+# skip() — a check that CANNOT run in this checkout, as opposed to one that ran
+# and failed. It never reddens the suite, because the release repo is legitimately
+# cloned standalone and a permanently-red suite gets ignored or disabled, costing
+# every check in this file rather than the one that could not run. It is counted
+# and reprinted in the summary so it can never pass unnoticed.
+skip() { echo "SKIP: $1"; SKIP=$((SKIP + 1)); }
 ok() { echo "  ok: $1"; }
 # section / ok_clean — a section's summary line prints only when that section
 # raised nothing, so a green summary can never sit under its own FAIL.
@@ -265,7 +272,11 @@ sh_default() { # <file> <VAR> — the :- default of VAR="${…:-default}"
 }
 
 if [ -z "$BRAND" ]; then
-    note "component sources not found beside the release repo — the path-agreement checks did NOT run"
+    # The cross-repo half cannot run here. The standalone half below still does,
+    # and it is the half that catches the actual failure shape: a wait pointed at
+    # the CONFIG tree. What is lost is drift detection if a daemon MOVES its
+    # running.json — which the full-workspace run catches.
+    skip "component sources not found beside the release repo — the cross-repo path-agreement checks did not run (the config-tree checks below still did)"
 else
     # edge — cmd/burrowee-edge/config.go writes through edgeData(), which is
     # edgeroot.DataDirFor(edgeHome()): the DATA tree, not the config tree.
@@ -363,4 +374,8 @@ for f in "$EDGE" "$GW"; do
 done
 
 [ "$FAIL" = 0 ] || { echo "install-waits-for-daemon: FAILED"; exit 1; }
-echo "ALL OK"
+if [ "$SKIP" != 0 ]; then
+    echo "ALL OK ($SKIP check(s) SKIPPED — see SKIP lines above)"
+else
+    echo "ALL OK"
+fi
