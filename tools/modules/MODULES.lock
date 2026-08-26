@@ -3,9 +3,12 @@
 download-r2-only   v1       243e1005500e2867695e9baed93897270ded43d89a11687a6c80e1c39569db63
 download           v1       9ac4341c316864347d7c355ba69ce94dd3ddf565ed8584412c2db0343a781597
 helpers            v1       e84df2c8a4bd2a4be9b0182739be87d0db8cbac2ae0ce9de9dd21741360b0595
+install-minisign-common v1       e71ad69b69c4100e36211ac605da869a85627be192e3fdc41a51a7faff4c4d85
+install-minisign-darwin v1       dd5ed37f5aa093aa8f49e4a2ecb07b72168eda3d5fc4a4ef5c8906b5911c2151
+install-minisign-linux v1       db5b065a9bfa4222e0801a61e0b81d294370a452e846e42503704d8574cb4239
 platform-detect    v1       faa1cc20dd0db9371acc9ccf141ef101c4f38efa10966cf0215c33989ac74520
 pubkey-guard       v1       9abecb99290a9761892c21f9ee3c07b99653f9db1f65868cc92033eef9901906
-require-minisign   v1       ad8e2dcc19c31f92a7f880a3b3b72b0abaf6d230779bf565589414360ee385d5
+require-minisign   v2       e2e0f66149a9443804b93f9f31f7513ec855d95d9ee07b765b2ceb09e2fc95db
 sha256             v1       1a2a41632b5f95e045ddd18ca3bc9ddcf9c17a1352658bbc0ea436a91745bf19
 tmp-workspace      v1       e5bd7ab63d84144a6447b33d8ad83a45b7533a225527be91e9a162c6e216455c
 verify-checksum    v4       ecfbe39b11760ee87dfff6badd58b689afcae674a132a1f09a05985bac763618

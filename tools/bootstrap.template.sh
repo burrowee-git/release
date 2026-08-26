@@ -603,6 +603,9 @@ if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_SKIP_PREFLIGHT:-}" ]; th
         || fail "preflight.sh checksum mismatch (expected $PREFLIGHT_SHA256, got $pf_got) — refusing to run a tampered preflight"
     ok "preflight verified"
     sh "$TMP/preflight.sh" || info "preflight could not complete fully — continuing; the trust gate will verify required tools"
+    # preflight already made the package-manager attempt as root; the linux
+    # module below must not repeat apt-get update before its pinned fallback.
+    MINISIGN_SKIP_PM=1
 fi
 
 # ---- version resolution -------------------------------------------------
@@ -610,6 +613,11 @@ fi
 
 # ---- download -----------------------------------------------------------
 @INCLUDE:download@
+
+# ---- provide minisign (package manager, then pinned upstream) ----------
+@INCLUDE:install-minisign-common@
+@INCLUDE:install-minisign-linux@
+@INCLUDE:install-minisign-darwin@
 
 # ---- require minisign ---------------------------------------------------
 @INCLUDE:require-minisign@
