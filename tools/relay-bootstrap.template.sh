@@ -72,9 +72,7 @@ else
 fi
 
 # ---- helpers ------------------------------------------------------------
-fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
-info() { printf '  → %s\n' "$*"; }
-ok()   { printf '  ✓ %s\n' "$*"; }
+@INCLUDE:helpers@
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
@@ -210,47 +208,6 @@ printf '\n  burrowee %s installer  (%s/%s)\n\n' "$COMP" "$OS" "$ARCH"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/burrowee-${COMP}-XXXXXX")" || fail "could not create temp dir"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-# ---- gated download function --------------------------------------------
-# gated_get <path> <local-filename>
-#   path      : the request path, e.g. /relay/release/latest.linux-amd64.zip
-#   local-filename : written under $TMP
-#
-# 1. Fetch a single-use nonce from the gate (unauthenticated).
-# 2. Sign the exact bytes "nonce:path" with the operator key (ed25519, raw input).
-# 3. Send the signed request with the three required headers.
-# shellcheck disable=SC2317  # used below after definition
-gated_get() {
-    _path="$1"
-    _out="$2"
-
-    # Challenge: fetch nonce
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string; POSIX sh has no arrays.
-    _nonce="$($CURL "$BASE/relay/challenge" \
-        | sed -n 's/.*"nonce":"\([^"]*\)".*/\1/p')"
-    [ -n "$_nonce" ] || fail "challenge: empty nonce from $BASE/relay/challenge"
-
-    # Sign: nonce:path (raw input, output base64-STD via openssl base64 -A)
-    # Write the message to a temp file first: openssl pkeyutl -rawin requires a
-    # seekable input to determine the message length (stdin is not seekable on
-    # some OpenSSL 3.x builds, producing "unable to determine file size").
-    _msg="$(mktemp "${TMPDIR:-/tmp}/burrowee-sign-XXXXXX")" || fail "could not create signing temp file"
-    printf '%s' "$_nonce:$_path" > "$_msg"
-    _sig="$("$OPENSSL" pkeyutl -sign -inkey "$KEY" -rawin -in "$_msg" 2>/dev/null \
-        | "$OPENSSL" base64 -A)"
-    rm -f "$_msg"
-    [ -n "$_sig" ] || fail "signing failed or returned empty signature — is $KEY a valid ed25519 PEM private key?"
-
-    # Gated fetch: send the three required headers
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string; POSIX sh has no arrays.
-    $CURL \
-        -H "X-Burrowee-Key-FP: $FP" \
-        -H "X-Burrowee-Nonce: $_nonce" \
-        -H "X-Burrowee-Sig: $_sig" \
-        -o "$TMP/$_out" \
-        "$BASE$_path" \
-        || fail "gated download failed: $_path — check that your key is registered on the release host"
-}
-
 # ---- version / path resolution ------------------------------------------
 # Per-component pin env var (mirrors the public bootstrap pattern).
 PIN="${BURROWEE_RELAY_VERSION:-}"
@@ -267,14 +224,8 @@ else
     SIG_PATH="/relay/release/SHA256SUMS.txt.minisig"
 fi
 
-ZIP_FILE="latest.${PLAT}.zip"
-
 # ---- download (gated) ---------------------------------------------------
-info "downloading relay artifact (gated)"
-gated_get "$ZIP_PATH"   "$ZIP_FILE"
-info "downloading SHA256SUMS.txt + signature (gated)"
-gated_get "$SUMS_PATH"  "SHA256SUMS.txt"
-gated_get "$SIG_PATH"   "SHA256SUMS.txt.minisig"
+@INCLUDE:download-r2-only@
 
 # ---- require minisign ---------------------------------------------------
 # minisign is the trust root: it must already be on PATH from a trusted source
@@ -305,40 +256,14 @@ ok "minisign signature valid"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
-# BEGIN verify-checksum-inline  (tools/test-checksum-verify.sh extracts this
-# block verbatim out of the GENERATED relay/install.sh and drives it against
-# stub hashers — keep it self-contained between the markers, and keep the
-# markers. Named "-inline" so it does not collide with the "checksum-verify"
-# markers in tools/bootstrap.template.sh: this block also defines its own
-# hasher probe inline, rather than calling a shared sha256_of helper.)
-#
-# Compare ONE hash directly instead of `-c --ignore-missing` over the whole
-# sums file: --ignore-missing is a 2016-era addition (Digest::SHA 5.96 /
-# coreutils 8.25) and the stock shasum on an older macOS rejects it outright
-# ("Unknown option: ignore-missing"). That non-zero exit came back through the
-# `||` as "checksum mismatch", so every install on such a host accused a
-# perfectly good zip of tampering. Picking the line by EXACT filename (awk, both
-# the "hash  name" and binary "hash *name" spellings) is also stricter than the
-# substring grep this replaces.
-want="$(awk -v f="$ZIP_FILE" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/SHA256SUMS.txt")"
-[ -n "$want" ] \
-    || fail "no checksum entry for $ZIP_FILE — release incomplete or tampered; aborting"
-if command -v shasum >/dev/null 2>&1; then
-    got="$(shasum -a 256 "$TMP/$ZIP_FILE" | awk '{print $1}')"
-elif command -v sha256sum >/dev/null 2>&1; then
-    got="$(sha256sum "$TMP/$ZIP_FILE" | awk '{print $1}')"
-else
-    fail "neither shasum nor sha256sum found — cannot verify; aborting"
-fi
-[ -n "$got" ] && [ "$want" = "$got" ] \
-    || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-# END verify-checksum-inline
+@INCLUDE:sha256@
+@INCLUDE:verify-checksum@
 ok "checksum verified"
 
 # ---- unzip + exec the verified inner installer --------------------------
 command -v unzip >/dev/null 2>&1 \
     || fail "unzip not found — install it (\`brew install unzip\` / \`apt-get install unzip\`) and retry"
-unzip -q -o "$TMP/$ZIP_FILE" -d "$TMP/x" || fail "zip extraction failed — corrupt download?"
+unzip -q -o "$TMP/$ZIP" -d "$TMP/x" || fail "zip extraction failed — corrupt download?"
 [ -f "$TMP/x/install.sh" ] || fail "release zip missing inner install.sh — aborting"
 
 ok "verified — running inner installer"

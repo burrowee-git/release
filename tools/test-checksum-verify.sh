@@ -51,15 +51,19 @@ sed -n '/^sha256_of()/,/^}/p' "$REPO_ROOT/cli/install.sh" > "$W/sha256_of.sh"
 grep -q '^sha256_of()' "$W/sha256_of.sh" \
     || die "could not extract sha256_of() from cli/install.sh"
 
-# relay ships its own, separately-coded inline gate (own shasum/sha256sum
-# probe, $ZIP_FILE rather than $ZIP, no sha256_of) — extract it too, out of
-# the GENERATED relay/install.sh, so both shipped variants of the portable
-# checksum gate are driven by this test, not just cli's.
-say "BEHAVIOR: extracting the verify-checksum-inline block from relay/install.sh"
-sed -n '/^# BEGIN verify-checksum-inline/,/^# END verify-checksum-inline/p' \
+# relay now shares the same verify-checksum module as cli (Task 8) — extract it
+# out of the GENERATED relay/install.sh too, so both shipped copies of the
+# portable checksum gate are driven by this test, not just cli's. Same marker
+# names as cli's block ("verify-checksum") because it's the same module; only
+# the source file differs.
+say "BEHAVIOR: extracting the verify-checksum block from relay/install.sh"
+sed -n '/^# BEGIN verify-checksum/,/^# END verify-checksum/p' \
     "$REPO_ROOT/relay/install.sh" > "$W/verify_relay.sh"
-grep -q '^# END verify-checksum-inline' "$W/verify_relay.sh" \
-    || die "could not extract the verify-checksum-inline block from relay/install.sh (markers missing or renamed)"
+grep -q '^# END verify-checksum' "$W/verify_relay.sh" \
+    || die "could not extract the verify-checksum block from relay/install.sh (markers missing or renamed)"
+sed -n '/^sha256_of()/,/^}/p' "$REPO_ROOT/relay/install.sh" > "$W/sha256_of_relay.sh"
+grep -q '^sha256_of()' "$W/sha256_of_relay.sh" \
+    || die "could not extract sha256_of() from relay/install.sh"
 
 # ---- stub hashers -----------------------------------------------------------
 # `shasum` as an old Digest::SHA ships it: -a 256 <file> works, --ignore-missing
@@ -120,15 +124,17 @@ run() {  # run <fixture-dir> <zip>
         sh "$W/run.sh" 2>&1
 }
 
-# relay's driver: no sha256_of, and the block reads $ZIP_FILE rather than $ZIP.
+# relay's driver: same shape as cli's now (Task 8) — sources sha256_of and
+# reads $ZIP, since both share the verify-checksum module.
 cat > "$W/run_relay.sh" <<'RUNNER'
 #!/bin/sh
 set -eu
 info() { :; }
 ok()   { printf 'OK: %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+. "$BLOCK_DIR/sha256_of_relay.sh"
 TMP="$FIXTURE"
-ZIP_FILE="$WANT_ZIP"
+ZIP="$WANT_ZIP"
 . "$BLOCK_DIR/verify_relay.sh"
 ok "checksum verified"
 RUNNER

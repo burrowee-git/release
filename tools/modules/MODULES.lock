@@ -1,5 +1,6 @@
 # module            version  sha256-of-authored-text
 # rewritten by tools/lock-modules.sh — do not hand-edit
+download-r2-only   v1       243e1005500e2867695e9baed93897270ded43d89a11687a6c80e1c39569db63
 download           v1       9ac4341c316864347d7c355ba69ce94dd3ddf565ed8584412c2db0343a781597
 helpers            v1       e84df2c8a4bd2a4be9b0182739be87d0db8cbac2ae0ce9de9dd21741360b0595
 platform-detect    v1       faa1cc20dd0db9371acc9ccf141ef101c4f38efa10966cf0215c33989ac74520
