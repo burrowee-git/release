@@ -337,12 +337,42 @@ for f in "$EDGE" "$GW"; do
         || note "$comp: the wait is not gated on SERVE_UNIT_STARTED"
     # It is set exactly twice — the darwin serve start and the linux serve start
     # — and never beside an updater start.
-    n="$(grep -c '^ *SERVE_UNIT_STARTED=1$' "$f")"
+    #
+    # `|| true`: grep -c prints 0 and EXITS 1 when there is no match, and under
+    # `set -eu` that aborted the whole suite from inside a command substitution,
+    # silently, at the one moment the count was the thing worth reporting.
+    n="$(grep -c '^ *SERVE_UNIT_STARTED=1$' "$f" || true)"
     [ "$n" = 2 ] || note "$comp: SERVE_UNIT_STARTED=1 appears $n times, expected 2 (one per platform's SERVE unit)"
-    grep -n 'SERVE_UNIT_STARTED=1' "$f" | while IFS=: read -r ln _; do
-        prev="$(sed -n "$((ln - 1))p;$((ln - 2))p;$((ln - 3))p" "$f")"
-        case "$prev" in
-            *UPDATER*) echo "FAIL: $comp: SERVE_UNIT_STARTED=1 follows an UPDATER start — a live updater says nothing about the serving daemon" ;;
+
+    # WHICH UNIT ARMS THE FLAG. Walk back from each assignment to the nearest
+    # preceding line that operates on a unit and read the unit's NAME off it.
+    #
+    # Three earlier defects in this one check, all of which let the mutation it
+    # exists for pass:
+    #   * `grep … | while …; done` ran the loop body in a SUBSHELL, so setting
+    #     FAIL there set it in a process that immediately exited — hence the
+    #     bare `echo "FAIL: …"` here, which printed a failure the suite then
+    #     did not count. The line numbers are collected FIRST and the loop runs
+    #     in this shell.
+    #   * the pattern was `*UPDATER*`, uppercase, which matches the launchd
+    #     variables ($LAUNCHD_UPDATER_LABEL) and never the systemd spelling
+    #     `burrowee-<comp>-updater` — so the Linux half was unpinned. The
+    #     comparison is case-folded now.
+    #   * it looked at the three PRECEDING LINES, which in all four call sites
+    #     are the comment explaining the flag — so it was reading prose, not
+    #     code, and a comment mentioning "the updater's own start" was the only
+    #     thing standing between it and a false positive.
+    for ln in $(grep -n '^ *SERVE_UNIT_STARTED=1$' "$f" | cut -d: -f1 || true); do
+        arm="$(sed -n "1,$((ln - 1))p" "$f" \
+            | grep -v '^[[:space:]]*#' \
+            | grep -E 'start_unit_(darwin|linux)|systemctl (restart|is-active|enable)|launchctl' \
+            | tail -n 1)"
+        if [ -z "$arm" ]; then
+            note "$comp: no unit operation precedes SERVE_UNIT_STARTED=1 at line $ln — the flag is armed by nothing"
+            continue
+        fi
+        case "$(printf '%s' "$arm" | tr 'A-Z' 'a-z')" in
+            *updater*) note "$comp: SERVE_UNIT_STARTED=1 at line $ln is armed by an UPDATER unit operation ($arm) — a live updater says nothing about the serving daemon" ;;
             *) ;;
         esac
     done
