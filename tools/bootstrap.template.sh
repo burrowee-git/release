@@ -932,10 +932,16 @@ run_inner() {
     if [ -n "$PREFIX" ]; then
         ( cd "$TMP/x" && $ELEVATE env PREFIX="$PREFIX" \
             BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" \
+            BURROWEE_NO_UPDATER="${BURROWEE_NO_UPDATER:-}" \
+            BURROWEE_FORCE_SERVICE_OVERRIDE="${BURROWEE_FORCE_SERVICE_OVERRIDE:-}" \
+            BURROWEE_NO_RESTART="${BURROWEE_NO_RESTART:-}" \
             BURROWEE_VERSION="$TAG" sh "./$INNER" )
     else
         ( cd "$TMP/x" && $ELEVATE env \
             BURROWEE_UNINSTALL="${BURROWEE_UNINSTALL:-}" \
+            BURROWEE_NO_UPDATER="${BURROWEE_NO_UPDATER:-}" \
+            BURROWEE_FORCE_SERVICE_OVERRIDE="${BURROWEE_FORCE_SERVICE_OVERRIDE:-}" \
+            BURROWEE_NO_RESTART="${BURROWEE_NO_RESTART:-}" \
             BURROWEE_VERSION="$TAG" sh "./$INNER" )
     fi
 }

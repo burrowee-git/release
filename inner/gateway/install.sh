@@ -211,6 +211,55 @@ SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
 SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
+
+# ---------------------------------------------------------------------------
+# The post-start daemon wait (see wait_for_running_version, and the tail of this
+# script). WAIT_CEILING is a CEILING, not a sleep: the wait returns the instant
+# the daemon reports the version being installed, and $WAIT_INTERVAL is only how
+# often it looks.
+#
+# Overridable for the shell test harnesses, exactly like SYS_BIN_DIR above, and
+# for nothing else — an operator has no reason to retune this and no documented
+# knob to do it with. Deliberately NOT spelled BURROWEE_*: those are the
+# published knobs the bootstrap forwards across its sudo boundary
+# (tools/bootstrap-env-forwarding.test.sh), and these two are not published.
+#
+# SERVE_UNIT_STARTED is the wait's gate — 1 only once the SERVE unit has been
+# (re)started AND verified up by start_unit_darwin / start_unit_linux. There is
+# nothing to wait for when nothing was restarted — which includes a mode that
+# stages the units without starting them, and only ONE of the three components
+# sharing this block has one: gateway reads BURROWEE_NO_RESTART, edge and relay
+# read it nowhere, so for them the gate is the start itself and nothing else.
+# Nor when the start already failed: that path has already said so, and spending
+# the ceiling to rediscover a known failure is noise on top of it. A started
+# UPDATER never sets it — a live updater says nothing about the daemon that
+# serves.
+# ---------------------------------------------------------------------------
+WAIT_INTERVAL="${WAIT_INTERVAL:-2}"
+WAIT_CEILING="${WAIT_CEILING:-60}"
+SERVE_UNIT_STARTED=0
+
+# UPDATER_START_FAILED — the deferred verdict for a failed UPDATER start.
+#
+# A serve start that fails is fatal on the spot: the serve daemon IS the
+# product, and everything after it is bookkeeping about a host that is not
+# running. The updater is the delivery channel, and a fatal abort there cost
+# strictly more than it bought — it skipped sweep_stale_user_bins,
+# report_unrecorded_migration, record_installed_version and the first-run
+# blob/PIN prompt, so the host ended with the NEW binaries on disk, the
+# migration ladder's anchor still naming the OLD version, and a fresh gateway
+# that was never offered enrollment. The next rung then gated on a version this
+# host had already moved past.
+#
+# So the failure is recorded, the script finishes its state-recording work, the
+# enrollment prompt still runs, doctor still reports, and the exit status is
+# non-zero at the very end — see finish_with_updater_verdict.
+#
+# Deliberately NOT part of the WAIT_* block above: that block is byte-identical
+# with edge's (tools/install-waits-for-daemon.test.sh pins it), and this flag is
+# gateway's alone — edge writes its version marker BEFORE setup_root_service, so
+# it has no anchor to strand.
+UPDATER_START_FAILED=0
 # THE PRIVILEGED EXECUTION SURFACE, collapsed into $BIN_DIR (formerly a separate
 # root-owned tree at /usr/local/libexec/burrowee/gateway, sibling of the system
 # config/data roots — retired now that $BIN_DIR's own default is root-owned; see
@@ -1173,6 +1222,175 @@ EOF
     esac
 }
 
+# $_RUNROOT / $_SYSTEMCTL — the two seams the start helpers below are
+# parameterised on. Those bodies are byte-identical across the four inner
+# installers and pinned that way (tools/prefix-gate-drift.test.sh), so anything
+# that legitimately differs between them has to be a variable read by the body,
+# never an edit to the body — and never a wrapper at the call site either, since
+# `$_RUNROOT cmd` with _RUNROOT=run_root expands to a function call and a call
+# site cannot reach inside the helper's own launchctl/systemctl invocations.
+#
+# GATEWAY HAS NO ROOT GATE. `gateway-cli` runs this script with the caller's
+# privileges from `service install`, `doctor --fix` and `bootstrap`, and every
+# other privileged step here goes through run_root — the start helpers must too.
+# It declares no $SYSTEMCTL seam.
+_RUNROOT="run_root"
+_SYSTEMCTL="systemctl"
+
+# start_unit_darwin <label> <plist> — start a launchd system unit and verify it
+# took. bootstrap's codes 5 (already loaded) and 37 are benign races against an
+# async bootout — every other code is a real failure and must not be swallowed.
+# enable + kickstart ALWAYS run: a bootstrap that no-ops on an already-loaded
+# label still needs both.
+#
+# The status is captured with `|| _rc=$?`, NOT inside `if ! ...`: POSIX makes $?
+# the NEGATED status of a `!` pipeline, so an `if !` branch would read 0 for
+# every failure and tolerate nothing.
+#
+# EVERY launchctl CALL GOES THROUGH $_RUNROOT, and that is not decoration. Only
+# one of the four scripts carrying this body refuses to run as anything but
+# root; the other three are entered by an unprivileged shell and elevate per
+# command. Unprivileged on macOS, `launchctl bootstrap` exits 5 — a code the
+# case below TOLERATES as "already loaded" — and `launchctl print` exits 113, so
+# a bare-launchctl body would sail past the guard, have enable and kickstart
+# denied and swallowed, and then abort at the probe with the daemon already
+# booted out by the caller. Silent non-elevation is the one failure this helper
+# cannot see.
+start_unit_darwin() {
+    _label="$1"; _plist="$2"
+    _rc=0
+    $_RUNROOT launchctl bootstrap system "$_plist" 2>/dev/null || _rc=$?
+    case "$_rc" in
+        0 | 5 | 37) ;; # started / already loaded / async bootout still settling
+        *)
+            echo "error: launchctl bootstrap $_label failed (exit $_rc)" >&2
+            echo "hint: sudo launchctl bootstrap system $_plist" >&2
+            return 1
+            ;;
+    esac
+    # enable + kickstart ALWAYS run, and their failures are deliberately funnelled
+    # into the probe below rather than aborting under set -e: the probe is the only
+    # thing that reports the label and a recovery command. `|| true` is safe here
+    # ONLY because a verification immediately follows it — never widen it further.
+    $_RUNROOT launchctl enable "system/$_label" 2>/dev/null || true
+    $_RUNROOT launchctl kickstart -k "system/$_label" 2>/dev/null || true
+    if $_RUNROOT launchctl print "system/$_label" >/dev/null 2>&1; then
+        echo "launchd service $_label enabled + started"
+    else
+        echo "error: $_label did not come up after bootstrap" >&2
+        echo "hint: sudo launchctl print system/$_label" >&2
+        return 1
+    fi
+}
+
+# start_unit_linux <unit> — enable, (re)start and verify a systemd system unit.
+# The probe is the point: enable --now on a unit that then dies must not be
+# reported as a started service.
+#
+# $_RUNROOT for the same reason as start_unit_darwin above; $_SYSTEMCTL because
+# two of the four scripts carrying this body declare a $SYSTEMCTL test seam and
+# still route every other systemctl call through it — a bare `systemctl` here
+# would be the one call that escaped it.
+start_unit_linux() {
+    _unit="$1"
+    # Failures here are funnelled into the is-active probe below rather than
+    # aborting under set -e: the probe is the only thing that reports the unit and
+    # a recovery command. `|| true` is safe here ONLY because a verification
+    # immediately follows it — never widen it further.
+    $_RUNROOT "$_SYSTEMCTL" enable --now "$_unit" 2>/dev/null || true
+    $_RUNROOT "$_SYSTEMCTL" restart "$_unit" 2>/dev/null || true
+    if $_RUNROOT "$_SYSTEMCTL" is-active --quiet "$_unit"; then
+        echo "systemd service $_unit enabled + (re)started"
+    else
+        echo "error: $_unit is not active after enable --now" >&2
+        echo "hint: sudo $_SYSTEMCTL status $_unit" >&2
+        return 1
+    fi
+}
+
+# binary_version_stamp <binary> — the version token a binary reports for ITSELF,
+# or "" when it cannot be read.
+#
+# THIS, and not $BURROWEE_VERSION, is what the wait below compares against,
+# because it is literally the same string the daemon writes: core's
+# runtime_version.WriteRunning records the serve binary's `version` variable, and
+# `<bin> version` prints that same variable as its first version-shaped token
+# (the parse runtime_version.InstalledVersion does, in shell). $BURROWEE_VERSION
+# is the release tag the bootstrap resolved, and it is empty whenever an operator
+# runs an unpacked kit by hand.
+#
+# BURROWEE_DISPATCHER_VERSION is blanked for the probe, exactly as
+# InstalledVersion strips it: inherited, the binary prints a dispatcher row
+# FIRST, and the first token would be the dispatcher's stamp rather than this
+# binary's.
+binary_version_stamp() {
+    # BOUNDED, because this runs the freshly-placed SERVE binary and an
+    # unbounded `version` on a binary that hangs hangs the installer — with no
+    # ceiling and no message, at the step whose whole job is to report. The Go
+    # original of this probe (core runtime_version) bounds the same command at
+    # 2s; this is that bound.
+    #
+    # THERE IS NO TIMEOUT HELPER IN THESE SCRIPTS TO REUSE, and acquiring a hard
+    # dependency for one probe is the wrong trade — as is the shell-only
+    # substitute, which cannot tell a finished child from a zombie and so pays
+    # its ceiling on EVERY install. So the bound is applied where the host
+    # already has it (`timeout`, GNU coreutils, present on every Linux host;
+    # `gtimeout`, the same tool where a macOS host installed coreutils) and is
+    # absent otherwise, leaving today's behaviour exactly as it is. A stock
+    # macOS host is therefore still unbounded here — a known, stated gap, not an
+    # oversight.
+    _bvs_bound=""
+    if command -v timeout >/dev/null 2>&1; then
+        _bvs_bound="timeout 2"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        _bvs_bound="gtimeout 2"
+    fi
+    # shellcheck disable=SC2020  # the repeated '\n' is deliberate: BOTH space and tab map to a newline.
+    # shellcheck disable=SC2086  # $_bvs_bound is a command PREFIX and must word-split; empty means no bound.
+    BURROWEE_DISPATCHER_VERSION="" $_bvs_bound "$1" version 2>/dev/null \
+        | tr ' \t' '\n\n' \
+        | grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$' \
+        | head -n 1
+}
+
+# wait_for_running_version <running-json-dir> <expected-version> — block until
+# the daemon reports it is serving <expected-version>, polling every
+# $WAIT_INTERVAL seconds up to $WAIT_CEILING.
+#
+# running.json is written BY THE DAEMON at serve start (core
+# runtime_version.WriteRunning) and carries {"version","pid","started_at"}, so a
+# match is positive proof the NEW binary is the one serving. The installed-version
+# marker is NOT usable as this predicate: THIS script writes it, so comparing it
+# to the version being installed matches instantly — including on a host where
+# the daemon never started, which is the only case worth asking about.
+#
+# The sed parse is deliberate, not laziness. running.json is json.Marshal of a
+# flat three-field struct: no nesting, no indentation, and nothing escapable in a
+# release stamp. An installer does not acquire a JSON dependency for that.
+#
+# BEST-EFFORT BY CONTRACT: a timeout warns and returns 1, and the caller ignores
+# that status. "Did the unit come up at all" was already answered by
+# start_unit_*, which fails the install. This is the softer second question — the
+# unit is active, but is it serving the NEW binary? — and an operator whose
+# daemon is slow to bind must not have a finished install fail retroactively.
+wait_for_running_version() {
+    _dir="$1"; _want="$2"; _waited=0
+    while [ "$_waited" -lt "$WAIT_CEILING" ]; do
+        _got="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$_dir/running.json" 2>/dev/null || true)"
+        if [ -n "$_got" ] && [ "$_got" = "$_want" ]; then
+            echo "daemon is serving $_want (after ${_waited}s)"
+            return 0
+        fi
+        sleep "$WAIT_INTERVAL"
+        _waited=$((_waited + WAIT_INTERVAL))
+        echo "  waiting for the daemon to report $_want … ${_waited}s/${WAIT_CEILING}s"
+    done
+    echo "warning: the daemon did not report version $_want within ${WAIT_CEILING}s" >&2
+    echo "hint: it may still be starting; 'doctor' below reports the live state" >&2
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # load_units — (re)load the rendered SYSTEM service units (root). Separated
 # from render_units so update mode can refresh the unit FILES without
@@ -1220,10 +1438,22 @@ load_units() {
             run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
             echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
         else
-            run_root launchctl bootout   "system/com.burrowee.gateway"          2>/dev/null || true
-            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
-            run_root launchctl bootout   "system/com.burrowee.gateway.updater"  2>/dev/null || true
-            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+            run_root launchctl bootout "system/com.burrowee.gateway" 2>/dev/null || true
+            start_unit_darwin "com.burrowee.gateway" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
+            # Reached only when the serve unit verified up: start_unit_darwin
+            # returns non-zero otherwise, and under `set -e` that ends this
+            # script. The flag is the only thing that arms the post-start wait at
+            # the tail — the BURROWEE_NO_RESTART branch above never sets it, and
+            # neither does the updater's own start.
+            SERVE_UNIT_STARTED=1
+            if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
+                echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
+            else
+                run_root launchctl bootout "system/com.burrowee.gateway.updater" 2>/dev/null || true
+                # Recorded, not fatal — see UPDATER_START_FAILED.
+                start_unit_darwin "com.burrowee.gateway.updater" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" \
+                    || UPDATER_START_FAILED=1
+            fi
         fi
         ;;
     Linux)
@@ -1265,11 +1495,11 @@ load_units() {
             # which modes call load_units at all, below), and the two that do are
             # operator-initiated install verbs.
             #
-            # Loud on failure and not fatal. New binaries under an old daemon is
-            # the one outcome that looks like a clean install and is not, so it is
-            # never swallowed; but the units on disk are still the durable
-            # outcome, and a supervisor-less host (a container) must still finish
-            # the install — same contract as every other step here.
+            # Loud on failure. New binaries under an old daemon is the one
+            # outcome that looks like a clean install and is not, so it is never
+            # swallowed. `restart`'s own status is a diagnosis, not the verdict:
+            # it is funnelled into the probe below the same way start_unit_linux
+            # funnels enable/restart into its is-active check.
             if ! run_root systemctl restart burrowee-gateway.service; then
                 echo "error: 'systemctl restart burrowee-gateway.service' failed — the newly" >&2
                 echo "error: installed binaries are on disk, but the daemon still running is the" >&2
@@ -1279,7 +1509,32 @@ load_units() {
                 echo "hint: restart it by hand: sudo systemctl restart burrowee-gateway.service" >&2
             fi
 
-            run_root systemctl enable --now burrowee-gateway-updater.service 2>/dev/null || true
+            # THE PROBE — gateway on Linux was the last component/platform pair
+            # without one, and the only place the policy "an installer that exits
+            # 0 has left the component running" (design rule 3) still did not
+            # hold. `enable --now` reports success for a unit whose ExecStart dies
+            # on start, and `restart` exiting 0 says the transaction was accepted,
+            # not that the daemon is up a moment later. Only is-active answers the
+            # question the install's exit status is claiming to answer.
+            #
+            # FATAL, like every other serve start in the tree: start_unit_linux
+            # and start_unit_darwin both return 1 here, and load_units is called
+            # unguarded under `set -e`. A container with no systemd never reaches
+            # this branch with an enabled unit to begin with — it fails at
+            # daemon-reload's `|| true` and has no unit to probe.
+            #
+            # THE FLAG IS ARMED FROM THE PROBE, not from restart's status: a
+            # daemon that starts and dies a second later would otherwise arm the
+            # 60s wait for a version it can never report.
+            if run_root systemctl is-active --quiet burrowee-gateway.service; then
+                echo "systemd service burrowee-gateway.service enabled + (re)started"
+                SERVE_UNIT_STARTED=1
+            else
+                echo "error: burrowee-gateway.service is not active after enable --now" >&2
+                echo "hint: sudo systemctl status burrowee-gateway.service" >&2
+                return 1
+            fi
+
             # A reinstall over an already-running (possibly stale) updater must advance
             # it to the freshly-installed binary — `enable --now` no-ops a running unit,
             # so restart it explicitly. Otherwise the stale updater keeps running old
@@ -1287,10 +1542,36 @@ load_units() {
             # updater's own push path — BURROWEE_UPDATE renders units without loading
             # them — so this can never self-kill. The Darwin branch above already
             # advances the updater via its bootout+bootstrap.)
-            run_root systemctl restart burrowee-gateway-updater.service 2>/dev/null || true
+            if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
+                echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
+            else
+                # Recorded, not fatal — see UPDATER_START_FAILED.
+                start_unit_linux burrowee-gateway-updater.service || UPDATER_START_FAILED=1
+            fi
         fi
         ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# finish_with_updater_verdict — the last statement of every mode that calls
+# load_units. Exits 0 when the updater started (or was never asked to), and 1
+# when its start failed, having let everything after load_units run first.
+#
+# It is an exit and not a `return 1` because the whole point is that it happens
+# AFTER the state-recording work and the doctor tail: a `set -e` abort at the
+# start itself is exactly the behaviour this replaces.
+# ---------------------------------------------------------------------------
+finish_with_updater_verdict() {
+    if [ "$UPDATER_START_FAILED" = 1 ]; then
+        echo "error: the gateway updater unit did not start — this host will not receive" >&2
+        echo "error: automatic updates until it does. Everything else completed: the serve" >&2
+        echo "error: daemon was verified up, the version anchor was recorded, and doctor's" >&2
+        echo "error: report is above. The start's own error names the unit and the command." >&2
+        echo "hint: sudo curl -fsSL https://release.burrowee.com/gateway/updater.install.sh | sh" >&2
+        exit 1
+    fi
+    exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1448,7 +1729,10 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     if [ "$MIGRATE_UNRECORDED" = "0" ]; then
         record_installed_version "${BURROWEE_VERSION:-}"
     fi
-    exit 0
+    # This mode calls load_units too, so it owns the same deferred verdict: the
+    # anchor above is written first, and only then does a failed updater start
+    # decide the exit status.
+    finish_with_updater_verdict
 fi
 
 if [ -n "${BURROWEE_UPDATE:-}" ]; then
@@ -1833,3 +2117,58 @@ elif ( exec 3<>/dev/tty ) 2>/dev/null; then
 else
     echo "next: burrowee $COMP bootstrap <blob> <pin>"
 fi
+
+# ---------------------------------------------------------------------------
+# Prove the NEW daemon is serving, then report — the last thing this script does
+# on the full-install path, because "hands back" is where the claim is made.
+#
+# THE PATH. burrowee-gateway writes running.json into
+# runtime_version.WriteRunning(cfg.paths.Home, version)
+# (cmd/burrowee-gateway/main.go), and GwPaths.Home is the DATA dir, not the
+# config dir (internal/gateway/home.go: GatewayPaths sets Home: dataDir) — so it
+# is $SYS_DATA_DIR here, never $SYS_CONFIG_DIR. Edge's own recordRunningVersion
+# header records what the second spelling of this decision cost, one component
+# over: a doctor reporting "the daemon is not running" about a daemon that was,
+# for 35h on a production node. These two names must stay in step;
+# tools/install-waits-for-daemon.test.sh asserts they do.
+#
+# Not on the BURROWEE_UNITS_ONLY, BURROWEE_UPDATE or BURROWEE_UNINSTALL paths:
+# each exits above. Update mode in particular renders units and deliberately
+# never loads them, so there is nothing there that a wait could be waiting for.
+# ---------------------------------------------------------------------------
+if [ "$SERVE_UNIT_STARTED" = 1 ]; then
+    WANT_VERSION="$(binary_version_stamp "$BIN_DIR/burrowee-gateway")"
+    if [ -n "$WANT_VERSION" ]; then
+        # The timeout's status is deliberately dropped: this wait never fails an
+        # install (see wait_for_running_version's contract).
+        wait_for_running_version "$SYS_DATA_DIR" "$WANT_VERSION" || true
+    else
+        echo "note: could not read the installed binary's version stamp — not waiting" >&2
+    fi
+else
+    echo "note: the serve unit was not (re)started by this run — not waiting on it"
+fi
+
+# ---- doctor, unconditionally ------------------------------------------------
+# On the match path, the timeout path and the skipped path alike. The wait
+# answers one bit; doctor is the report an operator acts on, and after a timeout
+# it is the only thing that says what the daemon is actually doing.
+#
+# ITS EXIT STATUS IS NOT THIS INSTALL'S. The verdict was decided by start_unit_*
+# further up; a read-only `doctor` reports failing rows through its exit code,
+# which is a diagnostic doing its job and not a failed install. Hence the guard.
+#
+# STDIN IS /dev/null so it can neither prompt nor elevate. doctor's elevation
+# gate is `euid != 0 && stdin is a terminal` (gw.MayElevate,
+# cmd/burrowee-gateway-cli/doctor_elevate.go), and a non-terminal stdin makes it
+# false whoever is running — which matters here more than for the other two
+# components, since this script does not require root of itself and reaches
+# privileged work through run_root. Only `--fix` remediates or prompts, and this
+# is the read-only verb.
+"$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
+
+# ---- the deferred updater verdict, and nothing after it ---------------------
+# Prints nothing and exits 0 on every healthy path. It sits below doctor because
+# a broken delivery channel is precisely the failure an operator needs the
+# diagnostic for; it sits at all because the exit status still has to report it.
+finish_with_updater_verdict
