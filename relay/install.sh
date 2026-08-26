@@ -187,10 +187,16 @@ FP="$("$OPENSSL" pkey -in "$KEY" -pubout -outform DER 2>/dev/null \
 info "key fingerprint: $FP"
 
 # ---- platform detection -------------------------------------------------
+# Darwin is refused HERE, before anything is downloaded. The relay installer has
+# no launchd branch — it manages services purely through $SYSTEMCTL — so a macOS
+# run used to place four binaries, run the migration ladder, write the version
+# marker and self-copy, and only THEN die on "systemctl: command not found",
+# leaving a half-installed host. Refusing up front is strictly better than
+# aborting mid-install. Revisit when relay actually ships a launchd unit.
 case "$(uname -s)" in
-    Darwin) OS=darwin ;;
     Linux)  OS=linux ;;
-    *)      fail "unsupported OS: $(uname -s) (burrowee relay ships darwin + linux only)" ;;
+    Darwin) fail "burrowee relay has no macOS support: its installer manages services through systemd only (linux arm64 + amd64)" ;;
+    *)      fail "unsupported OS: $(uname -s) (burrowee relay ships linux only)" ;;
 esac
 case "$(uname -m)" in
     arm64|aarch64) ARCH=arm64 ;;
