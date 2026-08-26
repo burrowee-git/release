@@ -459,6 +459,7 @@ assert_version_floor() {
 # END version-floor
 
 # ---- platform detection -------------------------------------------------
+# BEGIN platform-detect
 case "$(uname -s)" in
     Darwin) OS=darwin ;;
     Linux)  OS=linux ;;
@@ -471,12 +472,15 @@ case "$(uname -m)" in
 esac
 
 printf '\n  burrowee %s installer  (%s/%s)\n\n' "$COMP" "$OS" "$ARCH"
+# END platform-detect
 
 # ---- guard against a TEMP / unbaked pubkey ------------------------------
+# BEGIN pubkey-guard
 case "$PUBKEY" in
     ""|*REPLACE*|*PLACEHOLDER*|*TEMP*)
         fail "this installer was built without a real signing key — refusing to verify against a placeholder (regenerate with tools/gen-bootstraps.sh)" ;;
 esac
+# END pubkey-guard
 
 # BEGIN mode-dispatch  (cmd/rkit's updater-install bootstrap test extracts this
 # block verbatim and drives it directly — keep it self-contained between the
@@ -607,8 +611,10 @@ done
 # END mode-args
 
 # ---- temp workspace -----------------------------------------------------
+# BEGIN tmp-workspace
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/burrowee-${COMP}-XXXXXX")" || fail "could not create temp dir"
 trap 'rm -rf "$TMP"' EXIT INT TERM
+# END tmp-workspace
 
 # ---- preflight (install OS deps before the trust gate) ------------------
 # preflight.sh installs minisign/unzip/curl (the trust gate's deps) + nginx for
