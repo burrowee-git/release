@@ -92,6 +92,10 @@ mkdir -p "$W/repo/tools" "$W/home"
 for f in bootstrap.template.sh relay-bootstrap.template.sh preflight.template.sh gen-bootstraps.sh; do
     cp "$REPO_ROOT/tools/$f" "$W/repo/tools/$f"
 done
+# tools/modules/ — gen-bootstraps.sh expands @INCLUDE:<name>@ from
+# MODDIR="$ROOT/tools/modules" at render time, so the scratch root needs its
+# own copy or every include fails closed before anything is rendered.
+cp -R "$REPO_ROOT/tools/modules" "$W/repo/tools/modules"
 minisign -G -W -p "$W/test.pub" -s "$W/test.key" >/dev/null 2>&1 \
     || die "could not generate an ephemeral minisign keypair"
 BURROWEE_PUBKEY_FILE="$W/test.pub" BURROWEE_MIN_VERSION="$MINV" \
