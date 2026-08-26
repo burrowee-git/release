@@ -362,9 +362,75 @@ for f in "$EDGE" "$GW"; do
     comp="$(basename "$(dirname "$f")")"
     grep -qE '(burrowee-edge-cli|burrowee-gateway-cli)" doctor.*--fix' "$f" \
         && note "$comp: the doctor tail passes --fix — the install's last act must be a report, not a remediation"
-    tail -n 1 "$f" | grep -q 'doctor < /dev/null || true' \
-        || note "$comp: the doctor tail is not the last thing the script does"
+    # The doctor tail is the last thing the script DOES — checked as "nothing
+    # but comments, blank lines and the allowed trailing statement follows it",
+    # not as `tail -n 1`, because gateway now ends with one more statement:
+    # finish_with_updater_verdict, which prints nothing on a healthy run and
+    # exists so that a failed UPDATER start reports through the exit status
+    # instead of aborting above doctor (and above the version anchor and the
+    # enrollment prompt with it).
+    after="$(sed -n '/doctor < \/dev\/null || true/,$p' "$f" | sed '1d' \
+        | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
+    case "$comp" in
+    gateway)
+        [ "$after" = "finish_with_updater_verdict" ] \
+            || note "$comp: unexpected code after the doctor tail: [$after]" ;;
+    *)
+        [ -z "$after" ] \
+            || note "$comp: the doctor tail is not the last thing the script does: [$after]" ;;
+    esac
 done
+
+# ── 7b. a failed UPDATER start defers its verdict past the state writes ──────
+# The regression this pins: start_unit_* returning 1 for the UPDATER used to
+# abort load_units under `set -e`, which skipped sweep_stale_user_bins,
+# report_unrecorded_migration, record_installed_version and the first-run
+# blob/PIN prompt — leaving the new binaries on disk with the ladder's anchor
+# still naming the OLD version, and a fresh gateway never offered enrollment.
+section
+grep -q '^UPDATER_START_FAILED=0$' "$GW" \
+    || note "gateway: UPDATER_START_FAILED is not initialised to 0"
+n_def="$(grep -c 'UPDATER_START_FAILED=1' "$GW" || true)"
+[ "$n_def" = 2 ] \
+    || note "gateway: UPDATER_START_FAILED=1 is set $n_def times, expected 2 (one per platform's UPDATER start)"
+# Every updater start records instead of aborting…
+for _start in \
+    'start_unit_darwin "com.burrowee.gateway.updater"' \
+    'start_unit_linux burrowee-gateway-updater.service'; do
+    ln="$(grep -n "$_start" "$GW" | cut -d: -f1 | head -n 1)"
+    if [ -z "$ln" ]; then
+        note "gateway: no updater start matching [$_start]"
+    else
+        # the call plus its continuation line
+        stmt="$(sed -n "$ln,$((ln + 1))p" "$GW")"
+        case "$stmt" in
+            *'|| UPDATER_START_FAILED=1'*) ;;
+            *) note "gateway: the updater start [$_start] is fatal — it must record UPDATER_START_FAILED and let the script finish" ;;
+        esac
+    fi
+done
+# …and the SERVE starts stay fatal.
+for _start in \
+    'start_unit_darwin "com.burrowee.gateway" ' \
+    'run_root systemctl is-active --quiet burrowee-gateway.service'; do
+    grep -q "$_start" "$GW" || note "gateway: no serve start/probe matching [$_start]"
+    grep -F "$_start" "$GW" | grep -q 'UPDATER_START_FAILED' \
+        && note "gateway: a SERVE start records UPDATER_START_FAILED — the serve start must stay fatal"
+done
+# Both modes that call load_units end on the verdict, so neither can exit 0
+# with a dead updater.
+n_fin="$(grep -c '^ *finish_with_updater_verdict$' "$GW" || true)"
+[ "$n_fin" = 2 ] \
+    || note "gateway: finish_with_updater_verdict is called $n_fin times, expected 2 (units-only mode and the full-install tail)"
+# The verdict must run AFTER the anchor and the enrollment prompt, which is the
+# whole point of deferring it.
+for _after in 'record_installed_version' 'gateway_already_set_up' 'doctor < /dev/null'; do
+    last_use="$(grep -n "$_after" "$GW" | tail -n 1 | cut -d: -f1)"
+    last_fin="$(grep -n '^ *finish_with_updater_verdict$' "$GW" | tail -n 1 | cut -d: -f1)"
+    [ -n "$last_use" ] && [ -n "$last_fin" ] && [ "$last_fin" -gt "$last_use" ] \
+        || note "gateway: finish_with_updater_verdict does not run after $_after"
+done
+ok_clean "a failed updater start is recorded, deferred past the state writes, and still exits non-zero"
 ok_clean "doctor runs last, unconditionally, guarded, with a non-terminal stdin"
 
 # ── 8. both scripts still parse, on both shells ──────────────────────────────

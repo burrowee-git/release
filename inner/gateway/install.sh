@@ -235,6 +235,28 @@ SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 WAIT_INTERVAL="${WAIT_INTERVAL:-2}"
 WAIT_CEILING="${WAIT_CEILING:-60}"
 SERVE_UNIT_STARTED=0
+
+# UPDATER_START_FAILED — the deferred verdict for a failed UPDATER start.
+#
+# A serve start that fails is fatal on the spot: the serve daemon IS the
+# product, and everything after it is bookkeeping about a host that is not
+# running. The updater is the delivery channel, and a fatal abort there cost
+# strictly more than it bought — it skipped sweep_stale_user_bins,
+# report_unrecorded_migration, record_installed_version and the first-run
+# blob/PIN prompt, so the host ended with the NEW binaries on disk, the
+# migration ladder's anchor still naming the OLD version, and a fresh gateway
+# that was never offered enrollment. The next rung then gated on a version this
+# host had already moved past.
+#
+# So the failure is recorded, the script finishes its state-recording work, the
+# enrollment prompt still runs, doctor still reports, and the exit status is
+# non-zero at the very end — see finish_with_updater_verdict.
+#
+# Deliberately NOT part of the WAIT_* block above: that block is byte-identical
+# with edge's (tools/install-waits-for-daemon.test.sh pins it), and this flag is
+# gateway's alone — edge writes its version marker BEFORE setup_root_service, so
+# it has no anchor to strand.
+UPDATER_START_FAILED=0
 # THE PRIVILEGED EXECUTION SURFACE, collapsed into $BIN_DIR (formerly a separate
 # root-owned tree at /usr/local/libexec/burrowee/gateway, sibling of the system
 # config/data roots — retired now that $BIN_DIR's own default is root-owned; see
@@ -1403,7 +1425,9 @@ load_units() {
                 echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
             else
                 run_root launchctl bootout "system/com.burrowee.gateway.updater" 2>/dev/null || true
-                start_unit_darwin "com.burrowee.gateway.updater" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist"
+                # Recorded, not fatal — see UPDATER_START_FAILED.
+                start_unit_darwin "com.burrowee.gateway.updater" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" \
+                    || UPDATER_START_FAILED=1
             fi
         fi
         ;;
@@ -1496,11 +1520,33 @@ load_units() {
             if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
                 echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
             else
-                start_unit_linux burrowee-gateway-updater.service
+                # Recorded, not fatal — see UPDATER_START_FAILED.
+                start_unit_linux burrowee-gateway-updater.service || UPDATER_START_FAILED=1
             fi
         fi
         ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# finish_with_updater_verdict — the last statement of every mode that calls
+# load_units. Exits 0 when the updater started (or was never asked to), and 1
+# when its start failed, having let everything after load_units run first.
+#
+# It is an exit and not a `return 1` because the whole point is that it happens
+# AFTER the state-recording work and the doctor tail: a `set -e` abort at the
+# start itself is exactly the behaviour this replaces.
+# ---------------------------------------------------------------------------
+finish_with_updater_verdict() {
+    if [ "$UPDATER_START_FAILED" = 1 ]; then
+        echo "error: the gateway updater unit did not start — this host will not receive" >&2
+        echo "error: automatic updates until it does. Everything else completed: the serve" >&2
+        echo "error: daemon was verified up, the version anchor was recorded, and doctor's" >&2
+        echo "error: report is above. The start's own error names the unit and the command." >&2
+        echo "hint: sudo curl -fsSL https://release.burrowee.com/gateway/updater.install.sh | sh" >&2
+        exit 1
+    fi
+    exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1658,7 +1704,10 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     if [ "$MIGRATE_UNRECORDED" = "0" ]; then
         record_installed_version "${BURROWEE_VERSION:-}"
     fi
-    exit 0
+    # This mode calls load_units too, so it owns the same deferred verdict: the
+    # anchor above is written first, and only then does a failed updater start
+    # decide the exit status.
+    finish_with_updater_verdict
 fi
 
 if [ -n "${BURROWEE_UPDATE:-}" ]; then
@@ -2092,3 +2141,9 @@ fi
 # privileged work through run_root. Only `--fix` remediates or prompts, and this
 # is the read-only verb.
 "$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
+
+# ---- the deferred updater verdict, and nothing after it ---------------------
+# Prints nothing and exits 0 on every healthy path. It sits below doctor because
+# a broken delivery channel is precisely the failure an operator needs the
+# diagnostic for; it sits at all because the exit status still has to report it.
+finish_with_updater_verdict
