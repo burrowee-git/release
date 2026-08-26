@@ -251,9 +251,14 @@
       installer, which is the trust anchor that verifies each download automatically. To check
       a download yourself:</p>
     <div class="verify-block">
-      <pre class="block">minisign -Vm SHA256SUMS.txt -p burrowee-release.pub
-shasum -a 256 -c SHA256SUMS.txt   # or sha256sum on Linux</pre>
-      <copy-button value="minisign -Vm SHA256SUMS.txt -p burrowee-release.pub&#10;shasum -a 256 -c SHA256SUMS.txt   # or sha256sum on Linux">Copy</copy-button>
+      <pre class="block">minisign -V -P "$(cat burrowee-release.pub | tail -n1)" -m SHA256SUMS.txt -x SHA256SUMS.txt.minisig
+f=&lt;file&gt;                                      # the file you downloaded
+want=$(awk -v f="$f" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' SHA256SUMS.txt)
+got=$(shasum -a 256 "$f" | awk '{print $1}')  # sha256sum "$f" on Linux
+if   [ -z "$want" ];        then echo "NO ENTRY for $f in SHA256SUMS.txt — do not install"
+elif [ "$want" = "$got" ];  then echo "OK $f"
+else                             echo "MISMATCH for $f — do not install"; fi</pre>
+      <copy-button value="minisign -V -P &quot;$(cat burrowee-release.pub | tail -n1)&quot; -m SHA256SUMS.txt -x SHA256SUMS.txt.minisig&#10;f=&lt;file&gt;                                      # the file you downloaded&#10;want=$(awk -v f=&quot;$f&quot; '{ n = $2; sub(/^\*/, &quot;&quot;, n); if (n == f) { print $1; exit } }' SHA256SUMS.txt)&#10;got=$(shasum -a 256 &quot;$f&quot; | awk '{print $1}')  # sha256sum &quot;$f&quot; on Linux&#10;if   [ -z &quot;$want&quot; ];        then echo &quot;NO ENTRY for $f in SHA256SUMS.txt — do not install&quot;&#10;elif [ &quot;$want&quot; = &quot;$got&quot; ];  then echo &quot;OK $f&quot;&#10;else                             echo &quot;MISMATCH for $f — do not install&quot;; fi">Copy</copy-button>
     </div>
     <p class="faint">A failed signature check means the bytes are untrusted — do not install them.</p>
   </section>
