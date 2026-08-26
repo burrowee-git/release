@@ -67,14 +67,26 @@ check "dir extras: agent"    "$(payload_dir_extras agent   | paste -sd, -)" ""
 
 # --- payload_manifest -------------------------------------------------------
 SRC="$(gateway_src manifest-gw v0_1_to_v0_2.sh)"
+# updater.install.sh rides in these too: inner/gateway/updater.install.sh is a
+# real, committed file (Ruling E — edge and gateway only), resolved out of
+# INNER_DIR regardless of the fixture SRC above, exactly like install.sh is
+# resolved out of inner/<comp>/ rather than <src-dir>.
 check "manifest: gateway" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
-    "update.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh"
+    "update.sh,updater.install.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh"
 
 # Discovery, not declaration: a migration added to the gateway repo appears with
 # no edit to payload.sh.
 : > "${SRC}/migrations/v2_to_v3.sh"
 check "manifest: picks up a new migration" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
-    "update.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
+    "update.sh,updater.install.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
+
+# …AND A NON-SCRIPT MEMBER TOO. The gateway's migrations/ holds only scripts
+# today, which is the only reason a `*.sh` glob on the rkit side and a `*` glob
+# here looked identical for so long. cmd/rkit/payload_manifest_test.go pins the
+# two lists together; this states the shell side's own expectation.
+: > "${SRC}/migrations/component.conf"
+check "manifest: ships a non-script migrations member" "$(payload_manifest gateway "${SRC}" | paste -sd, -)" \
+    "update.sh,updater.install.sh,migrations/component.conf,migrations/run.sh,migrations/v0_1_to_v0_2.sh,migrations/v2_to_v3.sh"
 
 # edge's manifest carries the SHARED ladder's members plus its own two files.
 # The shared half is discovered by glob from inner/_shared/migrations, so it is
@@ -86,12 +98,27 @@ mkdir -p "${SHARED_FIX}"
 : > "${SHARED_FIX}/run.sh"; : > "${SHARED_FIX}/upgrade.sh"; : > "${SHARED_FIX}/lib_paths.sh"
 : > "${SHARED_FIX}/lib_stale_user_bins.sh"; : > "${SHARED_FIX}/stale_user_bins.sh"
 : > "${SHARED_FIX}/adopt_user_tree.sh"
+# A TEST SUITE IS NOT PAYLOAD. Both spellings go into the fixture and NEITHER
+# may appear in any manifest below — the expectations that follow are unchanged
+# by their presence, which is the assertion. adopt_updater_unit_test.sh really
+# did sit in inner/_shared/migrations and really was staged, chmod 0755, into
+# every edge, cli and relay zip; it now lives in tools/adopt_updater_unit.test.sh
+# and cmd/rkit/assemble.go drops the same two patterns.
+: > "${SHARED_FIX}/adopt_updater_unit.test.sh"
+: > "${SHARED_FIX}/adopt_updater_unit_test.sh"
 SHARED_MIGRATIONS_DIR="${SHARED_FIX}"
+check "shared scripts: test suites are not staged" \
+    "$(shared_migration_scripts | paste -sd, -)" \
+    "adopt_user_tree.sh,lib_paths.sh,lib_stale_user_bins.sh,run.sh,stale_user_bins.sh,upgrade.sh"
 EDGE_SRC="${TMP}/manifest-edge"
 mkdir -p "${EDGE_SRC}/migrations"
 : > "${EDGE_SRC}/migrations/component.conf"; : > "${EDGE_SRC}/migrations/ledger"
+# edge carries updater.install.sh (real inner/edge/updater.install.sh); cli
+# does NOT (no inner/cli/updater.install.sh exists — it gets no updater
+# installer, Ruling E) even though it shares the same EDGE_SRC fixture below —
+# the one thing that differs between these two checks is the component name.
 check "manifest: edge"  "$(payload_manifest edge  "${EDGE_SRC}" | paste -sd, -)" \
-    "update.sh,updater.update.sh,covers/admin.html,covers/default.html,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
+    "update.sh,updater.update.sh,updater.install.sh,covers/admin.html,covers/default.html,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
 check "manifest: cli"   "$(payload_manifest cli   "${EDGE_SRC}" | paste -sd, -)" \
     "update.sh,migrations/adopt_user_tree.sh,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,migrations/component.conf,migrations/ledger"
 
@@ -174,13 +201,68 @@ check "stage extras: relay copies content verbatim" \
 GW_SRC="$(comp_src gw-extras-src install.sh update.sh)"
 GW_ASM="${TMP}/gw-extras-asm"; mkdir -p "${GW_ASM}"
 stage_payload_extras gateway "${GW_SRC}" "${GW_ASM}"
-check "stage extras: gateway takes update.sh only" "$(staged "${GW_ASM}")" "update.sh"
+# updater.install.sh comes from THIS repo's inner/gateway/, not GW_SRC — it
+# rides even though GW_SRC never declared it.
+check "stage extras: gateway takes update.sh + updater.install.sh" \
+    "$(staged "${GW_ASM}")" "update.sh,updater.install.sh"
+if [ -x "${GW_ASM}/updater.install.sh" ]; then
+    ok "stage extras: gateway's staged updater.install.sh is executable"
+else bad "stage extras: gateway's staged updater.install.sh is not executable"; fi
+
+# edge takes the shared ladder too, so this fixture needs the shared half
+# (component.conf + ledger) as well as update.sh/updater.update.sh — same
+# shape as EDGE_SRC above, just with the root-level extras stage_payload_extras
+# actually requires.
+EDGE_EXTRAS_SRC="$(comp_src edge-extras-src update.sh updater.update.sh)"
+mkdir -p "${EDGE_EXTRAS_SRC}/migrations"
+: > "${EDGE_EXTRAS_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${EDGE_EXTRAS_SRC}/migrations/ledger"
+EDGE_EXTRAS_ASM="${TMP}/edge-extras-asm"; mkdir -p "${EDGE_EXTRAS_ASM}"
+if stage_payload_extras edge "${EDGE_EXTRAS_SRC}" "${EDGE_EXTRAS_ASM}"; then
+    ok "stage extras: edge succeeds"
+else bad "stage extras: edge failed"; fi
+if [ -f "${EDGE_EXTRAS_ASM}/updater.install.sh" ] && [ -x "${EDGE_EXTRAS_ASM}/updater.install.sh" ]; then
+    ok "stage extras: edge stages an executable updater.install.sh"
+else bad "stage extras: edge did not stage an executable updater.install.sh"; fi
+
+# cli MUST NOT get one — it has no updater installer (Ruling E). Same shape of
+# fixture as edge's above (cli takes the shared ladder too), so the only
+# difference between this case and edge's is the component name — proving the
+# guard, not just the happy path.
+CLI_EXTRAS_SRC="$(comp_src cli-extras-src update.sh)"
+mkdir -p "${CLI_EXTRAS_SRC}/migrations"
+: > "${CLI_EXTRAS_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${CLI_EXTRAS_SRC}/migrations/ledger"
+CLI_EXTRAS_ASM="${TMP}/cli-extras-asm"; mkdir -p "${CLI_EXTRAS_ASM}"
+if stage_payload_extras cli "${CLI_EXTRAS_SRC}" "${CLI_EXTRAS_ASM}"; then
+    ok "stage extras: cli succeeds"
+else bad "stage extras: cli failed"; fi
+if [ -e "${CLI_EXTRAS_ASM}/updater.install.sh" ]; then
+    bad "stage extras: cli wrongly got updater.install.sh — it has no updater installer"
+else ok "stage extras: cli stages no updater.install.sh"; fi
 
 AGENT_ASM="${TMP}/agent-asm"; mkdir -p "${AGENT_ASM}"
 if stage_payload_extras agent "${TMP}/nope" "${AGENT_ASM}"; then
     ok "stage extras: agent (no extras) succeeds without a source tree"
 else bad "stage extras: agent failed"; fi
 check "stage extras: agent stages nothing" "$(staged "${AGENT_ASM}")" ""
+
+# --- updater_install_src: presence-driven, not a hardcoded component switch -
+# Proven against component names payload_file_extras/payload_dir_extras have
+# never heard of, so this guard would also catch a DIFFERENT file staged for
+# only some components going missing — not just updater.install.sh, named by
+# luck. If this were instead an `edge|gateway) …` switch, "widget" below would
+# never be reached and this would pass for the wrong reason.
+GENERIC_INNER="${TMP}/generic-inner"
+mkdir -p "${GENERIC_INNER}/widget"
+: > "${GENERIC_INNER}/widget/updater.install.sh"
+SAVED_INNER_DIR="${INNER_DIR}"
+INNER_DIR="${GENERIC_INNER}"
+check "updater_install_src: presence-driven for an unlisted component" \
+    "$(updater_install_src widget)" "${GENERIC_INNER}/widget/updater.install.sh"
+check "updater_install_src: absent for a sibling with no file" \
+    "$(updater_install_src gadget)" ""
+INNER_DIR="${SAVED_INNER_DIR}"
 
 # Fail closed. A relay source missing updater.update.sh must stop the cut: the
 # payload would extract and verify, then die on "cannot open ./updater.update.sh"
@@ -371,5 +453,105 @@ rm -f "${RELAY_ZIP_ASM}/migrations/adopt_unit_home_tree.sh" "${TMP}/relay-norung
 if assert_payload_migrations relay "${TMP}/relay-norung.zip" "${RELAY_MIG_SRC}" 2>/dev/null; then
     bad "gate: accepted a relay payload missing its ledger-named adoption rung"
 else ok "gate: rejects a relay payload missing its ledger-named adoption rung"; fi
+
+# --- the gate on the UPDATER LEDGER (edge/gateway/relay only) ---------------
+# migrations/updater-ledger is a SECOND, SEPARATE ledger for the updater's own
+# track (Task 10, elsewhere: edge, gateway, relay — cli and agent have no
+# updater). No component in this repo's own fixtures ships one yet, so absence
+# is a no-op; the check fires the moment a source carries one.
+
+# No updater-ledger in EDGE_SRC: the gate stayed silent about it in the
+# "accepts a complete shared-ladder payload" case above. Asserted directly too.
+if assert_updater_ledger edge "${EDGE_SRC}" "${TMP}/shared-good.zip" "$(unzip -Z1 "${TMP}/shared-good.zip")"; then
+    ok "gate: no updater-ledger in source is a no-op"
+else bad "gate: fired with no updater-ledger in source"; fi
+
+UL_SRC="${TMP}/updater-ledger-edge"
+mkdir -p "${UL_SRC}/migrations"
+: > "${UL_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${UL_SRC}/migrations/ledger"
+printf '# updater track\n0.2.0 adopt_updater_unit.sh\n' > "${UL_SRC}/migrations/updater-ledger"
+
+# stage_component_migrations copies updater-ledger too — it is just another
+# file under the component's own migrations/, discovered by the same glob as
+# component.conf and ledger. adopt_updater_unit.sh itself is normally staged
+# from inner/_shared/migrations (SHARED_MIGRATIONS_DIR), which this suite
+# points at a fixture (SHARED_FIX) that predates this rung; added here by hand
+# rather than widening SHARED_FIX and re-pinning every manifest string above
+# that already asserts its exact sorted contents.
+UL_ASM="${TMP}/updater-ledger-asm"; mkdir -p "${UL_ASM}"
+stage_component_migrations edge "${UL_SRC}" "${UL_ASM}" >/dev/null
+: > "${UL_ASM}/migrations/adopt_updater_unit.sh"
+( cd "${UL_ASM}" && zip -r -q "${TMP}/updater-ledger-good.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/updater-ledger-good.zip" "${UL_SRC}"; then
+    ok "gate: accepts a payload whose updater-ledger row is present"
+else bad "gate: rejected a payload whose updater-ledger row is present"; fi
+
+# updater-ledger exists in source but was never staged into the zip — the
+# "row check" reasoning applied one level up, to the ledger file itself.
+UL_ASM2="${TMP}/updater-ledger-asm2"; mkdir -p "${UL_ASM2}"
+stage_component_migrations edge "${UL_SRC}" "${UL_ASM2}" >/dev/null
+: > "${UL_ASM2}/migrations/adopt_updater_unit.sh"
+rm -f "${UL_ASM2}/migrations/updater-ledger"
+( cd "${UL_ASM2}" && zip -r -q "${TMP}/updater-ledger-notstaged.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/updater-ledger-notstaged.zip" "${UL_SRC}" 2>/dev/null; then
+    bad "gate: accepted a payload with updater-ledger in source but not in the zip"
+else ok "gate: rejects a payload with updater-ledger in source but not in the zip"; fi
+
+# updater-ledger staged, but the rung it NAMES is missing from the zip — a row
+# the updater's run.sh would refuse on, on every host, after the cut.
+UL_ASM3="${TMP}/updater-ledger-asm3"; mkdir -p "${UL_ASM3}"
+stage_component_migrations edge "${UL_SRC}" "${UL_ASM3}" >/dev/null
+( cd "${UL_ASM3}" && zip -r -q "${TMP}/updater-ledger-gap.zip" migrations/ )
+if assert_payload_migrations edge "${TMP}/updater-ledger-gap.zip" "${UL_SRC}" 2>/dev/null; then
+    bad "gate: accepted a payload missing its updater-ledger-named rung"
+else ok "gate: rejects a payload missing its updater-ledger-named rung"; fi
+
+# cli takes the shared ladder but has no updater — an updater-ledger in its
+# source (however unlikely) must never be checked; the requirement stays
+# scoped to edge/gateway/relay, same reasoning as relay's own adopt-rung check.
+CLI_UL_SRC="${TMP}/updater-ledger-cli"
+mkdir -p "${CLI_UL_SRC}/migrations"
+: > "${CLI_UL_SRC}/migrations/component.conf"
+printf '0.2.0 stale_user_bins.sh\n' > "${CLI_UL_SRC}/migrations/ledger"
+printf '0.2.0 adopt_updater_unit.sh\n' > "${CLI_UL_SRC}/migrations/updater-ledger"
+CLI_UL_ASM="${TMP}/updater-ledger-cli-asm"; mkdir -p "${CLI_UL_ASM}"
+stage_component_migrations cli "${CLI_UL_SRC}" "${CLI_UL_ASM}" >/dev/null
+# deliberately NOT staging adopt_updater_unit.sh — if the cli exemption ever
+# regressed, this zip would fail the row check and this case would catch it.
+( cd "${CLI_UL_ASM}" && zip -r -q "${TMP}/updater-ledger-cli.zip" migrations/ )
+if assert_payload_migrations cli "${TMP}/updater-ledger-cli.zip" "${CLI_UL_SRC}"; then
+    ok "gate: updater-ledger check stays scoped to edge/gateway/relay (cli exempt)"
+else bad "gate: updater-ledger check leaked to cli"; fi
+
+# gateway takes the updater-ledger check too, through the NON-shared-ladder tail
+# of assert_payload_migrations — its own runner/ledger shape, exercised earlier.
+#
+# stage_gateway_migrations now globs migrations/* (Task 10's staging fix,
+# tools/payload.sh lines ~170/252) rather than migrations/*.sh — gateway's own
+# ledger has always lived INSIDE run.sh (see ledger_migrations above), so its
+# migrations/ never held a plain data file before updater-ledger. No manual cp
+# here: this proves the STAGING path actually carries the data file into the
+# zip, not just the assertion's own logic in isolation.
+GW_UL_SRC="$(gateway_src updater-ledger-gw v0_1_to_v0_2.sh lib_stale_user_bins.sh)"
+printf '0.2.0 adopt_updater_unit.sh\n' > "${GW_UL_SRC}/migrations/updater-ledger"
+GW_UL_ASM="${TMP}/updater-ledger-gw-asm"; mkdir -p "${GW_UL_ASM}"
+: > "${GW_UL_ASM}/install.sh"
+stage_gateway_migrations "${GW_UL_SRC}" "${GW_UL_ASM}" >/dev/null
+if [ -f "${GW_UL_ASM}/migrations/updater-ledger" ]; then
+    ok "staging: gateway's *-glob fix carries migrations/updater-ledger (data file) into the assemble dir"
+else bad "staging: gateway migrations/updater-ledger was NOT staged (glob still *.sh-only)"; fi
+if [ ! -x "${GW_UL_ASM}/migrations/updater-ledger" ]; then
+    ok "staging: gateway's staged updater-ledger is not executable (data file, not a script)"
+else bad "staging: gateway's staged updater-ledger was wrongly made executable"; fi
+( cd "${GW_UL_ASM}" && zip -r -q "${TMP}/updater-ledger-gw-gap.zip" migrations/ )
+if assert_payload_migrations gateway "${TMP}/updater-ledger-gw-gap.zip" "${GW_UL_SRC}" 2>/dev/null; then
+    bad "gate: accepted a gateway payload missing its updater-ledger-named rung"
+else ok "gate: rejects a gateway payload missing its updater-ledger-named rung"; fi
+: > "${GW_UL_ASM}/migrations/adopt_updater_unit.sh"
+( cd "${GW_UL_ASM}" && zip -r -q "${TMP}/updater-ledger-gw-good.zip" migrations/ )
+if assert_payload_migrations gateway "${TMP}/updater-ledger-gw-good.zip" "${GW_UL_SRC}"; then
+    ok "gate: accepts a complete gateway payload with an updater-ledger row"
+else bad "gate: rejected a complete gateway payload with an updater-ledger row"; fi
 
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi

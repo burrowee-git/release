@@ -82,8 +82,8 @@
 # declares, so it is the one place that decision is made.
 #
 # EXIT CODES: run.sh's, verbatim (0 nothing applied · 1 refused/failed · 2 ran ·
-# 3 ran but a receipt was lost), plus 64 for a wrong command line, which is also
-# run.sh's code for that.
+# 3 still pending — a receipt was lost, or a rung DEFERRED), plus 64 for a wrong
+# command line, which is also run.sh's code for that.
 #
 # THIS SCRIPT STARTS NOTHING, AND FOR SOME LADDERS THAT MATTERS. The runner
 # itself stops nothing, but a RUNG may — a component declares which ones in
@@ -432,8 +432,11 @@ case "$CODE" in
     fi
     ;;
 3)
-    say "the migrations ran, but a receipt was lost (exit 3). The rung stays"
-    say "re-runnable, which is the point of withholding the receipt."
+    say "the ladder is STILL PENDING (exit 3): either a rung ran and its receipt was"
+    say "lost, or a rung DEFERRED — it declined before changing anything and said on"
+    say "stderr what has to happen first. Read the runner's output above for which."
+    say "Either way the rung stays re-runnable, which is the point of withholding the"
+    say "version."
     ;;
 *)
     say "the ladder exited $CODE, which is not one of its documented codes."

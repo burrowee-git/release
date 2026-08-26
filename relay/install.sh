@@ -72,9 +72,11 @@ else
 fi
 
 # ---- helpers ------------------------------------------------------------
+# BEGIN helpers
 fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
 info() { printf '  → %s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
+# END helpers
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
@@ -187,10 +189,16 @@ FP="$("$OPENSSL" pkey -in "$KEY" -pubout -outform DER 2>/dev/null \
 info "key fingerprint: $FP"
 
 # ---- platform detection -------------------------------------------------
+# Darwin is refused HERE, before anything is downloaded. The relay installer has
+# no launchd branch — it manages services purely through $SYSTEMCTL — so a macOS
+# run used to place four binaries, run the migration ladder, write the version
+# marker and self-copy, and only THEN die on "systemctl: command not found",
+# leaving a half-installed host. Refusing up front is strictly better than
+# aborting mid-install. Revisit when relay actually ships a launchd unit.
 case "$(uname -s)" in
-    Darwin) OS=darwin ;;
     Linux)  OS=linux ;;
-    *)      fail "unsupported OS: $(uname -s) (burrowee relay ships darwin + linux only)" ;;
+    Darwin) fail "burrowee relay has no macOS support: its installer manages services through systemd only (linux arm64 + amd64)" ;;
+    *)      fail "unsupported OS: $(uname -s) (burrowee relay ships linux only)" ;;
 esac
 case "$(uname -m)" in
     arm64|aarch64) ARCH=arm64 ;;
@@ -204,7 +212,25 @@ printf '\n  burrowee %s installer  (%s/%s)\n\n' "$COMP" "$OS" "$ARCH"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/burrowee-${COMP}-XXXXXX")" || fail "could not create temp dir"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-# ---- gated download function --------------------------------------------
+# ---- version / path resolution ------------------------------------------
+# Per-component pin env var (mirrors the public bootstrap pattern).
+PIN="${BURROWEE_RELAY_VERSION:-}"
+
+PLAT="${OS}-${ARCH}"
+if [ -n "$PIN" ]; then
+    info "using pinned version: $PIN"
+    ZIP_PATH="/relay/release/${PIN}/latest.${PLAT}.zip"
+    SUMS_PATH="/relay/release/${PIN}/SHA256SUMS.txt"
+    SIG_PATH="/relay/release/${PIN}/SHA256SUMS.txt.minisig"
+else
+    ZIP_PATH="/relay/release/latest.${PLAT}.zip"
+    SUMS_PATH="/relay/release/SHA256SUMS.txt"
+    SIG_PATH="/relay/release/SHA256SUMS.txt.minisig"
+fi
+
+# ---- download (gated) ---------------------------------------------------
+# BEGIN download-r2-only
+
 # gated_get <path> <local-filename>
 #   path      : the request path, e.g. /relay/release/latest.linux-amd64.zip
 #   local-filename : written under $TMP
@@ -245,30 +271,14 @@ gated_get() {
         || fail "gated download failed: $_path — check that your key is registered on the release host"
 }
 
-# ---- version / path resolution ------------------------------------------
-# Per-component pin env var (mirrors the public bootstrap pattern).
-PIN="${BURROWEE_RELAY_VERSION:-}"
+ZIP="latest.${PLAT}.zip"
 
-PLAT="${OS}-${ARCH}"
-if [ -n "$PIN" ]; then
-    info "using pinned version: $PIN"
-    ZIP_PATH="/relay/release/${PIN}/latest.${PLAT}.zip"
-    SUMS_PATH="/relay/release/${PIN}/SHA256SUMS.txt"
-    SIG_PATH="/relay/release/${PIN}/SHA256SUMS.txt.minisig"
-else
-    ZIP_PATH="/relay/release/latest.${PLAT}.zip"
-    SUMS_PATH="/relay/release/SHA256SUMS.txt"
-    SIG_PATH="/relay/release/SHA256SUMS.txt.minisig"
-fi
-
-ZIP_FILE="latest.${PLAT}.zip"
-
-# ---- download (gated) ---------------------------------------------------
 info "downloading relay artifact (gated)"
-gated_get "$ZIP_PATH"   "$ZIP_FILE"
+gated_get "$ZIP_PATH"   "$ZIP"
 info "downloading SHA256SUMS.txt + signature (gated)"
 gated_get "$SUMS_PATH"  "SHA256SUMS.txt"
 gated_get "$SIG_PATH"   "SHA256SUMS.txt.minisig"
+# END download-r2-only
 
 # ---- require minisign ---------------------------------------------------
 # minisign is the trust root: it must already be on PATH from a trusted source
@@ -299,23 +309,42 @@ ok "minisign signature valid"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
-grep -qF "$ZIP_FILE" "$TMP/SHA256SUMS.txt" \
-    || fail "no checksum entry for $ZIP_FILE — release incomplete or tampered; aborting"
-if command -v shasum >/dev/null 2>&1; then
-    ( cd "$TMP" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-elif command -v sha256sum >/dev/null 2>&1; then
-    ( cd "$TMP" && sha256sum -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-else
-    fail "neither shasum nor sha256sum found — cannot verify; aborting"
-fi
+# BEGIN sha256
+# sha256 of a file, as a bare hex digest. shasum on macOS, sha256sum on stock
+# Debian/Ubuntu (which ships no perl and therefore no shasum). Both spellings
+# are pre-2016-safe: no --ignore-missing, no --check.
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else return 1; fi
+}
+# END sha256
+# BEGIN verify-checksum
+# v4: declares needs: helpers too — the block below calls fail(), which lives
+# in the helpers module, not sha256. Under-declaring it was latent only because
+# every current template happens to splice helpers before this module.
+# Compare ONE hash directly instead of `-c --ignore-missing` over the whole
+# sums file: --ignore-missing is a 2016-era addition (Digest::SHA 5.96 /
+# coreutils 8.25) and the stock shasum on an older macOS rejects it outright
+# ("Unknown option: ignore-missing"). That non-zero exit came back through the
+# `||` as "checksum mismatch", so every install on such a host accused a
+# perfectly good zip of tampering. Picking the line by EXACT filename (awk, both
+# the "hash  name" and binary "hash *name" spellings) is also stricter than the
+# substring grep this replaces.
+want="$(awk -v f="$ZIP" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/SHA256SUMS.txt")"
+[ -n "$want" ] \
+    || fail "no checksum entry for $ZIP — release incomplete or tampered; aborting"
+got="$(sha256_of "$TMP/$ZIP")" \
+    || fail "neither shasum nor sha256sum found — cannot verify; aborting"
+[ -n "$got" ] && [ "$want" = "$got" ] \
+    || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
+# END verify-checksum
 ok "checksum verified"
 
 # ---- unzip + exec the verified inner installer --------------------------
 command -v unzip >/dev/null 2>&1 \
     || fail "unzip not found — install it (\`brew install unzip\` / \`apt-get install unzip\`) and retry"
-unzip -q -o "$TMP/$ZIP_FILE" -d "$TMP/x" || fail "zip extraction failed — corrupt download?"
+unzip -q -o "$TMP/$ZIP" -d "$TMP/x" || fail "zip extraction failed — corrupt download?"
 [ -f "$TMP/x/install.sh" ] || fail "release zip missing inner install.sh — aborting"
 
 ok "verified — running inner installer"

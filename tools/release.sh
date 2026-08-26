@@ -932,8 +932,8 @@ distribute_only() {
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ would: gh release create ${comp}/${stamp} (GitHub Release, public) via ghp"
-        echo "→ would: gen-bootstraps.sh (regenerate ${comp}/install.sh + ${comp}/upgrade.sh + ${comp}/preflight.sh)"
-        echo "→ would: scp install.sh/upgrade.sh/preflight.sh/burrowee-release.pub/site/index.html/skills to ${RELEASE_HOST}:${STATIC_DIR}/${comp}/ (self-hosting upload)"
+        echo "→ would: gen-bootstraps.sh (regenerate ${comp}/install.sh + ${comp}/upgrade.sh + ${comp}/preflight.sh, and for edge/gateway ${comp}/updater.install.sh)"
+        echo "→ would: scp install.sh/upgrade.sh/preflight.sh/burrowee-release.pub/site/index.html/skills (and for edge/gateway updater.install.sh) to ${RELEASE_HOST}:${STATIC_DIR}/${comp}/ (self-hosting upload)"
         echo "→ would: marker commit [RELEASED: ${comp}] ${stamp}"
         echo "→ would: register_staged ${comp} ${stamp} (console catalog)"
         echo "→ would: GitHub release retention report (prune-releases.sh, dry-run)"
@@ -1005,6 +1005,14 @@ distribute_only() {
     if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
         scp -q "${REPO_ROOT}/${comp}/preflight.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/preflight.sh"
     fi
+    # updater.install.sh is the THIRD @MODE@ of the same template — install.sh's
+    # inner script swapped for the narrow updater-recovery script. Rendered by
+    # gen-bootstraps.sh for edge/gateway ONLY (see UPDATER_INSTALL_COMPONENTS
+    # there), so guarded here the same way preflight.sh is guarded above, not
+    # unconditional like install.sh/upgrade.sh which every public component has.
+    if [ -f "${REPO_ROOT}/${comp}/updater.install.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/updater.install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/updater.install.sh"
+    fi
     if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
         scp -q "${REPO_ROOT}/burrowee-release.pub" "${RELEASE_HOST}:${STATIC_DIR}/burrowee-release.pub"
     fi
@@ -1022,6 +1030,12 @@ distribute_only() {
 
     # (3) marker commit.
     git add "versions/${comp}" "${comp}/install.sh" "${comp}/upgrade.sh" "${comp}/preflight.sh"
+    # updater.install.sh: same edge/gateway-only guard as its scp above — a
+    # `git add` of a path that does not exist for this comp would abort the
+    # cut under `set -e`.
+    if [ -f "${REPO_ROOT}/${comp}/updater.install.sh" ]; then
+        git add "${comp}/updater.install.sh"
+    fi
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
@@ -1777,6 +1791,14 @@ do_release() {
     if [ -f "${REPO_ROOT}/${comp}/preflight.sh" ]; then
         scp -q "${REPO_ROOT}/${comp}/preflight.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/preflight.sh"
     fi
+    # updater.install.sh is the THIRD @MODE@ of the same template — install.sh's
+    # inner script swapped for the narrow updater-recovery script. Rendered by
+    # gen-bootstraps.sh for edge/gateway ONLY (see UPDATER_INSTALL_COMPONENTS
+    # there), so guarded here the same way preflight.sh is guarded above, not
+    # unconditional like install.sh/upgrade.sh which every public component has.
+    if [ -f "${REPO_ROOT}/${comp}/updater.install.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/updater.install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/updater.install.sh"
+    fi
     if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
         scp -q "${REPO_ROOT}/burrowee-release.pub" "${RELEASE_HOST}:${STATIC_DIR}/burrowee-release.pub"
     fi
@@ -1794,6 +1816,12 @@ do_release() {
 
     # (8) marker commit.
     git add "versions/${comp}" "${comp}/install.sh" "${comp}/upgrade.sh" "${comp}/preflight.sh"
+    # updater.install.sh: same edge/gateway-only guard as its scp above — a
+    # `git add` of a path that does not exist for this comp would abort the
+    # cut under `set -e`.
+    if [ -f "${REPO_ROOT}/${comp}/updater.install.sh" ]; then
+        git add "${comp}/updater.install.sh"
+    fi
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 

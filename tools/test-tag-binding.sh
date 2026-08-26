@@ -35,7 +35,8 @@ die() { printf '\n✗ TAG-BINDING TEST FAILED: %s\n' "$*" >&2; exit 1; }
 
 GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
 cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
-cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh"
+cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh
+edge/updater.install.sh gateway/updater.install.sh"
 
 # ---- work dir + cleanup ------------------------------------------------------
 # The bootstraps are regenerated twice below (real key, then an ephemeral one),

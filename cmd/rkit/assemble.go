@@ -117,6 +117,10 @@ func ledgerMigrations(runSh string) ([]string, error) {
 //     cover pages copied from the edge.web repo at package time (release.sh lines
 //     1063-1068): admin.html → covers/admin.html, login.html → covers/default.html.
 //     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/edge.web (release.sh line 1064).
+//   - edge + gateway carry updater.install.sh, copied from THIS repo's own
+//     inner/<comp>/ (not the component source worktree) if it exists there —
+//     see updaterInstallPayload. cli's updater is a one-shot binary with no
+//     service, and agent has no updater installer, so neither carries one.
 //
 // The remaining component (agent) has no extras.
 // takesSharedLadder reports whether this component's migrations/ is assembled
@@ -142,14 +146,34 @@ func takesSharedLadder(comp string) bool {
 // <repoDir>/inner/_shared/migrations, sorted by basename. Discovered by glob
 // rather than listed, so adding one stays a one-file change; mirrors
 // shared_migration_scripts in tools/payload.sh.
+//
+// TEST SUITES ARE NOT PAYLOAD. The glob ships whatever is in the directory, and
+// a suite written beside its subject put 25 KB of test harness, chmod 0755, into
+// every edge, cli and relay zip. Suites belong in tools/<name>.test.sh — which
+// is where every other shell suite in this repo lives — and this exclusion is
+// the second lock on that door. tools/payload.sh drops the same two patterns.
 func sharedMigrationScripts(repoDir string) ([]string, error) {
 	dir := filepath.Join(repoDir, "inner", "_shared", "migrations")
 	paths, err := filepath.Glob(filepath.Join(dir, "*.sh"))
 	if err != nil {
 		return nil, fmt.Errorf("shared migrations glob %s: %w", dir, err)
 	}
-	sort.Strings(paths)
-	return paths, nil
+	kept := paths[:0:0]
+	for _, p := range paths {
+		if isShellTestFile(filepath.Base(p)) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	sort.Strings(kept)
+	return kept, nil
+}
+
+// isShellTestFile reports whether a basename names a shell test suite rather
+// than something a host runs. Mirrors the case pattern in tools/payload.sh's
+// shared_migration_scripts.
+func isShellTestFile(base string) bool {
+	return strings.HasSuffix(base, ".test.sh") || strings.HasSuffix(base, "_test.sh")
 }
 
 // componentMigrationFiles returns the component's OWN half of its ladder —
@@ -275,6 +299,43 @@ func sharedLadderPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	return extras, nil
 }
 
+// updaterInstallPayload returns the updater.install.sh member for this
+// component — inner/<comp>/updater.install.sh, if it exists in the release
+// repo — or nil.
+//
+// Present for edge and gateway only: cli's updater is a one-shot binary with
+// no service to reinstall, and agent has no updater installer at all. FILE
+// PRESENCE is the guard, not a hardcoded component allowlist — exactly like
+// preflight.sh's `[ -f … ]` guard in tools/release.sh's outer bootstrap
+// staging, and unlike install.sh's per-component, unconditionally REQUIRED
+// resolution one level up in build.go. A component that never grows the file
+// is simply unaffected; nothing here needs to change to add or drop one.
+// Mirrors updater_install_src in tools/payload.sh.
+//
+// THE EXEC BIT IS FORCED, exactly like install.sh (copyExecutable, below in
+// build.go): release-kit's pack.Content carries no mode field, and pack.Zip
+// preserves whatever os.Stat reports on Content.Src verbatim — it forces
+// nothing. inner/gateway/updater.install.sh is committed as 0644, same as
+// every other inner/ script; left unforced, `rkit build` — the produce half
+// of every cut (tools/release.sh) — would ship a gateway recovery script an
+// operator cannot execute. Copied to a temp file at 0755 rather than mutating
+// the checked-in source in place, same shape as install.sh's own copy.
+func updaterInstallPayload(comp, repoDir string) (*pack.Content, error) {
+	p := filepath.Join(repoDir, "inner", comp, "updater.install.sh")
+	if _, err := os.Stat(p); err != nil {
+		return nil, nil
+	}
+	dir, err := os.MkdirTemp("", "rkit-updater-install-*")
+	if err != nil {
+		return nil, fmt.Errorf("updater.install.sh temp dir: %w", err)
+	}
+	dst := filepath.Join(dir, "updater.install.sh")
+	if err := copyExecutable(p, dst); err != nil {
+		return nil, fmt.Errorf("updater.install.sh: %w", err)
+	}
+	return &pack.Content{Src: dst, Name: "updater.install.sh"}, nil
+}
+
 func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	var extras []pack.Content
 	switch comp {
@@ -294,6 +355,15 @@ func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 		}
 		extras = append(extras, pack.Content{Src: p, Name: s})
 	}
+	// updater.install.sh comes from THIS repo's inner/<comp>/, like install.sh
+	// one level up in build.go — not from srcDir like the members staged just
+	// above — so it is resolved separately here rather than folded into the
+	// switch. See updaterInstallPayload for the presence guard.
+	if ui, err := updaterInstallPayload(comp, repoDir); err != nil {
+		return nil, err
+	} else if ui != nil {
+		extras = append(extras, *ui)
+	}
 	if comp == "gateway" {
 		// The whole migrations/ dir rides along: migrations/run.sh is the runner
 		// install.sh and update.sh invoke, and it needs every migration named in
@@ -305,10 +375,28 @@ func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 		// run.sh is REQUIRED: a gateway zip without it turns every upgrade that
 		// needs a migration into a daemon that comes back without its state, which
 		// is far worse than a build that stops here.
+		//
+		// EVERY FILE, NOT EVERY *.sh. tools/payload.sh globs migrations/* here
+		// and this side globbed migrations/*.sh, which is invisible only for as
+		// long as the gateway's migrations/ holds nothing but scripts — the day
+		// it grows a ledger data file or a component.conf, the shell path ships
+		// it and this one does not, and the two zips differ. Both sides carry a
+		// "mirrors X in Y" comment; that is not a mechanism, so
+		// cmd/rkit/payload_manifest_test.go's gateway fixture now carries a
+		// non-.sh member to make this a red test rather than a comment.
 		mig := filepath.Join(srcDir, "migrations")
-		scripts, globErr := filepath.Glob(filepath.Join(mig, "*.sh"))
+		globbed, globErr := filepath.Glob(filepath.Join(mig, "*"))
 		if globErr != nil {
 			return nil, fmt.Errorf("gateway migrations glob %s: %w", mig, globErr)
+		}
+		var scripts []string
+		for _, p := range globbed {
+			// Directories are not payload members, and tools/payload.sh's
+			// `[ -f "${p}" ] || continue` skips them the same way.
+			if st, statErr := os.Stat(p); statErr != nil || st.IsDir() {
+				continue
+			}
+			scripts = append(scripts, p)
 		}
 		sort.Strings(scripts)
 		shipped := map[string]bool{}

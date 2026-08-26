@@ -91,6 +91,43 @@ func renderedArtifacts(t *testing.T) []string {
 	return out
 }
 
+// partialRenderedArtifacts is the set of per-component files
+// tools/gen-bootstraps.sh writes for SOME but not all public components —
+// present in at least one floorComponents() directory and absent from at
+// least one other (e.g. updater.install.sh: edge/gateway only). It exists
+// because renderedArtifacts()'s intersection is blind to these BY
+// CONSTRUCTION — a file in 2 of 4 directories never reaches n==len(comps) —
+// which is exactly how updater.install.sh escaped the publish guard the
+// first time it was added: generated, committed, never uploaded, and the
+// guard written to make that impossible never saw it. Returns a map from
+// artifact name to the SORTED list of components that actually have it, so a
+// caller can name exactly which ones without re-deriving it.
+func partialRenderedArtifacts(t *testing.T) map[string][]string {
+	t.Helper()
+	root := repoRoot(t)
+	comps := floorComponents(t)
+	owners := map[string][]string{}
+	for _, comp := range comps {
+		entries, err := os.ReadDir(filepath.Join(root, comp))
+		if err != nil {
+			t.Fatalf("read %s: %v", comp, err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".sh") {
+				owners[e.Name()] = append(owners[e.Name()], comp)
+			}
+		}
+	}
+	out := map[string][]string{}
+	for name, list := range owners {
+		if len(list) > 0 && len(list) < len(comps) {
+			sort.Strings(list)
+			out[name] = list
+		}
+	}
+	return out
+}
+
 // TestUpgradeBootstrapsAreExactlyThePublicComponents closes the set direction.
 //
 // THE RULE THIS PINS, stated once so a reader does not have to infer it: an
@@ -206,13 +243,37 @@ func TestReleasePublishesEveryRenderedArtifact(t *testing.T) {
 	release := readRepoFile(t, "tools/release.sh")
 	for _, artifact := range renderedArtifacts(t) {
 		t.Run(artifact, func(t *testing.T) {
-			if got := scpSites(release, artifact); len(got) != 2 {
-				t.Errorf("tools/release.sh scps ${comp}/%s from %d site(s) %v, want 2 (do_release + distribute-only) — a rendered artifact nobody uploads is a 404 at a URL we advertise", artifact, len(got), got)
-			}
-			if got := gitAddSites(release, artifact); len(got) != 2 {
-				t.Errorf("tools/release.sh `git add`s ${comp}/%s at %d site(s) %v, want 2 (do_release + distribute-only) — a rendered artifact the marker commit drops is regenerated-but-uncommitted on the next cut", artifact, len(got), got)
-			}
+			assertArtifactPublished(t, release, artifact)
 		})
+	}
+	// Non-universal artifacts (present for SOME but not all public components
+	// — e.g. updater.install.sh, edge/gateway only) are invisible to
+	// renderedArtifacts()'s intersection BY CONSTRUCTION. The publish sites in
+	// tools/release.sh are comp-parameterized shell (`${comp}/<artifact>`,
+	// guarded with `[ -f … ]` for the components that don't have the file), so
+	// the same two-sites-each requirement still applies — this loop is what
+	// makes the guard see the artifact class that escaped it once already.
+	for artifact, owners := range partialRenderedArtifacts(t) {
+		t.Run(artifact, func(t *testing.T) {
+			t.Logf("%s is rendered for %v only (not every public component) — still must be published from both sites", artifact, owners)
+			assertArtifactPublished(t, release, artifact)
+		})
+	}
+}
+
+// assertArtifactPublished is the two-sites-each requirement shared by the
+// universal and partial artifact checks above: tools/release.sh must scp
+// ${comp}/<artifact> to the static host and `git add` it into the marker
+// commit from EXACTLY two sites (do_release + distribute-only) — not "at
+// least", since a third publish site is a path this test has never seen and a
+// silently-missing one is what it exists to catch.
+func assertArtifactPublished(t *testing.T, release, artifact string) {
+	t.Helper()
+	if got := scpSites(release, artifact); len(got) != 2 {
+		t.Errorf("tools/release.sh scps ${comp}/%s from %d site(s) %v, want 2 (do_release + distribute-only) — a rendered artifact nobody uploads is a 404 at a URL we advertise", artifact, len(got), got)
+	}
+	if got := gitAddSites(release, artifact); len(got) != 2 {
+		t.Errorf("tools/release.sh `git add`s ${comp}/%s at %d site(s) %v, want 2 (do_release + distribute-only) — a rendered artifact the marker commit drops is regenerated-but-uncommitted on the next cut", artifact, len(got), got)
 	}
 }
 
@@ -231,6 +292,20 @@ func TestTestSuitesRestoreEveryRenderedArtifact(t *testing.T) {
 			body := readRepoFile(t, suite)
 			for _, comp := range floorComponents(t) {
 				for _, artifact := range renderedArtifacts(t) {
+					rel := comp + "/" + artifact
+					if !strings.Contains(body, rel) {
+						t.Errorf("%s re-renders the bootstraps but never names %s — a failed run leaves a TEST-keyed copy of it in the working tree", suite, rel)
+					}
+				}
+			}
+			// Partial artifacts (updater.install.sh: edge/gateway only) are
+			// re-rendered by the SAME `sh tools/gen-bootstraps.sh` call these
+			// suites make — it does not skip a component just because this
+			// suite's restore list doesn't know about the file — so they need
+			// the same per-owner coverage, component by component (never
+			// cli/agent, which never had the file to begin with).
+			for artifact, owners := range partialRenderedArtifacts(t) {
+				for _, comp := range owners {
 					rel := comp + "/" + artifact
 					if !strings.Contains(body, rel) {
 						t.Errorf("%s re-renders the bootstraps but never names %s — a failed run leaves a TEST-keyed copy of it in the working tree", suite, rel)

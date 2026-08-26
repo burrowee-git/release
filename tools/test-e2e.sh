@@ -33,10 +33,35 @@ TAMPER_PREFIX="${TMPDIR:-/tmp}/e2e-prefix-tamper"
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\n✗ E2E FAILED: %s\n' "$*" >&2; exit 1; }
 
+# ---- bootstrap restore list ---------------------------------------------------
+# Step (3) below regenerates EVERY public component's bootstraps with the TEST
+# pubkey (gen-bootstraps.sh has no per-component mode — see its own header), not
+# just cli's, so it previously left gateway/edge/agent's install.sh/upgrade.sh/
+# preflight.sh — and now gateway/edge's updater.install.sh too — TEST-keyed and
+# dirty in the working tree after every run: a published installer that verifies
+# against a key nothing we release is signed with, the same hazard
+# tools/test-preflight.sh's own header names. Stash the pre-test bytes and
+# restore THOSE on exit; never `git checkout`, which would also throw away a
+# contributor's uncommitted work.
+GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
+cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
+cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh
+edge/updater.install.sh gateway/updater.install.sh"
+W_RESTORE="$(mktemp -d "${TMPDIR:-/tmp}/test-e2e-restore-XXXXXX")"
+mkdir -p "${W_RESTORE}/orig"
+for f in ${GENERATED}; do
+    mkdir -p "${W_RESTORE}/orig/$(dirname "${f}")"
+    cp "${REPO_ROOT}/${f}" "${W_RESTORE}/orig/${f}"
+done
+
 # ---- cleanup trap -----------------------------------------------------------
 SERVER_PID=""
 cleanup() {
     [ -n "${SERVER_PID}" ] && kill "${SERVER_PID}" 2>/dev/null || true
+    for g in ${GENERATED}; do
+        if [ -f "${W_RESTORE}/orig/${g}" ]; then cp "${W_RESTORE}/orig/${g}" "${REPO_ROOT}/${g}"; fi
+    done
+    rm -rf "${W_RESTORE}"
 }
 trap cleanup EXIT INT TERM
 

@@ -30,6 +30,29 @@ payload_file_extras() {
     esac
 }
 
+# INNER_DIR — this repo's inner/, the same tree cmd/rkit/build.go resolves
+# install.sh from (inner/<comp>/install.sh). Resolved from this file's own
+# location so a caller does not have to know it, and overridable only for the
+# suite — same pattern as SHARED_MIGRATIONS_DIR below.
+INNER_DIR="${INNER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/inner}"
+
+# updater_install_src <comp> — inner/<comp>/updater.install.sh if it exists,
+# nothing otherwise.
+#
+# Present for edge and gateway only: cli's updater is a one-shot binary with no
+# service to reinstall, and agent has no updater installer at all. The guard
+# here is FILE PRESENCE under INNER_DIR, not a hardcoded component allowlist —
+# exactly like preflight.sh's `[ -f … ]` guard in tools/release.sh's outer
+# bootstrap staging, and unlike install.sh's per-component, unconditionally
+# REQUIRED resolution (cmd/rkit/build.go line ~394). A component that never
+# grows the file is simply unaffected; nothing here needs to change to add or
+# drop one. Mirrors updaterInstallPayload in cmd/rkit/assemble.go.
+updater_install_src() {
+    local p="${INNER_DIR}/$1/updater.install.sh"
+    [ -f "${p}" ] && printf '%s\n' "${p}"
+    return 0
+}
+
 # stage_payload_extras <comp> <src-dir> <assemble-dir> — copy the component's
 # flat payload extras into the staged bundle, executable.
 #
@@ -48,10 +71,15 @@ payload_file_extras() {
 # each caller keeps ownership of where its own install.sh comes from. That is
 # what lets relay share the manifest without changing a byte of its payload.
 #
-# Every extra comes from the component source tree on both paths, so <src-dir>
-# is the whole provenance. A declared extra missing from the source is a hard
-# error: a payload whose updater then dies on "cannot open ./update.sh" is the
-# same class of defect as a gateway shipped without migrations/.
+# payload_file_extras's members all come from the component source tree on
+# both paths, so <src-dir> is their whole provenance. A declared one missing
+# from the source is a hard error: a payload whose updater then dies on
+# "cannot open ./update.sh" is the same class of defect as a gateway shipped
+# without migrations/.
+#
+# updater.install.sh is the ONE exception: like install.sh, it comes from THIS
+# repo's own inner/<comp>/ rather than <src-dir>, so it is staged separately,
+# right below, and its absence is never an error — see updater_install_src.
 stage_payload_extras() {
     local comp="$1" src="$2" dest="$3" s
     for s in $(payload_file_extras "${comp}"); do
@@ -62,6 +90,12 @@ stage_payload_extras() {
         cp "${src}/${s}" "${dest}/${s}"
         chmod 0755 "${dest}/${s}"
     done
+    local ui
+    ui="$(updater_install_src "${comp}")"
+    if [ -n "${ui}" ]; then
+        cp "${ui}" "${dest}/updater.install.sh"
+        chmod 0755 "${dest}/updater.install.sh"
+    fi
     # The SHARED ladder is staged HERE, from the one function both of release.sh's
     # assembly sites already call, rather than as a third open-coded copy beside
     # them — the open-coded copy is exactly what shipped a gateway with no
@@ -118,10 +152,22 @@ SHARED_MIGRATIONS_DIR="${SHARED_MIGRATIONS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0
 # the shared ladder, one basename per line, sorted. Discovered by glob rather
 # than listed, so adding one stays a one-file change; mirrors sharedMigration
 # Scripts in cmd/rkit/assemble.go.
+#
+# TEST SUITES ARE NOT PAYLOAD. The glob ships whatever is in the directory, and
+# a suite written beside its subject put 25 KB of test harness, chmod 0755, into
+# every edge, cli and relay zip. Suites belong in tools/<name>.test.sh — which
+# is where every other shell suite in this repo lives, and where the one that
+# got in has been moved to — and this exclusion is the second lock on that
+# door: a *.test.sh or *_test.sh under inner/_shared/migrations is never staged.
+# cmd/rkit/assemble.go's sharedMigrationScripts drops the same two patterns, and
+# cmd/rkit/payload_manifest_test.go compares the two lists name-for-name.
 shared_migration_scripts() {
     local p
     for p in "${SHARED_MIGRATIONS_DIR}"/*.sh; do
         [ -f "${p}" ] || continue
+        case "$(basename "${p}")" in
+            *.test.sh | *_test.sh) continue ;;
+        esac
         printf '%s\n' "$(basename "${p}")"
     done | sort
 }
@@ -161,13 +207,22 @@ takes_shared_ladder() {
 # gateway-repo change. edge's covers come from the separate edge.web tree and
 # are emitted by name (their content, not their names, depends on that tree).
 payload_manifest() {
-    local comp="$1" src="$2" s p
+    local comp="$1" src="$2" s p ui
     for s in $(payload_file_extras "${comp}"); do
         printf '%s\n' "${s}"
     done
+    # updater.install.sh: sourced from THIS repo's inner/<comp>/, like
+    # install.sh — not from <src-dir> like payload_file_extras' members — so it
+    # is resolved via updater_install_src rather than folded into that list.
+    # Emitted for whichever components actually have it (edge, gateway today);
+    # see updater_install_src for the presence guard.
+    ui="$(updater_install_src "${comp}")"
+    if [ -n "${ui}" ]; then
+        printf 'updater.install.sh\n'
+    fi
     case "${comp}" in
         gateway)
-            for p in "${src}"/migrations/*.sh; do
+            for p in "${src}"/migrations/*; do
                 [ -f "${p}" ] || continue
                 printf 'migrations/%s\n' "$(basename "${p}")"
             done
@@ -249,11 +304,11 @@ stage_component_migrations() {
         done
         return 0
     fi
-    for p in "${src}"/migrations/*.sh; do
+    for p in "${src}"/migrations/*; do
         [ -f "${p}" ] || continue
         base="$(basename "${p}")"
         cp "${p}" "${dest}/migrations/${base}"
-        chmod 0755 "${dest}/migrations/${base}"
+        case "${base}" in *.sh) chmod 0755 "${dest}/migrations/${base}" ;; esac
         found=1
     done
     if [ "${found}" != 1 ]; then
@@ -347,6 +402,46 @@ ledger_file_migrations() {
     ' "$1"
 }
 
+# assert_updater_ledger <comp> <src-dir> <zip> <members> — the UPDATER track's
+# own ledger, migrations/updater-ledger: a second, separate invocation of the
+# same shared run.sh that walks migrations/ledger, created per component by
+# Task 10 (edge, gateway, relay — cli and agent have no updater and are never
+# checked here). First row: adopt_updater_unit.sh.
+#
+# OPTIONAL TODAY, CHECKED THE MOMENT ONE EXISTS: no component in this repo's
+# own fixtures ships one yet, so a source tree without migrations/updater-ledger
+# is not an error — nothing here names it. The moment a component's source DOES
+# carry one, the same reasoning as the serve ledger applies verbatim: a row
+# naming a script the zip does not carry is a rung run.sh refuses on, on every
+# host, after the cut — and a release that cannot migrate must not be signed.
+assert_updater_ledger() {
+    local comp="$1" src="$2" zip_path="$3" members="$4"
+    case "${comp}" in edge|gateway|relay) ;; *) return 0 ;; esac
+
+    local ledger="${src}/migrations/updater-ledger"
+    [ -f "${ledger}" ] || return 0
+
+    if ! printf '%s\n' "${members}" | grep -qxF 'migrations/updater-ledger'; then
+        echo "✗ ${comp} payload has no migrations/updater-ledger: ${zip_path}" >&2
+        echo "  ${ledger} exists in source but was not staged into the zip; the updater" >&2
+        echo "  track's ladder invocation would refuse on every host." >&2
+        return 1
+    fi
+
+    local named name
+    if ! named="$(ledger_file_migrations "${ledger}")"; then
+        echo "✗ unparseable ${comp} updater ledger in ${ledger}" >&2
+        return 1
+    fi
+    # shellcheck disable=SC2086  # ${named} is an intentional newline-list of script names; word-splitting is the point.
+    for name in ${named}; do
+        if ! printf '%s\n' "${members}" | grep -qxF "migrations/${name}"; then
+            echo "✗ ${comp} updater migration \"${name}\" is named in the ledger of ${ledger} but is not in ${zip_path}" >&2
+            return 1
+        fi
+    done
+}
+
 assert_payload_migrations() {
     local comp="$1" zip_path="$2" src="$3"
     case "${comp}" in gateway|edge|cli|relay) ;; *) return 0 ;; esac
@@ -404,6 +499,7 @@ assert_payload_migrations() {
                 return 1
             fi
         done
+        assert_updater_ledger "${comp}" "${src}" "${zip_path}" "${members}" || return 1
         return 0
     fi
 
@@ -452,4 +548,5 @@ assert_payload_migrations() {
             return 1
         fi
     done
+    assert_updater_ledger "${comp}" "${src}" "${zip_path}" "${members}" || return 1
 }
