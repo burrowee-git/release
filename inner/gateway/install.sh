@@ -1446,11 +1446,11 @@ load_units() {
             # which modes call load_units at all, below), and the two that do are
             # operator-initiated install verbs.
             #
-            # Loud on failure and not fatal. New binaries under an old daemon is
-            # the one outcome that looks like a clean install and is not, so it is
-            # never swallowed; but the units on disk are still the durable
-            # outcome, and a supervisor-less host (a container) must still finish
-            # the install — same contract as every other step here.
+            # Loud on failure. New binaries under an old daemon is the one
+            # outcome that looks like a clean install and is not, so it is never
+            # swallowed. `restart`'s own status is a diagnosis, not the verdict:
+            # it is funnelled into the probe below the same way start_unit_linux
+            # funnels enable/restart into its is-active check.
             if ! run_root systemctl restart burrowee-gateway.service; then
                 echo "error: 'systemctl restart burrowee-gateway.service' failed — the newly" >&2
                 echo "error: installed binaries are on disk, but the daemon still running is the" >&2
@@ -1458,16 +1458,32 @@ load_units() {
                 echo "error: until it is restarted, and a unit rewritten to a new ExecStart has" >&2
                 echo "error: not taken effect." >&2
                 echo "hint: restart it by hand: sudo systemctl restart burrowee-gateway.service" >&2
-            else
-                # The Linux serve unit is the one start that does NOT go through
-                # start_unit_linux — `restart` carries its own diagnosis above,
-                # and it already fails when the unit does not come back. So the
-                # flag is set on its success branch, for the same reason and with
-                # the same meaning as the Darwin one: a restart was attempted and
-                # the daemon is up. The failure branch leaves it 0 — it has warned
-                # already, and spending the ceiling to rediscover a known failure
-                # is noise on top of it.
+            fi
+
+            # THE PROBE — gateway on Linux was the last component/platform pair
+            # without one, and the only place the policy "an installer that exits
+            # 0 has left the component running" (design rule 3) still did not
+            # hold. `enable --now` reports success for a unit whose ExecStart dies
+            # on start, and `restart` exiting 0 says the transaction was accepted,
+            # not that the daemon is up a moment later. Only is-active answers the
+            # question the install's exit status is claiming to answer.
+            #
+            # FATAL, like every other serve start in the tree: start_unit_linux
+            # and start_unit_darwin both return 1 here, and load_units is called
+            # unguarded under `set -e`. A container with no systemd never reaches
+            # this branch with an enabled unit to begin with — it fails at
+            # daemon-reload's `|| true` and has no unit to probe.
+            #
+            # THE FLAG IS ARMED FROM THE PROBE, not from restart's status: a
+            # daemon that starts and dies a second later would otherwise arm the
+            # 60s wait for a version it can never report.
+            if run_root systemctl is-active --quiet burrowee-gateway.service; then
+                echo "systemd service burrowee-gateway.service enabled + (re)started"
                 SERVE_UNIT_STARTED=1
+            else
+                echo "error: burrowee-gateway.service is not active after enable --now" >&2
+                echo "hint: sudo systemctl status burrowee-gateway.service" >&2
+                return 1
             fi
 
             # A reinstall over an already-running (possibly stale) updater must advance
