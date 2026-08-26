@@ -90,6 +90,8 @@ cd "${REPO_ROOT}"
 
 # shellcheck source=tools/vulncheck.sh
 source "${REPO_ROOT}/tools/vulncheck.sh"
+# shellcheck source=tools/module_gate.sh
+source "${REPO_ROOT}/tools/module_gate.sh"
 # shellcheck source=tools/apple_sign.sh
 source "${REPO_ROOT}/tools/apple_sign.sh"
 # shellcheck source=tools/updater_pin.sh
@@ -1209,6 +1211,14 @@ if [ "${DRY_RUN}" != 1 ]; then
             || { echo "✗ cannot ssh to ${RELEASE_HOST}" >&2; exit 1; }
     fi
 fi
+
+# Outer-bootstrap trust-chain gate (every cut, including --dry-run): the modules
+# are locked, their dependencies ordered, and the committed bootstraps are what
+# the generator writes. Runs before the first build for the same reason
+# vulncheck_gate does — a tree whose install chain is not what it claims must
+# never mint an artifact. Which suites are in the set, and why the red ones and
+# sync-modules.sh itself are not, is documented in tools/module_gate.sh.
+module_gate
 
 # CVE hard gate (public releases only): scan every module we're about to build.
 # Runs before the first build so a vulnerable cut never produces a binary.
