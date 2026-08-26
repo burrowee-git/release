@@ -841,6 +841,7 @@ dl "SHA256SUMS.txt"         "SHA256SUMS.txt"
 dl "SHA256SUMS.txt.minisig" "SHA256SUMS.txt.minisig"
 
 # ---- require minisign ---------------------------------------------------
+# BEGIN require-minisign
 # minisign is the trust root: it must already be on PATH from a trusted source
 # (your package manager). We never auto-fetch the verifier — a binary pulled
 # over the network and run unverified would itself become an unverified trust
@@ -860,8 +861,10 @@ else
     upstream: https://github.com/jedisct1/minisign
     Verification is mandatory; this installer will NOT run an unverified verifier."
 fi
+# END require-minisign
 
 # ---- VERIFY (the trust gate) --------------------------------------------
+# BEGIN verify-signature
 info "verifying signature"
 # 1) signature over the sums file, using the baked pubkey (inline, no key fetch).
 # Capture stdout — minisign prints the SIGNED "Trusted comment:" line there, and
@@ -871,6 +874,7 @@ info "verifying signature"
 verify_out="$("$MINISIGN" -V -P "$PUBKEY" -m "$TMP/SHA256SUMS.txt" -x "$TMP/SHA256SUMS.txt.minisig")" \
     || fail "signature verification failed — aborting (refusing to install unverified bytes)"
 ok "minisign signature valid"
+# END verify-signature
 
 # 1b) BIND the verified bytes to the resolved $TAG. Signature + checksum alone
 # prove the bytes are a genuine Burrowee release — NOT that they are the release

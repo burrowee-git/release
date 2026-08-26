@@ -807,36 +807,10 @@ dl "SHA256SUMS.txt"         "SHA256SUMS.txt"
 dl "SHA256SUMS.txt.minisig" "SHA256SUMS.txt.minisig"
 
 # ---- require minisign ---------------------------------------------------
-# minisign is the trust root: it must already be on PATH from a trusted source
-# (your package manager). We never auto-fetch the verifier — a binary pulled
-# over the network and run unverified would itself become an unverified trust
-# root, defeating the whole signature chain. Verification is mandatory and is
-# only ever performed by a minisign the operator already trusts.
-if command -v minisign >/dev/null 2>&1; then
-    MINISIGN=minisign
-else
-    case "$OS" in
-        darwin) hint="install Homebrew if you don't have it, then minisign:
-      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
-      brew install minisign" ;;
-        *)      hint="apt-get install minisign  (or your distro's package manager)" ;;
-    esac
-    fail "minisign is required and is not installed — install it and re-run.
-    $hint
-    upstream: https://github.com/jedisct1/minisign
-    Verification is mandatory; this installer will NOT run an unverified verifier."
-fi
+@INCLUDE:require-minisign@
 
 # ---- VERIFY (the trust gate) --------------------------------------------
-info "verifying signature"
-# 1) signature over the sums file, using the baked pubkey (inline, no key fetch).
-# Capture stdout — minisign prints the SIGNED "Trusted comment:" line there, and
-# that comment is the only version-bearing field in the whole verified set (the
-# zip name and SHA256SUMS.txt are both version-independent). stderr is left
-# attached so a verification failure still shows minisign's own diagnostics.
-verify_out="$("$MINISIGN" -V -P "$PUBKEY" -m "$TMP/SHA256SUMS.txt" -x "$TMP/SHA256SUMS.txt.minisig")" \
-    || fail "signature verification failed — aborting (refusing to install unverified bytes)"
-ok "minisign signature valid"
+@INCLUDE:verify-signature@
 
 # 1b) BIND the verified bytes to the resolved $TAG. Signature + checksum alone
 # prove the bytes are a genuine Burrowee release — NOT that they are the release
