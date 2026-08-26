@@ -187,10 +187,16 @@ FP="$("$OPENSSL" pkey -in "$KEY" -pubout -outform DER 2>/dev/null \
 info "key fingerprint: $FP"
 
 # ---- platform detection -------------------------------------------------
+# Darwin is refused HERE, before anything is downloaded. The relay installer has
+# no launchd branch — it manages services purely through $SYSTEMCTL — so a macOS
+# run used to place four binaries, run the migration ladder, write the version
+# marker and self-copy, and only THEN die on "systemctl: command not found",
+# leaving a half-installed host. Refusing up front is strictly better than
+# aborting mid-install. Revisit when relay actually ships a launchd unit.
 case "$(uname -s)" in
-    Darwin) OS=darwin ;;
     Linux)  OS=linux ;;
-    *)      fail "unsupported OS: $(uname -s) (burrowee relay ships darwin + linux only)" ;;
+    Darwin) fail "burrowee relay has no macOS support: its installer manages services through systemd only (linux arm64 + amd64)" ;;
+    *)      fail "unsupported OS: $(uname -s) (burrowee relay ships linux only)" ;;
 esac
 case "$(uname -m)" in
     arm64|aarch64) ARCH=arm64 ;;
@@ -299,17 +305,34 @@ ok "minisign signature valid"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
-grep -qF "$ZIP_FILE" "$TMP/SHA256SUMS.txt" \
+# BEGIN verify-checksum-inline  (tools/test-checksum-verify.sh extracts this
+# block verbatim out of the GENERATED relay/install.sh and drives it against
+# stub hashers — keep it self-contained between the markers, and keep the
+# markers. Named "-inline" so it does not collide with the "checksum-verify"
+# markers in tools/bootstrap.template.sh: this block also defines its own
+# hasher probe inline, rather than calling a shared sha256_of helper.)
+#
+# Compare ONE hash directly instead of `-c --ignore-missing` over the whole
+# sums file: --ignore-missing is a 2016-era addition (Digest::SHA 5.96 /
+# coreutils 8.25) and the stock shasum on an older macOS rejects it outright
+# ("Unknown option: ignore-missing"). That non-zero exit came back through the
+# `||` as "checksum mismatch", so every install on such a host accused a
+# perfectly good zip of tampering. Picking the line by EXACT filename (awk, both
+# the "hash  name" and binary "hash *name" spellings) is also stricter than the
+# substring grep this replaces.
+want="$(awk -v f="$ZIP_FILE" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/SHA256SUMS.txt")"
+[ -n "$want" ] \
     || fail "no checksum entry for $ZIP_FILE — release incomplete or tampered; aborting"
 if command -v shasum >/dev/null 2>&1; then
-    ( cd "$TMP" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
+    got="$(shasum -a 256 "$TMP/$ZIP_FILE" | awk '{print $1}')"
 elif command -v sha256sum >/dev/null 2>&1; then
-    ( cd "$TMP" && sha256sum -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
+    got="$(sha256sum "$TMP/$ZIP_FILE" | awk '{print $1}')"
 else
     fail "neither shasum nor sha256sum found — cannot verify; aborting"
 fi
+[ -n "$got" ] && [ "$want" = "$got" ] \
+    || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
+# END verify-checksum-inline
 ok "checksum verified"
 
 # ---- unzip + exec the verified inner installer --------------------------

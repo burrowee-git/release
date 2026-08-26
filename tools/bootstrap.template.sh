@@ -889,17 +889,26 @@ ok "version binding verified ($TAG)"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
-grep -qF "$ZIP" "$TMP/SHA256SUMS.txt" \
+# BEGIN checksum-verify  (tools/test-checksum-verify.sh extracts this block
+# verbatim out of the GENERATED cli/install.sh and drives it against stub
+# hashers — keep it self-contained between the markers, and keep the markers.)
+#
+# Compare ONE hash directly instead of `-c --ignore-missing` over the whole
+# sums file: --ignore-missing is a 2016-era addition (Digest::SHA 5.96 /
+# coreutils 8.25) and the stock shasum on an older macOS rejects it outright
+# ("Unknown option: ignore-missing"). That non-zero exit came back through the
+# `||` as "checksum mismatch", so every install on such a host accused a
+# perfectly good zip of tampering. Picking the line by EXACT filename (awk, both
+# the "hash  name" and binary "hash *name" spellings) is also stricter than the
+# substring grep this replaces.
+want="$(awk -v f="$ZIP" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/SHA256SUMS.txt")"
+[ -n "$want" ] \
     || fail "no checksum entry for $ZIP — release incomplete or tampered; aborting"
-if command -v shasum >/dev/null 2>&1; then
-    ( cd "$TMP" && shasum -a 256 -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-elif command -v sha256sum >/dev/null 2>&1; then
-    ( cd "$TMP" && sha256sum -c --ignore-missing SHA256SUMS.txt >/dev/null ) \
-        || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-else
-    fail "neither shasum nor sha256sum found — cannot verify; aborting"
-fi
+got="$(sha256_of "$TMP/$ZIP")" \
+    || fail "neither shasum nor sha256sum found — cannot verify; aborting"
+[ -n "$got" ] && [ "$want" = "$got" ] \
+    || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
+# END checksum-verify
 ok "checksum verified"
 
 # ---- unzip + exec the verified inner installer --------------------------

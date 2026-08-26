@@ -48,7 +48,8 @@ yourself:
 ```sh
 minisign -V -P "$(cat burrowee-release.pub)" \
   -m SHA256SUMS.txt -x SHA256SUMS.txt.minisig
-shasum -a 256 -c --ignore-missing SHA256SUMS.txt   # or sha256sum on Linux
+grep " <file>$" SHA256SUMS.txt > one.txt          # just the file you downloaded
+shasum -a 256 -c one.txt                          # or sha256sum -c on Linux
 ```
 
 A failed signature check means the bytes are untrusted — do not install them.
