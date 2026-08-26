@@ -478,11 +478,14 @@ VERSION_MARKER="$COMP_HOME/installed-version"
 #
 # SERVE_UNIT_STARTED is the wait's gate — 1 only once the SERVE unit has been
 # (re)started AND verified up by start_unit_darwin / start_unit_linux. There is
-# nothing to wait for when nothing was restarted, when BURROWEE_NO_RESTART
-# staged the units without starting them, or when the start already failed: that
-# path has already said so, and spending the ceiling to rediscover a known
-# failure is noise on top of it. A started UPDATER never sets it — a live updater
-# says nothing about the daemon that serves.
+# nothing to wait for when nothing was restarted — which includes a mode that
+# stages the units without starting them, and only ONE of the three components
+# sharing this block has one: gateway reads BURROWEE_NO_RESTART, edge and relay
+# read it nowhere, so for them the gate is the start itself and nothing else.
+# Nor when the start already failed: that path has already said so, and spending
+# the ceiling to rediscover a known failure is noise on top of it. A started
+# UPDATER never sets it — a live updater says nothing about the daemon that
+# serves.
 # ---------------------------------------------------------------------------
 WAIT_INTERVAL="${WAIT_INTERVAL:-2}"
 WAIT_CEILING="${WAIT_CEILING:-60}"
@@ -690,8 +693,30 @@ start_unit_linux() {
 # FIRST, and the first token would be the dispatcher's stamp rather than this
 # binary's.
 binary_version_stamp() {
+    # BOUNDED, because this runs the freshly-placed SERVE binary and an
+    # unbounded `version` on a binary that hangs hangs the installer — with no
+    # ceiling and no message, at the step whose whole job is to report. The Go
+    # original of this probe (core runtime_version) bounds the same command at
+    # 2s; this is that bound.
+    #
+    # THERE IS NO TIMEOUT HELPER IN THESE SCRIPTS TO REUSE, and acquiring a hard
+    # dependency for one probe is the wrong trade — as is the shell-only
+    # substitute, which cannot tell a finished child from a zombie and so pays
+    # its ceiling on EVERY install. So the bound is applied where the host
+    # already has it (`timeout`, GNU coreutils, present on every Linux host;
+    # `gtimeout`, the same tool where a macOS host installed coreutils) and is
+    # absent otherwise, leaving today's behaviour exactly as it is. A stock
+    # macOS host is therefore still unbounded here — a known, stated gap, not an
+    # oversight.
+    _bvs_bound=""
+    if command -v timeout >/dev/null 2>&1; then
+        _bvs_bound="timeout 2"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        _bvs_bound="gtimeout 2"
+    fi
     # shellcheck disable=SC2020  # the repeated '\n' is deliberate: BOTH space and tab map to a newline.
-    BURROWEE_DISPATCHER_VERSION="" "$1" version 2>/dev/null \
+    # shellcheck disable=SC2086  # $_bvs_bound is a command PREFIX and must word-split; empty means no bound.
+    BURROWEE_DISPATCHER_VERSION="" $_bvs_bound "$1" version 2>/dev/null \
         | tr ' \t' '\n\n' \
         | grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$' \
         | head -n 1
