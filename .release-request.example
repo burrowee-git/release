@@ -5,8 +5,9 @@
 # write here executes with the toolchain on PATH. One NAME="value" per line;
 # `#` comments and blank lines are fine. LF endings only: a CRLF copy leaves a
 # trailing \r inside the last value, and the cut aborts on a component name it
-# cannot match. Only COMPONENTS and FLAGS are read — a mistyped FLAG= is not an
-# error, it is silently ignored, and the run proceeds as if you had set nothing.
+# cannot match. Only COMPONENTS, FLAGS and KEEP_WINDOW are read — a mistyped
+# FLAG= is not an error, it is silently ignored, and the run proceeds as if you
+# had set nothing.
 #
 # COMPONENTS — one or more of: cli gateway edge agent relay
 #
@@ -57,6 +58,58 @@
 # run by hand. --distribute-only is recognised only as release.sh's FIRST
 # argument, because it takes its component and stamp positionally — so it cannot
 # be expressed in FLAGS at all.
+#
+# KEEP_WINDOW — hold the Terminal window open after the cut finishes.
+#
+# Unset (the default), what happens to this window is Terminal's decision, not
+# the launcher's: the launcher exits, and the profile's "When the shell exits"
+# setting acts on that.
+#
+#     Terminal ▸ Settings ▸ Profiles ▸ <your profile> ▸ Shell
+#     "When the shell exits:"  Close the window / Close if the shell exited
+#                              cleanly / Don't close the window
+#
+# The launcher READS that setting at the start of every run — it never writes it,
+# and it never fails a cut over it — and puts one line in the log saying what it
+# will mean, naming the profile it read. Two of the three settings were measured
+# directly; the numbers stored in the plist are menu tags, not menu positions,
+# and reading them the obvious way gets them backwards:
+#
+#   - "Close the window" closes it HOWEVER the cut ended. A cut that fails then
+#     disappears off the screen, which is the one outcome this window exists to
+#     prevent — so when this is the setting AND the cut fails, the launcher holds
+#     the window itself, unasked, and says so. You do not have to remember to set
+#     KEEP_WINDOW before the run that goes wrong.
+#   - "Don't close the window" leaves it up after every cut. Nothing to hold;
+#     close it yourself.
+#   - "Close if the shell exited cleanly" is the setting you probably want, and
+#     it is the one that was NOT measured — no profile on the machine this was
+#     written on used it. The launcher reports an unrecognised value as
+#     unrecognised instead of filing it under whichever branch looks likely.
+#
+# There is deliberately no scripted close. Asking Terminal to close the window
+# over an Apple Event was built, tested and thrown away: sent from inside the
+# running .command it left the window PINNED open — Terminal will not close a
+# window whose tab still holds a process, and that process is the launcher — and
+# a window asked once then stopped closing by any route at all, including the
+# shell-exit setting that had been working before. Measured against a control
+# that did nothing but exit 0 and closed every time. It also wanted an Automation
+# grant nobody should have to give a release script. Hence: no Apple Events,
+# nothing to allow, nothing to deny.
+#
+# Set KEEP_WINDOW=1 when you are debugging the cut itself and want the scrollback
+# in front of you rather than in a file — release.sh's own output, the notarize
+# chatter, and anything you were about to run in that window by hand. The only
+# way a script can hold a window Terminal is about to close is to not finish, so
+# the run stops at the end and waits for Return. That happens AFTER .release.log
+# is written and closed, sentinel included, so an agent watching the log for
+# RELEASE-EXIT: reads it and carries on while the window is still sitting there.
+#
+#     KEEP_WINDOW=1
+#
+# The launcher reads it from the environment too, but an opened .command does not
+# inherit your shell's environment — LaunchServices does not carry it across — so
+# this file is the setting that actually reaches a double-clicked or `open`ed run.
 
 COMPONENTS="edge"
 FLAGS="--public"
