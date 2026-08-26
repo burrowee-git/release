@@ -221,9 +221,7 @@ else
 fi
 
 # ---- helpers ------------------------------------------------------------
-fail() { printf '\n  ✗ %s\n\n' "$*" >&2; exit 1; }
-info() { printf '  → %s\n' "$*"; }
-ok()   { printf '  ✓ %s\n' "$*"; }
+@INCLUDE:helpers@
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay

@@ -87,6 +87,40 @@ sha256_of() {
     else echo "✗ neither shasum nor sha256sum found — cannot compute preflight pin" >&2; exit 1; fi
 }
 
+MODDIR="$ROOT/tools/modules"
+
+# expand_includes <template> — write <template> to stdout with every line that is
+# exactly `@INCLUDE:<name>@` replaced by tools/modules/<name>.sh, wrapped in
+# `# BEGIN <name>` / `# END <name>` markers and with the module's own header
+# lines dropped. Runs BEFORE the sed substitution pass, so a module may contain
+# @COMP@ / @MODE@ / @BRAND@ / @brand@ like any other template text.
+#
+# The bootstrap is the trust anchor: it is delivered as `curl … | sh` and fetches
+# no code. Modules are therefore spliced HERE, at generation time, and never
+# sourced at runtime.
+expand_includes() {
+    awk -v moddir="$MODDIR" '
+        /^@INCLUDE:[a-z0-9-]+@$/ {
+            name = substr($0, 10, length($0) - 9 - 1)
+            path = moddir "/" name ".sh"
+            if ((getline probe < path) < 0) {
+                printf("✗ @INCLUDE:%s@ but %s does not exist\n", name, path) > "/dev/stderr"
+                exit 1
+            }
+            close(path)
+            printf("# BEGIN %s\n", name)
+            while ((getline line < path) > 0) {
+                if (line ~ /^# (module|needs|since):/) continue
+                print line
+            }
+            close(path)
+            printf("# END %s\n", name)
+            next
+        }
+        { print }
+    ' "$1"
+}
+
 # ---- resolve the pubkey -------------------------------------------------
 pubfile=""
 for cand in "${BURROWEE_PUBKEY_FILE:-}" "$ROOT/burrowee-release.pub" "$ROOT/tools/testkeys/test.pub"; do
@@ -197,11 +231,14 @@ for comp in cli gateway edge agent; do
     for mode in $modes; do
         out="$ROOT/$comp/$mode.sh"
         tmp="$out.tmp.$$"
-        sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
-            -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
-            "$TEMPLATE" > "$tmp"
+        expand_includes "$TEMPLATE" \
+            | sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+                  -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
+                  -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+            > "$tmp"
         chmod +x "$tmp"
         mv -f "$tmp" "$out"
+        grep -q '@INCLUDE:' "$out" && { echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
         echo "✓ wrote $out  (mode $mode, version floor $min_version)"
     done
 done
@@ -213,7 +250,11 @@ comp=relay
 out="$ROOT/$comp/install.sh"
 mkdir -p "$ROOT/$comp"
 tmp="$out.tmp.$$"
-sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" "$RELAY_TEMPLATE" > "$tmp"
+expand_includes "$RELAY_TEMPLATE" \
+    | sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+          -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+    > "$tmp"
 chmod +x "$tmp"
 mv -f "$tmp" "$out"
+grep -q '@INCLUDE:' "$out" && { echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
 echo "✓ wrote $out  (relay gated-channel bootstrap)"

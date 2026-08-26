@@ -1,0 +1,3 @@
+# module            version  sha256-of-authored-text
+# rewritten by tools/lock-modules.sh — do not hand-edit
+helpers            v1       e84df2c8a4bd2a4be9b0182739be87d0db8cbac2ae0ce9de9dd21741360b0595
