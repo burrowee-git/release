@@ -81,3 +81,10 @@ Canonical, shared across all Burrowee repos — read from `burrowee-git/resource
 Operator-only (machine-local, not required to contribute): release signing, deploy,
 and the local repo registry live outside these repos and are not needed to write code
 here.
+
+## Tasks
+
+Deferred work for this repo lives at [`../../tasks/`](../../tasks/) (project
+root, beside `code/` — outside the working tree). One file per task, grouped by
+creation date: `tasks/{YYYY-MM-DD}/{priority}-{slug}-{hours}h.md`. `ls P*` shows
+open work; `completed.*` / `dropped.*` are renamed in place.
