@@ -191,10 +191,19 @@ for comp in cli gateway edge agent; do
         *)    nginx=0 ;;
     esac
 
-    # (1) preflight — tmp-then-mv atomic write.
+    # (1) preflight — tmp-then-mv atomic write. expand_includes runs OFF the left
+    # of any pipeline (assigned via its own redirection) so `set -e` sees its
+    # exit status directly — a pipeline's left-hand failure is otherwise
+    # invisible under plain `set -eu`. The @INCLUDE: guard runs against the tmp
+    # file BEFORE the mv, so a bad render never reaches the file preflight.sh's
+    # sha256 gets pinned from, let alone the published path.
     pf_out="$ROOT/$comp/preflight.sh"
     pf_tmp="$pf_out.tmp.$$"
-    sed -e "s|@COMP@|$comp|g" -e "s|@NGINX@|$nginx|g" "$PREFLIGHT_TEMPLATE" > "$pf_tmp"
+    pf_exp="$pf_out.exp.$$"
+    expand_includes "$PREFLIGHT_TEMPLATE" > "$pf_exp"
+    sed -e "s|@COMP@|$comp|g" -e "s|@NGINX@|$nginx|g" "$pf_exp" > "$pf_tmp"
+    rm -f "$pf_exp"
+    grep -q '@INCLUDE:' "$pf_tmp" && { rm -f "$pf_tmp"; echo "✗ unexpanded @INCLUDE in $pf_out" >&2; exit 1; }
     chmod +x "$pf_tmp"
     mv -f "$pf_tmp" "$pf_out"
     pf_sha="$(sha256_of "$pf_out")"
@@ -231,14 +240,24 @@ for comp in cli gateway edge agent; do
     for mode in $modes; do
         out="$ROOT/$comp/$mode.sh"
         tmp="$out.tmp.$$"
-        expand_includes "$TEMPLATE" \
-            | sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
-                  -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
-                  -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
-            > "$tmp"
+        exp="$out.exp.$$"
+        # expand_includes runs OFF the left of the pipeline (its own redirection,
+        # not a pipe) so `set -e` sees its exit status: a missing module makes
+        # awk exit 1 without ever printing the `@INCLUDE:` line, so the
+        # post-render grep guard below has nothing left to catch — only a
+        # directly-checked exit status catches that failure. The guard still
+        # runs, against the tmp file BEFORE the mv, to catch the OTHER failure
+        # shape: a malformed include name (e.g. `@INCLUDE:Helpers@`) that the
+        # awk regex declines to match and so passes through literally.
+        expand_includes "$TEMPLATE" > "$exp"
+        sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+            -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
+            -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+            "$exp" > "$tmp"
+        rm -f "$exp"
+        grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
         chmod +x "$tmp"
         mv -f "$tmp" "$out"
-        grep -q '@INCLUDE:' "$out" && { echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
         echo "✓ wrote $out  (mode $mode, version floor $min_version)"
     done
 done
@@ -250,11 +269,13 @@ comp=relay
 out="$ROOT/$comp/install.sh"
 mkdir -p "$ROOT/$comp"
 tmp="$out.tmp.$$"
-expand_includes "$RELAY_TEMPLATE" \
-    | sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" \
-          -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
-    > "$tmp"
+exp="$out.exp.$$"
+expand_includes "$RELAY_TEMPLATE" > "$exp"
+sed -e "s|@COMP@|$comp|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+    -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+    "$exp" > "$tmp"
+rm -f "$exp"
+grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
 chmod +x "$tmp"
 mv -f "$tmp" "$out"
-grep -q '@INCLUDE:' "$out" && { echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
 echo "✓ wrote $out  (relay gated-channel bootstrap)"
