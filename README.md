@@ -46,7 +46,7 @@ The signing public key lives in this repo and is mirrored at
 yourself:
 
 ```sh
-minisign -V -P "$(cat burrowee-release.pub)" \
+minisign -V -P "$(cat burrowee-release.pub | tail -n1)" \
   -m SHA256SUMS.txt -x SHA256SUMS.txt.minisig
 f=<file>                                      # the file you downloaded
 want=$(awk -v f="$f" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' SHA256SUMS.txt)
