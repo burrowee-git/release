@@ -8,6 +8,13 @@
 #                 generated bootstrap that includes the dependent module. An
 #                 undeclared order bug surfaces on an operator's machine as
 #                 "command not found", after the download and before the gate.
+#                 Also: any module (other than helpers itself) that CALLS
+#                 fail/info/ok must declare `# needs: helpers` even if no
+#                 bootstrap yet exposes the gap — the DEPS ordering check above
+#                 only believes what a module declares about itself, so an
+#                 under-declared dependency passes it clean today and dies on
+#                 an operator's machine the day some other template composition
+#                 splices this module without helpers ahead of it.
 # (3) GENERATOR — regenerating leaves every committed bootstrap byte-identical.
 set -eu
 
@@ -74,6 +81,36 @@ for relgen in $GENERATED_REL; do
             [ "$seen" = 1 ] || die "$gen includes '$mod' which needs '$dep', but '$dep' is not included before it"
         done
     done
+done
+printf '  OK\n'
+
+printf '\n=== DEPS: modules calling fail/info/ok declare needs: helpers ===\n'
+# A module's own `# needs:` line is the only thing the ordering check above
+# trusts — it never looks at what the module's BODY actually calls. Catch the
+# mismatch directly: search each module (other than helpers itself) for an
+# invocation — not merely the word — of fail/info/ok, and require `helpers` in
+# its needs line if found. The pattern requires a non-identifier character (or
+# start of line) before the name and the start of a quoted/variable argument
+# right after it, so `check_ok(`, a comment mentioning "ok", or the word "ok"
+# inside a message string do not trip it — only an actual `fail "..."` /
+# `info "..."` / `ok "..."`-shaped call does.
+for f in "$MODDIR"/*.sh; do
+    n="$(basename "$f" .sh)"
+    [ "$n" = "helpers" ] && continue
+    body="$(grep -vE '^[[:space:]]*#' "$f")"
+    calls=""
+    for fn in fail info ok; do
+        pat="(^|[^A-Za-z0-9_])${fn}[[:space:]]+[\"\$]"
+        if printf '%s\n' "$body" | grep -Eq "$pat"; then
+            calls="$calls $fn"
+        fi
+    done
+    [ -n "$calls" ] || continue
+    needs="$(sed -n '1,6s/^# needs:[[:space:]]*//p' "$f")"
+    case " $needs " in
+        *' helpers '*) ;;
+        *) die "$f calls$calls (from the helpers module) but its '# needs:' line does not list 'helpers'" ;;
+    esac
 done
 printf '  OK\n'
 

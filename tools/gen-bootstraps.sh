@@ -98,6 +98,13 @@ MODDIR="$ROOT/tools/modules"
 # The bootstrap is the trust anchor: it is delivered as `curl … | sh` and fetches
 # no code. Modules are therefore spliced HERE, at generation time, and never
 # sourced at runtime.
+#
+# The emitted `# BEGIN <name>` / `# END <name>` markers are LOAD-BEARING: one
+# or more tools/test-*.sh scripts (e.g. tools/test-checksum-verify.sh) extract
+# a module's spliced block out of a GENERATED bootstrap by matching these exact
+# marker names verbatim. Renaming a module (and therefore its markers) without
+# first grepping tools/test-*.sh for the old name will silently break that
+# extraction.
 expand_includes() {
     awk -v moddir="$MODDIR" '
         /^@INCLUDE:[a-z0-9-]+@$/ {

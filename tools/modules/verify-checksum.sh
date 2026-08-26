@@ -1,6 +1,9 @@
-# module: verify-checksum  v3
-# needs:  sha256
+# module: verify-checksum  v4
+# needs:  sha256 helpers
 # since:  2026-08-25  (v3: portable — no --ignore-missing)
+# v4: declares needs: helpers too — the block below calls fail(), which lives
+# in the helpers module, not sha256. Under-declaring it was latent only because
+# every current template happens to splice helpers before this module.
 # Compare ONE hash directly instead of `-c --ignore-missing` over the whole
 # sums file: --ignore-missing is a 2016-era addition (Digest::SHA 5.96 /
 # coreutils 8.25) and the stock shasum on an older macOS rejects it outright
