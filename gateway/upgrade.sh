@@ -286,11 +286,16 @@ resolve_elevate() {
 ELEVATE="$(resolve_elevate)"
 # ---- END pinned elevation literals ---------------------------------------
 
+# BEGIN sha256
+# sha256 of a file, as a bare hex digest. shasum on macOS, sha256sum on stock
+# Debian/Ubuntu (which ships no perl and therefore no shasum). Both spellings
+# are pre-2016-safe: no --ignore-missing, no --check.
 sha256_of() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
     elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
     else return 1; fi
 }
+# END sha256
 
 # BEGIN release-resolver  (tools/test-version-floor.sh extracts this block — and
 # the version-resolve block further down — verbatim and drives them against a
@@ -891,10 +896,7 @@ ok "version binding verified ($TAG)"
 
 info "verifying checksum"
 # 2) the zip's checksum against the now-trusted sums file
-# BEGIN checksum-verify  (tools/test-checksum-verify.sh extracts this block
-# verbatim out of the GENERATED cli/install.sh and drives it against stub
-# hashers — keep it self-contained between the markers, and keep the markers.)
-#
+# BEGIN verify-checksum
 # Compare ONE hash directly instead of `-c --ignore-missing` over the whole
 # sums file: --ignore-missing is a 2016-era addition (Digest::SHA 5.96 /
 # coreutils 8.25) and the stock shasum on an older macOS rejects it outright
@@ -910,7 +912,7 @@ got="$(sha256_of "$TMP/$ZIP")" \
     || fail "neither shasum nor sha256sum found — cannot verify; aborting"
 [ -n "$got" ] && [ "$want" = "$got" ] \
     || fail "checksum mismatch — aborting (zip tampered or download corrupted)"
-# END checksum-verify
+# END verify-checksum
 ok "checksum verified"
 
 # ---- unzip + exec the verified inner installer --------------------------

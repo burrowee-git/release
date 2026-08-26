@@ -43,9 +43,9 @@ printf '  OK: no --ignore-missing\n'
 # ---- (2) extract the shipped block ------------------------------------------
 # Out of the GENERATED cli/install.sh, so the test drives the bytes that ship.
 say "BEHAVIOR: extracting the checksum-verify block from cli/install.sh"
-sed -n '/^# BEGIN checksum-verify/,/^# END checksum-verify/p' \
+sed -n '/^# BEGIN verify-checksum/,/^# END verify-checksum/p' \
     "$REPO_ROOT/cli/install.sh" > "$W/verify.sh"
-grep -q '^# END checksum-verify' "$W/verify.sh" \
+grep -q '^# END verify-checksum' "$W/verify.sh" \
     || die "could not extract the checksum-verify block from cli/install.sh (markers missing or renamed)"
 sed -n '/^sha256_of()/,/^}/p' "$REPO_ROOT/cli/install.sh" > "$W/sha256_of.sh"
 grep -q '^sha256_of()' "$W/sha256_of.sh" \
