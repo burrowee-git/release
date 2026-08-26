@@ -742,6 +742,7 @@ fi
 # END version-resolve
 
 # ---- download -----------------------------------------------------------
+# BEGIN download
 if [ -n "$DL_BASE" ]; then
     BASE="$DL_BASE"
 else
@@ -839,6 +840,7 @@ dl "$ZIP" "$ZIP"
 info "downloading SHA256SUMS.txt + signature"
 dl "SHA256SUMS.txt"         "SHA256SUMS.txt"
 dl "SHA256SUMS.txt.minisig" "SHA256SUMS.txt.minisig"
+# END download
 
 # ---- require minisign ---------------------------------------------------
 # BEGIN require-minisign
