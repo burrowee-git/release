@@ -373,6 +373,22 @@ if [ -n "$MIGRATIONS_DIR" ] && [ -f "$MIGRATIONS_DIR/run.sh" ] && [ -f "$MIGRATI
 	fi
 fi
 
+# $_RUNROOT / $_SYSTEMCTL — the two seams the start helpers below are
+# parameterised on. Those bodies are byte-identical across the four inner
+# installers and pinned that way (tools/prefix-gate-drift.test.sh), so anything
+# that legitimately differs between them has to be a variable read by the body,
+# never an edit to the body — and never a wrapper at the call site either, since
+# `$_RUNROOT cmd` with _RUNROOT=run_root expands to a function call and a call
+# site cannot reach inside the helper's own launchctl/systemctl invocations.
+#
+# This script self-elevates per command and is documented as `curl … | sh` with
+# no sudo prefix, so the invoking shell is NOT assumed to be root: elevate is
+# how every other privileged step here reaches root, and the start helpers use
+# the same door. $SYSTEMCTL is this file's declared test seam (see the header),
+# so the helper reaches systemctl through it rather than around it.
+_RUNROOT="elevate"
+_SYSTEMCTL="$SYSTEMCTL"
+
 # start_unit_darwin <label> <plist> — start a launchd system unit and verify it
 # took. bootstrap's codes 5 (already loaded) and 37 are benign races against an
 # async bootout — every other code is a real failure and must not be swallowed.
@@ -382,10 +398,20 @@ fi
 # The status is captured with `|| _rc=$?`, NOT inside `if ! ...`: POSIX makes $?
 # the NEGATED status of a `!` pipeline, so an `if !` branch would read 0 for
 # every failure and tolerate nothing.
+#
+# EVERY launchctl CALL GOES THROUGH $_RUNROOT, and that is not decoration. Only
+# one of the four scripts carrying this body refuses to run as anything but
+# root; the other three are entered by an unprivileged shell and elevate per
+# command. Unprivileged on macOS, `launchctl bootstrap` exits 5 — a code the
+# case below TOLERATES as "already loaded" — and `launchctl print` exits 113, so
+# a bare-launchctl body would sail past the guard, have enable and kickstart
+# denied and swallowed, and then abort at the probe with the daemon already
+# booted out by the caller. Silent non-elevation is the one failure this helper
+# cannot see.
 start_unit_darwin() {
     _label="$1"; _plist="$2"
     _rc=0
-    launchctl bootstrap system "$_plist" 2>/dev/null || _rc=$?
+    $_RUNROOT launchctl bootstrap system "$_plist" 2>/dev/null || _rc=$?
     case "$_rc" in
         0 | 5 | 37) ;; # started / already loaded / async bootout still settling
         *)
@@ -398,9 +424,9 @@ start_unit_darwin() {
     # into the probe below rather than aborting under set -e: the probe is the only
     # thing that reports the label and a recovery command. `|| true` is safe here
     # ONLY because a verification immediately follows it — never widen it further.
-    launchctl enable "system/$_label" 2>/dev/null || true
-    launchctl kickstart -k "system/$_label" 2>/dev/null || true
-    if launchctl print "system/$_label" >/dev/null 2>&1; then
+    $_RUNROOT launchctl enable "system/$_label" 2>/dev/null || true
+    $_RUNROOT launchctl kickstart -k "system/$_label" 2>/dev/null || true
+    if $_RUNROOT launchctl print "system/$_label" >/dev/null 2>&1; then
         echo "launchd service $_label enabled + started"
     else
         echo "error: $_label did not come up after bootstrap" >&2
@@ -412,19 +438,24 @@ start_unit_darwin() {
 # start_unit_linux <unit> — enable, (re)start and verify a systemd system unit.
 # The probe is the point: enable --now on a unit that then dies must not be
 # reported as a started service.
+#
+# $_RUNROOT for the same reason as start_unit_darwin above; $_SYSTEMCTL because
+# two of the four scripts carrying this body declare a $SYSTEMCTL test seam and
+# still route every other systemctl call through it — a bare `systemctl` here
+# would be the one call that escaped it.
 start_unit_linux() {
     _unit="$1"
     # Failures here are funnelled into the is-active probe below rather than
     # aborting under set -e: the probe is the only thing that reports the unit and
     # a recovery command. `|| true` is safe here ONLY because a verification
     # immediately follows it — never widen it further.
-    systemctl enable --now "$_unit" 2>/dev/null || true
-    systemctl restart "$_unit" 2>/dev/null || true
-    if systemctl is-active --quiet "$_unit"; then
+    $_RUNROOT "$_SYSTEMCTL" enable --now "$_unit" 2>/dev/null || true
+    $_RUNROOT "$_SYSTEMCTL" restart "$_unit" 2>/dev/null || true
+    if $_RUNROOT "$_SYSTEMCTL" is-active --quiet "$_unit"; then
         echo "systemd service $_unit enabled + (re)started"
     else
         echo "error: $_unit is not active after enable --now" >&2
-        echo "hint: sudo systemctl status $_unit" >&2
+        echo "hint: sudo $_SYSTEMCTL status $_unit" >&2
         return 1
     fi
 }

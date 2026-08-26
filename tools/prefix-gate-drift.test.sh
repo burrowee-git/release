@@ -60,12 +60,20 @@
 #   3. start_unit_darwin() is byte-identical across ALL FOUR files, same
 #      shape as claim 1: it takes a label/plist pair as arguments, so it
 #      carries no component-specific text and any difference is drift.
-#      Gateway calls it through run_root at the call site (Task 3) — the
-#      helper BODY is untouched by that, which is exactly what this claim
-#      checks.
+#      WHAT DOES differ between the four — elevation — is read from a
+#      variable the body expands, NOT patched into the body and NOT wrapped
+#      at the call site: each file sets $_RUNROOT just above the helpers
+#      (empty in the root-only inner/edge/install.sh, run_root in
+#      inner/gateway/install.sh, elevate in both updater.install.sh), and
+#      the body spells every launchctl call `$_RUNROOT launchctl …`. A call
+#      site cannot wrap what the helper runs internally, which is why the
+#      prefix is inside the pinned body and the pin still holds.
 #
 #   4. start_unit_linux() is byte-identical across ALL FOUR files, same
-#      reasoning as claim 3.
+#      reasoning as claim 3, with a second seam for the same reason:
+#      $_SYSTEMCTL, so the two updater.install.sh files reach systemctl
+#      through the $SYSTEMCTL test seam they declare and still use
+#      everywhere else.
 #
 # THE ANCHOR IS STRUCTURAL, NOT ONE COMPONENT'S PRONE. `normalize_dir() {` /
 # `start_unit_darwin() {` / `start_unit_linux() {`, each closed by a `}` /
@@ -290,7 +298,7 @@ for _c in $COMPONENTS; do
         _f="inner/$_c/$_kind"
 
         _block="$(extract_start_unit_darwin "$HERE/$_f")"
-        for _want in "launchctl bootstrap system" "launchctl enable" "launchctl kickstart"; do
+        for _want in '$_RUNROOT launchctl bootstrap system' '$_RUNROOT launchctl enable' '$_RUNROOT launchctl kickstart' '$_RUNROOT launchctl print'; do
             case "$_block" in
             *"$_want"*) ;;
             *) fatal "$_f: the extracted start_unit_darwin no longer contains [$_want] — the comparison is vacuous" ;;
@@ -308,7 +316,7 @@ for _c in $COMPONENTS; do
         fi
 
         _block="$(extract_start_unit_linux "$HERE/$_f")"
-        for _want in "systemctl enable --now" "systemctl restart" "systemctl is-active"; do
+        for _want in '$_RUNROOT "$_SYSTEMCTL" enable --now' '$_RUNROOT "$_SYSTEMCTL" restart' '$_RUNROOT "$_SYSTEMCTL" is-active'; do
             case "$_block" in
             *"$_want"*) ;;
             *) fatal "$_f: the extracted start_unit_linux no longer contains [$_want] — the comparison is vacuous" ;;

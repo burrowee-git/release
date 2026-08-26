@@ -62,19 +62,43 @@ grep -q 'launchctl bootstrap system "\$_plist" .*|| true' "$EDGE" &&
 
 # enable + kickstart must sit OUTSIDE the case, at the helper's top level
 # (four-space indent), so an already-loaded label still gets both.
-grep -q '^    launchctl enable "system/\$_label"' "$EDGE" ||
+grep -q '^    \$_RUNROOT launchctl enable "system/\$_label"' "$EDGE" ||
     note "launchctl enable is not unconditional in the darwin start helper"
-grep -q '^    launchctl kickstart -k "system/\$_label"' "$EDGE" ||
+grep -q '^    \$_RUNROOT launchctl kickstart -k "system/\$_label"' "$EDGE" ||
     note "launchctl kickstart is not unconditional in the darwin start helper"
 
-grep -q 'launchctl print "system/\$_label"' "$EDGE" ||
+grep -q '\$_RUNROOT launchctl print "system/\$_label"' "$EDGE" ||
     note "darwin start helper has no post-start probe"
 
 # ── the linux helper ─────────────────────────────────────────────────────
-grep -q 'systemctl enable --now "\$_unit"' "$EDGE" ||
+grep -q '\$_RUNROOT "\$_SYSTEMCTL" enable --now "\$_unit"' "$EDGE" ||
     note "linux start helper does not enable --now"
-grep -q 'systemctl is-active --quiet "\$_unit"' "$EDGE" ||
+grep -q '\$_RUNROOT "\$_SYSTEMCTL" is-active --quiet "\$_unit"' "$EDGE" ||
     note "linux start helper has no post-start probe"
+
+# ── EVERY supervisor call INSIDE the two helpers is elevated ─────────────
+# The helpers are shared verbatim with three scripts that are NOT root-only
+# (both updater.install.sh, which self-elevate per command, and gateway's
+# install.sh, which gateway-cli runs with the caller's privileges). A bare
+# launchctl there is not a cosmetic difference: unprivileged, `bootstrap`
+# exits 5 — which the case above TOLERATES as "already loaded" — while
+# enable/kickstart are denied and swallowed, so the helper walks past its own
+# guard and dies at the probe with the daemon already booted out. This file
+# reads edge's copy, and the drift pin makes that the other three's copy too.
+#
+# SCOPED TO THE HELPER BODIES, not the file: edge's own call sites are bare on
+# purpose (this one installer refuses to run as anything but root), and only
+# the shared bodies have to hold for all four.
+helper_body() {
+    awk -v fn="$1() {" 'index($0, fn) == 1 { on = 1 } on { print; if ($0 == "}") exit }' "$EDGE"
+}
+BODIES="$(helper_body start_unit_darwin; helper_body start_unit_linux)"
+case "$BODIES" in
+    *launchctl*) ;;
+    *) note "the extracted start helper bodies contain no launchctl call — this check is vacuous" ;;
+esac
+printf '%s\n' "$BODIES" | grep -qE '^ +(launchctl|"?systemctl)' &&
+    note "un-elevated supervisor call inside a start helper — every one must be \$_RUNROOT launchctl / \$_RUNROOT \"\$_SYSTEMCTL\""
 
 # ── both units are routed through the helpers ────────────────────────────
 for call in \
