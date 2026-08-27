@@ -75,11 +75,14 @@
 # <comp>/beta.upgrade.sh and (edge/gateway) <comp>/beta.updater.install.sh — the
 # SAME template, SAME modes, with @CHANNEL@=beta and the floor read from
 # versions/<comp>.beta.stamp instead of versions/<comp>.stamp. That file's
-# PRESENCE is the open-beta-cycle flag (tools/version.sh's convention): when it
-# is absent the twins are not rendered, and any beta.*.sh left over from a since-
-# closed cycle is deleted — a closed cycle must never leave a live beta bootstrap
-# resolving against nothing. versions/<comp>.beta.stamp is written by
-# tools/release.sh's beta channel, not by this script.
+# PRESENCE is the open-beta-cycle flag: when it is absent the twins are not
+# rendered, and any beta.*.sh left over from a since-closed cycle is deleted —
+# a closed cycle must never leave a live beta bootstrap resolving against
+# nothing. TWO files gate this one state, one per half of it:
+# versions/<comp>.beta (the beta semver source, tools/version.sh reads and
+# writes it) and versions/<comp>.beta.stamp (the full cut stamp this script
+# reads, written by tools/release.sh's beta channel at cut time) — neither is
+# written by this script.
 #
 #   BURROWEE_MIN_VERSION_FILE   test-only override for the FILE min_version_of
 #                                reads (mirrors BURROWEE_MIN_VERSION, which
@@ -263,17 +266,22 @@ for comp in cli gateway edge agent; do
     # today — @COMP@/install.sh etc., prefix ""); beta renders its
     # @COMP@/beta.install.sh (etc.) twin ONLY while a beta cycle is open, i.e.
     # versions/<comp>.beta.stamp exists — that file's presence is the open-cycle
-    # flag (tools/version.sh's convention). When it is absent, any beta.*.sh
-    # left over from a since-closed cycle is deleted: a closed cycle must never
-    # leave a beta bootstrap on disk that still resolves (against nothing).
+    # flag (see the header comment: it is the cut-time companion to
+    # versions/<comp>.beta, which tools/version.sh owns). When it is absent,
+    # any beta.*.sh left over from a since-closed cycle is deleted: a closed
+    # cycle must never leave a beta bootstrap on disk that still resolves
+    # (against nothing). The sweep globs beta.*.sh rather than walking the
+    # current $modes, so a component that later leaves
+    # UPDATER_INSTALL_COMPONENTS still loses its stray beta.updater.install.sh.
     for channel in stable beta; do
         if [ "$channel" = beta ]; then
             beta_stamp="$ROOT/versions/${comp}.beta.stamp"
             if [ ! -f "$beta_stamp" ]; then
                 stale=""
-                for mode in $modes; do
-                    f="$ROOT/$comp/beta.$mode.sh"
-                    if [ -f "$f" ]; then rm -f "$f"; stale="$stale beta.$mode.sh"; fi
+                for f in "$ROOT/$comp"/beta.*.sh; do
+                    [ -e "$f" ] || continue   # glob matched nothing
+                    rm -f "$f"
+                    stale="$stale $(basename "$f")"
                 done
                 if [ -n "$stale" ]; then
                     echo "→ $comp: no beta cycle open ($beta_stamp absent) — removed stale:$stale"

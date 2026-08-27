@@ -63,11 +63,23 @@ printf '  OK\n'
 # the DEPS loop (which must also see preflight.sh — a module spliced into the
 # preflight template needs the same ordering check as one in the bootstrap
 # template) and the GENERATOR diff below.
+# The beta.* entries only exist while a beta cycle is open (versions/<comp>.beta.stamp
+# present — see tools/gen-bootstraps.sh); every loop below that reads a path off
+# this list already guards with `[ -f "$gen" ] || continue`, and a nonexistent
+# pathspec is a silent no-op to `git status --porcelain --`, so listing them
+# unconditionally is safe today (no beta cycle open in this repo) and correct once
+# one is: without this, a hand-edited cli/beta.install.sh would show up in `git
+# status` but not in the GENERATOR gate's restricted diff below, which checks
+# ONLY this list — exactly the gap this list exists to close.
 GENERATED_REL="cli/preflight.sh cli/install.sh cli/upgrade.sh \
 gateway/preflight.sh gateway/install.sh gateway/upgrade.sh gateway/updater.install.sh \
 edge/preflight.sh edge/install.sh edge/upgrade.sh edge/updater.install.sh \
 agent/preflight.sh agent/install.sh agent/upgrade.sh \
-relay/install.sh"
+relay/install.sh \
+cli/beta.install.sh cli/beta.upgrade.sh \
+gateway/beta.install.sh gateway/beta.upgrade.sh gateway/beta.updater.install.sh \
+edge/beta.install.sh edge/beta.upgrade.sh edge/beta.updater.install.sh \
+agent/beta.install.sh agent/beta.upgrade.sh"
 
 printf '\n=== DEPS: every "# needs:" is included earlier ===\n'
 for relgen in $GENERATED_REL; do

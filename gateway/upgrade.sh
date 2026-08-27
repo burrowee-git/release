@@ -139,6 +139,19 @@ case "$CHANNEL" in
     beta) SELF="beta.$MODE.sh" ;;
     *)    SELF="$MODE.sh" ;;
 esac
+# TAG_RE — the one tag shape this channel may ever accept, anchored on $COMP
+# too so a component mismatch cannot slip through. EVERY tag consumer is held
+# to this SAME regex: GitHub's answer and a GH_PROXY mirror's answer (both via
+# latest_tag(), below) AND the console catalog's answer (version-resolve,
+# spliced in further down) — a consumer that is not is exactly how a channel
+# leaks (a stable host reading a .beta. stamp off the one path — the catalog —
+# that used to be unfiltered, or the mirror image on a beta host). Set here,
+# not inside latest_tag(): that function runs at the end of a pipeline, in a
+# subshell, so a variable it set would not survive to the caller.
+case "$CHANNEL" in
+    beta) TAG_RE="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+    *)    TAG_RE="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+esac
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
 PREFLIGHT_SHA256="d10032f3773183d8fdce1648fd70f39609018cb5d32e4fd3bd2a938316a57420"
 # The version floor: the stamp this component was at when THIS installer was
@@ -323,22 +336,21 @@ sha256_of() {
 # Prefer jq (structural); fall back to grep/sed. Used for both the direct
 # api.github.com fetch and the GH_PROXY mirror retry.
 #
-# $CHANNEL narrows the match to the tag SHAPE that channel publishes: stable
-# tags never carry a ".beta." segment and beta tags always do (see
-# tools/version.sh), so one anchored regex per channel keeps the two from ever
-# seeing each other's tags — a stable resolve ignores a higher beta, and a beta
-# resolve ignores every stable, in both orderings.
+# $TAG_RE (set once, beside $CHANNEL in the knobs section above) narrows the
+# match to the tag SHAPE that channel publishes: stable tags never carry a
+# ".beta." segment and beta tags always do (see tools/version.sh), so one
+# anchored regex per channel keeps the two from ever seeing each other's tags
+# — a stable resolve ignores a higher beta, and a beta resolve ignores every
+# stable, in both orderings. NOT computed locally here: this function's
+# output runs through a pipeline (it is invoked as `latest_tag < file`, and
+# feeds one), so anything it assigned would live only in a subshell.
 latest_tag() {
-    case "$CHANNEL" in
-        beta) _lt_re="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
-        *)    _lt_re="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
-    esac
     if command -v jq >/dev/null 2>&1; then
         jq -r '.[].tag_name // empty' 2>/dev/null
     else
         grep -E '^[[:space:]]*"tag_name"[[:space:]]*:' \
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-    fi | grep -E "$_lt_re" | sort -V | tail -n1
+    fi | grep -E "$TAG_RE" | sort -V | tail -n1
 }
 
 # next_page_url — read a `curl -D` header dump on stdin and print the URL from
@@ -621,8 +633,8 @@ while [ $# -gt 0 ]; do
         *)
             case "$MODE" in
                 upgrade) : ;;
-                install) usage_error "$COMP/install.sh takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?" ;;
-                *)       usage_error "$COMP/$MODE.sh takes no arguments, and was given '$1'" ;;
+                install) usage_error "$COMP/$SELF takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?" ;;
+                *)       usage_error "$COMP/$SELF takes no arguments, and was given '$1'" ;;
             esac
             [ -z "$FLOOR" ] \
                 || usage_error "unexpected extra argument '$1' — upgrade.sh takes at most one, the migration floor"
@@ -733,7 +745,7 @@ else
         # (structural — reads only the top-level "version" field). Without jq,
         # split the body on field boundaries FIRST (tr , and { → newlines): the
         # console serves MINIFIED single-line JSON, so a line-anchored grep
-        # would never match it. The field-anchored grep plus the gateway/v… shape
+        # would never match it. The field-anchored grep plus the $TAG_RE shape
         # check below keep a "version":"…" substring buried in notes or nested
         # metadata from spoofing the tag. (Bytes are still minisign+sha256
         # verified downstream; this closes a downgrade / wrong-version vector
@@ -747,10 +759,19 @@ else
                 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
                 | head -n1)" || true
         fi
-        case "$TAG" in
-            "$COMP"/v*) : ;;
-            *) TAG="" ;;
-        esac
+        # Shape-check against $TAG_RE — the SAME channel-anchored regex
+        # latest_tag() is held to, set once beside $CHANNEL. A bare "$COMP/v*"
+        # prefix check (the old shape here) accepts EITHER channel's tag shape,
+        # so a stable host with GitHub blocked (GH_ANSWERED=0, the beta guard
+        # above never runs) would silently install whatever the catalog named,
+        # including a .beta. release — and the mirror-image leak on a beta
+        # host. The catalog is exempt from the VERSION FLOOR below (it serves
+        # the last PROMOTED release, which legitimately trails the cut the
+        # floor is baked from), but it is never exempt from the CHANNEL shape:
+        # nothing downstream re-checks which channel a tag belongs to.
+        if [ -n "$TAG" ] && ! printf '%s\n' "$TAG" | grep -Eq "$TAG_RE"; then
+            TAG=""
+        fi
         [ -n "$TAG" ] \
             || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest gateway version; retry when either is available"
         info "console catalog: $TAG"

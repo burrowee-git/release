@@ -1,4 +1,4 @@
-# module: version-resolve  v2
+# module: version-resolve  v3
 # needs:  helpers
 # since:  2026-08-25
 # Read the per-component pin env var by name (no eval). $COMP is a baked
@@ -62,7 +62,7 @@ else
         # (structural — reads only the top-level "version" field). Without jq,
         # split the body on field boundaries FIRST (tr , and { → newlines): the
         # console serves MINIFIED single-line JSON, so a line-anchored grep
-        # would never match it. The field-anchored grep plus the @COMP@/v… shape
+        # would never match it. The field-anchored grep plus the $TAG_RE shape
         # check below keep a "version":"…" substring buried in notes or nested
         # metadata from spoofing the tag. (Bytes are still minisign+sha256
         # verified downstream; this closes a downgrade / wrong-version vector
@@ -76,10 +76,19 @@ else
                 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
                 | head -n1)" || true
         fi
-        case "$TAG" in
-            "$COMP"/v*) : ;;
-            *) TAG="" ;;
-        esac
+        # Shape-check against $TAG_RE — the SAME channel-anchored regex
+        # latest_tag() is held to, set once beside $CHANNEL. A bare "$COMP/v*"
+        # prefix check (the old shape here) accepts EITHER channel's tag shape,
+        # so a stable host with GitHub blocked (GH_ANSWERED=0, the beta guard
+        # above never runs) would silently install whatever the catalog named,
+        # including a .beta. release — and the mirror-image leak on a beta
+        # host. The catalog is exempt from the VERSION FLOOR below (it serves
+        # the last PROMOTED release, which legitimately trails the cut the
+        # floor is baked from), but it is never exempt from the CHANNEL shape:
+        # nothing downstream re-checks which channel a tag belongs to.
+        if [ -n "$TAG" ] && ! printf '%s\n' "$TAG" | grep -Eq "$TAG_RE"; then
+            TAG=""
+        fi
         [ -n "$TAG" ] \
             || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest @COMP@ version; retry when either is available"
         info "console catalog: $TAG"

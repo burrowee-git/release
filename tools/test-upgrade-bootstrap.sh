@@ -508,6 +508,7 @@ info() { :; }
 ok()   { :; }
 COMP=gateway
 CHANNEL=stable
+TAG_RE="^gateway/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$"
 REPO=burrowee-git/release
 DL_BASE=""
 BURROWEE_GATEWAY_VERSION=""

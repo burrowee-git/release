@@ -139,6 +139,19 @@ case "$CHANNEL" in
     beta) SELF="beta.$MODE.sh" ;;
     *)    SELF="$MODE.sh" ;;
 esac
+# TAG_RE — the one tag shape this channel may ever accept, anchored on $COMP
+# too so a component mismatch cannot slip through. EVERY tag consumer is held
+# to this SAME regex: GitHub's answer and a GH_PROXY mirror's answer (both via
+# latest_tag(), below) AND the console catalog's answer (version-resolve,
+# spliced in further down) — a consumer that is not is exactly how a channel
+# leaks (a stable host reading a .beta. stamp off the one path — the catalog —
+# that used to be unfiltered, or the mirror image on a beta host). Set here,
+# not inside latest_tag(): that function runs at the end of a pipeline, in a
+# subshell, so a variable it set would not survive to the caller.
+case "$CHANNEL" in
+    beta) TAG_RE="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+    *)    TAG_RE="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+esac
 PUBKEY="@PUBKEY@"
 PREFLIGHT_SHA256="@PREFLIGHT_SHA256@"
 # The version floor: the stamp this component was at when THIS installer was
@@ -310,22 +323,21 @@ ELEVATE="$(resolve_elevate)"
 # Prefer jq (structural); fall back to grep/sed. Used for both the direct
 # api.github.com fetch and the GH_PROXY mirror retry.
 #
-# $CHANNEL narrows the match to the tag SHAPE that channel publishes: stable
-# tags never carry a ".beta." segment and beta tags always do (see
-# tools/version.sh), so one anchored regex per channel keeps the two from ever
-# seeing each other's tags — a stable resolve ignores a higher beta, and a beta
-# resolve ignores every stable, in both orderings.
+# $TAG_RE (set once, beside $CHANNEL in the knobs section above) narrows the
+# match to the tag SHAPE that channel publishes: stable tags never carry a
+# ".beta." segment and beta tags always do (see tools/version.sh), so one
+# anchored regex per channel keeps the two from ever seeing each other's tags
+# — a stable resolve ignores a higher beta, and a beta resolve ignores every
+# stable, in both orderings. NOT computed locally here: this function's
+# output runs through a pipeline (it is invoked as `latest_tag < file`, and
+# feeds one), so anything it assigned would live only in a subshell.
 latest_tag() {
-    case "$CHANNEL" in
-        beta) _lt_re="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
-        *)    _lt_re="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
-    esac
     if command -v jq >/dev/null 2>&1; then
         jq -r '.[].tag_name // empty' 2>/dev/null
     else
         grep -E '^[[:space:]]*"tag_name"[[:space:]]*:' \
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-    fi | grep -E "$_lt_re" | sort -V | tail -n1
+    fi | grep -E "$TAG_RE" | sort -V | tail -n1
 }
 
 # next_page_url — read a `curl -D` header dump on stdin and print the URL from
@@ -590,8 +602,8 @@ while [ $# -gt 0 ]; do
         *)
             case "$MODE" in
                 upgrade) : ;;
-                install) usage_error "$COMP/install.sh takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?" ;;
-                *)       usage_error "$COMP/$MODE.sh takes no arguments, and was given '$1'" ;;
+                install) usage_error "$COMP/$SELF takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?" ;;
+                *)       usage_error "$COMP/$SELF takes no arguments, and was given '$1'" ;;
             esac
             [ -z "$FLOOR" ] \
                 || usage_error "unexpected extra argument '$1' — upgrade.sh takes at most one, the migration floor"
