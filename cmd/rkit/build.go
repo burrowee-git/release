@@ -228,7 +228,7 @@ func buildRun(o buildOpts) (err error) {
 	}
 
 	ctx := context.Background()
-	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir)
+	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir, "stable")
 	if err != nil {
 		return err
 	}
@@ -331,7 +331,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 		}
 	}
 	// 2. Stamp (read-only, no bump).
-	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir)
+	stamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", o.Component), o.SrcDir, "stable")
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +369,7 @@ func orchestrate(ctx context.Context, o Options) (*Result, error) {
 	// 4. Build the dispatcher matrix — bundled into every component zip, stamped
 	//    independently of the component (mirrors tools/release.sh's DISP_STAMP:
 	//    versions/burrowee + the dispatcher source worktree).
-	dispStamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", "burrowee"), o.DispatcherDir)
+	dispStamp, err := relconfig.Stamp(ctx, filepath.Join(o.RepoDir, "versions", "burrowee"), o.DispatcherDir, "stable")
 	if err != nil {
 		return nil, fmt.Errorf("dispatcher stamp: %w", err)
 	}

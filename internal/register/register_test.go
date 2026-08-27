@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +49,45 @@ func TestLoadConfigParsesMinimalToml(t *testing.T) {
 	}
 	if cfg.ConsoleURL != "https://c.example" || cfg.ClientID != "release-mini" {
 		t.Errorf("parsed: %+v", cfg)
+	}
+}
+
+// TestRegister_RefusesChannelStampMismatch verifies that Register decodes the
+// payload's component/version/channel and refuses locally — before
+// fetchNonce ever runs, so a doomed cut doesn't spend a nonce — when the
+// stamp's shape disagrees with the claimed channel (spec §4.1, same anchored
+// patterns as the console's release.StampMatchesChannel). ConsoleURL is a
+// fake, unreachable address; a network call would time out or error
+// differently than this check, which returns immediately.
+func TestRegister_RefusesChannelStampMismatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		wantErr string
+	}{
+		{
+			name:    "stable-shaped stamp claims beta channel",
+			payload: `{"component":"cli","version":"v0.1.3.2026.06.21.abc12345","channel":"beta"}`,
+			wantErr: "not a beta stamp",
+		},
+		{
+			name:    "beta-shaped stamp claims stable channel",
+			payload: `{"component":"cli","version":"v0.1.3.beta.2026.06.21.abc12345","channel":"stable"}`,
+			wantErr: "not a stable stamp",
+		},
+		{
+			name:    "beta-shaped stamp with no channel field (defaults to stable)",
+			payload: `{"component":"cli","version":"v0.1.3.beta.2026.06.21.abc12345"}`,
+			wantErr: "not a stable stamp",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{ConsoleURL: "https://release-register-test.invalid"}
+			err := Register(cfg, []byte(tc.payload), false)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Register: got %v, want error containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }

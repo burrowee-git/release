@@ -7,6 +7,7 @@
 //	burrowee-release-register keygen [--dir <d>]
 //	burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
 //	burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
+//	burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
 //	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
 //	burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--dir <d>] [--execute]
 package main
@@ -40,6 +41,8 @@ func main() {
 		runRegister(os.Args[2:])
 	case "publish":
 		runPublish(os.Args[2:])
+	case "publish-dir":
+		runPublishDir(os.Args[2:])
 	case "publish-relay":
 		runPublishRelay(os.Args[2:])
 	case "prune":
@@ -64,6 +67,7 @@ func usage() {
   burrowee-release-register keygen [--dir <d>]
   burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
   burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
+  burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--dir <d>] [--execute]`)
 }
@@ -140,11 +144,46 @@ func runPublish(args []string) {
 	}
 }
 
+// runPublishDir uploads a component's artifacts from a local directory to R2
+// under <comp>/<stamp>/. It reads R2 credentials from <dir>/config.toml +
+// r2.key (the same location the register tool uses for public components). No
+// catalog row is required — the files are read directly from --from-dir and
+// verified against SHA256SUMS.txt before upload.
+//
+// This is the general form of the direct-to-R2 upload: relay was the first
+// (and, before beta, only) private component, so publish-relay predates this
+// and stays as a thin wrapper below with its own flag names. A beta cut of
+// any component is private the same way until promoted (spec §5.3), so
+// cli/gateway/edge/agent go through this verb too.
+func runPublishDir(args []string) {
+	fs := flag.NewFlagSet("publish-dir", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
+	comp := fs.String("comp", "", "component: cli|gateway|edge|agent|relay (required)")
+	stamp := fs.String("stamp", "", "release stamp (e.g. v0.1.3.2026.06.21.abc12345) — becomes the R2 prefix <comp>/<stamp>/")
+	fromDir := fs.String("from-dir", "", "local directory containing the component artifacts (required)")
+	fs.Parse(args) //nolint:errcheck
+
+	if *comp == "" || *stamp == "" || *fromDir == "" {
+		fmt.Fprintln(os.Stderr, "publish-dir: --comp, --stamp and --from-dir are required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	_, r2cfg, err := register.LoadPublishConfig(*dir)
+	if err != nil {
+		log.Fatalf("publish-dir: %v", err)
+	}
+	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
+
+	if err := register.PublishFromDir(context.Background(), client, *comp, *fromDir, *stamp, os.Stdout); err != nil {
+		log.Fatalf("publish-dir: %v", err)
+	}
+}
+
 // runPublishRelay uploads relay artifacts from a local directory to R2 under
-// relay/<stamp>/. It reads R2 credentials from <dir>/config.toml + r2.key (the
-// same location the register tool uses for public components). No catalog row is
-// required — the files are read directly from --from-dir and verified against
-// SHA256SUMS.txt before upload.
+// relay/<stamp>/ — the old relay-only verb, kept with its original flag names
+// (no --comp) and now a thin wrapper over runPublishDir's underlying call
+// with comp = "relay".
 //
 // This is called by do_release_relay in release.sh after the signing step, in
 // place of the former scp block.
@@ -167,7 +206,7 @@ func runPublishRelay(args []string) {
 	}
 	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
 
-	if err := register.PublishFromDir(context.Background(), client, *fromDir, *stamp, os.Stdout); err != nil {
+	if err := register.PublishFromDir(context.Background(), client, "relay", *fromDir, *stamp, os.Stdout); err != nil {
 		log.Fatalf("publish-relay: %v", err)
 	}
 }

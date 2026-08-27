@@ -283,7 +283,7 @@ func TestBuildGateOnByDefaultCanBeSkipped(t *testing.T) {
 // duplicating the stamp scheme.
 func mustStamp(t *testing.T, repo, comp string) string {
 	t.Helper()
-	stamp, err := relconfig.Stamp(context.Background(), filepath.Join(repo, "versions", comp), repo)
+	stamp, err := relconfig.Stamp(context.Background(), filepath.Join(repo, "versions", comp), repo, "stable")
 	if err != nil {
 		t.Fatal(err)
 	}

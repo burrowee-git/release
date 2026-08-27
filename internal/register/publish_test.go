@@ -129,7 +129,7 @@ func TestPublishFromDirHappyPath(t *testing.T) {
 	}
 
 	p := &fakePutter{}
-	if err := PublishFromDir(context.Background(), p, dir, stamp, io.Discard); err != nil {
+	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
 
@@ -181,12 +181,67 @@ func TestPublishFromDirSha256Mismatch(t *testing.T) {
 	}
 
 	p := &fakePutter{}
-	err := PublishFromDir(context.Background(), p, dir, stamp, io.Discard)
+	err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("want sha256 mismatch error, got %v", err)
 	}
 	if len(p.puts) != 0 {
 		t.Errorf("must not PUT on sha256 mismatch: %v", p.puts)
+	}
+}
+
+// TestPublishFromDirCLI verifies that PublishFromDir generalises beyond relay:
+// for comp="cli" it uploads burrowee-cli-<plat>.zip (not latest.<plat>.zip)
+// under cli/<stamp>/ — the key layout the console's presigner and register
+// endpoint already expect for a beta cut of any component (spec §4.1/§5.3).
+func TestPublishFromDirCLI(t *testing.T) {
+	dir := t.TempDir()
+	stamp := "v0.1.3.beta.2026.06.21.abc12345"
+
+	platforms := []string{"darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64"}
+	bodies := map[string]string{}
+	for _, plat := range platforms {
+		bodies["burrowee-cli-"+plat+".zip"] = "ZIP-" + plat
+	}
+
+	for name, body := range bodies {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var sums strings.Builder
+	for _, plat := range platforms {
+		name := "burrowee-cli-" + plat + ".zip"
+		h := sha256.Sum256([]byte(bodies[name]))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt.minisig"), []byte("SIG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakePutter{}
+	if err := PublishFromDir(context.Background(), p, "cli", dir, stamp, io.Discard); err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+
+	if len(p.puts) != 6 {
+		t.Fatalf("want 6 R2 puts, got %d: %v", len(p.puts), p.puts)
+	}
+	for _, plat := range platforms {
+		key := "cli/" + stamp + "/burrowee-cli-" + plat + ".zip"
+		if _, ok := p.puts[key]; !ok {
+			t.Errorf("missing R2 key %s; got %v", key, p.puts)
+		}
+	}
+	if _, ok := p.puts["cli/"+stamp+"/SHA256SUMS.txt"]; !ok {
+		t.Errorf("missing R2 key cli/%s/SHA256SUMS.txt", stamp)
+	}
+	if _, ok := p.puts["cli/"+stamp+"/SHA256SUMS.txt.minisig"]; !ok {
+		t.Errorf("missing R2 key cli/%s/SHA256SUMS.txt.minisig", stamp)
 	}
 }
 
