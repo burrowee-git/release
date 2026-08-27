@@ -507,6 +507,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 info() { :; }
 ok()   { :; }
 COMP=gateway
+CHANNEL=stable
 REPO=burrowee-git/release
 DL_BASE=""
 BURROWEE_GATEWAY_VERSION=""

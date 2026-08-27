@@ -70,6 +70,20 @@
 #                          BURROWEE_PUBKEY_FILE). Offline tests fabricate their
 #                          own release stamps, which have nothing to do with the
 #                          repo's real versions/<comp>.stamp.
+#
+# BETA TWINS: for every public component this also renders <comp>/beta.install.sh,
+# <comp>/beta.upgrade.sh and (edge/gateway) <comp>/beta.updater.install.sh — the
+# SAME template, SAME modes, with @CHANNEL@=beta and the floor read from
+# versions/<comp>.beta.stamp instead of versions/<comp>.stamp. That file's
+# PRESENCE is the open-beta-cycle flag (tools/version.sh's convention): when it
+# is absent the twins are not rendered, and any beta.*.sh left over from a since-
+# closed cycle is deleted — a closed cycle must never leave a live beta bootstrap
+# resolving against nothing. versions/<comp>.beta.stamp is written by
+# tools/release.sh's beta channel, not by this script.
+#
+#   BURROWEE_MIN_VERSION_FILE   test-only override for the FILE min_version_of
+#                                reads (mirrors BURROWEE_MIN_VERSION, which
+#                                overrides the VALUE outright and wins over both).
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -161,7 +175,7 @@ min_version_of() {
         _mv="${BURROWEE_MIN_VERSION}"
         _mv_src="\$BURROWEE_MIN_VERSION"
     else
-        _mv_file="$ROOT/versions/${_mv_comp}.stamp"
+        _mv_file="${BURROWEE_MIN_VERSION_FILE:-$ROOT/versions/${_mv_comp}.stamp}"
         [ -f "$_mv_file" ] \
             || { echo "✗ missing $_mv_file — cannot bake ${_mv_comp}'s version floor (cut the component, or set BURROWEE_MIN_VERSION for a test render)" >&2; exit 1; }
         _mv="$(tr -d '[:space:]' < "$_mv_file")"
@@ -239,33 +253,65 @@ for comp in cli gateway edge agent; do
     # fixed fact about the component, decided at design time, unlike "ships a
     # ladder this cut" above. cmd/rkit's
     # TestUpdaterInstallBootstrapsAreExactlyEdgeAndGateway pins this set too.
-    min_version="$(min_version_of "$comp")"
     modes="install upgrade"
     case " $UPDATER_INSTALL_COMPONENTS " in
         *" $comp "*) modes="$modes updater.install" ;;
     esac
-    for mode in $modes; do
-        out="$ROOT/$comp/$mode.sh"
-        tmp="$out.tmp.$$"
-        exp="$out.exp.$$"
-        # expand_includes runs OFF the left of the pipeline (its own redirection,
-        # not a pipe) so `set -e` sees its exit status: a missing module makes
-        # awk exit 1 without ever printing the `@INCLUDE:` line, so the
-        # post-render grep guard below has nothing left to catch — only a
-        # directly-checked exit status catches that failure. The guard still
-        # runs, against the tmp file BEFORE the mv, to catch the OTHER failure
-        # shape: a malformed include name (e.g. `@INCLUDE:Helpers@`) that the
-        # awk regex declines to match and so passes through literally.
-        expand_includes "$TEMPLATE" > "$exp"
-        sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
-            -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
-            -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
-            "$exp" > "$tmp"
-        rm -f "$exp"
-        grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
-        chmod +x "$tmp"
-        mv -f "$tmp" "$out"
-        echo "✓ wrote $out  (mode $mode, version floor $min_version)"
+
+    # ---- stable, then beta (twin) ---------------------------------------
+    # SAME modes loop, wrapped in a channel loop: stable always renders (as
+    # today — @COMP@/install.sh etc., prefix ""); beta renders its
+    # @COMP@/beta.install.sh (etc.) twin ONLY while a beta cycle is open, i.e.
+    # versions/<comp>.beta.stamp exists — that file's presence is the open-cycle
+    # flag (tools/version.sh's convention). When it is absent, any beta.*.sh
+    # left over from a since-closed cycle is deleted: a closed cycle must never
+    # leave a beta bootstrap on disk that still resolves (against nothing).
+    for channel in stable beta; do
+        if [ "$channel" = beta ]; then
+            beta_stamp="$ROOT/versions/${comp}.beta.stamp"
+            if [ ! -f "$beta_stamp" ]; then
+                stale=""
+                for mode in $modes; do
+                    f="$ROOT/$comp/beta.$mode.sh"
+                    if [ -f "$f" ]; then rm -f "$f"; stale="$stale beta.$mode.sh"; fi
+                done
+                if [ -n "$stale" ]; then
+                    echo "→ $comp: no beta cycle open ($beta_stamp absent) — removed stale:$stale"
+                else
+                    echo "→ $comp: no beta cycle open ($beta_stamp absent) — beta twins not rendered"
+                fi
+                continue
+            fi
+            min_version="$(BURROWEE_MIN_VERSION_FILE="$beta_stamp" min_version_of "$comp")"
+            prefix="beta."
+        else
+            min_version="$(min_version_of "$comp")"
+            prefix=""
+        fi
+        for mode in $modes; do
+            out="$ROOT/$comp/${prefix}${mode}.sh"
+            tmp="$out.tmp.$$"
+            exp="$out.exp.$$"
+            # expand_includes runs OFF the left of the pipeline (its own redirection,
+            # not a pipe) so `set -e` sees its exit status: a missing module makes
+            # awk exit 1 without ever printing the `@INCLUDE:` line, so the
+            # post-render grep guard below has nothing left to catch — only a
+            # directly-checked exit status catches that failure. The guard still
+            # runs, against the tmp file BEFORE the mv, to catch the OTHER failure
+            # shape: a malformed include name (e.g. `@INCLUDE:Helpers@`) that the
+            # awk regex declines to match and so passes through literally.
+            expand_includes "$TEMPLATE" > "$exp"
+            sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+                -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
+                -e "s|@CHANNEL@|$channel|g" \
+                -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+                "$exp" > "$tmp"
+            rm -f "$exp"
+            grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
+            chmod +x "$tmp"
+            mv -f "$tmp" "$out"
+            echo "✓ wrote $out  (channel $channel, mode $mode, version floor $min_version)"
+        done
     done
 done
 

@@ -126,6 +126,19 @@ COMP="@COMP@"
 # read from the environment: the mode is a property of the URL the operator
 # curl'd, and a runtime override would make one file behave as the other.
 MODE="@MODE@"
+# "stable" or "beta" — which release channel this bootstrap resolves against.
+# Baked at render time, same as MODE and for the same reason: the channel is a
+# property of WHICH URL was published (release.burrowee.com/@COMP@/install.sh
+# vs its .../beta.install.sh twin), never a runtime override.
+CHANNEL="@CHANNEL@"
+# SELF — this bootstrap's own filename as the operator curl'd it: "install.sh"
+# on stable, "beta.install.sh" on its beta twin (same for upgrade.sh /
+# updater.install.sh). Used wherever this script names itself back to the
+# operator, so a beta.install.sh does not point someone at plain install.sh.
+case "$CHANNEL" in
+    beta) SELF="beta.$MODE.sh" ;;
+    *)    SELF="$MODE.sh" ;;
+esac
 PUBKEY="@PUBKEY@"
 PREFLIGHT_SHA256="@PREFLIGHT_SHA256@"
 # The version floor: the stamp this component was at when THIS installer was
@@ -249,7 +262,7 @@ needs_root_comp() {
 # under sudo works verbatim. relay's own copy of this variable
 # (tools/relay-bootstrap.template.sh) says something else, because relay's
 # operator key cannot survive the sudo boundary -- see that file's comment.
-ELEVATE_HINT="curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sudo sh"
+ELEVATE_HINT="curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$SELF | sudo sh"
 
 # ---- BEGIN pinned elevation literals -------------------------------------
 # Kept byte-identical between tools/bootstrap.template.sh and
@@ -296,13 +309,23 @@ ELEVATE="$(resolve_elevate)"
 # text that merely contains the literal `"tag_name"` can't spoof the tag.
 # Prefer jq (structural); fall back to grep/sed. Used for both the direct
 # api.github.com fetch and the GH_PROXY mirror retry.
+#
+# $CHANNEL narrows the match to the tag SHAPE that channel publishes: stable
+# tags never carry a ".beta." segment and beta tags always do (see
+# tools/version.sh), so one anchored regex per channel keeps the two from ever
+# seeing each other's tags — a stable resolve ignores a higher beta, and a beta
+# resolve ignores every stable, in both orderings.
 latest_tag() {
+    case "$CHANNEL" in
+        beta) _lt_re="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+        *)    _lt_re="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+    esac
     if command -v jq >/dev/null 2>&1; then
         jq -r '.[].tag_name // empty' 2>/dev/null
     else
         grep -E '^[[:space:]]*"tag_name"[[:space:]]*:' \
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-    fi | grep -E "^${COMP}/v" | sort -V | tail -n1
+    fi | grep -E "$_lt_re" | sort -V | tail -n1
 }
 
 # next_page_url — read a `curl -D` header dump on stdin and print the URL from
@@ -489,7 +512,7 @@ esac
 # ladder) and it never changes which release installs: see the forced-migration
 # block for the floor's meaning.
 usage() {
-    printf 'usage: curl -fsSL https://release.burrowee.com/%s/%s.sh | sh' "$COMP" "$MODE"
+    printf 'usage: curl -fsSL https://release.burrowee.com/%s/%s | sh' "$COMP" "$SELF"
     case "$MODE" in
         upgrade)
             printf ' -s -- [<floor>]\n\n'

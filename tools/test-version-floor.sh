@@ -39,6 +39,9 @@ cd "${REPO_ROOT}"
 
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\n✗ VERSION-FLOOR TEST FAILED: %s\n' "$*" >&2; exit 1; }
+check() { # check <label> <got> <want>
+    [ "$2" = "$3" ] || die "$1 — got '$2' want '$3'"
+}
 
 # ---- work dir + cleanup ------------------------------------------------------
 # Section (5) re-renders the bootstraps (deliberately with a bad floor), so this
@@ -199,6 +202,7 @@ info() { :; }
 ok()   { :; }
 
 COMP=cli
+CHANNEL=stable
 REPO=burrowee-git/release
 DL_BASE=""
 BURROWEE_CLI_VERSION=""        # no operator pin: exercise the resolution flow
@@ -241,7 +245,7 @@ RUNNER
 chmod +x "${W}/resolve-run.sh"
 
 API_URL="https://api.github.com/repos/burrowee-git/release/releases?per_page=100"
-CATALOG_URL="https://console.invalid/api/v1/releases/cli/current"
+CATALOG_URL="https://console.invalid/api/v1/releases/cli/current?channel=stable"
 
 slug() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/_/g'; }
 
@@ -341,4 +345,88 @@ if got="$(resolve "${BAD}" "${FLOOR}" "")"; then
 fi
 printf '  OK: catalog answers are shape-checked before use\n'
 
-printf '\n  VERSION-FLOOR TEST PASSED (bake + predicate + fail-closed + generator + resolver)\n'
+# ---- (7) CHANNEL: latest_tag() matches only its own channel's tag shape -----
+# A stable resolve must ignore a higher beta, and a beta resolve must ignore
+# every stable, in both orderings — the property that keeps a beta tag from
+# ever reaching a stable install.sh and vice versa. Drive latest_tag() directly
+# (already extracted into resolver.sh above) against canned page bodies on
+# stdin, with and without jq on PATH — the same two code paths latest_tag()
+# itself branches on.
+say "CHANNEL: latest_tag() filters by \$CHANNEL, with and without jq"
+cat > "${W}/latest-tag-run.sh" <<'RUNNER'
+#!/bin/sh
+set -eu
+. "$1"
+latest_tag
+RUNNER
+chmod +x "${W}/latest-tag-run.sh"
+
+# run_latest_tag <comp> <channel> <path> — reads the page JSON on stdin.
+run_latest_tag() {
+    COMP="$1" CHANNEL="$2" PATH="$3" sh "${W}/latest-tag-run.sh" "${W}/resolver.sh"
+}
+
+# A curated bin dir, not a trimmed system PATH: some hosts (this one included)
+# ship a real /usr/bin/jq, so "/usr/bin:/bin" would still find it and silently
+# skip the no-jq branch. Symlink only what latest_tag()'s grep/sed fallback
+# needs, deliberately omitting jq, then PROVE it is really gone before trusting it.
+NO_JQ_DIR="${W}/no-jq-bin"
+mkdir -p "${NO_JQ_DIR}"
+for _njt in sh grep sed sort tail; do
+    # type -p, not command -v: a shell FUNCTION named grep/sed/etc. (this host
+    # has one) makes `command -v` print the bare name back, which then
+    # symlinks to itself and disappears. type -p only ever names a real file.
+    _njp="$(type -p "${_njt}" 2>/dev/null || true)"
+    [ -n "${_njp}" ] || die "cannot build a no-jq PATH: '${_njt}' not found on this host"
+    ln -sf "${_njp}" "${NO_JQ_DIR}/${_njt}"
+done
+NO_JQ_PATH="${NO_JQ_DIR}"
+if PATH="${NO_JQ_PATH}" command -v jq >/dev/null 2>&1; then
+    die "NO_JQ_PATH (${NO_JQ_PATH}) still finds jq on this host — fix the curated no-jq bin dir so the no-jq branch is really exercised"
+fi
+
+# mk_page <tag_name>... — a GitHub-shaped /releases page body: pretty-printed,
+# one field per line (the real api.github.com response shape — confirmed by
+# inspection above), NOT the minified single-line JSON the grep/sed fallback's
+# line-anchored match cannot see a "tag_name" field inside. The jq branch reads
+# either shape; this is what makes the grep/sed branch exercisable at all.
+mk_page() {
+    printf '[\n'
+    _mkp_first=1
+    for _mkp_t in "$@"; do
+        [ "${_mkp_first}" = 1 ] || printf ',\n'
+        _mkp_first=0
+        printf '  {\n    "tag_name": "%s"\n  }' "${_mkp_t}"
+    done
+    printf '\n]\n'
+}
+
+run_channel_pairs() {
+    _rcp_path="$1"
+    _rcp_label="$2"
+    page="$(mk_page cli/v0.3.0.beta.2026.08.28.1f0c9e2a cli/v0.2.9.2026.08.28.aa21f55c cli/v0.2.8.2026.08.27.7a56bdc5)"
+    check "stable ignores a higher beta (${_rcp_label})" \
+        "$(printf '%s' "${page}" | run_latest_tag cli stable "${_rcp_path}")" \
+        "cli/v0.2.9.2026.08.28.aa21f55c"
+    check "beta ignores every stable (${_rcp_label})" \
+        "$(printf '%s' "${page}" | run_latest_tag cli beta "${_rcp_path}")" \
+        "cli/v0.3.0.beta.2026.08.28.1f0c9e2a"
+    page2="$(mk_page cli/v0.3.1.2026.08.29.aa21f55c cli/v0.3.0.beta.2026.08.28.1f0c9e2a)"
+    check "beta ignores a higher stable (${_rcp_label})" \
+        "$(printf '%s' "${page2}" | run_latest_tag cli beta "${_rcp_path}")" \
+        "cli/v0.3.0.beta.2026.08.28.1f0c9e2a"
+    page3="$(mk_page cli/v0.2.9.2026.08.28.aa21f55c)"
+    check "beta with no beta tags is empty (${_rcp_label})" \
+        "$(printf '%s' "${page3}" | run_latest_tag cli beta "${_rcp_path}")" \
+        ""
+}
+
+if command -v jq >/dev/null 2>&1; then
+    run_channel_pairs "${PATH}" "with jq"
+else
+    printf '  (skipping the with-jq pass — no jq on this host'"'"'s PATH)\n'
+fi
+run_channel_pairs "${NO_JQ_PATH}" "without jq"
+printf '  OK: latest_tag() never crosses channels, with or without jq\n'
+
+printf '\n  VERSION-FLOOR TEST PASSED (bake + predicate + fail-closed + generator + resolver + channel)\n'
