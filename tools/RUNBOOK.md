@@ -495,3 +495,17 @@ The terminal states worth recognising:
 | `✗ <comp> cut left an unclean tree` | the cut ran to completion, so **the release is already live**, but it wrote something it did not commit | inspect the tree; nothing was pushed, so the marker is still local and the guard will block the next cut |
 | `✗ <comp>: HEAD is not a [RELEASED: <comp>] marker … yet <n> commit(s) are unpushed` | the cut published something it did not record | inspect before pushing; this case used to print "nothing to push" and exit 0 |
 | `→ <comp>: no marker and nothing unpushed` | **not** a failure — Residual 3, a re-cut at an identical stamp, whose marker is already in history | nothing |
+
+## The bootstrap's pinned minisign — bumping it is a module change, not a cut
+
+`tools/modules/install-minisign-common.sh` pins the upstream minisign release
+(version + both archive sha256s + upstream's release public key) that the outer
+bootstrap installs when a host has no minisign and its package manager cannot
+provide one. That pin is what makes the fetched verifier trustworthy — the
+bootstrap carries it, and the bootstrap is the install's trust root — so it
+moves only by a reviewed edit to that module: follow the "BUMPING THE PIN"
+recipe in its header (verify both archives against upstream's key, measure,
+update the constants, bump the module version, re-lock, regenerate, run
+`tools/test-install-minisign.sh`), land it through a PR, and then sync it into
+Clawee and Umbree with `tools/sync-modules.sh`. Nothing in `release.sh` touches
+it; a cut simply ships whatever the committed bootstraps carry.
