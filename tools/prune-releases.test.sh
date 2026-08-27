@@ -31,6 +31,9 @@ cli/v0.2.2.beta.2026.07.02.ffffffff
 cli/v0.2.3.beta.2026.07.03.11111111
 EOF
 
+# Assumes the invoking shell's own PATH doesn't already put a real `ghp`
+# ahead of ${STUB}: prune-releases.sh prepends only /usr/bin:/bin:/opt/homebrew/bin:
+# ${HOME}/.claude/bin (none of which hold ghp) before this inherited PATH.
 run() { CHANNEL="$1" KEEP="$2" COMPONENTS=cli PATH="${STUB}:${PATH}" GHP_STUB_TAGS="${WORK}/tags" \
   bash "${HERE}/prune-releases.sh"; }
 

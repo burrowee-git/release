@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -37,14 +38,33 @@ func keepFor(comp, channel string) int {
 	return 10
 }
 
-// chOf reports the channel a version/stamp string belongs to: "beta" when it
-// carries the ".beta." marker between semver and date (spec §4.1/§6.1's
-// ChannelOf), "stable" otherwise.
-func chOf(ver string) string {
-	if strings.Contains(ver, ".beta.") {
+// channelPatterns compiles comp's stable and beta stamp regexes, reusing
+// register.go's stableStampPattern/betaStampPattern (spec §4.1) so this file
+// carries no second copy of the shape.
+func channelPatterns(comp string) (stableRe, betaRe *regexp.Regexp) {
+	q := regexp.QuoteMeta(comp)
+	return regexp.MustCompile(fmt.Sprintf(stableStampPattern, q)),
+		regexp.MustCompile(fmt.Sprintf(betaStampPattern, q))
+}
+
+// chOf reports the channel comp+"/"+ver belongs to, validating its FULL
+// shape against the anchored patterns from channelPatterns — not a ".beta."
+// substring probe, which would misclassify anything merely lacking that
+// marker as "stable" (a legacy directory, a manual upload, a typo'd stamp).
+// A version matching neither pattern belongs to neither channel: chOf
+// returns "" so the caller's `!= channel` check excludes it from every
+// channel's count and delete list, per spec §4.1 "a tag matching neither is
+// ignored everywhere".
+func chOf(stableRe, betaRe *regexp.Regexp, comp, ver string) string {
+	full := comp + "/" + ver
+	switch {
+	case betaRe.MatchString(full):
 		return "beta"
+	case stableRe.MatchString(full):
+		return "stable"
+	default:
+		return ""
 	}
-	return "stable"
 }
 
 // Prune drops all but the newest keepFor(comp, channel) version/stamp
@@ -74,9 +94,12 @@ func Prune(ctx context.Context, store PruneStore, comp, channel string, execute 
 		return 0, err
 	}
 
+	stableRe, betaRe := channelPatterns(comp)
+
 	// Group keys by their version/stamp dir (the segment right after <comp>/),
 	// skipping any version whose channel doesn't match — this is what keeps a
-	// stable prune from ever counting or deleting a beta version (and back).
+	// stable prune from ever counting or deleting a beta version (and back),
+	// and a version matching NEITHER shape is excluded from both.
 	byVersion := map[string][]string{}
 	for _, k := range keys {
 		rest := strings.TrimPrefix(k, prefix)
@@ -84,8 +107,8 @@ func Prune(ctx context.Context, store PruneStore, comp, channel string, execute 
 		if !ok || ver == "" {
 			continue // not a <comp>/<version>/<file> key — leave it alone
 		}
-		if chOf(ver) != channel {
-			continue // other channel — never counted or touched by this prune
+		if chOf(stableRe, betaRe, comp, ver) != channel {
+			continue // other channel, or neither — never counted or touched by this prune
 		}
 		byVersion[ver] = append(byVersion[ver], k)
 	}
