@@ -126,6 +126,32 @@ COMP="cli"
 # read from the environment: the mode is a property of the URL the operator
 # curl'd, and a runtime override would make one file behave as the other.
 MODE="upgrade"
+# "stable" or "beta" — which release channel this bootstrap resolves against.
+# Baked at render time, same as MODE and for the same reason: the channel is a
+# property of WHICH URL was published (release.burrowee.com/cli/install.sh
+# vs its .../beta.install.sh twin), never a runtime override.
+CHANNEL="stable"
+# SELF — this bootstrap's own filename as the operator curl'd it: "install.sh"
+# on stable, "beta.install.sh" on its beta twin (same for upgrade.sh /
+# updater.install.sh). Used wherever this script names itself back to the
+# operator, so a beta.install.sh does not point someone at plain install.sh.
+case "$CHANNEL" in
+    beta) SELF="beta.$MODE.sh" ;;
+    *)    SELF="$MODE.sh" ;;
+esac
+# TAG_RE — the one tag shape this channel may ever accept, anchored on $COMP
+# too so a component mismatch cannot slip through. EVERY tag consumer is held
+# to this SAME regex: GitHub's answer and a GH_PROXY mirror's answer (both via
+# latest_tag(), below) AND the console catalog's answer (version-resolve,
+# spliced in further down) — a consumer that is not is exactly how a channel
+# leaks (a stable host reading a .beta. stamp off the one path — the catalog —
+# that used to be unfiltered, or the mirror image on a beta host). Set here,
+# not inside latest_tag(): that function runs at the end of a pipeline, in a
+# subshell, so a variable it set would not survive to the caller.
+case "$CHANNEL" in
+    beta) TAG_RE="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+    *)    TAG_RE="^${COMP}/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+esac
 PUBKEY="RWT/O8xU4IbIBI1rg1T9ddsPLqdhI7wOYaVPDt/9ctT2TkNI2H2yLXFk"
 PREFLIGHT_SHA256="d6382a0ad2a38630cfcd39b105cafac48b615a514aa6644352f85b075ade2cd9"
 # The version floor: the stamp this component was at when THIS installer was
@@ -253,7 +279,7 @@ needs_root_comp() {
 # under sudo works verbatim. relay's own copy of this variable
 # (tools/relay-bootstrap.template.sh) says something else, because relay's
 # operator key cannot survive the sudo boundary -- see that file's comment.
-ELEVATE_HINT="curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$MODE.sh | sudo sh"
+ELEVATE_HINT="curl -fsSL --proto '=https' --tlsv1.2 $CHANNEL_BASE/$SELF | sudo sh"
 
 # ---- BEGIN pinned elevation literals -------------------------------------
 # Kept byte-identical between tools/bootstrap.template.sh and
@@ -309,13 +335,22 @@ sha256_of() {
 # text that merely contains the literal `"tag_name"` can't spoof the tag.
 # Prefer jq (structural); fall back to grep/sed. Used for both the direct
 # api.github.com fetch and the GH_PROXY mirror retry.
+#
+# $TAG_RE (set once, beside $CHANNEL in the knobs section above) narrows the
+# match to the tag SHAPE that channel publishes: stable tags never carry a
+# ".beta." segment and beta tags always do (see tools/version.sh), so one
+# anchored regex per channel keeps the two from ever seeing each other's tags
+# — a stable resolve ignores a higher beta, and a beta resolve ignores every
+# stable, in both orderings. NOT computed locally here: this function's
+# output runs through a pipeline (it is invoked as `latest_tag < file`, and
+# feeds one), so anything it assigned would live only in a subshell.
 latest_tag() {
     if command -v jq >/dev/null 2>&1; then
         jq -r '.[].tag_name // empty' 2>/dev/null
     else
         grep -E '^[[:space:]]*"tag_name"[[:space:]]*:' \
             | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-    fi | grep -E "^${COMP}/v" | sort -V | tail -n1
+    fi | grep -E "$TAG_RE" | sort -V | tail -n1
 }
 
 # next_page_url — read a `curl -D` header dump on stdin and print the URL from
@@ -520,7 +555,7 @@ esac
 # ladder) and it never changes which release installs: see the forced-migration
 # block for the floor's meaning.
 usage() {
-    printf 'usage: curl -fsSL https://release.burrowee.com/%s/%s.sh | sh' "$COMP" "$MODE"
+    printf 'usage: curl -fsSL https://release.burrowee.com/%s/%s | sh' "$COMP" "$SELF"
     case "$MODE" in
         upgrade)
             printf ' -s -- [<floor>]\n\n'
@@ -598,8 +633,8 @@ while [ $# -gt 0 ]; do
         *)
             case "$MODE" in
                 upgrade) : ;;
-                install) usage_error "$COMP/install.sh takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?" ;;
-                *)       usage_error "$COMP/$MODE.sh takes no arguments, and was given '$1'" ;;
+                install) usage_error "$COMP/$SELF takes no arguments, and was given '$1' — did you mean upgrade.sh, which takes the migration floor?" ;;
+                *)       usage_error "$COMP/$SELF takes no arguments, and was given '$1'" ;;
             esac
             [ -z "$FLOOR" ] \
                 || usage_error "unexpected extra argument '$1' — upgrade.sh takes at most one, the migration floor"
@@ -686,13 +721,22 @@ else
         done
     fi
     if [ -z "$TAG" ]; then
+        # GitHub answered (this host reached it) but nothing matched $CHANNEL's
+        # tag shape — on beta that is not "unreachable", it is "no beta cycle is
+        # open right now". The console catalog carries the same ?channel= filter
+        # just below and would say the same thing, so asking it adds a round trip
+        # for no new answer: give the actionable refusal here instead of falling
+        # through to the generic "both unreachable" message below.
+        if [ "$GH_ANSWERED" = 1 ] && [ "$CHANNEL" = beta ]; then
+            fail "no public beta release of cli right now — ask the operator for a private beta invite link, or install the stable release with install.sh"
+        fi
         TAG_SOURCE=catalog
         # GitHub unreachable or no releases published. Try the console catalog
-        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/cli/current.
+        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/cli/current?channel=<channel>.
         # This is the R2 fallback path — assets are served via `burrowee download-url`
         # (see the dl() function below), which requires a device grant.
         info "GitHub unreachable — trying console catalog for latest cli version"
-        catalog_url="${CONSOLE_URL}/api/v1/releases/cli/current"
+        catalog_url="${CONSOLE_URL}/api/v1/releases/cli/current?channel=${CHANNEL}"
         # Use plain curl (no TLS-only flags) when DL_BASE is set for tests, else
         # standard hardened curl.
         # shellcheck disable=SC2086  # intentional word-split of $CURL flags
@@ -701,7 +745,7 @@ else
         # (structural — reads only the top-level "version" field). Without jq,
         # split the body on field boundaries FIRST (tr , and { → newlines): the
         # console serves MINIFIED single-line JSON, so a line-anchored grep
-        # would never match it. The field-anchored grep plus the cli/v… shape
+        # would never match it. The field-anchored grep plus the $TAG_RE shape
         # check below keep a "version":"…" substring buried in notes or nested
         # metadata from spoofing the tag. (Bytes are still minisign+sha256
         # verified downstream; this closes a downgrade / wrong-version vector
@@ -715,10 +759,19 @@ else
                 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
                 | head -n1)" || true
         fi
-        case "$TAG" in
-            "$COMP"/v*) : ;;
-            *) TAG="" ;;
-        esac
+        # Shape-check against $TAG_RE — the SAME channel-anchored regex
+        # latest_tag() is held to, set once beside $CHANNEL. A bare "$COMP/v*"
+        # prefix check (the old shape here) accepts EITHER channel's tag shape,
+        # so a stable host with GitHub blocked (GH_ANSWERED=0, the beta guard
+        # above never runs) would silently install whatever the catalog named,
+        # including a .beta. release — and the mirror-image leak on a beta
+        # host. The catalog is exempt from the VERSION FLOOR below (it serves
+        # the last PROMOTED release, which legitimately trails the cut the
+        # floor is baked from), but it is never exempt from the CHANNEL shape:
+        # nothing downstream re-checks which channel a tag belongs to.
+        if [ -n "$TAG" ] && ! printf '%s\n' "$TAG" | grep -Eq "$TAG_RE"; then
+            TAG=""
+        fi
         [ -n "$TAG" ] \
             || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest cli version; retry when either is available"
         info "console catalog: $TAG"

@@ -134,11 +134,25 @@ check "dirty worktree, empty index: makes no commit" "$(commit_count "${DIRTY}")
 # some of them is not fixing it. This is a structural assertion in the same
 # spirit as cmd/rkit's TestReleasePublishesEveryRenderedArtifact, which pins
 # the scp + git add sites the same way.
+#
+# SIX sites today, not four — the beta channel added two real marker sites,
+# not two bugs:
+#   1. distribute_relay()      — relay, distribute-only, private (unconditional)
+#   2. distribute_only()       — cli/gateway/edge/agent, distribute-only
+#   3. do_release_relay() beta  — relay, full-cut, CHANNEL=beta branch
+#   4. do_release_relay() stable — relay, full-cut, CHANNEL=beta's else branch
+#   5. do_release() beta        — CHANNEL=beta branch (NEW — spec §5.3, no
+#                                  GitHub Release, R2-only)
+#   6. do_release() stable      — the pre-existing stable tail
+# Sites 3/4 and 5/6 are each an if/else over CHANNEL on what used to be one
+# unconditional call (do_release_relay had one, do_release's stable tail had
+# one) — the beta channel branches, it does not multiply defects, so the
+# count goes from four to six and stays pinned there.
 RELEASE_SH="${HERE}/release.sh"
 raw_commits="$(grep -c '^[[:space:]]*git commit -m "\[RELEASED:' "${RELEASE_SH}" || true)"
 check "release.sh: no bare 'git commit -m \"[RELEASED:' remains" "${raw_commits}" "0"
 marker_calls="$(grep -c '^[[:space:]]*marker_commit ' "${RELEASE_SH}" || true)"
-check "release.sh: all four marker sites call marker_commit" "${marker_calls}" "4"
+check "release.sh: all six marker sites call marker_commit" "${marker_calls}" "6"
 check_contains "release.sh: sources marker_commit.sh" \
     "$(grep 'tools/marker_commit.sh' "${RELEASE_SH}" || true)" "source"
 

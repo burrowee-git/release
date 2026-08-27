@@ -1,4 +1,4 @@
-# module: version-resolve  v1
+# module: version-resolve  v3
 # needs:  helpers
 # since:  2026-08-25
 # Read the per-component pin env var by name (no eval). $COMP is a baked
@@ -38,13 +38,22 @@ else
         done
     fi
     if [ -z "$TAG" ]; then
+        # GitHub answered (this host reached it) but nothing matched $CHANNEL's
+        # tag shape — on beta that is not "unreachable", it is "no beta cycle is
+        # open right now". The console catalog carries the same ?channel= filter
+        # just below and would say the same thing, so asking it adds a round trip
+        # for no new answer: give the actionable refusal here instead of falling
+        # through to the generic "both unreachable" message below.
+        if [ "$GH_ANSWERED" = 1 ] && [ "$CHANNEL" = beta ]; then
+            fail "no public beta release of @COMP@ right now — ask the operator for a private beta invite link, or install the stable release with install.sh"
+        fi
         TAG_SOURCE=catalog
         # GitHub unreachable or no releases published. Try the console catalog
-        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/@COMP@/current.
+        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/@COMP@/current?channel=<channel>.
         # This is the R2 fallback path — assets are served via `@brand@ download-url`
         # (see the dl() function below), which requires a device grant.
         info "GitHub unreachable — trying console catalog for latest @COMP@ version"
-        catalog_url="${CONSOLE_URL}/api/v1/releases/@COMP@/current"
+        catalog_url="${CONSOLE_URL}/api/v1/releases/@COMP@/current?channel=${CHANNEL}"
         # Use plain curl (no TLS-only flags) when DL_BASE is set for tests, else
         # standard hardened curl.
         # shellcheck disable=SC2086  # intentional word-split of $CURL flags
@@ -53,7 +62,7 @@ else
         # (structural — reads only the top-level "version" field). Without jq,
         # split the body on field boundaries FIRST (tr , and { → newlines): the
         # console serves MINIFIED single-line JSON, so a line-anchored grep
-        # would never match it. The field-anchored grep plus the @COMP@/v… shape
+        # would never match it. The field-anchored grep plus the $TAG_RE shape
         # check below keep a "version":"…" substring buried in notes or nested
         # metadata from spoofing the tag. (Bytes are still minisign+sha256
         # verified downstream; this closes a downgrade / wrong-version vector
@@ -67,10 +76,19 @@ else
                 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
                 | head -n1)" || true
         fi
-        case "$TAG" in
-            "$COMP"/v*) : ;;
-            *) TAG="" ;;
-        esac
+        # Shape-check against $TAG_RE — the SAME channel-anchored regex
+        # latest_tag() is held to, set once beside $CHANNEL. A bare "$COMP/v*"
+        # prefix check (the old shape here) accepts EITHER channel's tag shape,
+        # so a stable host with GitHub blocked (GH_ANSWERED=0, the beta guard
+        # above never runs) would silently install whatever the catalog named,
+        # including a .beta. release — and the mirror-image leak on a beta
+        # host. The catalog is exempt from the VERSION FLOOR below (it serves
+        # the last PROMOTED release, which legitimately trails the cut the
+        # floor is baked from), but it is never exempt from the CHANNEL shape:
+        # nothing downstream re-checks which channel a tag belongs to.
+        if [ -n "$TAG" ] && ! printf '%s\n' "$TAG" | grep -Eq "$TAG_RE"; then
+            TAG=""
+        fi
         [ -n "$TAG" ] \
             || fail "GitHub and the console catalog are both unreachable — cannot resolve the latest @COMP@ version; retry when either is available"
         info "console catalog: $TAG"

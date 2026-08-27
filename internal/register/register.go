@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"time"
 )
 
@@ -36,6 +37,14 @@ func Register(cfg Config, payload []byte, dryRun bool) error {
 
 	if cfg.ConsoleURL == "" {
 		return fmt.Errorf("register: console_url not configured (set it in ~/.burrowee/release/config.toml or BURROWEE_CONSOLE_URL)")
+	}
+
+	// Refuse locally, before spending a nonce, when the payload's stamp shape
+	// disagrees with the channel it claims to have cut on. The console
+	// refuses too (release.StampMatchesChannel) — this is a client-side
+	// fast-fail, not a substitute for it.
+	if err := checkChannelStampShape(payload); err != nil {
+		return err
 	}
 
 	// Step 1: fetch a nonce.
@@ -75,6 +84,59 @@ func Register(cfg Config, payload []byte, dryRun bool) error {
 	default:
 		return fmt.Errorf("register: unexpected status %d", resp.StatusCode)
 	}
+}
+
+// stableStampPattern and betaStampPattern are %s-templated on the component
+// name — spec §4.1's two exclusive-by-construction stamp shapes, the same
+// ones the console's internal/console/release/channel.go anchors against
+// (stableStampRe/betaStampRe there always match a "<comp>/" prefix once the
+// version is joined to it, which is what this templates in directly).
+const (
+	stableStampPattern = `^%s/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$`
+	betaStampPattern   = `^%s/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$`
+)
+
+// channelStampPayload is the subset of releaseRegisterRequest (console's
+// internal/console/handlers/manage_releases.go) that checkChannelStampShape
+// needs. Unknown fields in payload are ignored by json.Unmarshal.
+type channelStampPayload struct {
+	Component string `json:"component"`
+	Version   string `json:"version"`
+	// Channel empty means stable — an old client that predates the beta
+	// channel never sends this field. Mirrors the console's default.
+	Channel string `json:"channel"`
+}
+
+// checkChannelStampShape refuses locally when payload's stamp shape
+// disagrees with the channel it claims to have cut on — see the call site in
+// Register. Payload decode failures and unrecognized channel values are not
+// refused here: fetchNonce/POST surfaces those the same as before this check
+// existed, same as the console's own invalid_channel/bad_payload checks own
+// them server-side.
+func checkChannelStampShape(payload []byte) error {
+	var req channelStampPayload
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil
+	}
+	channel := req.Channel
+	if channel == "" {
+		channel = "stable"
+	}
+	var pattern string
+	switch channel {
+	case "stable":
+		pattern = stableStampPattern
+	case "beta":
+		pattern = betaStampPattern
+	default:
+		return nil
+	}
+	re := regexp.MustCompile(fmt.Sprintf(pattern, regexp.QuoteMeta(req.Component)))
+	full := req.Component + "/" + req.Version
+	if !re.MatchString(full) {
+		return fmt.Errorf("register: stamp %q is not a %s stamp", req.Version, channel)
+	}
+	return nil
 }
 
 // fetchNonce requests a single-use nonce from the console.

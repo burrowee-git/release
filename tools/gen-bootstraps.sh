@@ -70,6 +70,38 @@
 #                          BURROWEE_PUBKEY_FILE). Offline tests fabricate their
 #                          own release stamps, which have nothing to do with the
 #                          repo's real versions/<comp>.stamp.
+#
+# BETA TWINS: for every public component this also renders <comp>/beta.install.sh,
+# <comp>/beta.upgrade.sh and (edge/gateway) <comp>/beta.updater.install.sh — the
+# SAME template, SAME modes, with @CHANNEL@=beta and the floor read from
+# versions/<comp>.beta.stamp instead of versions/<comp>.stamp. That file's
+# PRESENCE is the open-beta-cycle flag: when it is absent the twins are not
+# rendered, and any beta.*.sh left over from a since-closed cycle is deleted —
+# the LOCAL copy, and only that: this script never touches the release host,
+# so a beta.*.sh already served from there is untouched by this sweep and
+# keeps resolving and installing the last public beta indefinitely (spec §3
+# keeps beta tags on GitHub as history, so there is something to resolve to)
+# until an operator removes the served file by hand — see tools/RUNBOOK.md
+# "Close a cycle". TWO files gate this one state, one per half of it:
+# versions/<comp>.beta (the beta semver source, tools/version.sh reads and
+# writes it) and versions/<comp>.beta.stamp (the full cut stamp this script
+# reads, written by tools/release.sh's beta channel at cut time) — neither is
+# written by this script.
+#
+#   BURROWEE_MIN_VERSION_FILE   override for the FILE min_version_of reads
+#                                (mirrors BURROWEE_MIN_VERSION, which overrides
+#                                the VALUE outright and wins over both). NOT
+#                                test-only: the beta twin loop below sets this
+#                                in PRODUCTION to point min_version_of at
+#                                versions/<comp>.beta.stamp instead of
+#                                versions/<comp>.stamp — the assignment lives
+#                                inside a command substitution
+#                                ($(BURROWEE_MIN_VERSION_FILE=... min_version_of
+#                                ...)), so it cannot leak into the next
+#                                component's or channel's stable render. Tests
+#                                (test-version-floor.sh etc.) also use it, to
+#                                point at a fabricated stamp with nothing to do
+#                                with this repo's real versions/*.stamp.
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -79,6 +111,11 @@ PREFLIGHT_TEMPLATE="$ROOT/tools/preflight.template.sh"
 [ -f "$TEMPLATE" ] || { echo "✗ missing template: $TEMPLATE" >&2; exit 1; }
 [ -f "$RELAY_TEMPLATE" ] || { echo "✗ missing relay template: $RELAY_TEMPLATE" >&2; exit 1; }
 [ -f "$PREFLIGHT_TEMPLATE" ] || { echo "✗ missing preflight template: $PREFLIGHT_TEMPLATE" >&2; exit 1; }
+
+# PUBLIC_COMPONENTS — cli gateway edge agent. Shared with tools/release.sh (its
+# sweep-staging widen needs the SAME set this script renders/sweeps for, not a
+# second hardcoded copy that can drift from it) — see tools/public_components.sh.
+. "$ROOT/tools/public_components.sh"
 
 # sha256 of a file (shasum on mac, sha256sum on linux) — for the preflight pin.
 sha256_of() {
@@ -161,7 +198,7 @@ min_version_of() {
         _mv="${BURROWEE_MIN_VERSION}"
         _mv_src="\$BURROWEE_MIN_VERSION"
     else
-        _mv_file="$ROOT/versions/${_mv_comp}.stamp"
+        _mv_file="${BURROWEE_MIN_VERSION_FILE:-$ROOT/versions/${_mv_comp}.stamp}"
         [ -f "$_mv_file" ] \
             || { echo "✗ missing $_mv_file — cannot bake ${_mv_comp}'s version floor (cut the component, or set BURROWEE_MIN_VERSION for a test render)" >&2; exit 1; }
         _mv="$(tr -d '[:space:]' < "$_mv_file")"
@@ -191,7 +228,7 @@ UPDATER_INSTALL_COMPONENTS="edge gateway"
 # ORDER per comp: render <comp>/preflight.sh FIRST (so we can sha256 it), then
 # render <comp>/install.sh baking that hash as @PREFLIGHT_SHA256@. @NGINX@ is 1
 # for edge (installs nginx + stream module), 0 for cli/gateway/agent.
-for comp in cli gateway edge agent; do
+for comp in $PUBLIC_COMPONENTS; do
     mkdir -p "$ROOT/$comp"
     case "$comp" in
         edge) nginx=1 ;;
@@ -239,33 +276,72 @@ for comp in cli gateway edge agent; do
     # fixed fact about the component, decided at design time, unlike "ships a
     # ladder this cut" above. cmd/rkit's
     # TestUpdaterInstallBootstrapsAreExactlyEdgeAndGateway pins this set too.
-    min_version="$(min_version_of "$comp")"
     modes="install upgrade"
     case " $UPDATER_INSTALL_COMPONENTS " in
         *" $comp "*) modes="$modes updater.install" ;;
     esac
-    for mode in $modes; do
-        out="$ROOT/$comp/$mode.sh"
-        tmp="$out.tmp.$$"
-        exp="$out.exp.$$"
-        # expand_includes runs OFF the left of the pipeline (its own redirection,
-        # not a pipe) so `set -e` sees its exit status: a missing module makes
-        # awk exit 1 without ever printing the `@INCLUDE:` line, so the
-        # post-render grep guard below has nothing left to catch — only a
-        # directly-checked exit status catches that failure. The guard still
-        # runs, against the tmp file BEFORE the mv, to catch the OTHER failure
-        # shape: a malformed include name (e.g. `@INCLUDE:Helpers@`) that the
-        # awk regex declines to match and so passes through literally.
-        expand_includes "$TEMPLATE" > "$exp"
-        sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
-            -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
-            -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
-            "$exp" > "$tmp"
-        rm -f "$exp"
-        grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
-        chmod +x "$tmp"
-        mv -f "$tmp" "$out"
-        echo "✓ wrote $out  (mode $mode, version floor $min_version)"
+
+    # ---- stable, then beta (twin) ---------------------------------------
+    # SAME modes loop, wrapped in a channel loop: stable always renders (as
+    # today — @COMP@/install.sh etc., prefix ""); beta renders its
+    # @COMP@/beta.install.sh (etc.) twin ONLY while a beta cycle is open, i.e.
+    # versions/<comp>.beta.stamp exists — that file's presence is the open-cycle
+    # flag (see the header comment: it is the cut-time companion to
+    # versions/<comp>.beta, which tools/version.sh owns). When it is absent,
+    # any beta.*.sh left over from a since-closed cycle is deleted: the
+    # LOCAL copy only — the served one, if any, is untouched (this script
+    # never deletes from the release host) and keeps resolving the last
+    # public beta indefinitely until an operator removes it by hand, see
+    # tools/RUNBOOK.md "Close a cycle". The sweep globs beta.*.sh rather than
+    # walking the current $modes, so a component that later leaves
+    # UPDATER_INSTALL_COMPONENTS still loses its stray beta.updater.install.sh.
+    for channel in stable beta; do
+        if [ "$channel" = beta ]; then
+            beta_stamp="$ROOT/versions/${comp}.beta.stamp"
+            if [ ! -f "$beta_stamp" ]; then
+                stale=""
+                for f in "$ROOT/$comp"/beta.*.sh; do
+                    [ -e "$f" ] || continue   # glob matched nothing
+                    rm -f "$f"
+                    stale="$stale $(basename "$f")"
+                done
+                if [ -n "$stale" ]; then
+                    echo "→ $comp: no beta cycle open ($beta_stamp absent) — removed stale:$stale"
+                else
+                    echo "→ $comp: no beta cycle open ($beta_stamp absent) — beta twins not rendered"
+                fi
+                continue
+            fi
+            min_version="$(BURROWEE_MIN_VERSION_FILE="$beta_stamp" min_version_of "$comp")"
+            prefix="beta."
+        else
+            min_version="$(min_version_of "$comp")"
+            prefix=""
+        fi
+        for mode in $modes; do
+            out="$ROOT/$comp/${prefix}${mode}.sh"
+            tmp="$out.tmp.$$"
+            exp="$out.exp.$$"
+            # expand_includes runs OFF the left of the pipeline (its own redirection,
+            # not a pipe) so `set -e` sees its exit status: a missing module makes
+            # awk exit 1 without ever printing the `@INCLUDE:` line, so the
+            # post-render grep guard below has nothing left to catch — only a
+            # directly-checked exit status catches that failure. The guard still
+            # runs, against the tmp file BEFORE the mv, to catch the OTHER failure
+            # shape: a malformed include name (e.g. `@INCLUDE:Helpers@`) that the
+            # awk regex declines to match and so passes through literally.
+            expand_includes "$TEMPLATE" > "$exp"
+            sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
+                -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
+                -e "s|@CHANNEL@|$channel|g" \
+                -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
+                "$exp" > "$tmp"
+            rm -f "$exp"
+            grep -q '@INCLUDE:' "$tmp" && { rm -f "$tmp"; echo "✗ unexpanded @INCLUDE in $out" >&2; exit 1; }
+            chmod +x "$tmp"
+            mv -f "$tmp" "$out"
+            echo "✓ wrote $out  (channel $channel, mode $mode, version floor $min_version)"
+        done
     done
 done
 

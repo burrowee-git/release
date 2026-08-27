@@ -63,27 +63,41 @@ type catalogRow struct {
 	MinisigRef string                   `json:"minisig_ref"`
 }
 
-// PublishFromDir uploads the relay artifacts from a local directory to R2 under
-// relay/<stamp>/. It uploads every latest.<os>-<arch>.zip, SHA256SUMS.txt, and
-// SHA256SUMS.txt.minisig found in dir. Size+sha256 are verified against
-// SHA256SUMS.txt before upload.
+// zipFilename returns the platform zip's name inside a component's local
+// build directory. relay's is legacy-shaped (latest.<plat>.zip, no component
+// name — it predates the other components' naming and nothing depends on
+// changing it); every other component's is burrowee-<comp>-<plat>.zip.
+func zipFilename(comp, plat string) string {
+	if comp == "relay" {
+		return "latest." + plat + ".zip"
+	}
+	return "burrowee-" + comp + "-" + plat + ".zip"
+}
+
+// PublishFromDir uploads a component's artifacts from a local directory to R2
+// under <comp>/<stamp>/. It uploads the four platform zips (see zipFilename),
+// SHA256SUMS.txt, and SHA256SUMS.txt.minisig found in dir. Size+sha256 are
+// verified against SHA256SUMS.txt before upload.
 //
-// This is used by the relay cut flow (do_release_relay in release.sh) which
-// produces local artifacts instead of publishing a GitHub Release. The catalog
-// row's url_or_key/sums_ref/minisig_ref already point at the R2 keys
-// relay/<stamp>/... before this function runs.
+// relay was the first (and, before beta, only) private component, so this was
+// written for it and driven by the relay cut flow (do_release_relay in
+// release.sh), which produces local artifacts instead of publishing a GitHub
+// Release. A beta cut of any component is private the same way until
+// promoted (spec §5.3), so this now takes comp and is used by all five. The
+// catalog/console-side row's url_or_key/sums_ref/minisig_ref already point at
+// the matching R2 keys <comp>/<stamp>/... before this function runs.
 //
 // Integrity is gated by sha256 of each file against the minisign-signed
 // SHA256SUMS.txt; there is no catalog size reference on the local-upload path,
 // so size-from-catalog verification (as in Publish) does not apply here.
-func PublishFromDir(ctx context.Context, r2 Putter, dir, stamp string, out io.Writer) error {
+func PublishFromDir(ctx context.Context, r2 Putter, comp, dir, stamp string, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
 	}
 	sumsPath := dir + "/SHA256SUMS.txt"
 	sumsBody, err := os.ReadFile(sumsPath)
 	if err != nil {
-		return fmt.Errorf("publish-relay: read SHA256SUMS.txt: %w", err)
+		return fmt.Errorf("publish-dir: read SHA256SUMS.txt: %w", err)
 	}
 	// parse SHA256SUMS.txt: each line is "<hex>  <filename>"
 	hashByFile := map[string]string{}
@@ -102,20 +116,20 @@ func PublishFromDir(ctx context.Context, r2 Putter, dir, stamp string, out io.Wr
 	// Upload the four platform zips with sha256 verification.
 	platforms := []string{"darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64"}
 	for _, plat := range platforms {
-		filename := "latest." + plat + ".zip"
+		filename := zipFilename(comp, plat)
 		body, err := os.ReadFile(dir + "/" + filename)
 		if err != nil {
-			return fmt.Errorf("publish-relay: read %s: %w", filename, err)
+			return fmt.Errorf("publish-dir: read %s: %w", filename, err)
 		}
 		expectedHash, ok := hashByFile[filename]
 		if !ok {
-			return fmt.Errorf("publish-relay: %s not found in SHA256SUMS.txt", filename)
+			return fmt.Errorf("publish-dir: %s not found in SHA256SUMS.txt", filename)
 		}
 		sum := sha256.Sum256(body)
 		if got := hex.EncodeToString(sum[:]); got != expectedHash {
-			return fmt.Errorf("publish-relay: %s: sha256 mismatch (sums %s, got %s)", filename, expectedHash, got)
+			return fmt.Errorf("publish-dir: %s: sha256 mismatch (sums %s, got %s)", filename, expectedHash, got)
 		}
-		key := "relay/" + stamp + "/" + filename
+		key := comp + "/" + stamp + "/" + filename
 		if err := r2.Put(ctx, key, body, "application/zip"); err != nil {
 			return err
 		}
@@ -132,9 +146,9 @@ func PublishFromDir(ctx context.Context, r2 Putter, dir, stamp string, out io.Wr
 	} {
 		body, err := os.ReadFile(dir + "/" + entry.filename)
 		if err != nil {
-			return fmt.Errorf("publish-relay: read %s: %w", entry.filename, err)
+			return fmt.Errorf("publish-dir: read %s: %w", entry.filename, err)
 		}
-		key := "relay/" + stamp + "/" + entry.filename
+		key := comp + "/" + stamp + "/" + entry.filename
 		if err := r2.Put(ctx, key, body, entry.contentType); err != nil {
 			return err
 		}

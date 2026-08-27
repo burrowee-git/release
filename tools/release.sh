@@ -2,7 +2,15 @@
 # release.sh — cut a signed Burrowee component release (cli | gateway | edge | agent).
 #
 # Usage:
-#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major|--keep-version] [--force]
+#   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major|--keep-version] [--force]
+#
+# --channel beta: cut from the registry's beta worktree (<code>/.worktrees/beta,
+#   see tools/release_origin.sh's beta_worktree_for) instead of the registry main
+#   folder, stamp with the .beta. segment (tools/version.sh --channel beta), skip
+#   GitHub entirely, and upload straight to R2 as a private, staged row — see
+#   do_release()'s CHANNEL=beta branch below. Defaults to stable; --distribute-only
+#   refuses --channel beta (that path re-publishes an already-staged GitHub
+#   Release, which a beta cut never creates).
 #
 # --force: bump + mint a fresh stamp even when the component's source is
 #   unchanged since its last cut (versions/<comp>.stamp's recorded sha8 +
@@ -108,6 +116,8 @@ source "${REPO_ROOT}/tools/trustcomment.sh"
 source "${REPO_ROOT}/tools/marker_commit.sh"
 # shellcheck source=tools/batch.sh
 source "${REPO_ROOT}/tools/batch.sh"
+# shellcheck source=tools/public_components.sh
+source "${REPO_ROOT}/tools/public_components.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -159,14 +169,32 @@ registry_src_for() {
     esac
 }
 
+# src_for <comp> — the source worktree for a real cut/distribute of <comp>.
+# Stable (default/unset CHANNEL): unchanged — SRC_<COMP> (a BURROWEE_SRC_*
+# override, dry-run only, or the registry main folder). Beta: redirected to
+# the registry's DERIVED beta worktree (beta_worktree_for, tools/release_origin.sh)
+# — never a second, independently-configured path, so it cannot drift from the
+# registry entry — UNLESS an override is set, which wins for both channels
+# (dry-run only; assert_release_origin refuses it outside --dry-run). An
+# override is detected by SRC_<COMP> disagreeing with REG_<COMP>: SRC_<COMP>
+# already collapses "${BURROWEE_SRC_*:-${REG_*}}" once, near the top of this
+# file, before CHANNEL is known.
 src_for() {
-    case "$1" in
-        cli)     printf '%s' "${SRC_CLI}" ;;
-        gateway) printf '%s' "${SRC_GATEWAY}" ;;
-        edge)    printf '%s' "${SRC_EDGE}" ;;
-        agent)   printf '%s' "${SRC_AGENT}" ;;
-        relay)   printf '%s' "${SRC_RELAY}" ;;
+    local comp="$1" reg cur
+    case "${comp}" in
+        cli)     reg="${REG_CLI}";     cur="${SRC_CLI}" ;;
+        gateway) reg="${REG_GATEWAY}"; cur="${SRC_GATEWAY}" ;;
+        edge)    reg="${REG_EDGE}";    cur="${SRC_EDGE}" ;;
+        agent)   reg="${REG_AGENT}";   cur="${SRC_AGENT}" ;;
+        relay)   reg="${REG_RELAY}";   cur="${SRC_RELAY}" ;;
     esac
+    if [ "${cur}" != "${reg}" ]; then
+        printf '%s' "${cur}"                          # BURROWEE_SRC_* override
+    elif [ "${CHANNEL:-stable}" = beta ]; then
+        beta_worktree_for "${reg}"
+    else
+        printf '%s' "${reg}"
+    fi
 }
 
 # Paths the RELEASE REPO may carry staged when the guard runs. Empty for every
@@ -194,17 +222,21 @@ assert_release_origins() {
     for comp in "$@"; do
         src="$(src_for "${comp}")"
         [ -d "${src}" ] || { echo "✗ ${comp} source worktree missing: ${src}" >&2; return 1; }
-        assert_release_origin "${comp}" "${src}" "$(registry_src_for "${comp}")" "${mode}" || return 1
+        assert_release_origin "${comp}" "${src}" "$(registry_src_for "${comp}")" "${mode}" "${CHANNEL:-stable}" || return 1
     done
     case " $* " in
         *" edge "*)
+            # edge.web is always checked against ITS main, both channels — a
+            # beta edge cut still bakes its covers from the stable edge.web
+            # tree (spec §5.2: "Dispatcher and edge.web are always checked
+            # against their main, both channels").
             [ -d "${EDGE_WEB}" ] || { echo "✗ edge.web source worktree missing: ${EDGE_WEB}" >&2; return 1; }
-            assert_release_origin edge.web "${EDGE_WEB}" "${REG_EDGE_WEB}" "${mode}" || return 1
+            assert_release_origin edge.web "${EDGE_WEB}" "${REG_EDGE_WEB}" "${mode}" stable || return 1
             ;;
     esac
     [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; return 1; }
-    assert_release_origin dispatcher "${SRC_DISPATCHER}" "${REG_DISPATCHER}" "${mode}" || return 1
-    assert_release_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" \
+    assert_release_origin dispatcher "${SRC_DISPATCHER}" "${REG_DISPATCHER}" "${mode}" stable || return 1
+    assert_release_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" stable \
         ${RELEASE_REPO_STAGED_OK[@]+"${RELEASE_REPO_STAGED_OK[@]}"} || return 1
 }
 
@@ -244,9 +276,10 @@ if [ "${1:-}" = "publish" ]; then
     echo
     echo "→ retention (dry-run — run prune with --execute in the deploy phase to apply):"
     "${REGISTER_BIN}" prune --comp "${comp}" || true
-    # GitHub prune scope is cli/gateway/edge only (relay has no GitHub release).
+    # GitHub prune scope is cli/gateway/edge/agent (relay has no GitHub release)
+    # — PUBLIC_COMPONENTS (tools/public_components.sh), not a second copy.
     gh_comps="${comp}"
-    [ "${comp}" = all ] && gh_comps="cli gateway edge agent"
+    [ "${comp}" = all ] && gh_comps="${PUBLIC_COMPONENTS}"
     COMPONENTS="${gh_comps}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
     exit 0
 fi
@@ -256,6 +289,18 @@ WHAT=""
 DRY_RUN=0
 BUMP_KIND="patch"
 FORCE_BUMP=0
+# CHANNEL: stable (default) or beta — see tools/version.sh, tools/release_origin.sh
+# and do_release()'s CHANNEL=beta branch below. A plain literal default, NOT
+# an env fallback (unlike RELEASE_HOST/STATIC_DIR/etc.): CHANNEL is a generic
+# enough name that a stray `export CHANNEL=beta` left over in an operator's
+# shell — from anything, this script included — would silently turn a
+# hand-run `bash tools/release.sh cli --public` into a beta cut of a repo
+# whose main is a live cut origin. The ONLY way to select beta is the
+# `--channel beta` flag in the arg loop below; nothing reads CHANNEL out of
+# the process environment as an implicit default. tools/release.command
+# always passes --channel explicitly (reading its own CHANNEL from
+# .release-request), so nothing depends on an env fallback existing.
+CHANNEL="stable"
 # --keep-version: pin versions/<comp>, mint a fresh stamp anyway. Deliberately a
 # separate variable rather than a fourth BUMP_KIND: BUMP_KIND selects WHICH bump
 # runs, and this flag's whole point is that none does — folding it in would make
@@ -283,6 +328,13 @@ if [ "${1:-}" = "--distribute-only" ]; then
         || { echo "✗ usage: release.sh --distribute-only <cli|gateway|edge|agent> <stamp> [--dry-run]" >&2; exit 2; }
     shift 2
 fi
+# --channel is a two-token flag: `--channel beta`. bash 3.2 (this script's
+# target — see tools/RUNBOOK.md and every other two-token flag in this repo)
+# has no `shift` inside a `for … in "$@"` loop, so the token that follows
+# --channel is captured via a one-shot latch instead: expect_channel=1 tells
+# the NEXT iteration "the arg you're about to see is the channel value, not a
+# new flag" — the catch-all `*)` arm below is what actually consumes it.
+expect_channel=0
 for arg in "$@"; do
     case "${arg}" in
         cli|gateway|edge|agent|relay|all) WHAT="${arg}" ;;
@@ -295,14 +347,32 @@ for arg in "$@"; do
         --bump-major)         BUMP_KIND="major" ;;
         --force)              FORCE_BUMP=1 ;;
         --keep-version)       KEEP_VERSION=1 ;;
+        --channel)            expect_channel=1 ;;
         -h|--help)            sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "✗ unknown argument: ${arg}" >&2; exit 2 ;;
+        *)
+            if [ "${expect_channel}" = 1 ]; then
+                CHANNEL="${arg}"; expect_channel=0
+            else
+                echo "✗ unknown argument: ${arg}" >&2; exit 2
+            fi
+            ;;
     esac
 done
+[ "${expect_channel}" = 0 ] || { echo "✗ --channel needs a value: stable or beta" >&2; exit 2; }
+case "${CHANNEL}" in
+    stable|beta) ;;
+    *) echo "✗ --channel must be stable or beta (got '${CHANNEL}')" >&2; exit 2 ;;
+esac
+# --distribute-only re-publishes an already-staged, already-GitHub-released
+# component (`rkit build` + gh_release_publish) — a beta cut never creates a
+# GitHub Release at all (it uploads straight to R2), so the two are mutually
+# exclusive. See do_release()'s CHANNEL=beta branch below.
+[ "${DISTRIBUTE_ONLY}" = 1 ] && [ "${CHANNEL}" = beta ] \
+    && { echo "✗ --distribute-only is a stable-channel verb; a beta cut uploads to R2 in one step" >&2; exit 2; }
 if [ "${DISTRIBUTE_ONLY}" = 1 ]; then
     [ -z "${WHAT}" ] || { echo "✗ --distribute-only takes <comp> <stamp> as its own args — drop the trailing '${WHAT}'" >&2; exit 2; }
 else
-    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major|--keep-version] [--force]" >&2; exit 2; }
+    [ -n "${WHAT}" ] || { echo "✗ usage: release.sh <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major|--keep-version] [--force]" >&2; exit 2; }
 fi
 
 # --keep-version pins versions/<comp>; --bump-minor/--bump-major/--force each
@@ -439,6 +509,30 @@ assert_stamp_untagged() {
     return 0
 }
 
+# version_sh <comp> [args...] — tools/version.sh, with --channel "${CHANNEL}"
+# threaded through every call site so a beta cut reads/writes versions/<comp>.beta
+# instead of versions/<comp>, without every call site spelling out the flag.
+# SRC_DIR (an env-var override on the caller's command line, e.g.
+# `SRC_DIR="${src}" version_sh "${comp}" --stamp`) still reaches tools/version.sh
+# exactly as it did through the old bare `bash tools/version.sh` calls: a
+# variable assignment ahead of a shell function call exports it for that one
+# call, function body included, same as it would for an external command.
+#
+# POSITIONAL CONTRACT, pinned here because nothing else records it: this only
+# works because `--channel beta` lands at argv position 2 — tools/version.sh's
+# own parse is `if [ "${2:-}" = "--channel" ]; then CHANNEL="${3:-}"; shift 2;
+# fi`, i.e. it looks ONLY at $2, never scans for --channel anywhere in the
+# arglist. A future reorder in either file (e.g. version_sh forwarding
+# --channel after the action instead of before it, or version.sh's own parse
+# moving to $3) breaks every call site here at once — silently: the symptom
+# is a wrong-channel version FILE (version.sh falls through to reading/
+# writing the stable versions/<comp> instead of refusing), not a parse error.
+# tools/version.test.sh exercises this shape directly.
+version_sh() {
+    local comp="$1"; shift
+    bash "${REPO_ROOT}/tools/version.sh" "${comp}" --channel "${CHANNEL:-stable}" "$@"
+}
+
 # resolve_comp_stamp <comp> <src_dir> — generalizes resolve_disp_stamp (above)
 # from the dispatcher-only freeze to EVERY component. Reuses the recorded
 # versions/<comp>.stamp verbatim (semver + date + changeset all frozen) when
@@ -467,9 +561,17 @@ resolve_comp_stamp() {
     local comp="$1" src_dir="$2"
     local cur_sha semver stamp_file recorded rec_sha rec_sv unchanged=0 fresh
 
+    # Beta: refuse before touching anything else — a beta that does not read
+    # newer than its stable sibling would ship a `version` output a beta node
+    # (and the follow-on stable cut) can't trust. See tools/version.sh.
+    if [ "${CHANNEL:-stable}" = beta ]; then
+        version_sh "${comp}" --assert-beta-above-stable || exit 1
+    fi
+
     cur_sha="$(git -C "${src_dir}" rev-parse --short=8 HEAD)"
-    semver="$(SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver | tr -d '[:space:]')"
+    semver="$(SRC_DIR="${src_dir}" version_sh "${comp}" --semver | tr -d '[:space:]')"
     stamp_file="${REPO_ROOT}/versions/${comp}.stamp"
+    [ "${CHANNEL:-stable}" = beta ] && stamp_file="${REPO_ROOT}/versions/${comp}.beta.stamp"
 
     if [ -f "${stamp_file}" ]; then
         recorded="$(tr -d '[:space:]' < "${stamp_file}")"
@@ -494,16 +596,16 @@ resolve_comp_stamp() {
     # It writes nothing under --dry-run, so dry-run still never bumps and never
     # mints a recorded stamp.
     if [ "${KEEP_VERSION:-0}" = 1 ]; then
-        fresh="$(SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp | tr -d '[:space:]')"
+        fresh="$(SRC_DIR="${src_dir}" version_sh "${comp}" --stamp | tr -d '[:space:]')"
         assert_stamp_untagged "${comp}" "${fresh}" || exit 1
-        echo "→ ${comp}: --keep-version — REPUBLISHING semver ${semver}; versions/${comp} not bumped, fresh stamp ${fresh}" >&2
+        echo "→ ${comp}: --keep-version — REPUBLISHING semver ${semver}; versions/${comp}$([ "${CHANNEL:-stable}" = beta ] && printf '.beta') not bumped, fresh stamp ${fresh}" >&2
         if [ "${DRY_RUN:-0}" != 1 ]; then
             # Same record-and-stage as the bump path below, minus the bump. The
             # caller's revert_version/revert_relay_version trap restores this
-            # staged write if the cut dies; versions/<comp> itself is never
-            # written here, so the trap's restore of it is a no-op.
+            # staged write if the cut dies; versions/<comp>[.beta] itself is
+            # never written here, so the trap's restore of it is a no-op.
             printf '%s\n' "${fresh}" > "${stamp_file}"
-            ( cd "${REPO_ROOT}" && git add "versions/${comp}.stamp" )
+            ( cd "${REPO_ROOT}" && git add "${stamp_file#"${REPO_ROOT}"/}" )
         fi
         printf '%s' "${fresh}"
         return 0
@@ -513,7 +615,7 @@ resolve_comp_stamp() {
         if [ "${unchanged}" = 1 ]; then
             printf '%s' "${recorded}"
         else
-            SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp | tr -d '[:space:]'
+            SRC_DIR="${src_dir}" version_sh "${comp}" --stamp | tr -d '[:space:]'
         fi
         return 0
     fi
@@ -523,17 +625,17 @@ resolve_comp_stamp() {
     fi
 
     case "${BUMP_KIND}" in
-        patch) SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-patch >/dev/null ;;
-        minor) SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-minor >/dev/null ;;
-        major) SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --bump-major >/dev/null ;;
+        patch) SRC_DIR="${src_dir}" version_sh "${comp}" --bump-patch >/dev/null ;;
+        minor) SRC_DIR="${src_dir}" version_sh "${comp}" --bump-minor >/dev/null ;;
+        major) SRC_DIR="${src_dir}" version_sh "${comp}" --bump-major >/dev/null ;;
     esac
-    fresh="$(SRC_DIR="${src_dir}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --stamp | tr -d '[:space:]')"
+    fresh="$(SRC_DIR="${src_dir}" version_sh "${comp}" --stamp | tr -d '[:space:]')"
     printf '%s\n' "${fresh}" > "${stamp_file}"
     # Rides the [RELEASED] marker commit; if the cut aborts before that
     # commit, the caller's revert_version/revert_relay_version trap restores
     # this staged write so a never-released date isn't left behind for the
     # next unchanged-source cut to wrongly reuse.
-    ( cd "${REPO_ROOT}" && git add "versions/${comp}.stamp" )
+    ( cd "${REPO_ROOT}" && git add "${stamp_file#"${REPO_ROOT}"/}" )
     printf '%s' "${fresh}"
 }
 
@@ -581,10 +683,18 @@ warn() { echo "⚠ $*" >&2; }
 register_staged() {
     local comp="$1" stamp="$2" semver="$3" stage_dir="$4" src_dir="$5"
     local gh_tag="${6:-}"
+    # Read from the caller's environment, defaulting stable — the callers this
+    # runs under (do_release, do_release_relay, distribute_only, distribute_relay)
+    # all have CHANNEL set by the time they reach here; the default only matters
+    # for tools/test-register-staged.sh's isolated function-extraction harness.
+    local channel="${CHANNEL:-stable}"
 
     local gated=false
     local github_release="${gh_tag}"
     [ "${comp}" = relay ] && gated=true && github_release=""
+    # A beta row is never a GitHub Release (spec §5.3) — forced empty
+    # regardless of comp, in ADDITION to relay's own always-empty rule above.
+    [ "${channel}" = beta ] && github_release=""
 
     # json_escape: emit the INTERIOR of a JSON string (no surrounding quotes) so
     # the existing "key":"$(json_escape …)" call sites stay unchanged. `jq -Rs`
@@ -625,6 +735,13 @@ register_staged() {
         if [ "${comp}" = relay ]; then
             zip_name="latest.${plat}.zip"
             url_or_key="relay/${stamp}/${zip_name}"
+        elif [ "${channel}" = beta ]; then
+            # Beta: same R2 key layout as relay's private publish
+            # (register publish-dir → internal/r2), just under the
+            # component's own prefix instead of relay/ — no GitHub asset to
+            # link, since a beta cut never creates a Release.
+            zip_name="burrowee-${comp}-${plat}.zip"
+            url_or_key="${comp}/${stamp}/${zip_name}"
         else
             zip_name="burrowee-${comp}-${plat}.zip"
             url_or_key="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/${zip_name}"
@@ -657,11 +774,14 @@ register_staged() {
     done
     artifacts_json="${artifacts_json}}"
 
-    # sums_ref and minisig_ref: public = GitHub asset URLs; relay = R2 keys.
+    # sums_ref and minisig_ref: public = GitHub asset URLs; relay/beta = R2 keys.
     local sums_ref minisig_ref
     if [ "${comp}" = relay ]; then
         sums_ref="relay/${stamp}/SHA256SUMS.txt"
         minisig_ref="relay/${stamp}/SHA256SUMS.txt.minisig"
+    elif [ "${channel}" = beta ]; then
+        sums_ref="${comp}/${stamp}/SHA256SUMS.txt"
+        minisig_ref="${comp}/${stamp}/SHA256SUMS.txt.minisig"
     else
         sums_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt"
         minisig_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt.minisig"
@@ -704,7 +824,7 @@ register_staged() {
 
     local body
     # artifacts is sent as a JSON *string* (console stores it as an opaque JSON blob); object-shaped would 400.
-    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\",\"binaries\":${binaries_json},\"dispatcher_version\":\"$(json_escape "${DISP_STAMP}")\",\"updater_version\":\"$(json_escape "${updater_ver}")\"}"
+    body="{\"component\":\"$(json_escape "${comp}")\",\"version\":\"$(json_escape "${stamp}")\",\"semver\":\"$(json_escape "${semver}")\",\"channel\":\"$(json_escape "${channel}")\",\"gated\":${gated},\"artifacts\":\"$(json_escape "${artifacts_json}")\",\"sums_ref\":\"$(json_escape "${sums_ref}")\",\"minisig_ref\":\"$(json_escape "${minisig_ref}")\",\"github_release\":\"$(json_escape "${github_release}")\",\"prerelease\":true,\"source_sha\":\"$(json_escape "${source_sha}")\",\"sha256\":\"$(json_escape "${sha256_bundle}")\",\"notes\":\"\",\"binaries\":${binaries_json},\"dispatcher_version\":\"$(json_escape "${DISP_STAMP}")\",\"updater_version\":\"$(json_escape "${updater_ver}")\"}"
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ dry-run: would register ${comp} ${stamp} via burrowee-release-register"
@@ -970,6 +1090,20 @@ distribute_only() {
     # mirrors do_release()'s self-hosting block verbatim so a distribute-only
     # cut actually updates release.burrowee.com, not just the GitHub Release.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+    # Stage every PUBLIC_COMPONENTS dir's beta.*.sh sweep outcome, not only
+    # ${comp}'s — same wedge and same fix as do_release()'s stable tail (see
+    # the comment there): gen-bootstraps.sh sweeps EVERY public component's
+    # beta.*.sh on every invocation, not only the one being distributed here.
+    # A stale narrower stage left another, already-closed component's sweep
+    # deletions unstaged, and release.command's tree_state() refused to push
+    # the marker commit this function is about to make — AFTER gh_release_publish
+    # (above) had already put the GitHub Release out. `-A -- "<dir>"` per
+    # component stages whole directories, never the `"${comp}/<artifact>"`
+    # shape cmd/rkit's TestReleasePublishesEveryRenderedArtifact's gitAddSites
+    # needle matches, and ships nothing (no scp) — not a third publish site.
+    for pubcomp in ${PUBLIC_COMPONENTS}; do
+        git add -A -- "${pubcomp}"
+    done
     # Edge operator skills are OWNED by the edge repo; mirror them in from its
     # worktree on every release so the served copy can never drift from source.
     # (The cli + gateway skills are authored in THIS repo and are left untouched.)
@@ -1020,6 +1154,25 @@ distribute_only() {
     if [ -f "${REPO_ROOT}/${comp}/updater.install.sh" ]; then
         scp -q "${REPO_ROOT}/${comp}/updater.install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/updater.install.sh"
     fi
+    # beta.install.sh / beta.upgrade.sh / beta.updater.install.sh: distribute-only
+    # is always a STABLE republish (--distribute-only refuses --channel beta), but
+    # gen-bootstraps.sh regenerates the beta twins on EVERY invocation whenever a
+    # beta cycle is open — idempotent, so re-shipping them here keeps a live beta
+    # cycle's bootstrap in step with THIS repo's current pubkey/preflight even
+    # when only a stable component is being distributed. Guarded exactly like
+    # updater.install.sh above (not every component/cycle combination has them).
+    # This is the second of the two sites cmd/rkit's
+    # TestReleasePublishesEveryRenderedArtifact requires per rendered artifact —
+    # the first is do_release()'s CHANNEL=beta branch.
+    if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/beta.install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/beta.install.sh"
+    fi
+    if [ -f "${REPO_ROOT}/${comp}/beta.upgrade.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/beta.upgrade.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/beta.upgrade.sh"
+    fi
+    if [ -f "${REPO_ROOT}/${comp}/beta.updater.install.sh" ]; then
+        scp -q "${REPO_ROOT}/${comp}/beta.updater.install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/beta.updater.install.sh"
+    fi
     if [ -f "${REPO_ROOT}/burrowee-release.pub" ]; then
         scp -q "${REPO_ROOT}/burrowee-release.pub" "${RELEASE_HOST}:${STATIC_DIR}/burrowee-release.pub"
     fi
@@ -1042,6 +1195,14 @@ distribute_only() {
     # cut under `set -e`.
     if [ -f "${REPO_ROOT}/${comp}/updater.install.sh" ]; then
         git add "${comp}/updater.install.sh"
+    fi
+    # Both files, not just install.sh — see the identical guard + comment in
+    # do_release()'s CHANNEL=beta branch above.
+    if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ] && [ -f "${REPO_ROOT}/${comp}/beta.upgrade.sh" ]; then
+        git add "${comp}/beta.install.sh" "${comp}/beta.upgrade.sh"
+    fi
+    if [ -f "${REPO_ROOT}/${comp}/beta.updater.install.sh" ]; then
+        git add "${comp}/beta.updater.install.sh"
     fi
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
@@ -1128,8 +1289,9 @@ EOF
     exit 0
 fi
 
-# components to cut
-if [ "${WHAT}" = all ]; then COMPONENTS=(cli gateway edge agent); else COMPONENTS=("${WHAT}"); fi
+# components to cut — PUBLIC_COMPONENTS (tools/public_components.sh), not a
+# second hardcoded copy.
+if [ "${WHAT}" = all ]; then read -r -a COMPONENTS <<< "${PUBLIC_COMPONENTS}"; else COMPONENTS=("${WHAT}"); fi
 
 # Every do_release() (i.e. every non-relay component) mirrors the edge skills
 # (EDGE_SKILLS_SRC=${SRC_EDGE}/skills) unconditionally, so the edge tree is
@@ -1353,8 +1515,8 @@ build_dispatcher() {
 
 # ---- relay private-publish ---------------------------------------------------
 do_release_relay() {
-    local src="${SRC_RELAY}"
     local comp=relay
+    local src; src="$(src_for "${comp}")"
     local bins; bins="$(bins_for "${comp}")"
 
     echo
@@ -1365,15 +1527,17 @@ do_release_relay() {
     # effect; else bump per BUMP_KIND and mint a fresh stamp. See
     # resolve_comp_stamp() above.
     local old_semver new_semver stamp
-    old_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+    old_semver="$(SRC_DIR="${src}" version_sh "${comp}" --semver)"
     stamp="$(resolve_comp_stamp "${comp}" "${src}")"
-    new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+    new_semver="$(SRC_DIR="${src}" version_sh "${comp}" --semver)"
 
     revert_relay_version() {
-        git restore --staged "versions/${comp}" 2>/dev/null || true
-        git checkout -- "versions/${comp}" 2>/dev/null || true
-        git restore --staged "versions/${comp}.stamp" 2>/dev/null || true
-        git checkout -- "versions/${comp}.stamp" 2>/dev/null || true
+        local vf="versions/${comp}"
+        [ "${CHANNEL}" = beta ] && vf="versions/${comp}.beta"
+        git restore --staged "${vf}" 2>/dev/null || true
+        git checkout -- "${vf}" 2>/dev/null || true
+        git restore --staged "${vf}.stamp" 2>/dev/null || true
+        git checkout -- "${vf}.stamp" 2>/dev/null || true
     }
     # ERR INT TERM (not just ERR): a Ctrl-C/SIGTERM after resolve_comp_stamp
     # bumped versions/${comp} must revert it too — mirrors resolve_disp_stamp's
@@ -1403,6 +1567,7 @@ do_release_relay() {
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
     echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
+    echo "Channel : ${CHANNEL}"
     echo "Dry-run : ${DRY_RUN}"
 
     local stage="${REPO_ROOT}/dist/${stamp}"
@@ -1548,15 +1713,24 @@ do_release_relay() {
         --stamp "${stamp}" \
         --from-dir "${latest_stage}"
 
-    # (4b) retention (dry-run): report relay R2 prefixes now over keep=3. The
-    # destructive drain (prune --comp relay --execute) is a deploy-phase step.
+    # (4b) retention (dry-run): report relay R2 prefixes now over keep=3 stable
+    # / 5 beta. The destructive drain (prune --comp relay --execute) is a
+    # deploy-phase step.
     echo
-    echo "→ relay R2 retention (dry-run — run prune --comp relay --execute in the deploy phase to apply):"
-    "${REGISTER_BIN}" prune --comp relay || true
+    echo "→ relay R2 retention (dry-run — run prune --comp relay --channel ${CHANNEL} --execute in the deploy phase to apply):"
+    "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" || true
 
-    # marker commit (no gh release / no git tag)
-    git add "versions/${comp}"
-    marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+    # marker commit (no gh release / no git tag, either channel — relay has
+    # always been R2-only). Beta gets the same " beta" marker-subject suffix
+    # release.command's push loop matches for the public components.
+    local relay_vf="versions/${comp}"
+    [ "${CHANNEL}" = beta ] && relay_vf="versions/${comp}.beta"
+    git add "${relay_vf}"
+    if [ "${CHANNEL}" = beta ]; then
+        marker_commit "${REPO_ROOT}" "[RELEASED: ${comp} beta] $(date -u +%Y-%m-%d) ${stamp} (private)"
+    else
+        marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
+    fi
 
     # (9) register staged row in the console catalog.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
@@ -1579,17 +1753,19 @@ do_release() {
     # effect; else bump per BUMP_KIND and mint a fresh stamp. See
     # resolve_comp_stamp() above.
     local old_semver new_semver stamp
-    old_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+    old_semver="$(SRC_DIR="${src}" version_sh "${comp}" --semver)"
     stamp="$(resolve_comp_stamp "${comp}" "${src}")"
-    new_semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" "${comp}" --semver)"
+    new_semver="$(SRC_DIR="${src}" version_sh "${comp}" --semver)"
 
-    # From here the versions/<comp>(.stamp) files may be modified. Any
+    # From here the versions/<comp>[.beta](.stamp) files may be modified. Any
     # failure (or the dry-run completion) reverts them.
     revert_version() {
-        git restore --staged "versions/${comp}" 2>/dev/null || true
-        git checkout -- "versions/${comp}" 2>/dev/null || true
-        git restore --staged "versions/${comp}.stamp" 2>/dev/null || true
-        git checkout -- "versions/${comp}.stamp" 2>/dev/null || true
+        local vf="versions/${comp}"
+        [ "${CHANNEL}" = beta ] && vf="versions/${comp}.beta"
+        git restore --staged "${vf}" 2>/dev/null || true
+        git checkout -- "${vf}" 2>/dev/null || true
+        git restore --staged "${vf}.stamp" 2>/dev/null || true
+        git checkout -- "${vf}.stamp" 2>/dev/null || true
     }
     # ERR INT TERM (not just ERR): a Ctrl-C/SIGTERM after resolve_comp_stamp
     # bumped versions/${comp} must revert it too — mirrors resolve_disp_stamp's
@@ -1616,6 +1792,7 @@ do_release() {
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
     echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
+    echo "Channel : ${CHANNEL}"
     echo "Dry-run : ${DRY_RUN}"
 
     local stage="${REPO_ROOT}/dist/${stamp}"
@@ -1745,6 +1922,105 @@ do_release() {
     # shellcheck disable=SC2012  # cosmetic listing of our own controlled asset names (no untrusted filenames); ls keeps the plain one-per-line format.
     ( cd "${stage}" && ls -1 burrowee-"${comp}"-*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
 
+    # ---- beta channel: private, R2-only publish — NO GitHub Release, NO tag.
+    # Diverges here rather than sharing the stable tail below: a beta cut
+    # skips gh_release_publish entirely (spec §5.3), so everything past this
+    # point (tag, GitHub Release, the stable-only scp block, its marker text,
+    # its register_staged gh_tag) is stable-channel-specific.
+    if [ "${CHANNEL}" = beta ]; then
+        if [ "${DRY_RUN}" = 1 ]; then
+            echo "→ would: publish-dir to R2 under ${comp}/${stamp}/ (beta: private until promoted)"
+            echo "→ would: gen-bootstraps.sh + scp ${comp}/beta.*.sh (idempotent)"
+            echo "→ would: marker commit [RELEASED: ${comp} beta] ${stamp} (private)"
+            # (9) dry-run registration preview — the SAME register_staged call
+            # the real (non-dry-run) beta branch below makes, not a fourth
+            # `would:` line describing it. The four `would:` lines above are a
+            # sketch of the beta cut's shape; this builds and prints the
+            # actual payload (channel="beta", gated, artifacts keyed under
+            # ${comp}/${stamp}/ on R2, github_release forced empty) the same
+            # way the stable dry-run above already does, so the one rehearsal
+            # an operator runs before a real beta cut previews the real
+            # console-registration body instead of a one-line stand-in for
+            # it. gh_tag ("") matches the real (non-dry-run) beta call a few
+            # lines down: register_staged forces github_release="" for
+            # channel=beta regardless of what's passed.
+            register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
+            revert_version
+            trap shred_key ERR INT TERM
+            echo "✓ dry-run ${comp} beta: artifacts under ${stage}/ (version bump reverted; no R2/scp/commit)"
+            return 0
+        fi
+
+        "${REGISTER_BIN}" publish-dir --comp "${comp}" --stamp "${stamp}" --from-dir "${stage}"
+
+        # Past the R2 publish — clear the version-revert trap, same reasoning
+        # as the stable tail clearing it immediately past gh_release_publish:
+        # the upload already happened, so a later failure in this function
+        # must not revert the version it was published under.
+        trap shred_key ERR INT TERM
+
+        bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+        # Stage every PUBLIC_COMPONENTS dir's beta.*.sh sweep outcome, not
+        # only ${comp}'s — same wedge and same fix as do_release()'s stable
+        # tail (see the comment there): gen-bootstraps.sh sweeps EVERY public
+        # component's beta.*.sh on every invocation, not only THIS comp's. A
+        # stale narrower stage left another, already-closed component's sweep
+        # deletions unstaged, and release.command's tree_state() refused to
+        # push the marker commit this branch makes below — checked only after
+        # release.sh returns, by which point the R2 publish-dir a few lines up
+        # and the console registration a few lines down have both already run.
+        # `-A -- "<dir>"` per component stages whole directories, never the
+        # `"${comp}/<artifact>"` shape cmd/rkit's
+        # TestReleasePublishesEveryRenderedArtifact's gitAddSites needle
+        # matches, and ships nothing (no scp) — not a third publish site.
+        for pubcomp in ${PUBLIC_COMPONENTS}; do
+            git add -A -- "${pubcomp}"
+        done
+        # Ship THIS cut's own bootstrap. cmd/rkit's
+        # TestReleasePublishesEveryRenderedArtifact requires every rendered
+        # artifact scp'd + git-added from EXACTLY two sites; for the beta
+        # twins those are here (a real beta cut) and distribute_only (which
+        # re-ships the currently-open cycle's twins on every stable
+        # distribute, since gen-bootstraps.sh regenerates them regardless of
+        # which channel triggered it) — inlined at both, not a shared
+        # helper, so a static grep over this file still finds exactly two.
+        if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ]; then
+            scp -q "${REPO_ROOT}/${comp}/beta.install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/beta.install.sh"
+        fi
+        if [ -f "${REPO_ROOT}/${comp}/beta.upgrade.sh" ]; then
+            scp -q "${REPO_ROOT}/${comp}/beta.upgrade.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/beta.upgrade.sh"
+        fi
+        if [ -f "${REPO_ROOT}/${comp}/beta.updater.install.sh" ]; then
+            scp -q "${REPO_ROOT}/${comp}/beta.updater.install.sh" "${RELEASE_HOST}:${STATIC_DIR}/${comp}/beta.updater.install.sh"
+        fi
+
+        git add "versions/${comp}.beta" "versions/${comp}.beta.stamp"
+        # Both files, not just install.sh: gen-bootstraps.sh renders the pair
+        # together, so this should never diverge — but a `git add` of a path
+        # that does not exist would abort the cut under `set -e`, and here
+        # that would land AFTER the R2 publish and past the cleared
+        # revert_version trap, i.e. a published beta with no marker commit.
+        if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ] && [ -f "${REPO_ROOT}/${comp}/beta.upgrade.sh" ]; then
+            git add "${comp}/beta.install.sh" "${comp}/beta.upgrade.sh"
+        fi
+        if [ -f "${REPO_ROOT}/${comp}/beta.updater.install.sh" ]; then
+            git add "${comp}/beta.updater.install.sh"
+        fi
+        marker_commit "${REPO_ROOT}" "[RELEASED: ${comp} beta] $(date -u +%Y-%m-%d) ${stamp} (private)"
+
+        # register_staged with no gh_tag ($6 empty) — channel=beta forces
+        # github_release="" regardless (see register_staged), the empty arg
+        # here just matches what a beta cut actually has: no GitHub tag.
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
+
+        echo "→ beta R2 retention (report only — run prune --comp ${comp} --channel beta --execute in the deploy phase to apply):"
+        "${REGISTER_BIN}" prune --comp "${comp}" --channel beta || true
+
+        echo "✓ released ${comp} beta ${stamp} (private, R2 ${comp}/${stamp}/)"
+        return 0
+    fi
+    # ---- stable channel: unchanged from here -----------------------------
+
     if [ "${DRY_RUN}" = 1 ]; then
         echo "✓ dry-run ${comp}: artifacts under ${stage}/ (version bump reverted; no tag/release/scp)"
         # (9) dry-run registration preview (uses the dry-run stamp for URLs).
@@ -1764,6 +2040,39 @@ do_release() {
 
     # (7) regenerate bootstraps + refresh edge skills + scp the static surface.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+    # Stage — but do NOT ship — whatever gen-bootstraps.sh just did to EVERY
+    # public component's beta.*.sh twins, not only THIS comp's. It renders
+    # every channel's bootstrap for every component in PUBLIC_COMPONENTS on
+    # every invocation, including a stable cut's: re-renders a component's
+    # twins while its beta cycle is open (harmless — the bytes don't change
+    # unless the pubkey/preflight did) and DELETES them the first time it runs
+    # after that component's cycle has just been closed. Nothing about which
+    # component gets swept depends on which comp THIS cut is for — so a
+    # narrower `git add -A -- "${comp}"` (staging only the comp being cut)
+    # left ANOTHER, already-closed component's sweep deletions unstaged: close
+    # comp X's cycle (RUNBOOK "Close a cycle" step 1: `git rm
+    # versions/X.beta*`), then cut comp Y stable — gen-bootstraps.sh deletes
+    # X/beta.*.sh, this block staged only Y's dir, and
+    # tools/release.command's tree_state() then refused to push an
+    # already-published marker commit ("cut left an unclean tree"), stranding
+    # the release AFTER Y's GitHub Release had already gone out — precisely
+    # the wedge the original `-A` was added to prevent, just scoped too
+    # narrowly to close it. Fix: stage every PUBLIC_COMPONENTS dir, not only
+    # ${comp}'s (same list tools/gen-bootstraps.sh sweeps from — see
+    # tools/public_components.sh — so the two cannot drift apart again).
+    #
+    # `-A -- "<dir>"` per component stages adds/modifies/deletes under that
+    # dir in one call — it does NOT ship these files (no scp), so it isn't a
+    # publish site: it doesn't match cmd/rkit's
+    # TestReleasePublishesEveryRenderedArtifact guard, which looks for the
+    # literal `git add "${comp}/<artifact>"` form (this loop's pathspec is a
+    # bare directory, never `<dir>/<artifact>`), nor does it scp anything.
+    # Shipping the twins is still exactly two sites — do_release's
+    # CHANNEL=beta branch and distribute_only — this only keeps every
+    # component's tree clean after a stable cut's sweep.
+    for pubcomp in ${PUBLIC_COMPONENTS}; do
+        git add -A -- "${pubcomp}"
+    done
     # Edge operator skills are OWNED by the edge repo; mirror them in from its
     # worktree on every release so the served copy can never drift from source.
     # (The cli + gateway skills are authored in THIS repo and are left untouched.)

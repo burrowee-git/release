@@ -473,5 +473,103 @@ check "case (g): staged_tolerance_for 0 cli returns 0" "${r}" "0"
 check "case (h): staged_tolerance_for 1 cli names exactly versions/cli and its stamp" \
     "$(staged_tolerance_for 1 cli)" "$(printf 'versions/cli\nversions/cli.stamp')"
 
+# ── beta channel ─────────────────────────────────────────────────────────────
+# assert_release_origin's [channel] is opt-in: every call above passed no
+# channel at all and is untouched by this section, which is itself the proof
+# that the stable path is unchanged — a stable-shaped call five sections up
+# never became wrong once beta support landed. beta redirects the whole guard
+# at a SECOND, structurally different origin: a LINKED worktree at
+# <registry-main>/../.worktrees/beta, derived from the registry main path
+# (never configured separately), on branch beta, clean, == origin/beta.
+new_origin_and_clone beta_ok >/dev/null
+MAIN="${WORK}/beta_ok"
+/usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${WORK}/.worktrees/beta" origin/main 2>/dev/null \
+    || /usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${MAIN}/../.worktrees/beta" origin/main
+BETA="$(cd "${MAIN}/../.worktrees/beta" && pwd)"
+/usr/bin/git -C "${BETA}" push --quiet -u origin beta
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: clean synced beta worktree accepted" "$?" "0"
+out="$(assert_release_origin cli "${MAIN}" "${MAIN}" strict beta 2>&1)"; check "beta: primary main folder refused" "$?" "1"
+check_contains "beta: refusal names the beta worktree" "${out}" ".worktrees/beta"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict stable 2>&1)"; check "stable: beta worktree refused" "$?" "1"
+echo dirty > "${BETA}/README.md"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: dirty refused" "$?" "1"
+/usr/bin/git -C "${BETA}" checkout --quiet -- README.md
+echo more > "${BETA}/x"; /usr/bin/git -C "${BETA}" add x; /usr/bin/git -C "${BETA}" -c user.name=t -c user.email=t@t commit --quiet -m ahead
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: ahead of origin/beta refused" "$?" "1"
+check_contains "beta: ahead message names origin/beta" "${out}" "origin/beta"
+/usr/bin/git -C "${MAIN}" worktree remove --force "${BETA}"
+out="$(assert_release_origin cli "${MAIN}/../.worktrees/beta" "${MAIN}" strict beta 2>&1)"; check "beta: missing worktree refused" "$?" "1"
+check_contains "beta: missing worktree hint" "${out}" "open a beta cycle"
+# Spec §5.2 quotes this refusal as ONE line with an em-dash — not the two-line
+# form with a separate "git worktree add" hint — so pin the exact shape,
+# not just a loose substring.
+check_contains "beta: missing worktree message matches the spec's single em-dash line" \
+    "${out}" "beta worktree missing: ${MAIN}/../.worktrees/beta — open a beta cycle first"
+
+# is_linked_worktree_of provenance: every case above refuses on a PATH
+# mismatch before that predicate is ever reached, so a regression inside the
+# predicate itself would go unnoticed. Put an unrelated repo at EXACTLY the
+# derived beta path (same path, wrong provenance — not a worktree of
+# DECOY_MAIN's .git at all), on branch beta and in sync with ITS OWN origin,
+# so path/branch/clean/sync all pass and is_linked_worktree_of is the ONLY
+# possible reason left for a refusal (confirmed by stubbing the predicate to
+# always succeed while writing this case: with it broken, this exact fixture
+# wrongly returns 0 — proving the case is genuinely load-bearing, not just
+# refused for some unrelated reason).
+new_origin_and_clone beta_decoy_main >/dev/null
+DECOY_MAIN="${WORK}/beta_decoy_main"
+new_origin_and_clone beta_decoy_unrelated >/dev/null
+/usr/bin/git -C "${WORK}/beta_decoy_unrelated" checkout --quiet -b beta
+/usr/bin/git -C "${WORK}/beta_decoy_unrelated" push --quiet -u origin beta
+mkdir -p "${WORK}/.worktrees"
+mv "${WORK}/beta_decoy_unrelated" "${WORK}/.worktrees/beta"
+DECOY_BETA="$(cd "${WORK}/.worktrees/beta" && pwd)"
+out="$(assert_release_origin cli "${DECOY_BETA}" "${DECOY_MAIN}" strict beta 2>&1)"
+check "beta: same-path decoy with different provenance refused" "$?" "1"
+check_contains "beta: decoy refusal names 'not a linked worktree'" "${out}" "not a linked worktree"
+rm -rf "${WORK}/.worktrees/beta"
+
+# channel=beta combined with a beta worktree on the WRONG branch: the shared
+# branch check is exercised for stable elsewhere in this file, but never in
+# combination with channel=beta — a regression that stopped comparing
+# against want_branch=beta (e.g. left comparing against "main") would pass
+# every case above and only show up here.
+new_origin_and_clone beta_wrong_branch >/dev/null
+WB_MAIN="${WORK}/beta_wrong_branch"
+/usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WORK}/.worktrees/beta" origin/main 2>/dev/null \
+    || /usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WB_MAIN}/../.worktrees/beta" origin/main
+WB_BETA="$(cd "${WB_MAIN}/../.worktrees/beta" && pwd)"
+out="$(assert_release_origin cli "${WB_BETA}" "${WB_MAIN}" strict beta 2>&1)"
+check "beta: wrong-branch beta worktree refused" "$?" "1"
+check_contains "beta: wrong-branch refusal names 'not on beta'" "${out}" "not on beta"
+/usr/bin/git -C "${WB_MAIN}" worktree remove --force "${WB_BETA}"
+
+# ── channel validation ───────────────────────────────────────────────────────
+# A 5th positional that is evidently a channel ATTEMPT (no "/", so it cannot
+# be an [allowed-staged...] path — every real one is shaped versions/<comp>
+# [.stamp]) but is not exactly stable/beta must be a hard, mode-independent
+# refusal: a computed channel variable landing here empty, wrong-cased, or
+# misspelled must never silently default to stable and cut from wherever
+# `dir` happens to be.
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict Beta 2>&1)"
+check "channel: wrong case ('Beta') is refused" "$?" "1"
+check_contains "channel: wrong-case refusal names it" "${out}" "unknown channel: Beta"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict betaa 2>&1)"
+check "channel: misspelled ('betaa') is refused" "$?" "1"
+check_contains "channel: misspelling refusal names it" "${out}" "unknown channel: betaa"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict "" 2>&1)"
+check "channel: empty string is refused" "$?" "1"
+check_contains "channel: empty-string refusal names it" "${out}" "unknown channel:"
+# Unconditional: even mode=report (the ONLY mode that otherwise lets a
+# finding through with 0) still refuses — a malformed channel is a caller
+# bug, not a tree finding a dry run may tolerate.
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" report Beta 2>&1)"
+check "channel: wrong case is refused even under mode=report" "$?" "1"
+# A path-shaped 5th positional (the real [allowed-staged...] shape) is still
+# left alone and defaults channel to stable — the validation must not start
+# rejecting every pre-existing call site's tolerance list.
+out="$(assert_release_origin edge "${COMP}" "${COMP}" strict versions/edge 2>&1)"
+check "channel: a path-shaped 5th positional is treated as tolerance, not a channel" "$?" "0"
+
 echo
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi

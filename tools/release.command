@@ -218,11 +218,21 @@ say "env: ${ENV_FILE}"
 # 4. Request.
 REQUEST="${RELEASE_REQUEST:-$REPO_ROOT/.release-request}"
 [ -r "${REQUEST}" ] || die "request file not readable: ${REQUEST}"
-COMPONENTS=""; FLAGS=""
+COMPONENTS=""; FLAGS=""; CHANNEL=""
 # shellcheck source=/dev/null
 . "${REQUEST}"
 IFS=$' \t\n'
 [ -n "${COMPONENTS}" ] || die "request names no COMPONENTS: ${REQUEST}"
+
+# CHANNEL: stable (default, an old request with no CHANNEL= line) or beta.
+# Validated here rather than left to release.sh's own --channel check so a
+# typo'd channel is refused BEFORE anything is cut, same as the COMPONENTS
+# loop below.
+CHANNEL="${CHANNEL:-stable}"
+case "${CHANNEL}" in
+    stable|beta) ;;
+    *) die "CHANNEL must be stable or beta (got '${CHANNEL}')" ;;
+esac
 
 # `all` is a real release.sh argument, and it defeats this file: it cuts every
 # component inside ONE process with no pushes between, then HEAD reads
@@ -237,7 +247,7 @@ for comp in ${COMPONENTS}; do
         *)   die "unknown component: ${comp} (expected cli, gateway, edge, agent or relay)" ;;
     esac
 done
-say "request: ${COMPONENTS} [${FLAGS}]"
+say "request: ${COMPONENTS} [${FLAGS}] channel=${CHANNEL}"
 
 # Said out loud, and said here rather than at exit: the window may be gone by the
 # time an operator would look for it, so the log has to carry what was decided
@@ -304,9 +314,9 @@ push_marker() {
 #    batch run unattended.
 for comp in ${COMPONENTS}; do
     say ""
-    say "── cut: ${comp} ──"
+    say "── cut: ${comp} (channel ${CHANNEL}) ──"
     # shellcheck disable=SC2086
-    bash tools/release.sh "${comp}" ${FLAGS} 2>&1 | tee -a "$LOG"
+    bash tools/release.sh "${comp}" --channel "${CHANNEL}" ${FLAGS} 2>&1 | tee -a "$LOG"
     rc="${PIPESTATUS[0]}"
     [ "${rc}" -eq 0 ] || { say "✗ ${comp} failed (exit ${rc}) — later components NOT cut"; say "   already-cut components above are PUBLISHED: drop them from COMPONENTS before re-running"; exit "${rc}"; }
 
@@ -317,7 +327,7 @@ for comp in ${COMPONENTS}; do
 
     subject="$($GIT log -1 --format=%s)" || die "cannot read HEAD subject — refusing to push"
     case "${subject}" in
-        "[RELEASED: ${comp}]"*)
+        "[RELEASED: ${comp}]"*|"[RELEASED: ${comp} beta]"*)
             push_marker "${comp}"
             ;;
         *)
