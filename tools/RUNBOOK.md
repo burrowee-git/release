@@ -585,19 +585,23 @@ CHANNEL=beta tools/prune-releases.sh --execute    # drain
 Run it as a deploy-phase step alongside the stable GitHub retention, on
 whatever cadence an operator decides a beta cycle warrants it.
 
-A stable cut of the **same component** always re-runs `gen-bootstraps.sh`
-(it renders every channel's bootstrap on every invocation, not only a beta
-cut's), so it re-renders `beta.*.sh` while a cycle is open, or deletes it the
-first time one runs after a cycle has been closed. Either way it **stages**
-that outcome into its own marker commit — so the working tree is always
-clean — but it does **not ship** the result: scp to the static host only
-happens from two sites total, `do_release`'s own `CHANNEL=beta` branch (a
-real beta cut shipping its own bootstrap) and `--distribute-only` (which
-re-ships whatever `beta.*.sh` currently exist, since it is always a stable
-republish). A plain stable cut of a component with an open (or just-closed)
-beta cycle therefore commits the twins' current state but does not push it
-to the host — the served copy catches up on the next beta cut or
-`--distribute-only` run for that component.
+Every cut — a stable full cut, `--distribute-only`, or a beta cut, of
+**any** component — always re-runs `gen-bootstraps.sh` (it renders every
+channel's bootstrap for every `PUBLIC_COMPONENTS` component on every
+invocation, not only a beta cut's or only the component being cut), so it
+re-renders `beta.*.sh` for a component whose cycle is open, or deletes it
+the first time one runs after that component's cycle has been closed —
+possibly a DIFFERENT component from the one this cut is for. Whichever cut
+is running **stages** that outcome for every `PUBLIC_COMPONENTS` directory,
+not only its own, into its own marker commit — so the working tree is
+always clean after any cut — but it does **not ship** the result: scp to
+the static host only happens from two sites total, `do_release`'s own
+`CHANNEL=beta` branch (a real beta cut shipping its own bootstrap) and
+`--distribute-only` (which re-ships whatever `beta.*.sh` currently exist,
+since it is always a stable republish). A plain stable cut of a component
+with an open (or just-closed) beta cycle therefore commits the twins'
+current state but does not push it to the host — the served copy catches
+up on the next beta cut or `--distribute-only` run for that component.
 
 `--distribute-only` refuses `--channel beta` outright (`✗ --distribute-only is
 a stable-channel verb; a beta cut uploads to R2 in one step`) — it re-publishes
@@ -627,9 +631,11 @@ There is no `close` verb either — closing is deleting the two files that mean
    repo, commit. The next `gen-bootstraps.sh` run (the next stable cut of any
    component, or a manual `bash tools/gen-bootstraps.sh`) sees the
    `.beta.stamp` file gone and **sweeps** `<comp>/beta.*.sh` **locally** —
-   deletes the file from the working tree, and a stable cut of THAT
-   component **stages** that deletion into its own marker commit (so the
-   working tree stays clean — see the note in "Cut" above). Nothing in
+   deletes the file from the working tree, and the NEXT cut — of ANY
+   component, stable full cut, `--distribute-only`, or beta — **stages**
+   that deletion (every `PUBLIC_COMPONENTS` directory, not only its own)
+   into its own marker commit (so the working tree stays clean — see the
+   note in "Cut" above). Nothing in
    `release.sh` ever deletes a file on the release **host**: every scp site
    here only uploads files that still exist locally, so removing the local
    copy does not touch the served one. Concretely, `<comp>/beta.*.sh` stays
