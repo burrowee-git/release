@@ -61,7 +61,7 @@ for m in helpers sha256 install-minisign-common install-minisign-linux install-m
 done
 grep -q '^# END require-minisign$' "$W/require.sh" || die "could not extract the require-minisign block"
 # The pins must be single-line assignments, or the substitutions below miss.
-for v in MINISIGN_LINUX_SHA256 MINISIGN_MACOS_SHA256 MINISIGN_KNOWN_PATHS; do
+for v in MINISIGN_VERSION MINISIGN_LINUX_SHA256 MINISIGN_MACOS_SHA256 MINISIGN_KNOWN_PATHS; do
     [ "$(grep -c "^$v=" "$W/block.sh")" = 1 ] || die "expected exactly one '$v=' line in the extracted block"
 done
 # Read the pinned version from the same extracted block the fixtures below have
@@ -183,8 +183,8 @@ printf '  OK\n'
 # ============================================================================
 say "CASE PRESEED: a pre-seeded \$MINISIGN in the environment is discarded, not trusted"
 clear_stubs; rm -f "$W/log"; stub_id 1000; stub_sudo
-# the unmodified block carries the REAL pin; "$W/serve-good" (built below) cannot
-# match it, so nothing installs here either — same stubs as PIN-MISMATCH
+# the unmodified block carries the REAL pin; "$W/serve-empty" holds no fixture
+# that could match it, so nothing installs here either — same stubs as PIN-MISMATCH
 mkdir -p "$W/serve-empty"
 if out="$(CASE_MINISIGN=/bin/echo run "$W/block.sh" linux amd64 "$W/serve-empty" 1)"; then
     die "PRESEED: the trust gate ACCEPTED a pre-seeded \$MINISIGN with nothing verified:
@@ -234,8 +234,8 @@ else
     rm -rf "$W/prefix"; mkdir -p "$W/prefix/bin"; chmod 0555 "$W/prefix/bin"
     out="$(KEEP_PREFIX=1 run "$W/block-good.sh" linux arm64 "$S" 1)" || true
     chmod 0755 "$W/prefix/bin"
-    has "$out" "not writable" || die "DEST-UNWRITABLE: expected the write-failure message: $out"
-    has "$out" "MINISIGN=/" && die "DEST-UNWRITABLE: MINISIGN set although the write failed: $out"
+    has "$out" "cannot write" || die "DEST-UNWRITABLE: expected install_file's own write-failure message: $out"
+    [ ! -e "$W/prefix/bin/minisign" ] || die "DEST-UNWRITABLE: something was written into a read-only bin"
     printf '  OK\n'
 fi
 
