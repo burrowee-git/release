@@ -566,6 +566,25 @@ is unchanged. What it does, once built/signed/notarized:
   `register prune --comp <comp> --channel beta` with no `--execute` — the
   drain is a deploy-phase step, same as stable's report-then-drain shape).
 
+**GitHub-side beta retention is a separate mechanism and nothing runs it.**
+The R2 report above is `register prune` (Go, R2 objects); a beta cut does
+**not** also report or drain the **GitHub** side (git tags — beta rows that
+reach `public` do get a GitHub prerelease, per the console promote flow
+above). `CHANNEL=beta tools/prune-releases.sh` exists and is tested for
+exactly this (spec §5.5: keep 5 beta on GitHub, same as R2), but nothing in
+`release.sh` or `release.command` calls it, and it is not in this RUNBOOK's
+deploy-phase steps — unlike the R2 side, which every beta cut at least
+*reports*, GitHub beta tags accumulate silently past 5 until an operator
+runs it by hand:
+
+```
+CHANNEL=beta tools/prune-releases.sh              # report (default)
+CHANNEL=beta tools/prune-releases.sh --execute    # drain
+```
+
+Run it as a deploy-phase step alongside the stable GitHub retention, on
+whatever cadence an operator decides a beta cycle warrants it.
+
 A stable cut of the **same component** always re-runs `gen-bootstraps.sh`
 (it renders every channel's bootstrap on every invocation, not only a beta
 cut's), so it re-renders `beta.*.sh` while a cycle is open, or deletes it the
@@ -607,16 +626,22 @@ There is no `close` verb either — closing is deleting the two files that mean
 1. `git rm versions/<comp>.beta versions/<comp>.beta.stamp` in the release
    repo, commit. The next `gen-bootstraps.sh` run (the next stable cut of any
    component, or a manual `bash tools/gen-bootstraps.sh`) sees the
-   `.beta.stamp` file gone and **sweeps** `<comp>/beta.*.sh` — a closed cycle
-   must never leave a live beta bootstrap resolving against nothing. A
-   stable cut of THAT component **stages** the sweep's deletion into its own
-   marker commit (so the working tree stays clean — see the note in "Cut"
-   above), but nothing in `release.sh` ever DELETES a file on the release
-   host — every scp site here only uploads files that still exist locally.
-   The now-stale `<comp>/beta.*.sh` served from the static host is left in
-   place — nobody advertises its URL once the cycle is closed, but it is not
-   proactively removed by any cut — until an operator removes it by hand,
-   over ssh.
+   `.beta.stamp` file gone and **sweeps** `<comp>/beta.*.sh` **locally** —
+   deletes the file from the working tree, and a stable cut of THAT
+   component **stages** that deletion into its own marker commit (so the
+   working tree stays clean — see the note in "Cut" above). Nothing in
+   `release.sh` ever deletes a file on the release **host**: every scp site
+   here only uploads files that still exist locally, so removing the local
+   copy does not touch the served one. Concretely, `<comp>/beta.*.sh` stays
+   live at `release.burrowee.com/<comp>/<beta.*.sh>` and keeps **resolving
+   and installing the last public beta**, exactly as it did before the cycle
+   closed — spec §3 keeps beta tags on GitHub as history, so there is
+   something for it to resolve to, **indefinitely**, for as long as anyone
+   still has or finds that URL. Nobody *advertises* the link once the cycle
+   is closed, but "not advertised" is not "not live" — an operator must
+   remove the served file by hand, over ssh, if the closed cycle's public
+   beta must actually stop being installable rather than merely stop being
+   pointed at.
 2. Remove the beta worktree: `git worktree remove <code>/<repo>/../.worktrees/beta`
    (standard worktree teardown — nothing beta-specific about the removal
    itself).
