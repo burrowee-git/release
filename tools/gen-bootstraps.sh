@@ -84,9 +84,20 @@
 # reads, written by tools/release.sh's beta channel at cut time) — neither is
 # written by this script.
 #
-#   BURROWEE_MIN_VERSION_FILE   test-only override for the FILE min_version_of
-#                                reads (mirrors BURROWEE_MIN_VERSION, which
-#                                overrides the VALUE outright and wins over both).
+#   BURROWEE_MIN_VERSION_FILE   override for the FILE min_version_of reads
+#                                (mirrors BURROWEE_MIN_VERSION, which overrides
+#                                the VALUE outright and wins over both). NOT
+#                                test-only: the beta twin loop below sets this
+#                                in PRODUCTION to point min_version_of at
+#                                versions/<comp>.beta.stamp instead of
+#                                versions/<comp>.stamp — the assignment lives
+#                                inside a command substitution
+#                                ($(BURROWEE_MIN_VERSION_FILE=... min_version_of
+#                                ...)), so it cannot leak into the next
+#                                component's or channel's stable render. Tests
+#                                (test-version-floor.sh etc.) also use it, to
+#                                point at a fabricated stamp with nothing to do
+#                                with this repo's real versions/*.stamp.
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"

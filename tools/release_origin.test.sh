@@ -487,18 +487,18 @@ MAIN="${WORK}/beta_ok"
     || /usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${MAIN}/../.worktrees/beta" origin/main
 BETA="$(cd "${MAIN}/../.worktrees/beta" && pwd)"
 /usr/bin/git -C "${BETA}" push --quiet -u origin beta
-out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse beta 2>&1)"; check "beta: clean synced beta worktree accepted" "$?" "0"
-out="$(assert_release_origin cli "${MAIN}" "${MAIN}" refuse beta 2>&1)"; check "beta: primary main folder refused" "$?" "1"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: clean synced beta worktree accepted" "$?" "0"
+out="$(assert_release_origin cli "${MAIN}" "${MAIN}" strict beta 2>&1)"; check "beta: primary main folder refused" "$?" "1"
 check_contains "beta: refusal names the beta worktree" "${out}" ".worktrees/beta"
-out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse stable 2>&1)"; check "stable: beta worktree refused" "$?" "1"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict stable 2>&1)"; check "stable: beta worktree refused" "$?" "1"
 echo dirty > "${BETA}/README.md"
-out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse beta 2>&1)"; check "beta: dirty refused" "$?" "1"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: dirty refused" "$?" "1"
 /usr/bin/git -C "${BETA}" checkout --quiet -- README.md
 echo more > "${BETA}/x"; /usr/bin/git -C "${BETA}" add x; /usr/bin/git -C "${BETA}" -c user.name=t -c user.email=t@t commit --quiet -m ahead
-out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse beta 2>&1)"; check "beta: ahead of origin/beta refused" "$?" "1"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: ahead of origin/beta refused" "$?" "1"
 check_contains "beta: ahead message names origin/beta" "${out}" "origin/beta"
 /usr/bin/git -C "${MAIN}" worktree remove --force "${BETA}"
-out="$(assert_release_origin cli "${MAIN}/../.worktrees/beta" "${MAIN}" refuse beta 2>&1)"; check "beta: missing worktree refused" "$?" "1"
+out="$(assert_release_origin cli "${MAIN}/../.worktrees/beta" "${MAIN}" strict beta 2>&1)"; check "beta: missing worktree refused" "$?" "1"
 check_contains "beta: missing worktree hint" "${out}" "open a beta cycle"
 # Spec §5.2 quotes this refusal as ONE line with an em-dash — not the two-line
 # form with a separate "git worktree add" hint — so pin the exact shape,
@@ -524,7 +524,7 @@ new_origin_and_clone beta_decoy_unrelated >/dev/null
 mkdir -p "${WORK}/.worktrees"
 mv "${WORK}/beta_decoy_unrelated" "${WORK}/.worktrees/beta"
 DECOY_BETA="$(cd "${WORK}/.worktrees/beta" && pwd)"
-out="$(assert_release_origin cli "${DECOY_BETA}" "${DECOY_MAIN}" refuse beta 2>&1)"
+out="$(assert_release_origin cli "${DECOY_BETA}" "${DECOY_MAIN}" strict beta 2>&1)"
 check "beta: same-path decoy with different provenance refused" "$?" "1"
 check_contains "beta: decoy refusal names 'not a linked worktree'" "${out}" "not a linked worktree"
 rm -rf "${WORK}/.worktrees/beta"
@@ -539,7 +539,7 @@ WB_MAIN="${WORK}/beta_wrong_branch"
 /usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WORK}/.worktrees/beta" origin/main 2>/dev/null \
     || /usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WB_MAIN}/../.worktrees/beta" origin/main
 WB_BETA="$(cd "${WB_MAIN}/../.worktrees/beta" && pwd)"
-out="$(assert_release_origin cli "${WB_BETA}" "${WB_MAIN}" refuse beta 2>&1)"
+out="$(assert_release_origin cli "${WB_BETA}" "${WB_MAIN}" strict beta 2>&1)"
 check "beta: wrong-branch beta worktree refused" "$?" "1"
 check_contains "beta: wrong-branch refusal names 'not on beta'" "${out}" "not on beta"
 /usr/bin/git -C "${WB_MAIN}" worktree remove --force "${WB_BETA}"
@@ -551,13 +551,13 @@ check_contains "beta: wrong-branch refusal names 'not on beta'" "${out}" "not on
 # refusal: a computed channel variable landing here empty, wrong-cased, or
 # misspelled must never silently default to stable and cut from wherever
 # `dir` happens to be.
-out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse Beta 2>&1)"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict Beta 2>&1)"
 check "channel: wrong case ('Beta') is refused" "$?" "1"
 check_contains "channel: wrong-case refusal names it" "${out}" "unknown channel: Beta"
-out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse betaa 2>&1)"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict betaa 2>&1)"
 check "channel: misspelled ('betaa') is refused" "$?" "1"
 check_contains "channel: misspelling refusal names it" "${out}" "unknown channel: betaa"
-out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse "" 2>&1)"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict "" 2>&1)"
 check "channel: empty string is refused" "$?" "1"
 check_contains "channel: empty-string refusal names it" "${out}" "unknown channel:"
 # Unconditional: even mode=report (the ONLY mode that otherwise lets a
