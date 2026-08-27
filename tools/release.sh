@@ -543,9 +543,19 @@ EDGE_SKILLS_SRC="${SRC_EDGE}/skills"
 TARGETS=(
     "darwin arm64"
     "darwin amd64"
+    "darwin amd64 legacy"
     "linux arm64"
     "linux amd64"
 )
+
+# plat_of <os> <arch> <variant> — the one spelling of the platform string used
+# for build output dirs, the dispatcher cache, assembly dirs, zip names, the
+# relay .latest set and the artifacts.json/register key: "<os>-<arch>" for the
+# empty (stock) variant, "<os>-<arch>-<variant>" otherwise. <variant> is
+# frequently the empty string — bash 3.2's `read` into three variables from a
+# two-word TARGETS entry already leaves the third empty, so no sentinel value
+# is needed to represent "no variant" in the space-separated triples below.
+plat_of() { printf '%s-%s%s' "$1" "$2" "${3:+-$3}"; }
 
 # src_for is defined earlier in this file, beside REG_*/SRC_*/assert_release_origins.
 
@@ -605,21 +615,23 @@ register_staged() {
     local source_sha
     source_sha="$(/usr/bin/git -C "${src_dir}" rev-parse HEAD 2>/dev/null || echo '')"
 
-    # sha256_bundle: sha256 of SHA256SUMS.txt (covers all four platform zips).
+    # sha256_bundle: sha256 of SHA256SUMS.txt (covers all five platform zips).
     local sha256_bundle
     # shellcheck disable=SC2086
     sha256_bundle="$(${SHA256} "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')" || sha256_bundle=""
 
     # Build artifacts JSON.
     # For each platform zip, extract sha256 + size, derive url_or_key.
-    # Public comps: zips are named burrowee-<comp>-<os>-<arch>.zip in stage_dir.
-    # Relay: zips are named latest.<os>-<arch>.zip in stage_dir (the latest_stage).
-    local artifacts_json="{" first=1
-    for pair in "darwin arm64" "darwin amd64" "linux arm64" "linux amd64"; do
-        local os arch
-        # shellcheck disable=SC2086  # pair is a controlled two-word string; word-splitting gives os arch.
-        read -r os arch <<<"${pair}"
-        local plat="${os}-${arch}"
+    # Public comps: zips are named burrowee-<comp>-<plat>.zip in stage_dir.
+    # Relay: zips are named latest.<plat>.zip in stage_dir (the latest_stage).
+    # Iterates the SAME TARGETS triples every other assembly/publish site uses,
+    # so darwin-amd64-legacy's artifacts key/zip names cannot drift from theirs.
+    local artifacts_json="{" first=1 any_found=0
+    for triple in "${TARGETS[@]}"; do
+        local os arch variant
+        # shellcheck disable=SC2086  # triple is a controlled space-separated string; word-splitting gives os arch [variant].
+        read -r os arch variant <<<"${triple}"
+        local plat="${os}-${arch}${variant:+-${variant}}"
 
         local zip_name url_or_key zip_path
         if [ "${comp}" = relay ]; then
@@ -632,9 +644,17 @@ register_staged() {
         zip_path="${stage_dir}/${zip_name}"
 
         if [ ! -f "${zip_path}" ]; then
-            echo "⚠ console registration: zip not found: ${zip_path} — skipping" >&2
-            return 0
+            # A platform release.sh's TARGETS knows about but this stage_dir
+            # does not carry — e.g. distribute_relay()/distribute_only() over
+            # a dir `rkit build` staged before rkit was taught a
+            # newly-added platform. Omit just this one artifact entry rather
+            # than abandoning registration for every platform that DID stage
+            # (the old behavior: one absent zip silently skipped the whole
+            # console row, public comps included).
+            echo "⚠ console registration: zip not found: ${zip_path} — omitting from artifacts" >&2
+            continue
         fi
+        any_found=1
 
         # sha256: read from SHA256SUMS.txt (already computed) for consistency.
         local sha256
@@ -655,6 +675,10 @@ register_staged() {
         first=0
         artifacts_json="${artifacts_json}${sep}\"${plat}\":{\"url_or_key\":\"$(json_escape "${url_or_key}")\",\"sha256\":\"$(json_escape "${sha256}")\",\"size\":${size}}"
     done
+    if [ "${any_found}" != 1 ]; then
+        echo "⚠ console registration: no artifact zips found for ${comp} under ${stage_dir} — skipping" >&2
+        return 0
+    fi
     artifacts_json="${artifacts_json}}"
 
     # sums_ref and minisig_ref: public = GitHub asset URLs; relay = R2 keys.
@@ -828,14 +852,23 @@ distribute_relay() {
     elif command -v sha256sum >/dev/null 2>&1; then SHA256="sha256sum"
     else echo "✗ neither shasum nor sha256sum found" >&2; exit 1; fi
 
-    # (1) re-stage rkit's burrowee-relay-<os>-<arch>.zip under latest.* names.
+    # (1) re-stage rkit's burrowee-relay-<plat>.zip under latest.* names.
+    #
+    # Derived from the STAGED zips (a glob), not TARGETS: TARGETS is the full
+    # cut's own target list (do_release_relay, below) and is free to grow —
+    # e.g. darwin-amd64-legacy — ahead of whatever platform set the separately
+    # versioned `rkit build --component relay` binary currently produces.
+    # distribute_relay must re-stage whatever rkit actually built, never
+    # demand a zip nothing produced.
     local latest_stage="${stage}/.latest"
     rm -rf "${latest_stage}"; mkdir -p "${latest_stage}"
-    local pair os arch z
-    for pair in "${TARGETS[@]}"; do
-        read -r os arch <<<"${pair}"
-        z="${stage}/burrowee-${comp}-${os}-${arch}.zip"
-        [ -f "${z}" ] || { echo "✗ missing ${z} (run rkit build --component relay first)" >&2; exit 1; }
+    local z plat found=0
+    for z in "${stage}/burrowee-${comp}-"*.zip; do
+        [ -f "${z}" ] || continue
+        found=1
+        plat="$(basename "${z}")"
+        plat="${plat#burrowee-"${comp}"-}"
+        plat="${plat%.zip}"
         # The same relay payload gate the full cut runs, applied to zips this
         # path did NOT assemble (rkit build produced them) — mirrors
         # distribute_only's loop for the public components. Whichever assembler
@@ -843,8 +876,10 @@ distribute_relay() {
         # the console catalog; ahead of the dry-run branch so a rehearsal fails
         # on it too.
         assert_payload_migrations "${comp}" "${z}" "${src}" || exit 1
-        cp "${z}" "${latest_stage}/latest.${os}-${arch}.zip"
+        cp "${z}" "${latest_stage}/latest.${plat}.zip"
     done
+    [ "${found}" = 1 ] \
+        || { echo "✗ no burrowee-${comp}-*.zip staged under ${stage} (run rkit build --component relay first)" >&2; exit 1; }
     # shellcheck disable=SC2086
     ( cd "${latest_stage}" && ${SHA256} latest.*.zip | sort > SHA256SUMS.txt )
 
@@ -882,7 +917,11 @@ distribute_relay() {
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ would: publish-relay to R2 under relay/${stamp}/"
-        for pair in "${TARGETS[@]}"; do read -r os arch <<<"${pair}"; echo "    relay/${stamp}/latest.${os}-${arch}.zip"; done
+        # Same stage-derived platform set as (1) above, not TARGETS.
+        for z in "${latest_stage}/latest."*.zip; do
+            [ -f "${z}" ] || continue
+            echo "    relay/${stamp}/$(basename "${z}")"
+        done
         echo "    relay/${stamp}/SHA256SUMS.txt"
         echo "    relay/${stamp}/SHA256SUMS.txt.minisig"
         echo "→ would: marker commit [RELEASED: relay] ${stamp} (private)"
@@ -1334,19 +1373,24 @@ DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
 # whatever produced it — a hand-copied binary, an interrupted signer, a partial
 # rebuild. Fail closed: unsigned, ad-hoc, or UNDETERMINABLE all rebuild.
 build_dispatcher() {
-    # build_dispatcher <os> <arch> — idempotent; populates $DISP_DIR/<os>-<arch>/burrowee
-    local os="$1" arch="$2" out="${DISP_DIR}/$1-$2"
+    # build_dispatcher <os> <arch> <variant> — idempotent; populates
+    # $DISP_DIR/<plat>/burrowee, keyed on the SAME plat_of() every other
+    # assembly/publish site uses, so darwin-amd64-legacy caches separately
+    # from darwin-amd64 rather than colliding with (and silently reusing) it.
+    local os="$1" arch="$2" variant="$3" plat out
+    plat="$(plat_of "${os}" "${arch}" "${variant}")"
+    out="${DISP_DIR}/${plat}"
     if [ -x "${out}/burrowee" ]; then
         # Off darwin, and in every non-Apple mode, the cache means what it always
         # meant: one build per target per run.
         if [ -z "${APPLE_SIGN}" ] || [ "${os}" != darwin ]; then return 0; fi
         if developer_id_signed "${out}/burrowee"; then return 0; fi
-        echo "→ dispatcher cache ${DISP_STAMP}/${os}-${arch} is not Developer-ID signed (an" >&2
+        echo "→ dispatcher cache ${DISP_STAMP}/${plat} is not Developer-ID signed (an" >&2
         echo "  earlier non-Apple build or --dry-run left it) — rebuilding and re-signing" >&2
         rm -f "${out}/burrowee"
     fi
     mkdir -p "${out}"
-    COMP=burrowee SRC_DIR="${SRC_DISPATCHER}" TARGETOS="${os}" TARGETARCH="${arch}" \
+    COMP=burrowee SRC_DIR="${SRC_DISPATCHER}" TARGETOS="${os}" TARGETARCH="${arch}" VARIANT="${variant}" \
         STAMP="${DISP_STAMP}" OUT_DIR="${out}" GO_BIN="${GO_BIN}" \
         bash "${REPO_ROOT}/tools/build.sh" >&2
 }
@@ -1410,19 +1454,20 @@ do_release_relay() {
     mkdir -p "${stage}"
 
     # (2) per-target build + assemble + zip.
-    local zips=() pair os arch out_bins assemble asset b d
-    for pair in "${TARGETS[@]}"; do
-        read -r os arch <<<"${pair}"
-        out_bins="${stage}/.bins-${os}-${arch}"
+    local zips=() triple os arch variant plat out_bins assemble asset b d
+    for triple in "${TARGETS[@]}"; do
+        read -r os arch variant <<<"${triple}"
+        plat="$(plat_of "${os}" "${arch}" "${variant}")"
+        out_bins="${stage}/.bins-${plat}"
         mkdir -p "${out_bins}"
 
         # dispatcher for this target (built once, reused) — bundled like the public comps.
-        build_dispatcher "${os}" "${arch}"
+        build_dispatcher "${os}" "${arch}" "${variant}"
 
         # relay binaries: build.sh emits all three (serve + cli + updater); the cli
         # and updater get console identity baked (console_pub_hex from
         # config/console-pub.hex). The serve binary gets only -X main.version.
-        COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \
+        COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" VARIANT="${variant}" \
             STAMP="${stamp}" OUT_DIR="${out_bins}" GO_BIN="${GO_BIN}" \
             CONSOLE_PUB_HEX="$(console_pub_hex)" \
             bash "${REPO_ROOT}/tools/build.sh" >&2
@@ -1441,12 +1486,12 @@ do_release_relay() {
         # open-coded `for s in install.sh update.sh updater.update.sh` this
         # replaces. That list was the last copy of the fact that shipped gateway
         # v0.2.0 with no migrations/ in it.
-        assemble="${stage}/burrowee-${comp}-${os}-${arch}"
+        assemble="${stage}/burrowee-${comp}-${plat}"
         rm -rf "${assemble}"
         mkdir -p "${assemble}"
         # shellcheck disable=SC2086  # ${bins} is an intentional space-list from bins_for(); word-splitting is the point.
         for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
-        cp "${DISP_DIR}/${os}-${arch}/burrowee" "${assemble}/burrowee"
+        cp "${DISP_DIR}/${plat}/burrowee" "${assemble}/burrowee"
         [ -f "${src}/install.sh" ] \
             || { echo "✗ relay script missing in source: ${src}/install.sh" >&2; exit 1; }
         cp "${src}/install.sh" "${assemble}/install.sh"
@@ -1462,7 +1507,7 @@ do_release_relay() {
             assert_payload_developer_id_signed "${assemble}" "${os}" || exit 1
         fi
 
-        asset="burrowee-${comp}-${os}-${arch}.zip"
+        asset="burrowee-${comp}-${plat}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
         # zip -j junks paths and SKIPS DIRECTORIES OUTRIGHT, so every
@@ -1499,16 +1544,17 @@ do_release_relay() {
     done
 
     # (3) sums + sign over the LATEST-NAMED set.
-    # We name the zips as latest.<os>-<arch>.zip so the gate-served paths are
+    # We name the zips as latest.<plat>.zip so the gate-served paths are
     # stable filenames the installer can hard-code:
-    #   /relay/release/latest.darwin-arm64.zip, etc.
+    #   /relay/release/latest.darwin-arm64.zip, /relay/release/latest.darwin-amd64-legacy.zip, etc.
     # We also archive a copy under <stamp>/ for the prune-to-3 retention.
     local latest_stage="${REPO_ROOT}/dist/${stamp}/.latest"
     mkdir -p "${latest_stage}"
-    for pair in "${TARGETS[@]}"; do
-        read -r os arch <<<"${pair}"
-        cp "${stage}/burrowee-${comp}-${os}-${arch}.zip" \
-           "${latest_stage}/latest.${os}-${arch}.zip"
+    for triple in "${TARGETS[@]}"; do
+        read -r os arch variant <<<"${triple}"
+        plat="$(plat_of "${os}" "${arch}" "${variant}")"
+        cp "${stage}/burrowee-${comp}-${plat}.zip" \
+           "${latest_stage}/latest.${plat}.zip"
     done
     # SHA256SUMS over the latest.* filenames (what the installer verifies).
     # shellcheck disable=SC2086
@@ -1526,9 +1572,9 @@ do_release_relay() {
         echo ""
         echo "✓ dry-run relay: would upload to R2 under relay/${stamp}/"
         echo "  R2 keys:"
-        for pair in "${TARGETS[@]}"; do
-            read -r os arch <<<"${pair}"
-            echo "    relay/${stamp}/latest.${os}-${arch}.zip"
+        for triple in "${TARGETS[@]}"; do
+            read -r os arch variant <<<"${triple}"
+            echo "    relay/${stamp}/latest.$(plat_of "${os}" "${arch}" "${variant}").zip"
         done
         echo "    relay/${stamp}/SHA256SUMS.txt"
         echo "    relay/${stamp}/SHA256SUMS.txt.minisig"
@@ -1623,34 +1669,35 @@ do_release() {
     mkdir -p "${stage}"
 
     # (3) per-target build + assemble + zip.
-    local zips=() pair os arch out_bins assemble asset b d
-    for pair in "${TARGETS[@]}"; do
-        read -r os arch <<<"${pair}"
-        out_bins="${stage}/.bins-${os}-${arch}"
+    local zips=() triple os arch variant plat out_bins assemble asset b d
+    for triple in "${TARGETS[@]}"; do
+        read -r os arch variant <<<"${triple}"
+        plat="$(plat_of "${os}" "${arch}" "${variant}")"
+        out_bins="${stage}/.bins-${plat}"
         mkdir -p "${out_bins}"
 
         # (2) dispatcher for this target (built once, reused).
-        build_dispatcher "${os}" "${arch}"
+        build_dispatcher "${os}" "${arch}" "${variant}"
 
         # component bins
         if [ "${comp}" = edge ]; then
-            COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \
+            COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" VARIANT="${variant}" \
                 STAMP="${stamp}" OUT_DIR="${out_bins}" GO_BIN="${GO_BIN}" \
                 CONSOLE_PUB_HEX="$(console_pub_hex)" \
                 bash "${REPO_ROOT}/tools/build.sh" >&2
         else
-            COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" \
+            COMP="${comp}" SRC_DIR="${src}" TARGETOS="${os}" TARGETARCH="${arch}" VARIANT="${variant}" \
                 STAMP="${stamp}" OUT_DIR="${out_bins}" GO_BIN="${GO_BIN}" \
                 bash "${REPO_ROOT}/tools/build.sh" >&2
         fi
 
         # assemble: component bins + dispatcher + inner installer (→ install.sh)
-        assemble="${stage}/burrowee-${comp}-${os}-${arch}"
+        assemble="${stage}/burrowee-${comp}-${plat}"
         rm -rf "${assemble}"
         mkdir -p "${assemble}"
         # shellcheck disable=SC2086  # ${bins} is an intentional space-list of bin names from bins_for(); word-splitting is the point.
         for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
-        cp "${DISP_DIR}/${os}-${arch}/burrowee" "${assemble}/burrowee"
+        cp "${DISP_DIR}/${plat}/burrowee" "${assemble}/burrowee"
         cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
@@ -1695,7 +1742,7 @@ do_release() {
             assert_payload_developer_id_signed "${assemble}" "${os}" || exit 1
         fi
 
-        asset="burrowee-${comp}-${os}-${arch}.zip"
+        asset="burrowee-${comp}-${plat}.zip"
         rm -f "${stage}/${asset}"
         ( cd "${assemble}" && zip -j -q "${stage}/${asset}" ./* )
         # zip -j junks paths and SKIPS DIRECTORIES OUTRIGHT, so every

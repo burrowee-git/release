@@ -95,6 +95,15 @@ done
 {
     os=darwin
     arch=arm64
+    # variant/plat: release.sh's do_release()/do_release_relay() compute
+    # `plat` (via plat_of()) BEFORE the extracted assembly block starts —
+    # out_bins is named from it too, one line earlier than the "# assemble:"
+    # marker the extraction below anchors on — so the fixture (not the
+    # extracted text) owns setting it, exactly like os/arch. Default is the
+    # stock (no-variant) platform; the darwin-amd64-legacy case further down
+    # overrides both before calling fixture().
+    variant=""
+    plat="darwin-arm64"
     APPLE_SIGN=""
     # Assigned by the blocks; declared so `set -u` is honest about what the
     # extracted code owns.
@@ -118,6 +127,7 @@ done
 fixture() {
     comp="$1"; shift
     bins="$*"
+    plat="${os}-${arch}${variant:+-${variant}}"
     src="${TMP}/${comp}/src"
     out_bins="${TMP}/${comp}/bins"
     DISP_DIR="${TMP}/${comp}/disp"
@@ -125,12 +135,12 @@ fixture() {
     REPO_ROOT="${TMP}/${comp}/repo"
     EDGE_WEB="${TMP}/${comp}/edge.web"
     rm -rf "${TMP:?}/${comp}"
-    mkdir -p "${src}" "${out_bins}" "${DISP_DIR}/${os}-${arch}" "${stage}" \
+    mkdir -p "${src}" "${out_bins}" "${DISP_DIR}/${plat}" "${stage}" \
         "${REPO_ROOT}/inner/${comp}" "${EDGE_WEB}"
     local f
     # shellcheck disable=SC2086  # ${bins} is the same intentional space-list release.sh uses.
     for f in ${bins}; do printf 'bin:%s\n' "${f}" > "${out_bins}/${f}"; done
-    printf 'bin:burrowee\n' > "${DISP_DIR}/${os}-${arch}/burrowee"
+    printf 'bin:burrowee\n' > "${DISP_DIR}/${plat}/burrowee"
 }
 
 # members — the finished zip's file entries, comma-joined, sorted. Read out of
@@ -160,6 +170,28 @@ check "cli payload members" "$(members "${stage}/${asset}")" \
     "burrowee,burrowee-cli,install.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh"
 check "cli install.sh comes from inner/cli/, not the component source" \
     "$(unzip -p "${stage}/${asset}" install.sh)" "inner installer"
+
+# --- cli, darwin/amd64/legacy: the FIFTH platform threads through the same
+# extracted release.sh text as every other target — asset name, dispatcher
+# cache path and payload membership must be identical to the stock build,
+# differing ONLY in the plat-derived names (never "darwin-amd64-''" or any
+# other spelling of "no variant" leaking in from an empty-variant edge case).
+os=darwin; arch=amd64; variant=legacy
+fixture cli burrowee-cli
+printf 'inner installer\n'     > "${REPO_ROOT}/inner/cli/install.sh"
+printf 'component installer\n' > "${src}/install.sh"
+printf 'update\n'              > "${src}/update.sh"
+printf 'updater self-update\n' > "${src}/updater.update.sh"
+shared_ladder_src "${src}"
+if run_public; then ok "cli (darwin-amd64-legacy): assembly succeeds"; else bad "cli (darwin-amd64-legacy): assembly failed"; fi
+check "cli (darwin-amd64-legacy) asset name" "${asset}" "burrowee-cli-darwin-amd64-legacy.zip"
+[ -f "${stage}/burrowee-cli-darwin-amd64-legacy.zip" ] \
+    && ok "cli (darwin-amd64-legacy) zip exists at the plat-derived path" \
+    || bad "cli (darwin-amd64-legacy) zip missing at ${stage}/burrowee-cli-darwin-amd64-legacy.zip"
+check "cli (darwin-amd64-legacy) payload members (same manifest as stock — VARIANT changes symbols, not membership)" \
+    "$(members "${stage}/${asset}")" \
+    "burrowee,burrowee-cli,install.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh"
+os=darwin; arch=arm64; variant=""   # restore the default fixture platform for the rest of this file
 
 # --- gateway: the regression, end to end through release.sh's own text -------
 fixture gateway burrowee-gateway
