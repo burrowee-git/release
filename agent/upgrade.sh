@@ -684,6 +684,13 @@ fi
 
 # ---- version resolution -------------------------------------------------
 # BEGIN version-resolve
+# v4: the console catalog selects the channel with a PATH SEGMENT
+# (/api/v1/releases/<channel>/<comp>/current), not a `channel=` query parameter.
+# A path segment selects WHICH catalog is read — that is logic, and a query
+# parameter only ever carried data. The query form's failure mode is what forced
+# this: a console that did not know the parameter answered the STABLE current
+# with 200, so a beta host installed stable and nothing anywhere said so. The
+# path form cannot be silently ignored — an unknown channel is a 4xx.
 # Read the per-component pin env var by name (no eval). $COMP is a baked
 # literal, so a direct case over the four known components is exhaustive.
 case "$COMP" in
@@ -723,8 +730,8 @@ else
     if [ -z "$TAG" ]; then
         # GitHub answered (this host reached it) but nothing matched $CHANNEL's
         # tag shape — on beta that is not "unreachable", it is "no beta cycle is
-        # open right now". The console catalog carries the same ?channel= filter
-        # just below and would say the same thing, so asking it adds a round trip
+        # open right now". The console catalog just below is read on that same
+        # channel and would say the same thing, so asking it adds a round trip
         # for no new answer: give the actionable refusal here instead of falling
         # through to the generic "both unreachable" message below.
         if [ "$GH_ANSWERED" = 1 ] && [ "$CHANNEL" = beta ]; then
@@ -732,11 +739,14 @@ else
         fi
         TAG_SOURCE=catalog
         # GitHub unreachable or no releases published. Try the console catalog
-        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/agent/current?channel=<channel>.
+        # (public, no auth): GET ${CONSOLE_URL}/api/v1/releases/<channel>/agent/current.
+        # The channel is a PATH SEGMENT: it selects which catalog is read, and a
+        # console that does not recognise it answers 4xx rather than quietly
+        # serving the stable current the way an unknown `channel=` query did.
         # This is the R2 fallback path — assets are served via `burrowee download-url`
         # (see the dl() function below), which requires a device grant.
         info "GitHub unreachable — trying console catalog for latest agent version"
-        catalog_url="${CONSOLE_URL}/api/v1/releases/agent/current?channel=${CHANNEL}"
+        catalog_url="${CONSOLE_URL}/api/v1/releases/${CHANNEL}/agent/current"
         # Use plain curl (no TLS-only flags) when DL_BASE is set for tests, else
         # standard hardened curl.
         # shellcheck disable=SC2086  # intentional word-split of $CURL flags
