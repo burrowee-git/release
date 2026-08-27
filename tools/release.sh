@@ -116,6 +116,8 @@ source "${REPO_ROOT}/tools/trustcomment.sh"
 source "${REPO_ROOT}/tools/marker_commit.sh"
 # shellcheck source=tools/batch.sh
 source "${REPO_ROOT}/tools/batch.sh"
+# shellcheck source=tools/public_components.sh
+source "${REPO_ROOT}/tools/public_components.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -1994,24 +1996,39 @@ do_release() {
 
     # (7) regenerate bootstraps + refresh edge skills + scp the static surface.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
-    # Stage — but do NOT ship — whatever gen-bootstraps.sh just did to THIS
-    # comp's beta.*.sh twins. It renders every channel's bootstrap on every
-    # invocation, including a stable cut's: re-renders them when a beta cycle
-    # is open (harmless — the bytes don't change unless the pubkey/preflight
-    # did) and DELETES them when a cycle has just been closed. Neither is
-    # staged by the scp/`git add` block below, which only handles the STABLE
-    # artifacts — so a stable cut run right after closing a beta cycle left
-    # the sweep's deletions sitting unstaged, and tools/release.command's
-    # tree_state() then refused to push an already-published marker commit
-    # ("cut left an unclean tree"), stranding the release AFTER the GitHub
-    # Release went out. `-A -- "${comp}"` stages adds/modifies/deletes under
-    # the whole comp dir in one call — it does NOT ship these files (no scp),
-    # so it isn't a third publish site: it doesn't match cmd/rkit's
+    # Stage — but do NOT ship — whatever gen-bootstraps.sh just did to EVERY
+    # public component's beta.*.sh twins, not only THIS comp's. It renders
+    # every channel's bootstrap for every component in PUBLIC_COMPONENTS on
+    # every invocation, including a stable cut's: re-renders a component's
+    # twins while its beta cycle is open (harmless — the bytes don't change
+    # unless the pubkey/preflight did) and DELETES them the first time it runs
+    # after that component's cycle has just been closed. Nothing about which
+    # component gets swept depends on which comp THIS cut is for — so a
+    # narrower `git add -A -- "${comp}"` (staging only the comp being cut)
+    # left ANOTHER, already-closed component's sweep deletions unstaged: close
+    # comp X's cycle (RUNBOOK "Close a cycle" step 1: `git rm
+    # versions/X.beta*`), then cut comp Y stable — gen-bootstraps.sh deletes
+    # X/beta.*.sh, this block staged only Y's dir, and
+    # tools/release.command's tree_state() then refused to push an
+    # already-published marker commit ("cut left an unclean tree"), stranding
+    # the release AFTER Y's GitHub Release had already gone out — precisely
+    # the wedge the original `-A` was added to prevent, just scoped too
+    # narrowly to close it. Fix: stage every PUBLIC_COMPONENTS dir, not only
+    # ${comp}'s (same list tools/gen-bootstraps.sh sweeps from — see
+    # tools/public_components.sh — so the two cannot drift apart again).
+    #
+    # `-A -- "<dir>"` per component stages adds/modifies/deletes under that
+    # dir in one call — it does NOT ship these files (no scp), so it isn't a
+    # publish site: it doesn't match cmd/rkit's
     # TestReleasePublishesEveryRenderedArtifact guard, which looks for the
-    # literal `git add "${comp}/<artifact>"` form, not `-A`. Shipping the
-    # twins is still exactly two sites — do_release's CHANNEL=beta branch and
-    # distribute_only — this only keeps the stable tail's tree clean.
-    git add -A -- "${comp}"
+    # literal `git add "${comp}/<artifact>"` form (this loop's pathspec is a
+    # bare directory, never `<dir>/<artifact>`), nor does it scp anything.
+    # Shipping the twins is still exactly two sites — do_release's
+    # CHANNEL=beta branch and distribute_only — this only keeps every
+    # component's tree clean after a stable cut's sweep.
+    for pubcomp in ${PUBLIC_COMPONENTS}; do
+        git add -A -- "${pubcomp}"
+    done
     # Edge operator skills are OWNED by the edge repo; mirror them in from its
     # worktree on every release so the served copy can never drift from source.
     # (The cli + gateway skills are authored in THIS repo and are left untouched.)

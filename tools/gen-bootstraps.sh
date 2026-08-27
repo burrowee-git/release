@@ -97,6 +97,11 @@ PREFLIGHT_TEMPLATE="$ROOT/tools/preflight.template.sh"
 [ -f "$RELAY_TEMPLATE" ] || { echo "✗ missing relay template: $RELAY_TEMPLATE" >&2; exit 1; }
 [ -f "$PREFLIGHT_TEMPLATE" ] || { echo "✗ missing preflight template: $PREFLIGHT_TEMPLATE" >&2; exit 1; }
 
+# PUBLIC_COMPONENTS — cli gateway edge agent. Shared with tools/release.sh (its
+# sweep-staging widen needs the SAME set this script renders/sweeps for, not a
+# second hardcoded copy that can drift from it) — see tools/public_components.sh.
+. "$ROOT/tools/public_components.sh"
+
 # sha256 of a file (shasum on mac, sha256sum on linux) — for the preflight pin.
 sha256_of() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
@@ -208,7 +213,7 @@ UPDATER_INSTALL_COMPONENTS="edge gateway"
 # ORDER per comp: render <comp>/preflight.sh FIRST (so we can sha256 it), then
 # render <comp>/install.sh baking that hash as @PREFLIGHT_SHA256@. @NGINX@ is 1
 # for edge (installs nginx + stream module), 0 for cli/gateway/agent.
-for comp in cli gateway edge agent; do
+for comp in $PUBLIC_COMPONENTS; do
     mkdir -p "$ROOT/$comp"
     case "$comp" in
         edge) nginx=1 ;;

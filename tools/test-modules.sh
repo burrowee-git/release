@@ -179,6 +179,7 @@ printf '\n=== GENERATOR-FAILS-CLOSED: a missing module aborts before any destina
 SCRATCH="$(mktemp -d)"
 mkdir -p "$SCRATCH/tools"
 cp "$ROOT/tools/gen-bootstraps.sh" "$SCRATCH/tools/gen-bootstraps.sh"
+cp "$ROOT/tools/public_components.sh" "$SCRATCH/tools/public_components.sh"
 cp "$ROOT/tools/preflight.template.sh" "$SCRATCH/tools/preflight.template.sh"
 cp "$ROOT/tools/relay-bootstrap.template.sh" "$SCRATCH/tools/relay-bootstrap.template.sh"
 {

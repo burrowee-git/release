@@ -197,6 +197,7 @@ say "GENERATOR: beta twins render with versions/<comp>.beta.stamp, and are swept
 BSCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/test-version-floor-beta-XXXXXX")"
 mkdir -p "${BSCRATCH}/tools/modules" "${BSCRATCH}/versions"
 cp "${REPO_ROOT}/tools/gen-bootstraps.sh" "${BSCRATCH}/tools/gen-bootstraps.sh"
+cp "${REPO_ROOT}/tools/public_components.sh" "${BSCRATCH}/tools/public_components.sh"
 cp "${REPO_ROOT}/tools/bootstrap.template.sh" "${BSCRATCH}/tools/bootstrap.template.sh"
 cp "${REPO_ROOT}/tools/preflight.template.sh" "${BSCRATCH}/tools/preflight.template.sh"
 cp "${REPO_ROOT}/tools/relay-bootstrap.template.sh" "${BSCRATCH}/tools/relay-bootstrap.template.sh"
