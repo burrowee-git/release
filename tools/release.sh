@@ -1089,6 +1089,20 @@ distribute_only() {
     # mirrors do_release()'s self-hosting block verbatim so a distribute-only
     # cut actually updates release.burrowee.com, not just the GitHub Release.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+    # Stage every PUBLIC_COMPONENTS dir's beta.*.sh sweep outcome, not only
+    # ${comp}'s — same wedge and same fix as do_release()'s stable tail (see
+    # the comment there): gen-bootstraps.sh sweeps EVERY public component's
+    # beta.*.sh on every invocation, not only the one being distributed here.
+    # A stale narrower stage left another, already-closed component's sweep
+    # deletions unstaged, and release.command's tree_state() refused to push
+    # the marker commit this function is about to make — AFTER gh_release_publish
+    # (above) had already put the GitHub Release out. `-A -- "<dir>"` per
+    # component stages whole directories, never the `"${comp}/<artifact>"`
+    # shape cmd/rkit's TestReleasePublishesEveryRenderedArtifact's gitAddSites
+    # needle matches, and ships nothing (no scp) — not a third publish site.
+    for pubcomp in ${PUBLIC_COMPONENTS}; do
+        git add -A -- "${pubcomp}"
+    done
     # Edge operator skills are OWNED by the edge repo; mirror them in from its
     # worktree on every release so the served copy can never drift from source.
     # (The cli + gateway skills are authored in THIS repo and are left untouched.)
@@ -1944,6 +1958,22 @@ do_release() {
         trap shred_key ERR INT TERM
 
         bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+        # Stage every PUBLIC_COMPONENTS dir's beta.*.sh sweep outcome, not
+        # only ${comp}'s — same wedge and same fix as do_release()'s stable
+        # tail (see the comment there): gen-bootstraps.sh sweeps EVERY public
+        # component's beta.*.sh on every invocation, not only THIS comp's. A
+        # stale narrower stage left another, already-closed component's sweep
+        # deletions unstaged, and release.command's tree_state() refused to
+        # push the marker commit this branch makes below — checked only after
+        # release.sh returns, by which point the R2 publish-dir a few lines up
+        # and the console registration a few lines down have both already run.
+        # `-A -- "<dir>"` per component stages whole directories, never the
+        # `"${comp}/<artifact>"` shape cmd/rkit's
+        # TestReleasePublishesEveryRenderedArtifact's gitAddSites needle
+        # matches, and ships nothing (no scp) — not a third publish site.
+        for pubcomp in ${PUBLIC_COMPONENTS}; do
+            git add -A -- "${pubcomp}"
+        done
         # Ship THIS cut's own bootstrap. cmd/rkit's
         # TestReleasePublishesEveryRenderedArtifact requires every rendered
         # artifact scp'd + git-added from EXACTLY two sites; for the beta
