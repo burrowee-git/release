@@ -1714,8 +1714,8 @@ do_release_relay() {
         --from-dir "${latest_stage}"
 
     # (4b) retention (dry-run): report relay R2 prefixes now over keep=3 stable
-    # / 5 beta. The destructive drain (prune --comp relay --execute) is a
-    # deploy-phase step.
+    # / 1 beta (beta is disposable — the newest cut is the only one kept). The
+    # destructive drain (prune --comp relay --execute) is a deploy-phase step.
     echo
     echo "→ relay R2 retention (dry-run — run prune --comp relay --channel ${CHANNEL} --execute in the deploy phase to apply):"
     "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" || true

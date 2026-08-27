@@ -562,20 +562,21 @@ is unchanged. What it does, once built/signed/notarized:
   stable `[RELEASED: <comp>]` one, so a batched beta cut through
   `release.command` still pushes its marker before the next component starts.
 - Registers a `staged`, `channel=beta` row with the console (R2 keys, no
-  `github_release`) and prints an R2 beta-retention **report** (keep 5,
-  `register prune --comp <comp> --channel beta` with no `--execute` — the
-  drain is a deploy-phase step, same as stable's report-then-drain shape).
+  `github_release`) and prints an R2 beta-retention **report** (keep 1 — the
+  latest only, since the beta track is disposable, `register prune --comp
+  <comp> --channel beta` with no `--execute` — the drain is a deploy-phase
+  step, same as stable's report-then-drain shape).
 
 **GitHub-side beta retention is a separate mechanism and nothing runs it.**
 The R2 report above is `register prune` (Go, R2 objects); a beta cut does
 **not** also report or drain the **GitHub** side (git tags — beta rows that
 reach `public` do get a GitHub prerelease, per the console promote flow
 above). `CHANNEL=beta tools/prune-releases.sh` exists and is tested for
-exactly this (spec §5.5: keep 5 beta on GitHub, same as R2), but nothing in
-`release.sh` or `release.command` calls it, and it is not in this RUNBOOK's
-deploy-phase steps — unlike the R2 side, which every beta cut at least
-*reports*, GitHub beta tags accumulate silently past 5 until an operator
-runs it by hand:
+exactly this (spec §5.5: keep 1 beta on GitHub — the latest only, same as
+R2), but nothing in `release.sh` or `release.command` calls it, and it is
+not in this RUNBOOK's deploy-phase steps — unlike the R2 side, which every
+beta cut at least *reports*, GitHub beta tags accumulate silently past 1
+until an operator runs it by hand:
 
 ```
 CHANNEL=beta tools/prune-releases.sh              # report (default)

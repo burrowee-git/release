@@ -200,11 +200,15 @@ func TestPruneChannelsNeverMix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune beta: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("beta deleted count: got %d want 2", n)
+	if n != 6 {
+		t.Errorf("beta deleted count: got %d want 6", n)
 	}
-	// 7 beta → keep 5 → drop the 2 oldest (beta[0], beta[1]).
-	wantBeta := map[string]bool{beta[0]: true, beta[1]: true}
+	// 7 beta → keep 1 (the latest only — beta is disposable, spec §5.5) →
+	// drop the 6 oldest (beta[0]..beta[5]), keeping only beta[6].
+	wantBeta := map[string]bool{}
+	for _, k := range beta[:6] {
+		wantBeta[k] = true
+	}
 	for _, k := range betaStore.deleted {
 		if !wantBeta[k] {
 			t.Errorf("beta prune deleted unexpected key: %s", k)
