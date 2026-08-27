@@ -35,18 +35,49 @@ Full design: `docs/specs/2026-08-27-darwin-legacy-build-design.md` §3–§4.1 i
 silently failing to apply after a Go bump. It passes only when:
 
 1. `go version` matches `GO_VERSION` exactly, and
-2. each of the three files here differs from the *live* `$(go env
-   GOROOT)/src/...` original only inside the hunks this overlay is allowed to
-   own (the chain loop; the import/wrapper block; the trampolines) — any other
-   difference (i.e. upstream Go touched something else in these files between
-   the pinned minor and the one actually installed) fails the check, and
+2. every diff **hunk** (`diff`'s normal-format change block, not individual
+   line) between each file here and its *live* `$(go env GOROOT)/src/...`
+   original contains at least one line naming a symbol the overlay owns
+   (`SecTrustCopyCertificateChain`, `SecTrustGetCertificateCount`,
+   `SecTrustGetCertificateAtIndex`, `chainRef`, `CFArrayGetCount`,
+   `CFArrayGetValueAtIndex`) — a hunk with none of those anchors anywhere in
+   it fails the check, and
 3. the overlay files still actually drop the macOS-12-only symbol and still
    walk the chain by index (belt-and-braces content checks, independent of
-   the diff-based check above).
+   the hunk-based check above).
 
 A future Go bump — even a patch release — therefore fails this test until a
 human re-derives the overlay, rather than silently shipping a stale overlay
 that either doesn't apply or reintroduces the macOS-12 symbol.
+
+### What the drift guard actually guarantees (and what it doesn't)
+
+Check 2 is **hunk**-scoped, not line-scoped, on purpose: a hunk this overlay
+legitimately owns (e.g. the chain-loop rewrite in `root_darwin.go`) mixes in
+ordinary Go boilerplate — an `if err != nil {` follow-on, a bare closing
+brace, `return int(ret)` — alongside the anchor symbols. An early version of
+this guard tried to allowlist that boilerplate line-by-line, which meant any
+line anywhere in the file matching one of those generic tokens was silently
+accepted — including inside a completely unrelated hunk that never mentions
+any owned symbol. Scoping the check to whole hunks closes that: the actual
+guarantee is **"every changed hunk contains at least one line naming an
+owned symbol somewhere in that hunk"**, which is stronger than line-by-line
+but still not literally "only the expected three hunks changed and nothing
+else." Two residual gaps to know about:
+
+- A hunk that legitimately touches an owned symbol could, in principle,
+  smuggle in an unrelated change *within that same hunk* (i.e. adjacent to
+  an anchor line) — the guard does not diff hunk shape/line-count against a
+  recorded expectation, only "does this hunk mention an owned symbol."
+- The anchor list is substring matching, so a symbol name appearing inside a
+  comment or string literal (not just real code) also satisfies it — this is
+  why check 3 (the `SecTrustCopyCertificateChain` occurrence count) exists as
+  an independent, non-hunk-based backstop rather than folding into check 2.
+
+Both gaps are deliberate trade-offs of a `diff`+`awk` guard over hand-written
+Go files, not oversights; a stronger guard would need something closer to an
+AST diff. If that trade-off ever proves insufficient, tighten check 2 rather
+than reverting to line-by-line matching.
 
 Nothing under `tools/legacy/darwin/` runs this test automatically at build
 time from here — that wiring (`build.sh` invoking `overlay.test.sh` before
