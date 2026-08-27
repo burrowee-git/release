@@ -34,6 +34,13 @@ import (
 // the REAL committed bytes and compare them against the Go side, rather than
 // restating the pattern a third time as a literal that could itself drift and
 // never be noticed.
+//
+// This test reads the COMMITTED bootstraps, not tools/bootstrap.template.sh
+// itself, so an edit to the template with no regeneration passes it clean —
+// that half is covered instead by tools/test-modules.sh's "GENERATOR:
+// committed bootstraps are what the generator writes" case (byte-diffs a
+// fresh render against what's checked in). The two together close the gap;
+// neither alone does.
 
 // stampPatternRepoRoot resolves this package's directory two levels up to the
 // repo root (internal/register -> internal -> root).
