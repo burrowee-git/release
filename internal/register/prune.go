@@ -25,12 +25,18 @@ type PruneStore interface {
 	Deleter
 }
 
-// keepFor reports the retention count for comp on channel: beta keeps 5
-// regardless of comp; on stable, relay keeps 3 and every public component
-// (cli/gateway/edge/agent) keeps 10. The locked operator policy (spec §5.5).
+// keepFor reports the retention count for comp on channel: beta keeps only
+// the latest — 1 — regardless of comp, because the beta track is disposable
+// (a cycle is opened, cut, promoted, superseded and dropped, and nothing on
+// it is worth carrying history for); on stable, relay keeps 3 and every
+// public component (cli/gateway/edge/agent) keeps 10. The locked operator
+// policy (spec §5.5). Consequence: cutting a new beta expires the previous
+// one and prunes its artifacts immediately — an invite link minted against
+// the older beta stops resolving, and there is no artifact-level rollback to
+// a prior beta.
 func keepFor(comp, channel string) int {
 	if channel == "beta" {
-		return 5
+		return 1
 	}
 	if comp == "relay" {
 		return 3

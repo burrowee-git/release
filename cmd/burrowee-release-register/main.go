@@ -214,8 +214,9 @@ func runPublishRelay(args []string) {
 // runPrune drops all but the newest N version prefixes for a component in R2,
 // on the given channel ONLY (a stable prune never counts or deletes a beta
 // version, and vice versa — spec §5.5): stable keeps 3 for relay and 10 for
-// every other component; beta keeps 5 regardless of component. Dry-run by
-// default; --execute performs the deletions. R2 credentials come from
+// every other component; beta keeps only the latest — 1 — regardless of
+// component, since the beta track is disposable. Dry-run by default;
+// --execute performs the deletions. R2 credentials come from
 // <dir>/config.toml + r2.key.
 func runPrune(args []string) {
 	fs := flag.NewFlagSet("prune", flag.ExitOnError)

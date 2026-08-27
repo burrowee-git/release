@@ -9,8 +9,12 @@
 #
 # Env (optional):
 #   CHANNEL                 stable|beta (default stable)
-#   KEEP                    newest versions to retain per component
-#                           (default 10 on stable, 5 on beta)
+#   KEEP                    newest versions to retain per component (default
+#                           10 on stable, 1 on beta — beta is disposable, so
+#                           cutting a new beta expires the previous one and
+#                           prunes its release now; an invite minted against
+#                           the older beta stops resolving, no artifact-level
+#                           rollback to it)
 #   COMPONENTS              space-separated set (default: PUBLIC_COMPONENTS,
 #                           tools/public_components.sh; relay is excluded — it
 #                           has no GitHub release)
@@ -40,7 +44,7 @@ case "${CHANNEL}" in
   *) echo "✗ CHANNEL must be stable or beta (got '${CHANNEL}')" >&2; exit 2 ;;
 esac
 if [ "${CHANNEL}" = beta ]; then
-  KEEP="${KEEP:-5}"
+  KEEP="${KEEP:-1}"
 else
   KEEP="${KEEP:-10}"
 fi
@@ -50,7 +54,7 @@ EXECUTE=0
 for a in "$@"; do
   case "$a" in
     --execute|--yes) EXECUTE=1 ;;
-    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "✗ unknown argument: $a" >&2; exit 2 ;;
   esac
 done
