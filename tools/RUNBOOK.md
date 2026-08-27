@@ -509,3 +509,20 @@ update the constants, bump the module version, re-lock, regenerate, run
 `tools/test-install-minisign.sh`), land it through a PR, and then sync it into
 Clawee and Umbree with `tools/sync-modules.sh`. Nothing in `release.sh` touches
 it; a cut simply ships whatever the committed bootstraps carry.
+
+## Go bump and the legacy overlay
+
+`tools/legacy/darwin/` overlays three `crypto/x509` files so the
+`darwin-amd64-legacy` target keeps verifying TLS chains with the macOS-10.7+
+`SecTrustGetCertificateAtIndex` API instead of the macOS-12-only
+`SecTrustCopyCertificateChain` that current Go imports non-lazily. It is
+pinned to one Go minor (`tools/legacy/darwin/GO_VERSION`) and guarded by
+`tools/legacy/darwin/overlay.test.sh`, which `build.sh` runs before every
+`VARIANT=legacy` build: a Go bump — even a patch release — fails that guard
+until a human re-derives the three files against the new stdlib and updates
+the pin, rather than silently shipping a stale overlay that either doesn't
+apply or reintroduces the macOS-12 symbol. Re-deriving the overlay after a Go
+bump is not a cut-time task; do it ahead of the bump, not during a release.
+Full procedure, the drift guard's guarantees and its two known gaps, and the
+condition under which the variant is dropped entirely: see
+`tools/legacy/darwin/README.md` → "Go-bump procedure".

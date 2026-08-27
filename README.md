@@ -97,12 +97,24 @@ Unset → the installer resolves the newest release for that component.
 
 ## Supported platforms
 
-| OS | arm64 | amd64 |
-|---|---|---|
-| macOS (darwin) | ✓ | ✓ |
-| Linux | ✓ | ✓ |
+| Platform | Support |
+|---|---|
+| `darwin-arm64` | Full — Apple Silicon Macs |
+| `darwin-amd64` | Full — Intel Macs on macOS 12+ |
+| `darwin-amd64-legacy` | Best effort — Intel Macs on macOS 10.15–11 |
+| `linux-arm64` | Full |
+| `linux-amd64` | Full |
 
 Windows is not supported.
+
+`darwin-amd64-legacy` is **best effort for Intel Macs on macOS 10.15–11**: it
+exists as long as (a) Apple ships `SecTrustGetCertificateAtIndex` and (b) the
+`crypto/x509` overlay (`tools/legacy/darwin/`) still applies to the current Go
+minor. When either stops, the variant is dropped from `TARGETS` and the
+installer's message becomes "macOS 12 or later is required" — it is not
+fought for. Platform selection is automatic and host-driven (by
+`kern.osproductversion`, not by which binary you run); there is nothing to
+opt into.
 
 ## For LLM coding agents
 
