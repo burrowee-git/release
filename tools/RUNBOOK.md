@@ -34,6 +34,17 @@ loudly", not "produce the fifth platform." Producing it from `rkit` is a
 deliberate future decision for the operator to make in `release-kit`, not
 something this repo can do on its own.
 
+If you are knowingly distributing a partial stage anyway (e.g. re-running
+`--distribute-only` for one already-known-short component), declare it
+explicitly rather than working around the gate: `RELEASE_SH_EXPECT_MISSING`
+(optionally component-scoped as `RELEASE_SH_EXPECT_MISSING_<COMP>`, e.g.
+`RELEASE_SH_EXPECT_MISSING_CLI`) names the exact platform(s) expected
+absent — space- or comma-separated — and is checked against the actual
+missing set, not a count: a platform missing that you didn't declare still
+fails, and a platform you declared that turns out NOT to be missing also
+fails (so the declaration cannot outlive the gap it was written for). Never
+set it for a real cut.
+
 ### (b) Landing order: the update path must not learn about this platform before core + console do
 
 `darwin-amd64-legacy` exists specifically so a pre-macOS-12 Intel Mac gets a

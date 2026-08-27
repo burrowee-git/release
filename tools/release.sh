@@ -558,8 +558,8 @@ TARGETS=(
 plat_of() { printf '%s-%s%s' "$1" "$2" "${3:+-$3}"; }
 
 # assert_platform_coverage <comp> <stage_dir> — fails loudly, naming the
-# component and the missing platform(s), when <stage_dir> carries fewer
-# burrowee-<comp>-<plat>.zip files than TARGETS expects.
+# component and the missing platform(s), when <stage_dir> does not carry
+# every burrowee-<comp>-<plat>.zip TARGETS expects.
 #
 # Why this exists: register_staged's own loop (below) treats a missing zip as
 # "omit that one artifact and keep going" — deliberately, for the case where
@@ -582,32 +582,72 @@ plat_of() { printf '%s-%s%s' "$1" "$2" "${3:+-$3}"; }
 # to lag TARGETS; that is an intentional, already-documented tolerance and is
 # out of scope for this assertion.
 #
-# RELEASE_SH_EXPECT_PLATFORMS overrides the expected count below the full
-# TARGETS count — set it ONLY to declare a deliberately-short stage is
-# expected (test fixtures; an operator who has already read the rkit-gap note
-# in RUNBOOK.md and is knowingly distributing a partial stage). A real
-# distribute-only cut must never set it.
+# RELEASE_SH_EXPECT_MISSING names the EXACT platform(s) expected absent — a
+# space- or comma-separated list, e.g. "darwin-amd64-legacy" — checked
+# against the ACTUAL computed missing set, not a count. A bare count (the
+# first cut of this gate) could not tell "the expected platform is missing"
+# from "some other platform is missing but the total happens to match", which
+# is the one failure mode this assertion exists to catch — so the comparison
+# must be exact, in both directions:
+#   - a missing platform NOT in the declared set fails, naming it (same as
+#     an unset/empty declaration always has);
+#   - a platform IN the declared set that is NOT actually missing also fails
+#     — a stale declaration must not linger silently once the real gap
+#     closes; requiring an exact match is what makes the override
+#     self-expiring rather than set-and-forget.
+# Component-scoped: RELEASE_SH_EXPECT_MISSING_<COMP> (uppercased comp, e.g.
+# RELEASE_SH_EXPECT_MISSING_CLI) takes precedence over the bare
+# RELEASE_SH_EXPECT_MISSING when both are set, so one component's declared
+# gap can't accidentally cover another's stage. Set it ONLY to declare a
+# deliberately-short stage is expected (test fixtures; an operator who has
+# already read the rkit-gap note in RUNBOOK.md and is knowingly distributing
+# a partial stage). A real distribute-only cut must never set it.
 assert_platform_coverage() {
     local comp="$1" stage_dir="$2"
-    local expect="${RELEASE_SH_EXPECT_PLATFORMS:-${#TARGETS[@]}}"
     local -a missing=()
-    local found=0
     local triple os arch variant plat zip_name
     for triple in "${TARGETS[@]}"; do
         # shellcheck disable=SC2086  # triple is a controlled space-separated string; word-splitting gives os arch [variant].
         read -r os arch variant <<<"${triple}"
         plat="$(plat_of "${os}" "${arch}" "${variant}")"
         zip_name="burrowee-${comp}-${plat}.zip"
-        if [ -f "${stage_dir}/${zip_name}" ]; then
-            found=$((found + 1))
-        else
-            missing+=("${plat}")
-        fi
+        [ -f "${stage_dir}/${zip_name}" ] || missing+=("${plat}")
     done
-    if [ "${found}" -lt "${expect}" ]; then
-        echo "✗ ${comp}: staged only ${found}/${#TARGETS[@]} platforms (expected at least ${expect}) — missing: ${missing[*]}" >&2
+
+    # Resolve the declared-missing set: component-scoped override wins over
+    # the bare one; comma or space separated, either works.
+    local comp_upper var_name declared
+    comp_upper="$(printf '%s' "${comp}" | tr '[:lower:]' '[:upper:]')"
+    var_name="RELEASE_SH_EXPECT_MISSING_${comp_upper}"
+    declared="${!var_name:-${RELEASE_SH_EXPECT_MISSING:-}}"
+    declared="${declared//,/ }"
+
+    # contains_word <space-list> <word> — exact-token membership, not substring.
+    contains_word() {
+        local list=" $1 " word="$2"
+        case "${list}" in *" ${word} "*) return 0 ;; *) return 1 ;; esac
+    }
+
+    local -a undeclared=() stale=()
+    local m d
+    # bash 3.2's `set -u` treats `"${arr[@]}"` on a zero-length array as an
+    # unbound-variable error, not an empty expansion — guard the count before
+    # iterating (the common case: nothing missing, missing[] is empty).
+    if [ "${#missing[@]}" -gt 0 ]; then
+        for m in "${missing[@]}"; do
+            contains_word "${declared}" "${m}" || undeclared+=("${m}")
+        done
+    fi
+    for d in ${declared}; do
+        contains_word "${missing[*]:-}" "${d}" || stale+=("${d}")
+    done
+
+    if [ "${#undeclared[@]}" -gt 0 ] || [ "${#stale[@]}" -gt 0 ]; then
+        echo "✗ ${comp}: staged platform set does not match the declared expectation" >&2
+        [ "${#undeclared[@]}" -gt 0 ] && echo "  missing but not declared: ${undeclared[*]}" >&2
+        [ "${#stale[@]}" -gt 0 ] && echo "  declared missing but actually staged: ${stale[*]}" >&2
         echo "  stage dir: ${stage_dir}" >&2
-        echo "  set RELEASE_SH_EXPECT_PLATFORMS to declare a deliberately short stage is expected (see tools/RUNBOOK.md — rkit gap)" >&2
+        echo "  set RELEASE_SH_EXPECT_MISSING (or RELEASE_SH_EXPECT_MISSING_${comp_upper}) to the EXACT platform(s) expected missing — space- or comma-separated (see tools/RUNBOOK.md — rkit gap)" >&2
         exit 1
     fi
 }
