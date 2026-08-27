@@ -292,9 +292,8 @@ for comp in $PUBLIC_COMPONENTS; do
     # LOCAL copy only — the served one, if any, is untouched (this script
     # never deletes from the release host) and keeps resolving the last
     # public beta indefinitely until an operator removes it by hand, see
-    # tools/RUNBOOK.md "Close a cycle". The sweep globs beta.*.sh rather
-    # than walking the
-    # current $modes, so a component that later leaves
+    # tools/RUNBOOK.md "Close a cycle". The sweep globs beta.*.sh rather than
+    # walking the current $modes, so a component that later leaves
     # UPDATER_INSTALL_COMPONENTS still loses its stray beta.updater.install.sh.
     for channel in stable beta; do
         if [ "$channel" = beta ]; then

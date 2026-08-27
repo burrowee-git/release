@@ -585,8 +585,8 @@ CHANNEL=beta tools/prune-releases.sh --execute    # drain
 Run it as a deploy-phase step alongside the stable GitHub retention, on
 whatever cadence an operator decides a beta cycle warrants it.
 
-Every cut — a stable full cut, `--distribute-only`, or a beta cut, of
-**any** component — always re-runs `gen-bootstraps.sh` (it renders every
+Every cut of a **public** component — a stable full cut, `--distribute-only`,
+or a beta cut — always re-runs `gen-bootstraps.sh` (it renders every
 channel's bootstrap for every `PUBLIC_COMPONENTS` component on every
 invocation, not only a beta cut's or only the component being cut), so it
 re-renders `beta.*.sh` for a component whose cycle is open, or deletes it
@@ -629,10 +629,11 @@ There is no `close` verb either — closing is deleting the two files that mean
 
 1. `git rm versions/<comp>.beta versions/<comp>.beta.stamp` in the release
    repo, commit. The next `gen-bootstraps.sh` run (the next stable cut of any
-   component, or a manual `bash tools/gen-bootstraps.sh`) sees the
+   public component, or a manual `bash tools/gen-bootstraps.sh`) sees the
    `.beta.stamp` file gone and **sweeps** `<comp>/beta.*.sh` **locally** —
    deletes the file from the working tree, and the NEXT cut — of ANY
-   component, stable full cut, `--distribute-only`, or beta — **stages**
+   **public** component, stable full cut, `--distribute-only`, or beta —
+   **stages**
    that deletion (every `PUBLIC_COMPONENTS` directory, not only its own)
    into its own marker commit (so the working tree stays clean — see the
    note in "Cut" above). Nothing in
