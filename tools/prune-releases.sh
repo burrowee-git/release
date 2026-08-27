@@ -11,8 +11,9 @@
 #   CHANNEL                 stable|beta (default stable)
 #   KEEP                    newest versions to retain per component
 #                           (default 10 on stable, 5 on beta)
-#   COMPONENTS              space-separated set (default "cli gateway edge agent";
-#                           relay is excluded — it has no GitHub release)
+#   COMPONENTS              space-separated set (default: PUBLIC_COMPONENTS,
+#                           tools/public_components.sh; relay is excluded — it
+#                           has no GitHub release)
 #   BURROWEE_RELEASE_REPO   GitHub repo (default burrowee-git/release)
 #
 # Per component it lists the release tags matching CHANNEL's anchored pattern
@@ -28,6 +29,10 @@ set -euo pipefail
 # grep/sort/sed/tr + gh/ghp resolve.
 export PATH="/usr/bin:/bin:/opt/homebrew/bin:${HOME}/.claude/bin:${PATH}"
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tools/public_components.sh
+source "${HERE}/public_components.sh"
+
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 CHANNEL="${CHANNEL:-stable}"
 case "${CHANNEL}" in
@@ -39,7 +44,7 @@ if [ "${CHANNEL}" = beta ]; then
 else
   KEEP="${KEEP:-10}"
 fi
-COMPONENTS="${COMPONENTS:-cli gateway edge agent}"
+COMPONENTS="${COMPONENTS:-${PUBLIC_COMPONENTS}}"
 
 EXECUTE=0
 for a in "$@"; do

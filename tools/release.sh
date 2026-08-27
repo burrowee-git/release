@@ -276,9 +276,10 @@ if [ "${1:-}" = "publish" ]; then
     echo
     echo "→ retention (dry-run — run prune with --execute in the deploy phase to apply):"
     "${REGISTER_BIN}" prune --comp "${comp}" || true
-    # GitHub prune scope is cli/gateway/edge only (relay has no GitHub release).
+    # GitHub prune scope is cli/gateway/edge/agent (relay has no GitHub release)
+    # — PUBLIC_COMPONENTS (tools/public_components.sh), not a second copy.
     gh_comps="${comp}"
-    [ "${comp}" = all ] && gh_comps="cli gateway edge agent"
+    [ "${comp}" = all ] && gh_comps="${PUBLIC_COMPONENTS}"
     COMPONENTS="${gh_comps}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
     exit 0
 fi
@@ -1288,8 +1289,9 @@ EOF
     exit 0
 fi
 
-# components to cut
-if [ "${WHAT}" = all ]; then COMPONENTS=(cli gateway edge agent); else COMPONENTS=("${WHAT}"); fi
+# components to cut — PUBLIC_COMPONENTS (tools/public_components.sh), not a
+# second hardcoded copy.
+if [ "${WHAT}" = all ]; then read -r -a COMPONENTS <<< "${PUBLIC_COMPONENTS}"; else COMPONENTS=("${WHAT}"); fi
 
 # Every do_release() (i.e. every non-relay component) mirrors the edge skills
 # (EDGE_SKILLS_SRC=${SRC_EDGE}/skills) unconditionally, so the edge tree is
