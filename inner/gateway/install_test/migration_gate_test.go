@@ -205,16 +205,31 @@ func TestUnitsOnlyRefusesBeforeAnyWriteWhenTheCLICannotMigrate(t *testing.T) {
 	}
 }
 
-// TestFreshInstallRefusesBeforeAnyWriteWhenTheCLICannotMigrate: the curl-pipe
-// path places the cli itself, so its pre-flight asks the STAGED one. A bundle
-// carrying a migration but a cli that cannot run it is internally inconsistent,
-// and installing half of it onto a legacy host is the same node-identity loss.
-func TestFreshInstallRefusesBeforeAnyWriteWhenTheCLICannotMigrate(t *testing.T) {
+// cliThatCrashes is a burrowee-gateway-cli that does not run on this host at
+// all: `migrate --help` dies with SIGABRT — "Abort trap: 6" on macOS — which
+// is what a release binary does on a host it was not built for. A crash is not
+// a missing verb, and the fresh-install pre-flight used to report it as one,
+// on a host that had nothing to migrate in the first place.
+const cliThatCrashes = "#!/bin/sh\ncase \"$1\" in migrate) kill -s ABRT $$ ;; esac\nexit 0\n"
+
+// TestFreshInstallOnAVirginHostSkipsTheMigratePreflight is the new server: no
+// gateway has ever been installed on it, so there is no legacy tree the ladder
+// could migrate and no installed cli the runner would probe. The pre-flight
+// exists to protect a host WITH such state from an update that would strand it
+// — on a host without it, the verb is never called, so demanding it refuses an
+// install for a migration that could not run. Seen live: a staged cli that
+// aborted on the target host was reported as "does not provide 'migrate'" and
+// the fresh install stopped before placing a single binary.
+//
+// The runner is still handed the host afterwards, on purpose: it is the one
+// authority on WHICH tree a ladder migrates ($SUDO_USER, $ADOPT_FROM), and it
+// evaluates a virgin host and declines it out loud by itself.
+func TestFreshInstallOnAVirginHostSkipsTheMigratePreflight(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	bundle := t.TempDir()
 	seedDummyBins(t, bundle)
-	if err := os.WriteFile(filepath.Join(bundle, "burrowee-gateway-cli"), []byte(cliWithoutMigrate), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(bundle, "burrowee-gateway-cli"), []byte(cliThatCrashes), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	script := stageInstaller(t, bundle)
@@ -222,15 +237,82 @@ func TestFreshInstallRefusesBeforeAnyWriteWhenTheCLICannotMigrate(t *testing.T) 
 	stageMigration(t, bundle, logPath, 0)
 
 	out, err := runStaged(t, script, bundle, home, stub)
-	if err == nil {
-		t.Fatalf("fresh install succeeded with a cli that cannot migrate:\n%s", out)
+	if err != nil {
+		t.Fatalf("a fresh install on a virgin host was refused over a migration it has nothing to run: %v\n%s", err, out)
 	}
-	assertNoUnitsWritten(t, home)
-	if _, statErr := os.Stat(filepath.Join(binDir(home), "burrowee-gateway")); statErr == nil {
-		t.Errorf("a binary was installed despite the refusal")
+	if !strings.Contains(out, "no gateway installed on this host") {
+		t.Errorf("the skipped pre-flight was not said out loud:\n%s", out)
 	}
-	if got := migrationLog(t, logPath); got != "" {
-		t.Errorf("the migration runner ran despite the refusal:\n%s", got)
+	if _, statErr := os.Stat(filepath.Join(binDir(home), "burrowee-gateway")); statErr != nil {
+		t.Errorf("the binaries were not placed: %v", statErr)
+	}
+	if _, statErr := os.Stat(coreUnitPath(home)); statErr != nil {
+		t.Errorf("the core unit was not written: %v", statErr)
+	}
+	if migrationLog(t, logPath) == "" {
+		t.Errorf("the migration runner was not handed the host — it, not install.sh, decides what a virgin host needs:\n%s", out)
+	}
+}
+
+// TestFreshInstallStillRefusesWhenAPriorInstallCannotBeMigrated is the other
+// half: `curl … | sh` on a host that already HAS a gateway — a 0.1.115 host
+// being brought forward by a fresh install rather than an update — must still
+// refuse before any write when the staged cli cannot migrate it. Each way a
+// prior install shows itself is its own case, so that no single probe can be
+// dropped without a test naming it: the legacy per-user tree the ladder reads,
+// the cli at $BIN_DIR, and the cli at the historical per-user bin dir.
+//
+// The refusal names the probe's actual outcome ("exited 2") rather than
+// asserting the verb is missing — the same message once covered a binary that
+// crashed, and told the operator to install a release that carries the verb.
+func TestFreshInstallStillRefusesWhenAPriorInstallCannotBeMigrated(t *testing.T) {
+	cases := []struct {
+		name string
+		seed func(t *testing.T, home string)
+	}{
+		{"the legacy per-user tree", func(t *testing.T, home string) {
+			if err := os.MkdirAll(filepath.Join(home, ".burrowee", "gateway"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a cli at $BIN_DIR", func(t *testing.T, home string) {
+			seedInstalled(t, binDir(home), withCLI(allBinsContent("v0.1.115"), cliWithoutMigrate))
+		}},
+		{"a cli at the historical per-user bin dir", func(t *testing.T, home string) {
+			seedInstalled(t, devBinDir(home), withCLI(allBinsContent("v0.1.115"), cliWithoutMigrate))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			stub := stubInitSystem(t)
+			tc.seed(t, home)
+			bundle := t.TempDir()
+			seedDummyBins(t, bundle)
+			if err := os.WriteFile(filepath.Join(bundle, "burrowee-gateway-cli"), []byte(cliWithoutMigrate), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			script := stageInstaller(t, bundle)
+			logPath := filepath.Join(t.TempDir(), "migration.log")
+			stageMigration(t, bundle, logPath, 0)
+
+			out, err := runStaged(t, script, bundle, home, stub)
+			if err == nil {
+				t.Fatalf("fresh install succeeded with a prior install and a cli that cannot migrate it:\n%s", out)
+			}
+			if !strings.Contains(out, "migrate --help' exited 2") {
+				t.Errorf("the refusal does not name the probe's outcome:\n%s", out)
+			}
+			assertNoUnitsWritten(t, home)
+			// By CONTENT, not presence: the $BIN_DIR case seeds a prior
+			// burrowee-gateway there, so "exists" would flag the fixture.
+			if b, readErr := os.ReadFile(filepath.Join(binDir(home), "burrowee-gateway")); readErr == nil && string(b) == "#!/bin/sh\necho burrowee-gateway\n" {
+				t.Errorf("the staged binary was installed despite the refusal")
+			}
+			if got := migrationLog(t, logPath); got != "" {
+				t.Errorf("the migration runner ran despite the refusal:\n%s", got)
+			}
+		})
 	}
 }
 

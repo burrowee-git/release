@@ -909,15 +909,100 @@ migrate_cli_path() {
     echo "$BIN_DIR/burrowee-gateway-cli"
 }
 
+#
+# The refusal names what the probe actually saw. "Does not provide it" once
+# covered every failure, including a staged binary that could not run on the
+# host at all (SIGABRT — "Abort trap: 6"), and then sent the operator to
+# install a release "that carries the verb" — the very release that had just
+# crashed. A signal death is a different defect from a missing verb and gets
+# a different hint.
 assert_can_migrate() {
     if [ -z "$(migration_runner)" ]; then return 0; fi
-    if [ -x "$1" ] && "$1" migrate --help >/dev/null 2>&1; then return 0; fi
+    if [ ! -x "$1" ]; then
+        _acm_why="$1 is not an executable file"
+        _acm_hint=verb
+    else
+        set +e
+        "$1" migrate --help >/dev/null 2>&1
+        _acm_rc=$?
+        set -e
+        if [ "$_acm_rc" = 0 ]; then return 0; fi
+        if [ "$_acm_rc" -ge 128 ]; then
+            _acm_why="'$1 migrate --help' died with signal $((_acm_rc - 128)) (exit $_acm_rc): the binary does not run on this host"
+            _acm_hint=host
+        else
+            _acm_why="'$1 migrate --help' exited $_acm_rc: the cli does not provide the verb"
+            _acm_hint=verb
+        fi
+    fi
     echo "error: this release's state migration needs 'burrowee-gateway-cli migrate'," >&2
-    echo "error: and $1 does not provide it — refusing before anything is changed." >&2
+    echo "error: and $_acm_why — refusing before anything is changed." >&2
     echo "hint: nothing has been touched: no binary was replaced and no service unit written." >&2
-    echo "hint: install the current release first (it ships a cli that carries the verb):" >&2
-    echo "hint:   curl -fsSL https://release.burrowee.com/gateway/install.sh | sh" >&2
+    if [ "$_acm_hint" = host ]; then
+        echo "hint: the staged binary itself failed, not the verb — check that it runs here at all:" >&2
+        echo "hint:   $1 --version    (wrong architecture, or an OS this build does not support?)" >&2
+    else
+        echo "hint: install the current release first (it ships a cli that carries the verb):" >&2
+        echo "hint:   curl -fsSL https://release.burrowee.com/gateway/install.sh | sh" >&2
+    fi
     exit 1
+}
+
+# ---------------------------------------------------------------------------
+# prior_install_present — is there ALREADY a gateway on this host for the
+# ladder to migrate? The fresh-install pre-flight is owed only to such a host.
+#
+# assert_can_migrate exists for a host WITH pre-0.2.0 state: an install that
+# swapped its binaries and wrote root-scheme units, then found the cli could
+# not migrate, leaves that host to re-register as a NEW node at the next
+# reboot. A host with no gateway on it has nothing the runner would migrate —
+# it evaluates the (absent) tree and declines by itself, never calling the
+# verb — so demanding the verb up front refuses the install over a migration
+# that could not run. Seen live on a new server: the staged cli aborted on
+# that host, the probe read the crash as "does not provide 'migrate'", and the
+# fresh install stopped before placing a single binary.
+#
+# Every way a prior install shows itself is probed on its own — no shared
+# gate: the tree the ladder reads, the cli at $BIN_DIR, the cli at the
+# historical per-user default, and — running as root on another user's behalf
+# — that user's copies of both, because that is the tree the runner will name
+# (run.sh's $SUDO_USER rule). An explicit $ADOPT_FROM is a prior install by
+# declaration. Only the pre-flight hangs on this answer: the runner is handed
+# the host either way and stays the one authority on what it needs.
+# ---------------------------------------------------------------------------
+#
+# home_of_user <name> — the account's home, or non-zero. The lookup the
+# runner's lib_paths.sh makes (getent on Linux, dscl on macOS), without its
+# legacy-parents sweep: an account this host cannot resolve is not evidence
+# of a prior install.
+home_of_user() {
+    _hou=""
+    if command -v getent >/dev/null 2>&1; then
+        _hou="$(getent passwd "$1" 2>/dev/null | cut -d: -f6)"
+    fi
+    if [ -z "$_hou" ] && command -v dscl >/dev/null 2>&1; then
+        _hou="$(dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
+    fi
+    [ -n "$_hou" ] || return 1
+    echo "$_hou"
+}
+
+prior_install_present() {
+    if [ -d "$GW_HOME" ]; then return 0; fi
+    if [ -e "$BIN_DIR/burrowee-gateway-cli" ]; then return 0; fi
+    if [ -e "$HOME/.local/bin/burrowee-gateway-cli" ]; then return 0; fi
+    if [ -n "${ADOPT_FROM:-}" ]; then return 0; fi
+    if [ "$(id -u)" = 0 ]; then
+        case "${SUDO_USER:-}" in
+        '' | root) ;;
+        *)
+            _pip_home="$(home_of_user "$SUDO_USER" || true)"
+            if [ -n "$_pip_home" ] && [ -d "$_pip_home/.burrowee/gateway" ]; then return 0; fi
+            if [ -n "$_pip_home" ] && [ -e "$_pip_home/.local/bin/burrowee-gateway-cli" ]; then return 0; fi
+            ;;
+        esac
+    fi
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -2001,7 +2086,15 @@ fi
 
 # Before the first write, same invariant as update mode: this run places every
 # binary including the cli, so the staged cli is the one the runner will probe.
-assert_can_migrate "./burrowee-gateway-cli"
+# Owed only to a host that already has a gateway to migrate — see
+# prior_install_present. A virgin host is still handed to the runner below:
+# it is the authority on what (if anything) this host needs, and it declines
+# an absent tree out loud by itself without ever calling the verb.
+if prior_install_present; then
+    assert_can_migrate "./burrowee-gateway-cli"
+else
+    echo "no gateway installed on this host — nothing to migrate, skipping the migration pre-flight"
+fi
 
 place_all_bins
 
