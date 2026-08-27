@@ -14,7 +14,7 @@ printf '0.2.8\n' > "${WORK}/repo/versions/cli"
 V="${WORK}/repo/tools/version.sh"
 
 check "stable semver unchanged" "$(bash "$V" cli --semver)" "0.2.8"
-out="$(bash "$V" cli --channel beta --semver 2>&1)"; check "beta semver refuses when versions/cli.beta absent" "$?" "1"
+bash "$V" cli --channel beta --semver >/dev/null 2>&1; check "beta semver refuses when versions/cli.beta absent" "$?" "1"
 printf '0.3.0\n' > "${WORK}/repo/versions/cli.beta"
 check "beta semver" "$(bash "$V" cli --channel beta --semver)" "0.3.0"
 check "beta stamp shape" "$(SRC_DIR="${WORK}/src" bash "$V" cli --channel beta --stamp)" "v0.3.0.beta.$(date -u +%Y.%m.%d).${SHA}"
