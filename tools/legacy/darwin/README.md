@@ -12,8 +12,18 @@ This directory holds a `go build -overlay` replacement for the three
 chain-walk (`SecTrustGetCertificateCount` + `SecTrustGetCertificateAtIndex`,
 present since macOS 10.7, deprecated-but-present through current macOS) back
 in. It changes nothing else about the build: same toolchain, same module
-pins, same CVE gate, same signing/notarization — only these three files are
-swapped for the `darwin-amd64-legacy` release target.
+pins, same signing/notarization — only these three files are swapped for the
+`darwin-amd64-legacy` release target.
+
+**Not covered by the CVE gate.** `tools/vulncheck.sh` runs `govulncheck`
+against the module's own source (`GOWORK=off`, no `-overlay` flag) — it
+analyses the toolchain's stdlib as vendored in the Go distribution, and never
+sees `_src/`. A future stdlib CVE in `crypto/x509/root_darwin.go`,
+`crypto/x509/internal/macos/security.go`, or `security.s` would be silently
+reintroduced by this overlay and go unreported by the gate. This is a small,
+bounded exposure — the overlay is ~40 lines of Go 1.24 code the drift guard
+(`overlay.test.sh`) already re-checks against the pinned toolchain on every
+run — but it is real, and nothing here scans `_src/` for it today.
 
 Full design: `docs/specs/2026-08-27-darwin-legacy-build-design.md` §3–§4.1 in
 `burrowee-git/resources`.

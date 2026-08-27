@@ -41,6 +41,17 @@ stray_hunks() {
 
 for f in root_darwin.go:crypto/x509/root_darwin.go security.go:crypto/x509/internal/macos/security.go security.s:crypto/x509/internal/macos/security.s; do
     ours="${HERE}/_src/${f%%:*}"; theirs="${GOROOT}/src/${f#*:}"
+    # Without this guard, a missing GOROOT original makes `diff` error to
+    # stderr with nothing on stdout, awk reads empty input, stray_hunks
+    # returns "", and the "only owned hunks differ" check below passes
+    # vacuously — the drift guard would report clean on a comparison it never
+    # actually ran. Fail loudly instead: this is the guard for the whole
+    # overlay design, and a silent pass here is worse than no check at all.
+    if [ ! -f "${theirs}" ]; then
+        echo "FAIL: GOROOT original missing, cannot diff: ${theirs}" >&2
+        fail=1
+        continue
+    fi
     stray="$(stray_hunks "${theirs}" "${ours}")"
     check "only owned hunks differ: ${f%%:*}" "${stray}" ""
     check "overlay drops the 12+ import: ${f%%:*}" "$(grep -c 'SecTrustCopyCertificateChain' "${ours}")" "0"

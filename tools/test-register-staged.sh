@@ -112,9 +112,16 @@ GO_ENV=(GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/b
 # tools/updater_pin.sh` — so the extracted file must source the real helper
 # too, or every register_staged call below would fail with "updater_pin:
 # command not found" instead of exercising the actual resolution path.
+#
+# register_staged also calls plat_of() — "the one spelling" of the platform
+# string, defined once beside TARGETS in release.sh — rather than re-deriving
+# it inline. Grep the real one-line definition out of release.sh (not a
+# hand-copied duplicate here, which would drift silently) so the extracted
+# function has it available too.
 extract_register_staged() {
     local out="$1"
     printf 'source "%s/tools/updater_pin.sh"\n' "${REPO_ROOT}" > "${out}"
+    grep '^plat_of()' "${REPO_ROOT}/tools/release.sh" >> "${out}"
     python3 - "${REPO_ROOT}/tools/release.sh" "${out}.body" <<'PYEOF'
 import sys
 

@@ -7,7 +7,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fail_count=0; check() { if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1 — got '$2' want '$3'"; fail_count=1; fi; }
-MOD="$(mktemp)"; sed -e 's/@brand@/burrowee/g' "${HERE}/modules/platform-detect.sh" > "$MOD"
+MOD="$(mktemp)"; trap 'rm -f "$MOD"' EXIT INT TERM
+sed -e 's/@brand@/burrowee/g' "${HERE}/modules/platform-detect.sh" > "$MOD"
 run() { # run <uname -s> <uname -m> <sw_vers|-> → prints "OS/ARCH" or "FAIL:<msg>"
     ( exec 3>&1  # fd 3 = a copy of this subshell's real stdout, taken BEFORE
                  # the `. "$MOD" >/dev/null 2>&1` below redirects fd1/fd2 for

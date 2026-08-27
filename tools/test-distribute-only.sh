@@ -60,6 +60,14 @@ CLI_LADDER="run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh component.conf
 say "staging fake dist/${STAMP}/"
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}"
+# Deliberately four platforms, not five: this is now the SHORTFALL case
+# assert_platform_coverage (tools/release.sh) exists to catch — exactly what
+# an rkit-produced stage looks like today, since rkit build has not been
+# taught darwin-amd64-legacy (see tools/RUNBOOK.md's rkit-gap note). Step
+# (4b) below proves the undeclared shortfall is refused, by name; step (5)'s
+# invocations declare it expected via RELEASE_SH_EXPECT_PLATFORMS=4 so the
+# rest of this test can keep exercising the dry-run stub behavior unrelated
+# to platform coverage.
 for plat in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
     # shellcheck disable=SC2086  # ${CLI_LADDER} is an intentional space-list.
     ladder_zip "${STAGE}/burrowee-${COMP}-${plat}.zip" ${CLI_LADDER}
@@ -103,10 +111,40 @@ case "${missing_out}" in
 esac
 printf '  OK: missing stage rejected with a clear error\n'
 
+# ---- (4b) SHORTFALL: the same 4-platform stage, undeclared, is refused ------
+# assert_platform_coverage (tools/release.sh) runs ahead of the dry-run stub,
+# so even a rehearsal over this fixture's deliberately-short stage (see the
+# staging comment above) fails loudly, by component and missing platform,
+# unless RELEASE_SH_EXPECT_PLATFORMS says the shortfall is expected. This is
+# the exact silent-four-platforms-of-five failure mode the darwin-legacy fix
+# wave closed: `rkit build` -> `release.sh --distribute-only` must not exit 0
+# looking complete while missing darwin-amd64-legacy.
+say "SHORTFALL: undeclared 4-platform stage is refused, by name"
+set +e
+short_out="$(BURROWEE_SRC_CLI="${FAKE_SRC}" \
+    bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --dry-run 2>&1)"
+short_rc=$?
+set -e
+[ "${short_rc}" -ne 0 ] || die "SHORTFALL: expected non-zero exit for an undeclared short stage, got 0. Output:\n${short_out}"
+case "${short_out}" in
+    *"darwin-amd64-legacy"*) : ;;
+    *) die "SHORTFALL: expected the missing platform (darwin-amd64-legacy) named. Output:\n${short_out}" ;;
+esac
+case "${short_out}" in
+    *"${COMP}"*"staged only"*) : ;;
+    *) die "SHORTFALL: expected the component named. Output:\n${short_out}" ;;
+esac
+printf '  OK: undeclared short stage refused, naming the component and the missing platform\n'
+
 # ---- (5) DRY-RUN: run --distribute-only against the staged dir ---------------
+# RELEASE_SH_EXPECT_PLATFORMS=4 declares this fixture's deliberate four-
+# platform stage as expected (see the staging comment above and (4b) just
+# above) so the rest of this step can exercise the dry-run stub's OTHER
+# behavior — the "would:" action lines, no-side-effects, no-ghp-dependency —
+# without tripping the shortfall gate this test now also covers.
 say "DRY-RUN: release.sh --distribute-only ${COMP} ${STAMP} --dry-run"
 set +e
-out="$(BURROWEE_SRC_CLI="${FAKE_SRC}" \
+out="$(BURROWEE_SRC_CLI="${FAKE_SRC}" RELEASE_SH_EXPECT_PLATFORMS=4 \
     bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --dry-run 2>&1)"
 rc=$?
 set -e
@@ -172,7 +210,7 @@ printf '  OK: working tree status unchanged outside dist/ (no scp/ghp/local-file
 say "DRY-RUN with a system-only PATH (no ~/.claude/bin ghp wrapper) — must still succeed"
 SYSTEM_ONLY_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 set +e
-out2="$(BURROWEE_SRC_CLI="${FAKE_SRC}" PATH="${SYSTEM_ONLY_PATH}" \
+out2="$(BURROWEE_SRC_CLI="${FAKE_SRC}" RELEASE_SH_EXPECT_PLATFORMS=4 PATH="${SYSTEM_ONLY_PATH}" \
     bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --dry-run 2>&1)"
 rc2=$?
 set -e
@@ -247,4 +285,4 @@ esac
 cleanup_relay
 printf '  OK: relay staged kit missing the shared adoption rung is refused, by name\n'
 
-printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + dry-run stub + no-side-effects + no-tool-dependency + relay-private + relay-ladder-gate)\n'
+printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + platform-shortfall-gate + dry-run stub + no-side-effects + no-tool-dependency + relay-private + relay-ladder-gate)\n'

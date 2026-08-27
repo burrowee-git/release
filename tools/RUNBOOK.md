@@ -5,6 +5,68 @@ manual". Each note records a hazard that the tooling does **not** prevent.
 
 ---
 
+## darwin-amd64-legacy: two landing-order hazards — read before cutting it
+
+### (a) `rkit build` cannot produce this platform. This is unimplemented, not pending.
+
+**`rkit build` is the primary produce path** (see the very next section below:
+`tools/release.sh` never builds anything, it distributes what rkit already
+staged into `dist/<stamp>/`). Today `rkit build` produces exactly the four
+original targets — `darwin/arm64`, `darwin/amd64`, `linux/arm64`,
+`linux/amd64` — and has no concept of a fifth target or of a build-time
+overlay at all. The list is hardcoded in
+`internal/relconfig/relconfig.go`'s `Targets()`, in the `burrowee-git/release`
+module itself, and `cmd/rkit` has no `VARIANT=legacy` equivalent to
+`tools/build.sh`'s.
+
+Until `Targets()` (and `cmd/rkit`'s build loop) are taught the fifth target
+and the `tools/legacy/darwin/` overlay — work that lives in a **fourth
+repository, `burrowee-git/release-kit`**, which nothing in this effort's
+spec, plan, or task briefs ever scoped — **`darwin-amd64-legacy` can only be
+produced by `tools/release.sh`'s own full-cut path** (`do_release`, which
+builds all five `TARGETS` itself under `set -e`), never by `rkit build` and
+never by `release.sh --distribute-only` over an `rkit build` stage. An
+operator running the documented `rkit build` → `--distribute-only` flow will
+get four platforms, not five, and (as of this fix wave) `release.sh` now
+refuses to register that short stage silently — see
+`assert_platform_coverage` in `tools/release.sh` — but the fix is "fail
+loudly", not "produce the fifth platform." Producing it from `rkit` is a
+deliberate future decision for the operator to make in `release-kit`, not
+something this repo can do on its own.
+
+### (b) Landing order: the update path must not learn about this platform before core + console do
+
+`darwin-amd64-legacy` exists specifically so a pre-macOS-12 Intel Mac gets a
+build that doesn't die at `_SecTrustCopyCertificateChain` before `main`. That
+protection covers **install** the moment this repo's bootstrap picks the
+right platform by host. It does **not** yet cover **self-update**: today the
+updater (`updater/fetch.go` et al.) and the gateway
+(`internal/gateway/service_install.go`'s `OsArch()`) still compute the
+platform as the bare `runtime.GOOS + "-" + runtime.GOARCH` — they have not
+been taught the legacy platform key. Tasks B2 (updater) and B3 (gateway) —
+re-pinning `updater/go.mod` to a tagged core that exposes the platform key,
+and switching `OsArch()` to use it — have **not landed**.
+
+The failure mode this creates is not a clean error, which is what makes it
+dangerous: `darwin-amd64` **exists** in the release catalog (it's one of the
+original four targets), so a Catalina host that installed the legacy build
+via the bootstrap will, on its next self-update, ask the catalog for
+`darwin-amd64` — a real, signed, notarized, perfectly valid entry — download
+it, and install a binary that dies before `main` on that exact host. That is
+the precise bug this entire effort exists to fix, reintroduced through the
+one code path (self-update) that this work has not yet touched.
+
+**Spec §13's landing order — core tagged and console-registered, then
+`updater/go.mod` re-pinned (B2) and the gateway switched (B3), all landed
+*before* the first `darwin-amd64-legacy` release is cut — is therefore a hard
+gate, not a suggestion.** Cutting `darwin-amd64-legacy` ahead of that order
+does not fail to help pre-macOS-12 hosts; it actively breaks them on their
+first subsequent self-update, which is strictly worse than never having
+built the platform at all — those hosts were, until this effort landed, at
+least still running.
+
+---
+
 ## Cutting a public release: the Apple environment
 
 **`rkit build` is the primary produce path.** `tools/release.sh` never invokes

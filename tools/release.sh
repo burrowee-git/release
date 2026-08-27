@@ -557,6 +557,61 @@ TARGETS=(
 # is needed to represent "no variant" in the space-separated triples below.
 plat_of() { printf '%s-%s%s' "$1" "$2" "${3:+-$3}"; }
 
+# assert_platform_coverage <comp> <stage_dir> — fails loudly, naming the
+# component and the missing platform(s), when <stage_dir> carries fewer
+# burrowee-<comp>-<plat>.zip files than TARGETS expects.
+#
+# Why this exists: register_staged's own loop (below) treats a missing zip as
+# "omit that one artifact and keep going" — deliberately, for the case where
+# an externally-staged dir (rkit build) predates this script's TARGETS
+# growing a platform rkit was never taught. That tolerance means a short
+# stage still registers, still exits 0, and still publishes a release that
+# LOOKS complete. Today that is exactly darwin-amd64-legacy: rkit builds only
+# the original four targets (internal/relconfig.Targets() has no fifth-target
+# or overlay concept — see tools/RUNBOOK.md), so `rkit build` ->
+# `release.sh --distribute-only` silently ships four platforms forever unless
+# something here refuses.
+#
+# Runs ahead of the DRY_RUN branch in distribute_only() (same placement as
+# assert_payload_migrations) so a --dry-run rehearsal catches a short stage
+# too, not just a real cut.
+#
+# Public components only (cli/gateway/edge/agent) — distribute_relay()
+# derives its platform set from the STAGED zips on purpose (see its own
+# comment) because relay's separately-versioned rkit build is already known
+# to lag TARGETS; that is an intentional, already-documented tolerance and is
+# out of scope for this assertion.
+#
+# RELEASE_SH_EXPECT_PLATFORMS overrides the expected count below the full
+# TARGETS count — set it ONLY to declare a deliberately-short stage is
+# expected (test fixtures; an operator who has already read the rkit-gap note
+# in RUNBOOK.md and is knowingly distributing a partial stage). A real
+# distribute-only cut must never set it.
+assert_platform_coverage() {
+    local comp="$1" stage_dir="$2"
+    local expect="${RELEASE_SH_EXPECT_PLATFORMS:-${#TARGETS[@]}}"
+    local -a missing=()
+    local found=0
+    local triple os arch variant plat zip_name
+    for triple in "${TARGETS[@]}"; do
+        # shellcheck disable=SC2086  # triple is a controlled space-separated string; word-splitting gives os arch [variant].
+        read -r os arch variant <<<"${triple}"
+        plat="$(plat_of "${os}" "${arch}" "${variant}")"
+        zip_name="burrowee-${comp}-${plat}.zip"
+        if [ -f "${stage_dir}/${zip_name}" ]; then
+            found=$((found + 1))
+        else
+            missing+=("${plat}")
+        fi
+    done
+    if [ "${found}" -lt "${expect}" ]; then
+        echo "✗ ${comp}: staged only ${found}/${#TARGETS[@]} platforms (expected at least ${expect}) — missing: ${missing[*]}" >&2
+        echo "  stage dir: ${stage_dir}" >&2
+        echo "  set RELEASE_SH_EXPECT_PLATFORMS to declare a deliberately short stage is expected (see tools/RUNBOOK.md — rkit gap)" >&2
+        exit 1
+    fi
+}
+
 # src_for is defined earlier in this file, beside REG_*/SRC_*/assert_release_origins.
 
 # binary list per component (the dispatcher `burrowee` is added at assembly time)
@@ -631,7 +686,7 @@ register_staged() {
         local os arch variant
         # shellcheck disable=SC2086  # triple is a controlled space-separated string; word-splitting gives os arch [variant].
         read -r os arch variant <<<"${triple}"
-        local plat="${os}-${arch}${variant:+-${variant}}"
+        local plat; plat="$(plat_of "${os}" "${arch}" "${variant}")"
 
         local zip_name url_or_key zip_path
         if [ "${comp}" = relay ]; then
@@ -651,6 +706,19 @@ register_staged() {
             # than abandoning registration for every platform that DID stage
             # (the old behavior: one absent zip silently skipped the whole
             # console row, public comps included).
+            #
+            # Deferred note: this `continue` (and the any_found guard below)
+            # is unreachable from the full-cut path — do_release()/
+            # do_release_relay() build every TARGETS platform themselves,
+            # under `set -e`, before ever calling register_staged, so a
+            # missing zip there already aborted the cut earlier. It exists
+            # for the externally-staged case: distribute_only()/
+            # distribute_relay() calling register_staged over a dir this
+            # script did not assemble (rkit build produced it). That gap is
+            # now caught earlier and louder, for public comps, by
+            # assert_platform_coverage() in distribute_only() above — this
+            # loop's per-artifact tolerance is what runs after that gate has
+            # already passed (or been explicitly overridden).
             echo "⚠ console registration: zip not found: ${zip_path} — omitting from artifacts" >&2
             continue
         fi
@@ -975,6 +1043,13 @@ distribute_only() {
         [ -f "${z}" ] || continue
         assert_payload_migrations "${comp}" "${z}" "${src}" || exit 1
     done
+
+    # Fails loudly, naming the missing platform(s), if <stage> carries fewer
+    # platforms than TARGETS expects — e.g. an rkit-produced stage that
+    # predates rkit learning darwin-amd64-legacy. See assert_platform_coverage
+    # above. Also ahead of the dry-run branch, same reasoning as the
+    # migrations gate just above: a rehearsal must catch a short stage too.
+    assert_platform_coverage "${comp}" "${stage}"
 
     if [ "${DRY_RUN}" = 1 ]; then
         echo "→ would: gh release create ${comp}/${stamp} (GitHub Release, public) via ghp"
