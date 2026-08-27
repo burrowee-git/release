@@ -1916,7 +1916,19 @@ do_release() {
             echo "→ would: publish-dir to R2 under ${comp}/${stamp}/ (beta: private until promoted)"
             echo "→ would: gen-bootstraps.sh + scp ${comp}/beta.*.sh (idempotent)"
             echo "→ would: marker commit [RELEASED: ${comp} beta] ${stamp} (private)"
-            echo "→ would: register_staged ${comp} ${stamp} channel=beta"
+            # (9) dry-run registration preview — the SAME register_staged call
+            # the real (non-dry-run) beta branch below makes, not a fourth
+            # `would:` line describing it. The four `would:` lines above are a
+            # sketch of the beta cut's shape; this builds and prints the
+            # actual payload (channel="beta", gated, artifacts keyed under
+            # ${comp}/${stamp}/ on R2, github_release forced empty) the same
+            # way the stable dry-run above already does, so the one rehearsal
+            # an operator runs before a real beta cut previews the real
+            # console-registration body instead of a one-line stand-in for
+            # it. gh_tag ("") matches the real (non-dry-run) beta call a few
+            # lines down: register_staged forces github_release="" for
+            # channel=beta regardless of what's passed.
+            register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
             revert_version
             trap shred_key ERR INT TERM
             echo "✓ dry-run ${comp} beta: artifacts under ${stage}/ (version bump reverted; no R2/scp/commit)"
