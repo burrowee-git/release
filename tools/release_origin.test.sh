@@ -473,5 +473,33 @@ check "case (g): staged_tolerance_for 0 cli returns 0" "${r}" "0"
 check "case (h): staged_tolerance_for 1 cli names exactly versions/cli and its stamp" \
     "$(staged_tolerance_for 1 cli)" "$(printf 'versions/cli\nversions/cli.stamp')"
 
+# ── beta channel ─────────────────────────────────────────────────────────────
+# assert_release_origin's [channel] is opt-in: every call above passed no
+# channel at all and is untouched by this section, which is itself the proof
+# that the stable path is unchanged — a stable-shaped call five sections up
+# never became wrong once beta support landed. beta redirects the whole guard
+# at a SECOND, structurally different origin: a LINKED worktree at
+# <registry-main>/../.worktrees/beta, derived from the registry main path
+# (never configured separately), on branch beta, clean, == origin/beta.
+new_origin_and_clone beta_ok >/dev/null
+MAIN="${WORK}/beta_ok"
+/usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${WORK}/.worktrees/beta" origin/main 2>/dev/null \
+    || /usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${MAIN}/../.worktrees/beta" origin/main
+BETA="$(cd "${MAIN}/../.worktrees/beta" && pwd)"
+/usr/bin/git -C "${BETA}" push --quiet -u origin beta
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse beta 2>&1)"; check "beta: clean synced beta worktree accepted" "$?" "0"
+out="$(assert_release_origin cli "${MAIN}" "${MAIN}" refuse beta 2>&1)"; check "beta: primary main folder refused" "$?" "1"
+check_contains "beta: refusal names the beta worktree" "${out}" ".worktrees/beta"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse stable 2>&1)"; check "stable: beta worktree refused" "$?" "1"
+echo dirty > "${BETA}/README.md"
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse beta 2>&1)"; check "beta: dirty refused" "$?" "1"
+/usr/bin/git -C "${BETA}" checkout --quiet -- README.md
+echo more > "${BETA}/x"; /usr/bin/git -C "${BETA}" add x; /usr/bin/git -C "${BETA}" -c user.name=t -c user.email=t@t commit --quiet -m ahead
+out="$(assert_release_origin cli "${BETA}" "${MAIN}" refuse beta 2>&1)"; check "beta: ahead of origin/beta refused" "$?" "1"
+check_contains "beta: ahead message names origin/beta" "${out}" "origin/beta"
+/usr/bin/git -C "${MAIN}" worktree remove --force "${BETA}"
+out="$(assert_release_origin cli "${MAIN}/../.worktrees/beta" "${MAIN}" refuse beta 2>&1)"; check "beta: missing worktree refused" "$?" "1"
+check_contains "beta: missing worktree hint" "${out}" "open a beta cycle"
+
 echo
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
