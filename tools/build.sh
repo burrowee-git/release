@@ -160,6 +160,27 @@ fi
 mkdir -p "${OUT_DIR}"
 HOST_OS="$(uname -s)"
 
+# VARIANT ("" | legacy) — darwin-amd64-legacy applies the crypto/x509 overlay
+# (spec §4.2) so the resulting binary avoids the macOS-12-only SecTrust API.
+# Scoped to darwin/amd64 only; every other target keeps building unmodified.
+VARIANT="${VARIANT:-}"
+OVERLAY_FLAG=()
+case "${VARIANT}" in
+    "") ;;
+    legacy)
+        [ "${TARGETOS}" = darwin ] && [ "${TARGETARCH}" = amd64 ] \
+            || { echo "✗ legacy variant is darwin/amd64 only (got ${TARGETOS}/${TARGETARCH})" >&2; exit 2; }
+        LEGACY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/legacy/darwin" && pwd)"
+        bash "${LEGACY_DIR}/overlay.test.sh" >/dev/null \
+            || { echo "✗ legacy overlay drift guard failed — see: bash ${LEGACY_DIR}/overlay.test.sh" >&2; exit 1; }
+        bash "${LEGACY_DIR}/overlay-json.sh" "${OUT_DIR}/.overlay.json"
+        OVERLAY_FLAG=(-overlay "${OUT_DIR}/.overlay.json")
+        # shellcheck source=tools/legacy/darwin/symbols.sh
+        source "${LEGACY_DIR}/symbols.sh"
+        ;;
+    *) echo "✗ unknown VARIANT '${VARIANT}' (use '' or legacy)" >&2; exit 2 ;;
+esac
+
 # shellcheck disable=SC2086  # ${MAP} is an intentional space-list of "bin:pkg" pairs; word-splitting into pairs is the point.
 for pair in ${MAP}; do
     bin="${pair%%:*}"
@@ -222,10 +243,13 @@ for pair in ${MAP}; do
             esac
             ;;
     esac
-    echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${bin_version})"
+    echo "→ ${COMP}: ${bin}  (GOOS=${TARGETOS} GOARCH=${TARGETARCH}, version=${bin_version}${VARIANT:+ variant=${VARIANT}})"
     assert_workspace_off "${build_dir}" "${bin_gowork}"
     ( cd "${build_dir}" && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOWORK="${bin_gowork}" \
-        "${GO_BIN}" build -trimpath -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
+        "${GO_BIN}" build -trimpath ${OVERLAY_FLAG[@]+"${OVERLAY_FLAG[@]}"} -ldflags "${bin_ldflags}" -o "${out}" "${pkg}" )
+    if [ "${VARIANT}" = legacy ]; then
+        assert_legacy_symbols "${out}" || exit 1
+    fi
     if [ "${TARGETOS}" = "darwin" ] && [ "${HOST_OS}" = "Darwin" ]; then
         if [ -n "${APPLE_SIGN:-}" ]; then
             # release mode: real Developer ID signature (hardened runtime + timestamp)
