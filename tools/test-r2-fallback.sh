@@ -161,7 +161,11 @@ done
 say "asset server up"
 
 # ---- (4) run a fake console catalog server -------------------------------------
-# Serves GET /api/v1/releases/cli/current → JSON with the test TAG.
+# Serves GET /api/v1/releases/stable/cli/current → JSON with the test TAG. The
+# channel is a PATH SEGMENT (tools/modules/version-resolve.sh v4); the retired
+# ?channel= form put it in the query string, which this exact-match handler never
+# saw — self.path carries the query — so every request 404'd and the fallback
+# resolved nothing.
 say "starting fake console catalog on 127.0.0.1:${CATALOG_PORT}"
 CATALOG_SCRIPT="${W}/catalog_server.py"
 cat > "${CATALOG_SCRIPT}" <<PYEOF
@@ -172,7 +176,7 @@ RESPONSE = b'{"version":"${TEST_TAG}","component":"cli"}'
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        if self.path == "/api/v1/releases/cli/current":
+        if self.path == "/api/v1/releases/stable/cli/current":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(RESPONSE)))
@@ -192,7 +196,7 @@ CATALOG_PID=$!
 
 # Wait for catalog server.
 i=0
-until curl -fsS "http://127.0.0.1:${CATALOG_PORT}/api/v1/releases/cli/current" \
+until curl -fsS "http://127.0.0.1:${CATALOG_PORT}/api/v1/releases/stable/cli/current" \
         -o /dev/null 2>/dev/null; do
     i=$((i+1)); [ "${i}" -lt 80 ] || die "catalog server did not come up on ${CATALOG_PORT}"
     sleep 0.1

@@ -106,6 +106,39 @@ for comp in ${COMPS}; do
 done
 printf '  OK: all four floors match their stamp files\n'
 
+# ---- (1b) CATALOG URL: the channel is a PATH SEGMENT, not a query parameter --
+# The console catalog is read at /api/v1/releases/<channel>/<comp>/current. The
+# retired ?channel= form is the whole reason for the change: a console that did
+# not recognise the parameter answered the STABLE current with 200, so a beta
+# host installed stable and nothing anywhere said so. A path segment cannot be
+# silently ignored — an unknown channel is a 4xx.
+#
+# assert_catalog_url <rendered bootstrap> <channel> <comp> — pull the shipped
+# assignment out of the rendered file and EVALUATE it, so this checks the URL the
+# installer actually builds rather than the shape of a line of text.
+assert_catalog_url() {
+    _f="$1"; _ch="$2"; _comp="$3"
+    _line="$(sed -n 's/^[[:space:]]*\(catalog_url=.*\)$/\1/p' "${_f}" | head -n1)"
+    [ -n "${_line}" ] \
+        || die "${_f}: no catalog_url= assignment — the console-catalog fallback has no URL to read"
+    _got="$(CONSOLE_URL="https://console.invalid" CHANNEL="${_ch}" \
+        sh -c "${_line}"'; printf %s "$catalog_url"')"
+    _want="https://console.invalid/api/v1/releases/${_ch}/${_comp}/current"
+    [ "${_got}" = "${_want}" ] \
+        || die "${_f} builds catalog URL '${_got}', want '${_want}' — the channel selects WHICH catalog is read, so it is a path segment, never a query parameter"
+    ! grep -q '?channel=' "${_f}" \
+        || die "${_f} still carries a '?channel=' query parameter — a console that ignores it serves the stable current with 200 and the wrong channel installs silently"
+}
+
+say "CATALOG URL: every rendered bootstrap reads /api/v1/releases/<channel>/<comp>/current"
+for comp in ${COMPS}; do
+    for mode in install upgrade updater.install; do
+        [ -f "${REPO_ROOT}/${comp}/${mode}.sh" ] || continue   # only edge/gateway have updater.install
+        assert_catalog_url "${REPO_ROOT}/${comp}/${mode}.sh" stable "${comp}"
+    done
+done
+printf '  OK: the committed stable bootstraps put the channel in the path\n'
+
 # ---- (2) extract the shipped predicate --------------------------------------
 # The block is delimited in tools/bootstrap.template.sh; pull it out of the
 # GENERATED cli/install.sh so the test drives the exact bytes that ship.
@@ -236,6 +269,16 @@ stable_floor="$(sed -n 's/^MIN_VERSION="\(.*\)"$/\1/p' "${BSCRATCH}/cli/install.
 [ "${stable_floor}" = "v0.1.0.2026.01.01.aaaaaaaa" ] \
     || die "cli/install.sh bakes MIN_VERSION='${stable_floor}' while a beta cycle is open, want versions/cli.stamp's value unchanged"
 
+# The beta twin's catalog URL, checked the same way (1b) checks the committed
+# stable ones — this is the render the query form's failure mode actually hurt:
+# a ?channel=beta a console did not recognise came back as the STABLE current,
+# with 200, and a beta host installed stable in silence.
+for f in beta.install.sh beta.upgrade.sh; do
+    assert_catalog_url "${BSCRATCH}/cli/${f}" beta cli
+done
+assert_catalog_url "${BSCRATCH}/cli/install.sh" stable cli
+printf '  OK: the beta twin reads the beta catalog by path, the stable render the stable one\n'
+
 # (c) close the cycle — the twins are swept, the stable render is untouched.
 rm -f "${BSTAMP}"
 BURROWEE_PUBKEY_FILE="${BPUB}" sh "${BSCRATCH}/tools/gen-bootstraps.sh" >/dev/null \
@@ -332,7 +375,7 @@ RUNNER
 chmod +x "${W}/resolve-run.sh"
 
 API_URL="https://api.github.com/repos/burrowee-git/release/releases?per_page=100"
-CATALOG_URL="https://console.invalid/api/v1/releases/cli/current?channel=stable"
+CATALOG_URL="https://console.invalid/api/v1/releases/stable/cli/current"
 
 slug() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/_/g'; }
 
@@ -450,7 +493,7 @@ printf '  OK: a stable resolve never accepts a .beta. catalog answer\n'
 # (6g) The mirror image: a beta resolve on a GitHub-blocked host must not
 # accept a stable (no ".beta.") tag from the catalog.
 say "RESOLVER: a beta resolve on a GitHub-blocked host rejects a stable catalog answer"
-CATALOG_URL_BETA="https://console.invalid/api/v1/releases/cli/current?channel=beta"
+CATALOG_URL_BETA="https://console.invalid/api/v1/releases/beta/cli/current"
 LEAK_BETA="${W}/fx-catalog-leak-beta"
 fixture "${LEAK_BETA}" "${CATALOG_URL_BETA}" '{"version":"cli/v0.2.9.2026.08.28.aa21f55c"}'
 if got="$(resolve "${LEAK_BETA}" "${FLOOR}" "" beta)"; then
