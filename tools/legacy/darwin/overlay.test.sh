@@ -40,11 +40,11 @@ stray_hunks() {
 }
 
 for f in root_darwin.go:crypto/x509/root_darwin.go security.go:crypto/x509/internal/macos/security.go security.s:crypto/x509/internal/macos/security.s; do
-    ours="${HERE}/${f%%:*}"; theirs="${GOROOT}/src/${f#*:}"
+    ours="${HERE}/_src/${f%%:*}"; theirs="${GOROOT}/src/${f#*:}"
     stray="$(stray_hunks "${theirs}" "${ours}")"
     check "only owned hunks differ: ${f%%:*}" "${stray}" ""
     check "overlay drops the 12+ import: ${f%%:*}" "$(grep -c 'SecTrustCopyCertificateChain' "${ours}")" "0"
 done
-check "root_darwin.go walks by index" "$(grep -c 'SecTrustGetCertificateAtIndex' "${HERE}/root_darwin.go")" "1"
-check "security.s has both trampolines" "$(grep -cE 'SecTrustGetCertificate(Count|AtIndex)_trampoline\(SB\)' "${HERE}/security.s")" "2"
+check "root_darwin.go walks by index" "$(grep -c 'SecTrustGetCertificateAtIndex' "${HERE}/_src/root_darwin.go")" "1"
+check "security.s has both trampolines" "$(grep -cE 'SecTrustGetCertificate(Count|AtIndex)_trampoline\(SB\)' "${HERE}/_src/security.s")" "2"
 exit "${fail}"

@@ -22,12 +22,45 @@ Full design: `docs/specs/2026-08-27-darwin-legacy-build-design.md` §3–§4.1 i
 
 | File | Role |
 |---|---|
-| `root_darwin.go` | `crypto/x509/root_darwin.go` with the chain-loop hunk swapped for the index walk |
-| `security.go` | `crypto/x509/internal/macos/security.go` with `SecTrustCopyCertificateChain` removed and `SecTrustGetCertificateCount` + `SecTrustGetCertificateAtIndex` added |
-| `security.s` | the matching two trampolines added, one removed |
+| `_src/root_darwin.go` | `crypto/x509/root_darwin.go` with the chain-loop hunk swapped for the index walk |
+| `_src/security.go` | `crypto/x509/internal/macos/security.go` with `SecTrustCopyCertificateChain` removed and `SecTrustGetCertificateCount` + `SecTrustGetCertificateAtIndex` added |
+| `_src/security.s` | the matching two trampolines added, one removed |
 | `GO_VERSION` | the exact `go version` these three files were derived from — the pin the drift guard checks against |
 | `overlay.test.sh` | the drift guard (see below) |
-| `overlay-json.sh <out-file>` | writes the `go build -overlay` JSON (absolute GOROOT paths) mapping the three stdlib files to the ones in this directory |
+| `overlay-json.sh <out-file>` | writes the `go build -overlay` JSON (absolute GOROOT paths) mapping the three stdlib files to the ones in `_src/` |
+
+### Why the three sources live in `_src/`, not here directly
+
+`root_darwin.go` declares `package x509`; `security.go` and `security.s`
+belong to `package macos`. That's correct — they're verbatim (edited) copies
+of two different stdlib packages — but it means two conflicting package
+clauses sitting directly in `tools/legacy/darwin/` make the Go tool treat
+the directory itself as an ill-formed Go package: `go build ./...`,
+`go vet ./...` and `go test ./...` all refuse with `found packages x509
+(root_darwin.go) and macos (security.go) in .../tools/legacy/darwin`, which
+breaks the whole module, not just this directory.
+
+These files are never meant to be compiled as part of this module in the
+first place — they're consumed exclusively by `go build -overlay` as raw
+file substitutions, so the Go tool has no business discovering them as a
+package at all. Moving them into `_src/` (a directory name that starts with
+`_`) fixes that: **the Go tool skips any directory whose name begins with
+`_` or `.` during package discovery** (same treatment as `testdata/`, just a
+different name), so `go build ./...` / `go vet ./...` / `go test ./...`
+never look inside `_src/` and the conflicting package clauses become
+invisible to them, while `overlay.test.sh` and `overlay-json.sh` — which
+read these files by explicit path, not by Go package discovery — work
+exactly as before. `GO_VERSION`, `overlay.test.sh`, `overlay-json.sh` and
+this README stay directly in `tools/legacy/darwin/` since none of them are
+Go source and none of them trip package discovery.
+
+**Do not move `root_darwin.go` / `security.go` / `security.s` back out of
+`_src/` "to tidy the layout."** Putting them beside `overlay.test.sh` again
+reintroduces the module-wide build/vet/test breakage this section exists to
+prevent — `tools/build.sh` (Task A4) locates them only through
+`overlay-json.sh`, which already points at `_src/`, so nothing outside this
+directory needs to change if `_src/` is ever renamed; only `overlay.test.sh`
+and `overlay-json.sh` would need updating together with it.
 
 ## The drift guard
 
@@ -79,9 +112,8 @@ Go files, not oversights; a stronger guard would need something closer to an
 AST diff. If that trade-off ever proves insufficient, tighten check 2 rather
 than reverting to line-by-line matching.
 
-Nothing under `tools/legacy/darwin/` runs this test automatically at build
-time from here — that wiring (`build.sh` invoking `overlay.test.sh` before
-building the `legacy` variant, per spec §4.2) is a later task.
+`tools/build.sh` (`VARIANT=legacy`) runs `overlay.test.sh` before every legacy
+build and refuses to build if it fails, per spec §4.2.
 
 ## Go-bump procedure
 
@@ -89,10 +121,12 @@ When `overlay.test.sh` starts failing because the installed Go minor no
 longer matches `GO_VERSION` (or because upstream touched one of the three
 files outside the expected hunks):
 
-1. Copy the three fresh originals from the new `$(go env GOROOT)/src/...`:
-   - `crypto/x509/root_darwin.go` → `root_darwin.go`
-   - `crypto/x509/internal/macos/security.go` → `security.go`
-   - `crypto/x509/internal/macos/security.s` → `security.s`
+1. Copy the three fresh originals from the new `$(go env GOROOT)/src/...`
+   into `_src/` (see "Why the three sources live in `_src/`" above — do not
+   put them anywhere else):
+   - `crypto/x509/root_darwin.go` → `_src/root_darwin.go`
+   - `crypto/x509/internal/macos/security.go` → `_src/security.go`
+   - `crypto/x509/internal/macos/security.s` → `_src/security.s`
 2. Re-apply the same three edits (see spec §4.1 for the exact hunks, or diff
    the previous committed versions of these files against their previous
    GOROOT originals to see exactly what changed):
