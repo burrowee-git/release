@@ -9,7 +9,7 @@
 //	burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
 //	burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
 //	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
-//	burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--dir <d>] [--execute]
+//	burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
 package main
 
 import (
@@ -69,7 +69,7 @@ func usage() {
   burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
   burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
-  burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--dir <d>] [--execute]`)
+  burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]`)
 }
 
 func runKeygen(args []string) {
@@ -211,13 +211,17 @@ func runPublishRelay(args []string) {
 	}
 }
 
-// runPrune drops all but the newest N version prefixes for a component in R2
-// (relay keeps 3; cli/gateway/edge/agent keep 10). Dry-run by default; --execute
-// performs the deletions. R2 credentials come from <dir>/config.toml + r2.key.
+// runPrune drops all but the newest N version prefixes for a component in R2,
+// on the given channel ONLY (a stable prune never counts or deletes a beta
+// version, and vice versa — spec §5.5): stable keeps 3 for relay and 10 for
+// every other component; beta keeps 5 regardless of component. Dry-run by
+// default; --execute performs the deletions. R2 credentials come from
+// <dir>/config.toml + r2.key.
 func runPrune(args []string) {
 	fs := flag.NewFlagSet("prune", flag.ExitOnError)
 	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
 	comp := fs.String("comp", "", "component: cli|gateway|edge|agent|relay|all (required)")
+	channel := fs.String("channel", "stable", "channel: stable|beta (default stable)")
 	execute := fs.Bool("execute", false, "actually delete (default: dry-run)")
 	fs.Parse(args) //nolint:errcheck
 
@@ -225,6 +229,12 @@ func runPrune(args []string) {
 		fmt.Fprintln(os.Stderr, "prune: --comp is required (cli|gateway|edge|agent|relay|all)")
 		fs.Usage()
 		os.Exit(1)
+	}
+	switch *channel {
+	case "stable", "beta":
+	default:
+		fmt.Fprintf(os.Stderr, "prune: --channel must be stable or beta (got %q)\n", *channel)
+		os.Exit(2)
 	}
 	_, r2cfg, err := register.LoadPublishConfig(*dir)
 	if err != nil {
@@ -237,7 +247,7 @@ func runPrune(args []string) {
 		comps = []string{"cli", "gateway", "edge", "agent", "relay"}
 	}
 	for _, c := range comps {
-		if _, err := register.Prune(context.Background(), client, c, *execute, os.Stdout); err != nil {
+		if _, err := register.Prune(context.Background(), client, c, *channel, *execute, os.Stdout); err != nil {
 			log.Fatalf("prune %s: %v", c, err)
 		}
 	}

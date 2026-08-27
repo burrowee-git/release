@@ -104,7 +104,7 @@ func TestPruneRelayKeepsThree(t *testing.T) {
 		"v0.1.5.2026.06.05.eeeeeeee",
 	}
 	store := &fakeStore{keys: keysFor(versions)}
-	n, err := Prune(context.Background(), store, "relay", true, io.Discard)
+	n, err := Prune(context.Background(), store, "relay", "stable", true, io.Discard)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestPrunePublicKeepsTen(t *testing.T) {
 		keys = append(keys, "cli/"+v+"/burrowee-cli-darwin-arm64.zip")
 	}
 	store := &fakeStore{keys: keys}
-	n, err := Prune(context.Background(), store, "cli", true, io.Discard)
+	n, err := Prune(context.Background(), store, "cli", "stable", true, io.Discard)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -155,6 +155,63 @@ func TestPrunePublicKeepsTen(t *testing.T) {
 	}
 }
 
+// TestPruneChannelsNeverMix is the guard on the destructive part of spec
+// §5.5: a stable prune must never count or delete a beta version, and a beta
+// prune must never count or delete a stable one, even though both channels'
+// keys sit side by side under the same <comp>/ prefix in R2.
+func TestPruneChannelsNeverMix(t *testing.T) {
+	var stable, beta []string
+	for i := 1; i <= 12; i++ {
+		stable = append(stable, "cli/v0.1."+itoa(i)+".2026.06."+pad2(i)+"."+hex8(i)+"/burrowee-cli-darwin-arm64.zip")
+	}
+	for i := 1; i <= 7; i++ {
+		beta = append(beta, "cli/v0.2."+itoa(i)+".beta.2026.07."+pad2(i)+"."+hex8(i)+"/burrowee-cli-darwin-arm64.zip")
+	}
+	keys := append(append([]string(nil), stable...), beta...)
+
+	stableStore := &fakeStore{keys: keys}
+	n, err := Prune(context.Background(), stableStore, "cli", "stable", true, io.Discard)
+	if err != nil {
+		t.Fatalf("Prune stable: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("stable deleted count: got %d want 2", n)
+	}
+	for _, k := range stableStore.deleted {
+		if strings.Contains(k, ".beta.") {
+			t.Errorf("stable prune deleted a beta key: %s", k)
+		}
+	}
+
+	betaStore := &fakeStore{keys: keys}
+	n, err = Prune(context.Background(), betaStore, "cli", "beta", true, io.Discard)
+	if err != nil {
+		t.Fatalf("Prune beta: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("beta deleted count: got %d want 2", n)
+	}
+	for _, k := range betaStore.deleted {
+		if !strings.Contains(k, ".beta.") {
+			t.Errorf("beta prune deleted a stable key: %s", k)
+		}
+	}
+}
+
+// pad2 zero-pads i to 2 digits (day-of-month position in the stamp).
+func pad2(i int) string {
+	if i < 10 {
+		return "0" + itoa(i)
+	}
+	return itoa(i)
+}
+
+// hex8 renders i as an 8-hex-digit sha stand-in, distinct per i.
+func hex8(i int) string {
+	s := itoa(i)
+	return strings.Repeat("0", 8-len(s)) + s
+}
+
 func TestPruneDryRunDeletesNothing(t *testing.T) {
 	versions := []string{
 		"v0.1.1.2026.06.01.aaaaaaaa",
@@ -164,7 +221,7 @@ func TestPruneDryRunDeletesNothing(t *testing.T) {
 	}
 	store := &fakeStore{keys: keysFor(versions)}
 	var buf strings.Builder
-	n, err := Prune(context.Background(), store, "relay", false, &buf)
+	n, err := Prune(context.Background(), store, "relay", "stable", false, &buf)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -181,7 +238,7 @@ func TestPruneDryRunDeletesNothing(t *testing.T) {
 
 func TestPruneUnderKeepIsNoOp(t *testing.T) {
 	store := &fakeStore{keys: keysFor([]string{"v0.1.1.x", "v0.1.2.x"})}
-	n, err := Prune(context.Background(), store, "relay", true, io.Discard)
+	n, err := Prune(context.Background(), store, "relay", "stable", true, io.Discard)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}

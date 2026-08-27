@@ -24,18 +24,35 @@ type PruneStore interface {
 	Deleter
 }
 
-// keepFor reports the retention count for comp: relay keeps 3, every public
-// component (cli/gateway/edge/agent) keeps 10. The locked operator policy.
-func keepFor(comp string) int {
+// keepFor reports the retention count for comp on channel: beta keeps 5
+// regardless of comp; on stable, relay keeps 3 and every public component
+// (cli/gateway/edge/agent) keeps 10. The locked operator policy (spec §5.5).
+func keepFor(comp, channel string) int {
+	if channel == "beta" {
+		return 5
+	}
 	if comp == "relay" {
 		return 3
 	}
 	return 10
 }
 
-// Prune drops all but the newest keepFor(comp) version/stamp prefixes under
-// <comp>/ in R2, deleting every object beneath the dropped prefixes. "Newest"
-// is decided by the same version ordering the rest of the tooling uses
+// chOf reports the channel a version/stamp string belongs to: "beta" when it
+// carries the ".beta." marker between semver and date (spec §4.1/§6.1's
+// ChannelOf), "stable" otherwise.
+func chOf(ver string) string {
+	if strings.Contains(ver, ".beta.") {
+		return "beta"
+	}
+	return "stable"
+}
+
+// Prune drops all but the newest keepFor(comp, channel) version/stamp
+// prefixes under <comp>/ in R2 ON THE GIVEN CHANNEL ONLY, deleting every
+// object beneath the dropped prefixes. A stable prune never counts or deletes
+// a beta version, and vice versa — versions on the other channel (or matching
+// neither channel pattern) are left untouched, not just unlisted. "Newest" is
+// decided by the same version ordering the rest of the tooling uses
 // (`sort -V`): the version triple dominates and the date+sha stamp suffix
 // breaks ties chronologically.
 //
@@ -45,11 +62,11 @@ func keepFor(comp string) int {
 //
 // Returns the number of objects deleted (execute=true) or that would be
 // deleted (execute=false).
-func Prune(ctx context.Context, store PruneStore, comp string, execute bool, out io.Writer) (int, error) {
+func Prune(ctx context.Context, store PruneStore, comp, channel string, execute bool, out io.Writer) (int, error) {
 	if out == nil {
 		out = io.Discard
 	}
-	keep := keepFor(comp)
+	keep := keepFor(comp, channel)
 	prefix := comp + "/"
 
 	keys, err := store.List(ctx, prefix)
@@ -57,13 +74,18 @@ func Prune(ctx context.Context, store PruneStore, comp string, execute bool, out
 		return 0, err
 	}
 
-	// Group keys by their version/stamp dir (the segment right after <comp>/).
+	// Group keys by their version/stamp dir (the segment right after <comp>/),
+	// skipping any version whose channel doesn't match — this is what keeps a
+	// stable prune from ever counting or deleting a beta version (and back).
 	byVersion := map[string][]string{}
 	for _, k := range keys {
 		rest := strings.TrimPrefix(k, prefix)
 		ver, _, ok := strings.Cut(rest, "/")
 		if !ok || ver == "" {
 			continue // not a <comp>/<version>/<file> key — leave it alone
+		}
+		if chOf(ver) != channel {
+			continue // other channel — never counted or touched by this prune
 		}
 		byVersion[ver] = append(byVersion[ver], k)
 	}
