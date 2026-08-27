@@ -642,6 +642,11 @@ if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_SKIP_PREFLIGHT:-}" ]; th
     MINISIGN_SKIP_PM=1
 fi
 
+# An uninstall never touches the OS package set: the provide step below may
+# still drop the pinned minisign beside the product so the payload it runs is
+# verified, and that one file is not removed afterwards (README says so).
+[ -z "${BURROWEE_UNINSTALL:-}" ] || MINISIGN_SKIP_PM=1
+
 # ---- version resolution -------------------------------------------------
 # BEGIN version-resolve
 # Read the per-component pin env var by name (no eval). $COMP is a baked
@@ -865,6 +870,8 @@ dl "SHA256SUMS.txt.minisig" "SHA256SUMS.txt.minisig"
 #   4. update MINISIGN_VERSION and both sha256 constants, bump this module's vN,
 #      sh tools/lock-modules.sh && sh tools/gen-bootstraps.sh &&
 #      sh tools/test-modules.sh && sh tools/test-install-minisign.sh
+#      (the suite reads MINISIGN_VERSION and the pins from the generated block —
+#      nothing in it to edit)
 #   5. sync-modules.sh from the other products (they carry this module too)
 MINISIGN=""
 MINISIGN_VERSION="0.12"
@@ -893,7 +900,7 @@ minisign_known() {
 # bootstrap before this point; empty means the root-only installers' /usr/local.
 minisign_dest_dir() {
     _md="${PREFIX:-/usr/local}/bin"
-    mkdir -p "$_md" 2>/dev/null || return 1
+    mkdir -p "$_md" 2>/dev/null || { info "minisign: cannot create $_md" >&2; return 1; }
     printf '%s' "$_md"
 }
 
@@ -934,10 +941,11 @@ minisign_fetch() {
 minisign_install_file() {
     _mi_dir="$(minisign_dest_dir)" || return 1
     if [ -e "$_mi_dir/minisign" ]; then
-        info "minisign: $_mi_dir/minisign already exists — not overwriting it"
+        info "minisign: $_mi_dir/minisign already exists — not overwriting it" >&2
         return 1
     fi
-    install -m 0755 "$1" "$_mi_dir/minisign" || return 1
+    install -m 0755 "$1" "$_mi_dir/minisign" 2>/dev/null \
+        || { info "minisign: cannot write $_mi_dir/minisign (not writable — re-run as root, or set PREFIX)" >&2; return 1; }
     printf '%s/minisign' "$_mi_dir"
 }
 
@@ -1006,7 +1014,7 @@ if [ "$OS" = linux ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_know
             MINISIGN="$_ml_bin"
             ok "minisign $MINISIGN_VERSION installed to $(dirname "$_ml_bin") (pinned upstream build)"
         else
-            info "minisign: could not install the pinned upstream build (network, mirrors, or its signature)"
+            info "minisign: could not install the pinned upstream build (network, mirrors, its signature, or the destination is not writable)"
         fi
     fi
 fi
@@ -1019,7 +1027,7 @@ fi
 # see, or one already at the install destination, is still an install:
 # minisign_known counts it as present.
 if [ "$OS" = darwin ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_known >/dev/null; then
-    if command -v brew >/dev/null 2>&1; then
+    if [ -z "${MINISIGN_SKIP_PM:-}" ] && command -v brew >/dev/null 2>&1; then
         info "minisign: not found — trying Homebrew"
         brew install minisign >/dev/null 2>&1 || true
     fi
@@ -1035,7 +1043,7 @@ if [ "$OS" = darwin ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_kno
             MINISIGN="$_md_bin"
             ok "minisign $MINISIGN_VERSION installed to $(dirname "$_md_bin") (pinned upstream build)"
         else
-            info "minisign: could not install the pinned upstream build (network, mirrors, or its signature)"
+            info "minisign: could not install the pinned upstream build (network, mirrors, its signature, or the destination is not writable)"
         fi
     else
         info "minisign: upstream ships no Intel build — install Homebrew, then minisign"

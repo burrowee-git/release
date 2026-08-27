@@ -3,9 +3,9 @@
 download-r2-only   v1       243e1005500e2867695e9baed93897270ded43d89a11687a6c80e1c39569db63
 download           v1       9ac4341c316864347d7c355ba69ce94dd3ddf565ed8584412c2db0343a781597
 helpers            v1       e84df2c8a4bd2a4be9b0182739be87d0db8cbac2ae0ce9de9dd21741360b0595
-install-minisign-common v1       a7a4d407f8a603a62eeed5e5167ea9c1e4763b0b4121fbaec32283aff1d50108
-install-minisign-darwin v1       7562a32dc26b72746cccfb82d0e314a9b60a39427125a6d402e949c96426c828
-install-minisign-linux v1       db5e75de00d18075c632839d67e8570153406c8f927c1f0615ec34b7679221fc
+install-minisign-common v1       a99204f6af06b41f306b210861a39f5f481a3edfd8f129d113256034da039cb5
+install-minisign-darwin v1       99e7c93fb5b3b7fb3eb0fd8c9bcfd406463474f0238377e967ee8f8dda32a02b
+install-minisign-linux v1       91ddfdf52530426753342526f1ee043866abf4e9d4f40d39d70d44e5f21eb8e3
 platform-detect    v1       faa1cc20dd0db9371acc9ccf141ef101c4f38efa10966cf0215c33989ac74520
 pubkey-guard       v1       9abecb99290a9761892c21f9ee3c07b99653f9db1f65868cc92033eef9901906
 require-minisign   v2       46f8adfbaae469e8b2d0dd753893060ba375c5c71e821900bb49e346d3d8f262

@@ -19,6 +19,8 @@
 #   4. update MINISIGN_VERSION and both sha256 constants, bump this module's vN,
 #      sh tools/lock-modules.sh && sh tools/gen-bootstraps.sh &&
 #      sh tools/test-modules.sh && sh tools/test-install-minisign.sh
+#      (the suite reads MINISIGN_VERSION and the pins from the generated block —
+#      nothing in it to edit)
 #   5. sync-modules.sh from the other products (they carry this module too)
 MINISIGN=""
 MINISIGN_VERSION="0.12"
@@ -47,7 +49,7 @@ minisign_known() {
 # bootstrap before this point; empty means the root-only installers' /usr/local.
 minisign_dest_dir() {
     _md="${PREFIX:-/usr/local}/bin"
-    mkdir -p "$_md" 2>/dev/null || return 1
+    mkdir -p "$_md" 2>/dev/null || { info "minisign: cannot create $_md" >&2; return 1; }
     printf '%s' "$_md"
 }
 
@@ -88,10 +90,11 @@ minisign_fetch() {
 minisign_install_file() {
     _mi_dir="$(minisign_dest_dir)" || return 1
     if [ -e "$_mi_dir/minisign" ]; then
-        info "minisign: $_mi_dir/minisign already exists — not overwriting it"
+        info "minisign: $_mi_dir/minisign already exists — not overwriting it" >&2
         return 1
     fi
-    install -m 0755 "$1" "$_mi_dir/minisign" || return 1
+    install -m 0755 "$1" "$_mi_dir/minisign" 2>/dev/null \
+        || { info "minisign: cannot write $_mi_dir/minisign (not writable — re-run as root, or set PREFIX)" >&2; return 1; }
     printf '%s/minisign' "$_mi_dir"
 }
 

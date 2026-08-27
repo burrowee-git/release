@@ -8,7 +8,7 @@
 # see, or one already at the install destination, is still an install:
 # minisign_known counts it as present.
 if [ "$OS" = darwin ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_known >/dev/null; then
-    if command -v brew >/dev/null 2>&1; then
+    if [ -z "${MINISIGN_SKIP_PM:-}" ] && command -v brew >/dev/null 2>&1; then
         info "minisign: not found — trying Homebrew"
         brew install minisign >/dev/null 2>&1 || true
     fi
@@ -24,7 +24,7 @@ if [ "$OS" = darwin ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_kno
             MINISIGN="$_md_bin"
             ok "minisign $MINISIGN_VERSION installed to $(dirname "$_md_bin") (pinned upstream build)"
         else
-            info "minisign: could not install the pinned upstream build (network, mirrors, or its signature)"
+            info "minisign: could not install the pinned upstream build (network, mirrors, its signature, or the destination is not writable)"
         fi
     else
         info "minisign: upstream ships no Intel build — install Homebrew, then minisign"

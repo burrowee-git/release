@@ -51,7 +51,7 @@ if [ "$OS" = linux ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_know
             MINISIGN="$_ml_bin"
             ok "minisign $MINISIGN_VERSION installed to $(dirname "$_ml_bin") (pinned upstream build)"
         else
-            info "minisign: could not install the pinned upstream build (network, mirrors, or its signature)"
+            info "minisign: could not install the pinned upstream build (network, mirrors, its signature, or the destination is not writable)"
         fi
     fi
 fi

@@ -32,10 +32,14 @@ that component, downloads the zip + `SHA256SUMS.txt` + `SHA256SUMS.txt.minisig`,
 **verifies the minisign signature against the baked public key**, checks the
 SHA-256, then unzips and runs the inner installer.
 If `minisign` is missing, the installer provides it first — through your package
-manager when it can run one without a password prompt, otherwise the official
-upstream 0.12 build whose SHA-256 is pinned inside the installer itself and whose
-own signature is then checked against upstream's key — and refuses to continue if
-neither works; it never runs an unverified verifier.
+manager where the installer has root (or, for a user-level install, passwordless
+sudo), otherwise the official upstream 0.12 build whose SHA-256 is pinned inside
+the installer itself and whose own signature is then checked against upstream's
+key — and refuses to continue if neither works; it never runs an unverified
+verifier.
+An uninstall never touches your package manager; if it had to fetch the pinned
+build to verify its payload, that single `minisign` file stays in the bin
+directory afterwards.
 Binaries land in
 `$HOME/.local/bin` (override with `PREFIX`) — **except the gateway and the
 edge**, which install to the root-owned `/usr/local/bin` and nowhere else:

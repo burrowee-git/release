@@ -608,6 +608,11 @@ if [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_SKIP_PREFLIGHT:-}" ]; th
     MINISIGN_SKIP_PM=1
 fi
 
+# An uninstall never touches the OS package set: the provide step below may
+# still drop the pinned minisign beside the product so the payload it runs is
+# verified, and that one file is not removed afterwards (README says so).
+[ -z "${BURROWEE_UNINSTALL:-}" ] || MINISIGN_SKIP_PM=1
+
 # ---- version resolution -------------------------------------------------
 @INCLUDE:version-resolve@
 
