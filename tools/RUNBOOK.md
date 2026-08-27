@@ -566,12 +566,19 @@ is unchanged. What it does, once built/signed/notarized:
   `register prune --comp <comp> --channel beta` with no `--execute` — the
   drain is a deploy-phase step, same as stable's report-then-drain shape).
 
-A stable cut of the **same component**, while a beta cycle happens to be
-open, also re-ships the current `beta.*.sh` twins (both `do_release` and
-`--distribute-only` do this) — harmless and idempotent, since nothing about
-the beta files changed, but it keeps the served beta bootstrap byte-identical
-to what `gen-bootstraps.sh` would render right now even if the beta host copy
-ever drifted.
+A stable cut of the **same component** always re-runs `gen-bootstraps.sh`
+(it renders every channel's bootstrap on every invocation, not only a beta
+cut's), so it re-renders `beta.*.sh` while a cycle is open, or deletes it the
+first time one runs after a cycle has been closed. Either way it **stages**
+that outcome into its own marker commit — so the working tree is always
+clean — but it does **not ship** the result: scp to the static host only
+happens from two sites total, `do_release`'s own `CHANNEL=beta` branch (a
+real beta cut shipping its own bootstrap) and `--distribute-only` (which
+re-ships whatever `beta.*.sh` currently exist, since it is always a stable
+republish). A plain stable cut of a component with an open (or just-closed)
+beta cycle therefore commits the twins' current state but does not push it
+to the host — the served copy catches up on the next beta cut or
+`--distribute-only` run for that component.
 
 `--distribute-only` refuses `--channel beta` outright (`✗ --distribute-only is
 a stable-channel verb; a beta cut uploads to R2 in one step`) — it re-publishes
@@ -601,7 +608,15 @@ There is no `close` verb either — closing is deleting the two files that mean
    repo, commit. The next `gen-bootstraps.sh` run (the next stable cut of any
    component, or a manual `bash tools/gen-bootstraps.sh`) sees the
    `.beta.stamp` file gone and **sweeps** `<comp>/beta.*.sh` — a closed cycle
-   must never leave a live beta bootstrap resolving against nothing.
+   must never leave a live beta bootstrap resolving against nothing. A
+   stable cut of THAT component **stages** the sweep's deletion into its own
+   marker commit (so the working tree stays clean — see the note in "Cut"
+   above), but nothing in `release.sh` ever DELETES a file on the release
+   host — every scp site here only uploads files that still exist locally.
+   The now-stale `<comp>/beta.*.sh` served from the static host is left in
+   place — nobody advertises its URL once the cycle is closed, but it is not
+   proactively removed by any cut — until an operator removes it by hand,
+   over ssh.
 2. Remove the beta worktree: `git worktree remove <code>/<repo>/../.worktrees/beta`
    (standard worktree teardown — nothing beta-specific about the removal
    itself).

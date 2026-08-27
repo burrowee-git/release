@@ -287,10 +287,17 @@ DRY_RUN=0
 BUMP_KIND="patch"
 FORCE_BUMP=0
 # CHANNEL: stable (default) or beta — see tools/version.sh, tools/release_origin.sh
-# and do_release()'s CHANNEL=beta branch below. Set here, ahead of the arg loop,
-# so an operator-exported CHANNEL is honored the same way RELEASE_HOST/STATIC_DIR
-# are; --channel <token> in the arg loop overrides it.
-CHANNEL="${CHANNEL:-stable}"
+# and do_release()'s CHANNEL=beta branch below. A plain literal default, NOT
+# an env fallback (unlike RELEASE_HOST/STATIC_DIR/etc.): CHANNEL is a generic
+# enough name that a stray `export CHANNEL=beta` left over in an operator's
+# shell — from anything, this script included — would silently turn a
+# hand-run `bash tools/release.sh cli --public` into a beta cut of a repo
+# whose main is a live cut origin. The ONLY way to select beta is the
+# `--channel beta` flag in the arg loop below; nothing reads CHANNEL out of
+# the process environment as an implicit default. tools/release.command
+# always passes --channel explicitly (reading its own CHANNEL from
+# .release-request), so nothing depends on an env fallback existing.
+CHANNEL="stable"
 # --keep-version: pin versions/<comp>, mint a fresh stamp anyway. Deliberately a
 # separate variable rather than a fourth BUMP_KIND: BUMP_KIND selects WHICH bump
 # runs, and this flag's whole point is that none does — folding it in would make
@@ -507,6 +514,17 @@ assert_stamp_untagged() {
 # exactly as it did through the old bare `bash tools/version.sh` calls: a
 # variable assignment ahead of a shell function call exports it for that one
 # call, function body included, same as it would for an external command.
+#
+# POSITIONAL CONTRACT, pinned here because nothing else records it: this only
+# works because `--channel beta` lands at argv position 2 — tools/version.sh's
+# own parse is `if [ "${2:-}" = "--channel" ]; then CHANNEL="${3:-}"; shift 2;
+# fi`, i.e. it looks ONLY at $2, never scans for --channel anywhere in the
+# arglist. A future reorder in either file (e.g. version_sh forwarding
+# --channel after the action instead of before it, or version.sh's own parse
+# moving to $3) breaks every call site here at once — silently: the symptom
+# is a wrong-channel version FILE (version.sh falls through to reading/
+# writing the stable versions/<comp> instead of refusing), not a parse error.
+# tools/version.test.sh exercises this shape directly.
 version_sh() {
     local comp="$1"; shift
     bash "${REPO_ROOT}/tools/version.sh" "${comp}" --channel "${CHANNEL:-stable}" "$@"
@@ -1161,7 +1179,9 @@ distribute_only() {
     if [ -f "${REPO_ROOT}/${comp}/updater.install.sh" ]; then
         git add "${comp}/updater.install.sh"
     fi
-    if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ]; then
+    # Both files, not just install.sh — see the identical guard + comment in
+    # do_release()'s CHANNEL=beta branch above.
+    if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ] && [ -f "${REPO_ROOT}/${comp}/beta.upgrade.sh" ]; then
         git add "${comp}/beta.install.sh" "${comp}/beta.upgrade.sh"
     fi
     if [ -f "${REPO_ROOT}/${comp}/beta.updater.install.sh" ]; then
@@ -1929,7 +1949,12 @@ do_release() {
         fi
 
         git add "versions/${comp}.beta" "versions/${comp}.beta.stamp"
-        if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ]; then
+        # Both files, not just install.sh: gen-bootstraps.sh renders the pair
+        # together, so this should never diverge — but a `git add` of a path
+        # that does not exist would abort the cut under `set -e`, and here
+        # that would land AFTER the R2 publish and past the cleared
+        # revert_version trap, i.e. a published beta with no marker commit.
+        if [ -f "${REPO_ROOT}/${comp}/beta.install.sh" ] && [ -f "${REPO_ROOT}/${comp}/beta.upgrade.sh" ]; then
             git add "${comp}/beta.install.sh" "${comp}/beta.upgrade.sh"
         fi
         if [ -f "${REPO_ROOT}/${comp}/beta.updater.install.sh" ]; then
@@ -1969,6 +1994,24 @@ do_release() {
 
     # (7) regenerate bootstraps + refresh edge skills + scp the static surface.
     bash "${REPO_ROOT}/tools/gen-bootstraps.sh" >&2
+    # Stage — but do NOT ship — whatever gen-bootstraps.sh just did to THIS
+    # comp's beta.*.sh twins. It renders every channel's bootstrap on every
+    # invocation, including a stable cut's: re-renders them when a beta cycle
+    # is open (harmless — the bytes don't change unless the pubkey/preflight
+    # did) and DELETES them when a cycle has just been closed. Neither is
+    # staged by the scp/`git add` block below, which only handles the STABLE
+    # artifacts — so a stable cut run right after closing a beta cycle left
+    # the sweep's deletions sitting unstaged, and tools/release.command's
+    # tree_state() then refused to push an already-published marker commit
+    # ("cut left an unclean tree"), stranding the release AFTER the GitHub
+    # Release went out. `-A -- "${comp}"` stages adds/modifies/deletes under
+    # the whole comp dir in one call — it does NOT ship these files (no scp),
+    # so it isn't a third publish site: it doesn't match cmd/rkit's
+    # TestReleasePublishesEveryRenderedArtifact guard, which looks for the
+    # literal `git add "${comp}/<artifact>"` form, not `-A`. Shipping the
+    # twins is still exactly two sites — do_release's CHANNEL=beta branch and
+    # distribute_only — this only keeps the stable tail's tree clean.
+    git add -A -- "${comp}"
     # Edge operator skills are OWNED by the edge repo; mirror them in from its
     # worktree on every release so the served copy can never drift from source.
     # (The cli + gateway skills are authored in THIS repo and are left untouched.)

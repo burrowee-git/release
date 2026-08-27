@@ -14,6 +14,13 @@ printf '0.2.8\n' > "${WORK}/repo/versions/cli"
 V="${WORK}/repo/tools/version.sh"
 
 check "stable semver unchanged" "$(bash "$V" cli --semver)" "0.2.8"
+# Positional contract: --channel is honored ONLY at argv position 2 ($2 =
+# "--channel"), never scanned for anywhere in the arglist — a caller that
+# puts it after the action (as release.sh's version_sh would if it or this
+# parse ever got reordered) gets silently ignored, ending up on the STABLE
+# semver rather than a refusal or the beta one. This is the shape
+# tools/release.sh's version_sh() comment points back at.
+check "--channel after the action is NOT honored (position-2 only)" "$(bash "$V" cli --semver --channel beta)" "0.2.8"
 bash "$V" cli --channel beta --semver >/dev/null 2>&1; check "beta semver refuses when versions/cli.beta absent" "$?" "1"
 printf '0.3.0\n' > "${WORK}/repo/versions/cli.beta"
 check "beta semver" "$(bash "$V" cli --channel beta --semver)" "0.3.0"
