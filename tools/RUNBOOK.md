@@ -509,3 +509,103 @@ update the constants, bump the module version, re-lock, regenerate, run
 `tools/test-install-minisign.sh`), land it through a PR, and then sync it into
 Clawee and Umbree with `tools/sync-modules.sh`. Nothing in `release.sh` touches
 it; a cut simply ships whatever the committed bootstraps carry.
+
+---
+
+## Beta channel
+
+`release.sh <comp> --channel beta` cuts from the registry's dedicated beta
+worktree, straight to R2, and never touches GitHub. Design:
+`docs/specs/2026-08-27-beta-channel-design.md` (burrowee-git/resources).
+`--channel` defaults to `stable`; every stable invocation is unaffected.
+
+### Open a cycle
+
+A beta cycle is two files' presence, nothing more — there is no `open` verb:
+
+1. Create the linked worktree the channel is cut from, sibling to the
+   registry's main folder: `<code>/<repo>/../.worktrees/beta`, on branch
+   `beta`, tracking `origin/beta` (`tools/release_origin.sh`'s
+   `beta_worktree_for` derives this path from the registry entry — it is never
+   configured separately). Standard `git worktree add` flow, same shape as any
+   other linked worktree in this product.
+2. In the **release repo**, write `versions/<comp>.beta` — the component's
+   beta semver, one line, `MAJOR.MINOR.PATCH`. It must sort strictly above
+   `versions/<comp>` (the stable semver): a beta that doesn't read newer than
+   its stable sibling would make a beta node's `version` output, and the
+   follow-on stable cut, both lie. `tools/version.sh <comp> --channel beta
+   --bump-minor` (or `--bump-patch`) against a starting value of the current
+   stable's next minor, patch 0, is the usual opener; `resolve_comp_stamp`
+   refuses at cut time (`--assert-beta-above-stable`) if this isn't true.
+3. Commit `versions/<comp>.beta`. There is nothing else to stage — the
+   `.beta.stamp` companion file doesn't exist yet; the first cut writes it.
+
+### Cut
+
+`bash tools/release.sh <comp> --channel beta --public [--dry-run]`. `--public`
+is **still required** — a beta becomes publicly installable the moment the
+console promotes it, so Developer-ID signing, notarization and the CVE gate
+apply exactly as they do to a stable cut. The empty-`FLAGS` interactive prompt
+is unchanged. What it does, once built/signed/notarized:
+
+- **No** git tag, **no** GitHub Release — `gh_release_publish` is skipped
+  entirely (see `do_release`'s `CHANNEL=beta` branch).
+- Uploads the four zips + `SHA256SUMS.txt(.minisig)` to R2 under
+  `<comp>/<stamp>/` (`register publish-dir`).
+- Regenerates the bootstraps (`gen-bootstraps.sh`, idempotent — it renders
+  every channel's twin on every invocation, stable and beta both) and scps
+  `<comp>/beta.install.sh` + `beta.upgrade.sh` (+ `beta.updater.install.sh`
+  for edge/gateway) to the static host, same as a stable cut ships
+  `<comp>/install.sh`.
+- Marker commit `[RELEASED: <comp> beta] <date> <stamp> (private)` —
+  `tools/release.command`'s push loop matches this subject alongside the
+  stable `[RELEASED: <comp>]` one, so a batched beta cut through
+  `release.command` still pushes its marker before the next component starts.
+- Registers a `staged`, `channel=beta` row with the console (R2 keys, no
+  `github_release`) and prints an R2 beta-retention **report** (keep 5,
+  `register prune --comp <comp> --channel beta` with no `--execute` — the
+  drain is a deploy-phase step, same as stable's report-then-drain shape).
+
+A stable cut of the **same component**, while a beta cycle happens to be
+open, also re-ships the current `beta.*.sh` twins (both `do_release` and
+`--distribute-only` do this) — harmless and idempotent, since nothing about
+the beta files changed, but it keeps the served beta bootstrap byte-identical
+to what `gen-bootstraps.sh` would render right now even if the beta host copy
+ever drifted.
+
+`--distribute-only` refuses `--channel beta` outright (`✗ --distribute-only is
+a stable-channel verb; a beta cut uploads to R2 in one step`) — it re-publishes
+an already-staged, already-GitHub-released component, which a beta cut never
+produces.
+
+### What the console does on promote
+
+Promoting a `staged`, `channel=beta` row is the **mirror** of a stable
+promote: stable moves GitHub → R2, beta moves **R2 → GitHub**. The console
+verifies the six R2 objects (four zips + sums + minisig) are complete and
+checksum-clean, creates a **prerelease** GitHub Release `<comp>/<stamp>` on
+`burrowee-git/release` streaming the assets from R2, flips the row to
+`public` (current within `(component, beta)`), and writes
+`<comp>/latest.beta.json` to R2. From that moment `beta.install.sh` resolves
+it and push / `update --auto` can reach it. Relay (gated on every channel)
+skips the GitHub half — its beta promote is the DB flip plus
+`latest.beta.json`. None of this runs from `release.sh`; it is entirely a
+console operation, out of scope for a cut.
+
+### Close a cycle
+
+There is no `close` verb either — closing is deleting the two files that mean
+"a cycle is open":
+
+1. `git rm versions/<comp>.beta versions/<comp>.beta.stamp` in the release
+   repo, commit. The next `gen-bootstraps.sh` run (the next stable cut of any
+   component, or a manual `bash tools/gen-bootstraps.sh`) sees the
+   `.beta.stamp` file gone and **sweeps** `<comp>/beta.*.sh` — a closed cycle
+   must never leave a live beta bootstrap resolving against nothing.
+2. Remove the beta worktree: `git worktree remove <code>/<repo>/../.worktrees/beta`
+   (standard worktree teardown — nothing beta-specific about the removal
+   itself).
+3. Any `staged`/`public` beta rows already in the console catalog are left
+   alone — closing a cycle is a release-repo/host-side action; yanking or
+   otherwise retiring already-shipped beta releases is a separate, deliberate
+   console operation.

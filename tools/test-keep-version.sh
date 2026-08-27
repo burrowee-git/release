@@ -72,9 +72,16 @@ PYEOF
 }
 
 HELPER="${W}/keep_version_funcs.sh"
-extract_funcs "${HELPER}" assert_stamp_untagged resolve_comp_stamp
+# version_sh: resolve_comp_stamp's own tools/version.sh call sites now go
+# through this wrapper (threads --channel "${CHANNEL}" through), so it has to
+# be extracted alongside resolve_comp_stamp or every version.sh call inside it
+# fails with "command not found" the moment this harness sources it in
+# isolation.
+extract_funcs "${HELPER}" assert_stamp_untagged version_sh resolve_comp_stamp
 grep -q '^assert_stamp_untagged() {' "${HELPER}" \
     || die "extraction failed — assert_stamp_untagged() not found in ${HELPER}"
+grep -q '^version_sh() {' "${HELPER}" \
+    || die "extraction failed — version_sh() not found in ${HELPER}"
 grep -q '^resolve_comp_stamp() {' "${HELPER}" \
     || die "extraction failed — resolve_comp_stamp() not found in ${HELPER}"
 grep -q 'KEEP_VERSION' "${HELPER}" \
