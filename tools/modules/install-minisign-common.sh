@@ -30,13 +30,24 @@ MINISIGN_UPSTREAM_BASE="https://github.com/jedisct1/minisign/releases/download/$
 # product's `update` verb probes.
 MINISIGN_KNOWN_PATHS="/opt/homebrew/bin/minisign /usr/local/bin/minisign"
 
+# minisign_known — print the first executable minisign at a location PATH may
+# not cover: the install destination itself (an earlier run, or the operator's
+# own copy in $PREFIX/bin), then the Homebrew locations. Nothing here is ever
+# overwritten; require-minisign uses whatever this finds.
+minisign_known() {
+    for _mk_p in "${PREFIX:-/usr/local}/bin/minisign" $MINISIGN_KNOWN_PATHS; do
+        [ -x "$_mk_p" ] && { printf '%s' "$_mk_p"; return 0; }
+    done
+    return 1
+}
+
 # minisign_dest_dir — where a fetched minisign lands: beside the product, in
 # $PREFIX/bin. The inner installer puts that directory on PATH, so the
 # product's `update` verb finds it on later runs. PREFIX is resolved by the
 # bootstrap before this point; empty means the root-only installers' /usr/local.
 minisign_dest_dir() {
     _md="${PREFIX:-/usr/local}/bin"
-    mkdir -p "$_md" || return 1
+    mkdir -p "$_md" 2>/dev/null || return 1
     printf '%s' "$_md"
 }
 
@@ -70,9 +81,16 @@ minisign_fetch() {
 }
 
 # minisign_install_file <src> — install <src> as minisign in the destination
-# directory; print the absolute path.
+# directory and print the absolute path. Never overwrites: a file already
+# there belongs to the operator (or an earlier run) and minisign_known will
+# have reported it — so minisign_seal's removal below only ever touches a
+# file this run created.
 minisign_install_file() {
     _mi_dir="$(minisign_dest_dir)" || return 1
+    if [ -e "$_mi_dir/minisign" ]; then
+        info "minisign: $_mi_dir/minisign already exists — not overwriting it"
+        return 1
+    fi
     install -m 0755 "$1" "$_mi_dir/minisign" || return 1
     printf '%s/minisign' "$_mi_dir"
 }

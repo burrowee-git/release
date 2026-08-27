@@ -876,13 +876,24 @@ MINISIGN_UPSTREAM_BASE="https://github.com/jedisct1/minisign/releases/download/$
 # product's `update` verb probes.
 MINISIGN_KNOWN_PATHS="/opt/homebrew/bin/minisign /usr/local/bin/minisign"
 
+# minisign_known — print the first executable minisign at a location PATH may
+# not cover: the install destination itself (an earlier run, or the operator's
+# own copy in $PREFIX/bin), then the Homebrew locations. Nothing here is ever
+# overwritten; require-minisign uses whatever this finds.
+minisign_known() {
+    for _mk_p in "${PREFIX:-/usr/local}/bin/minisign" $MINISIGN_KNOWN_PATHS; do
+        [ -x "$_mk_p" ] && { printf '%s' "$_mk_p"; return 0; }
+    done
+    return 1
+}
+
 # minisign_dest_dir — where a fetched minisign lands: beside the product, in
 # $PREFIX/bin. The inner installer puts that directory on PATH, so the
 # product's `update` verb finds it on later runs. PREFIX is resolved by the
 # bootstrap before this point; empty means the root-only installers' /usr/local.
 minisign_dest_dir() {
     _md="${PREFIX:-/usr/local}/bin"
-    mkdir -p "$_md" || return 1
+    mkdir -p "$_md" 2>/dev/null || return 1
     printf '%s' "$_md"
 }
 
@@ -916,9 +927,16 @@ minisign_fetch() {
 }
 
 # minisign_install_file <src> — install <src> as minisign in the destination
-# directory; print the absolute path.
+# directory and print the absolute path. Never overwrites: a file already
+# there belongs to the operator (or an earlier run) and minisign_known will
+# have reported it — so minisign_seal's removal below only ever touches a
+# file this run created.
 minisign_install_file() {
     _mi_dir="$(minisign_dest_dir)" || return 1
+    if [ -e "$_mi_dir/minisign" ]; then
+        info "minisign: $_mi_dir/minisign already exists — not overwriting it"
+        return 1
+    fi
     install -m 0755 "$1" "$_mi_dir/minisign" || return 1
     printf '%s/minisign' "$_mi_dir"
 }
@@ -944,7 +962,7 @@ minisign_seal() {
 # linked, so distro and libc do not matter). Every failure here is an info
 # line and falls through; require-minisign is the one that decides.
 # MINISIGN_SKIP_PM=1 says a preflight already made the package-manager attempt.
-if [ "$OS" = linux ] && ! command -v minisign >/dev/null 2>&1; then
+if [ "$OS" = linux ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_known >/dev/null; then
     _ml_sudo=""; _ml_can_pm=0
     if [ "$(id -u)" = 0 ]; then
         _ml_can_pm=1
@@ -998,16 +1016,14 @@ fi
 # the pinned upstream build — which upstream ships for arm64 only, so an Intel
 # Mac without Homebrew gets a plain statement of the gap and require-minisign's
 # brew recipe. A Homebrew minisign that a daemon-hosted shell's bare PATH cannot
-# see is still an install: the known locations count as present.
-_md_have=""
-for _md_p in $MINISIGN_KNOWN_PATHS; do [ -x "$_md_p" ] && _md_have=1; done
-if [ "$OS" = darwin ] && [ -z "$_md_have" ] && ! command -v minisign >/dev/null 2>&1; then
+# see, or one already at the install destination, is still an install:
+# minisign_known counts it as present.
+if [ "$OS" = darwin ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_known >/dev/null; then
     if command -v brew >/dev/null 2>&1; then
         info "minisign: not found — trying Homebrew"
         brew install minisign >/dev/null 2>&1 || true
-        for _md_p in $MINISIGN_KNOWN_PATHS; do [ -x "$_md_p" ] && _md_have=1; done
     fi
-    if [ -n "$_md_have" ] || command -v minisign >/dev/null 2>&1; then
+    if command -v minisign >/dev/null 2>&1 || minisign_known >/dev/null; then
         ok "minisign installed by Homebrew"
     elif [ "$ARCH" = arm64 ]; then
         info "minisign: trying the pinned upstream build"
@@ -1035,16 +1051,15 @@ fi
 # the install's trust root already, so a hash it carries makes the fetched
 # verifier exactly as trusted as the script itself (see install-minisign-common).
 # This module only DECIDES: an executable $MINISIGN set by those modules, else
-# PATH, else the Homebrew locations a daemon-hosted shell cannot see, else
-# refuse. Verification is mandatory and is never skipped.
+# PATH, else a copy at the install destination or the Homebrew locations a
+# daemon-hosted shell cannot see (minisign_known), else refuse. Verification
+# is mandatory and is never skipped.
 if [ -n "$MINISIGN" ] && [ -x "$MINISIGN" ]; then
     :
 elif command -v minisign >/dev/null 2>&1; then
     MINISIGN=minisign
 else
-    for _rm_p in $MINISIGN_KNOWN_PATHS; do
-        [ -x "$_rm_p" ] && [ -z "$MINISIGN" ] && MINISIGN="$_rm_p"
-    done
+    MINISIGN="$(minisign_known)" || MINISIGN=""
 fi
 if [ -z "$MINISIGN" ]; then
     case "$OS" in

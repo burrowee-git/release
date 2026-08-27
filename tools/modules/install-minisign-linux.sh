@@ -7,7 +7,7 @@
 # linked, so distro and libc do not matter). Every failure here is an info
 # line and falls through; require-minisign is the one that decides.
 # MINISIGN_SKIP_PM=1 says a preflight already made the package-manager attempt.
-if [ "$OS" = linux ] && ! command -v minisign >/dev/null 2>&1; then
+if [ "$OS" = linux ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_known >/dev/null; then
     _ml_sudo=""; _ml_can_pm=0
     if [ "$(id -u)" = 0 ]; then
         _ml_can_pm=1

@@ -5,16 +5,14 @@
 # the pinned upstream build — which upstream ships for arm64 only, so an Intel
 # Mac without Homebrew gets a plain statement of the gap and require-minisign's
 # brew recipe. A Homebrew minisign that a daemon-hosted shell's bare PATH cannot
-# see is still an install: the known locations count as present.
-_md_have=""
-for _md_p in $MINISIGN_KNOWN_PATHS; do [ -x "$_md_p" ] && _md_have=1; done
-if [ "$OS" = darwin ] && [ -z "$_md_have" ] && ! command -v minisign >/dev/null 2>&1; then
+# see, or one already at the install destination, is still an install:
+# minisign_known counts it as present.
+if [ "$OS" = darwin ] && ! command -v minisign >/dev/null 2>&1 && ! minisign_known >/dev/null; then
     if command -v brew >/dev/null 2>&1; then
         info "minisign: not found — trying Homebrew"
         brew install minisign >/dev/null 2>&1 || true
-        for _md_p in $MINISIGN_KNOWN_PATHS; do [ -x "$_md_p" ] && _md_have=1; done
     fi
-    if [ -n "$_md_have" ] || command -v minisign >/dev/null 2>&1; then
+    if command -v minisign >/dev/null 2>&1 || minisign_known >/dev/null; then
         ok "minisign installed by Homebrew"
     elif [ "$ARCH" = arm64 ]; then
         info "minisign: trying the pinned upstream build"

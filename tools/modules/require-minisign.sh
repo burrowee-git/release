@@ -1,5 +1,5 @@
 # module: require-minisign  v2
-# needs:  helpers install-minisign-common
+# needs:  helpers platform-detect install-minisign-common
 # since:  2026-08-25
 # minisign is the trust root of this install. The install-minisign-* modules
 # above try to PROVIDE it: the OS package manager first, then the official
@@ -7,16 +7,15 @@
 # the install's trust root already, so a hash it carries makes the fetched
 # verifier exactly as trusted as the script itself (see install-minisign-common).
 # This module only DECIDES: an executable $MINISIGN set by those modules, else
-# PATH, else the Homebrew locations a daemon-hosted shell cannot see, else
-# refuse. Verification is mandatory and is never skipped.
+# PATH, else a copy at the install destination or the Homebrew locations a
+# daemon-hosted shell cannot see (minisign_known), else refuse. Verification
+# is mandatory and is never skipped.
 if [ -n "$MINISIGN" ] && [ -x "$MINISIGN" ]; then
     :
 elif command -v minisign >/dev/null 2>&1; then
     MINISIGN=minisign
 else
-    for _rm_p in $MINISIGN_KNOWN_PATHS; do
-        [ -x "$_rm_p" ] && [ -z "$MINISIGN" ] && MINISIGN="$_rm_p"
-    done
+    MINISIGN="$(minisign_known)" || MINISIGN=""
 fi
 if [ -z "$MINISIGN" ]; then
     case "$OS" in
