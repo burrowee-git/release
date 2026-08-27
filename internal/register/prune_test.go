@@ -314,7 +314,13 @@ func TestPruneDryRunDeletesNothing(t *testing.T) {
 }
 
 func TestPruneUnderKeepIsNoOp(t *testing.T) {
-	store := &fakeStore{keys: keysFor([]string{"v0.1.1.x", "v0.1.2.x"})}
+	// Full §4.1 stable shape — chOf's shape validation must accept these (see
+	// TestPruneNeverCountsANonConformingKey) so this test exercises the
+	// under-keep no-op branch itself, not the non-conforming-key exclusion.
+	store := &fakeStore{keys: keysFor([]string{
+		"v0.1.1.2026.06.01.aaaaaaaa",
+		"v0.1.2.2026.06.02.bbbbbbbb",
+	})}
 	n, err := Prune(context.Background(), store, "relay", "stable", true, io.Discard)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
