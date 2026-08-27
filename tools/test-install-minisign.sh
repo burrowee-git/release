@@ -2,8 +2,9 @@
 # tools/test-install-minisign.sh — the bootstrap provides minisign before it
 # requires it, and the trust gate is not weakened by that.
 #
-#     sh tools/test-install-minisign.sh          # this shell (macOS /bin/sh)
-#     dash tools/test-install-minisign.sh        # and this one, always
+#     sh tools/test-install-minisign.sh          # this shell (macOS /bin/sh = bash 3.2)
+#     dash tools/test-install-minisign.sh        # harness under dash; the BLOCKS run under
+#                                                # dash only where `sh` IS dash (the CI container)
 #
 # The install-minisign-* blocks are extracted verbatim from a GENERATED
 # bootstrap and driven under a controlled PATH / PREFIX / TMP with DL_BASE
@@ -25,7 +26,8 @@
 #   DARWIN        arm64 fixture zip installs; amd64 without brew refuses with
 #                 the brew hint
 #   REAL          the real 0.12 archive for THIS host, if reachable, else
-#                 SKIPPED (offline) on its own line
+#                 SKIPPED (offline) on its own line; RELEASE_TESTS_OFFLINE=1
+#                 skips it by request (cut on an air-gapped host)
 set -eu
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -62,6 +64,7 @@ for v in MINISIGN_LINUX_SHA256 MINISIGN_MACOS_SHA256 MINISIGN_KNOWN_PATHS; do
     [ "$(grep -c "^$v=" "$W/block.sh")" = 1 ] || die "expected exactly one '$v=' line in the extracted block"
 done
 sed -i.orig "s|^MINISIGN_KNOWN_PATHS=.*|MINISIGN_KNOWN_PATHS=\"$W/nowhere/minisign\"|" "$W/block.sh"
+rm -f "$W/block.sh.orig"
 printf '  OK\n'
 
 # ---- a PATH that holds only what the blocks need --------------------------
@@ -164,7 +167,7 @@ $out"
 has "$out" "minisign:" && die "PRESENT: the block spoke although minisign is present:
 $out"
 [ ! -e "$W/prefix/bin/minisign" ] || die "PRESENT: wrote into PREFIX/bin although minisign is present"
-has "$out" "MINISIGN=" && ! has "$out" "MINISIGN=/" || die "PRESENT: MINISIGN should be empty: $out"
+[ "$(printf '%s\n' "$out" | tail -1)" = "MINISIGN=" ] || die "PRESENT: MINISIGN should be empty: $out"
 out="$(run "$W/block.sh" linux arm64 "$W/serve-empty" 1)" || die "PRESENT+require: refused although minisign is present:
 $out"
 has "$out" "MINISIGN=minisign" || die "PRESENT+require: expected MINISIGN=minisign (PATH lookup): $out"
@@ -301,18 +304,35 @@ esac
 if [ -z "$ros" ]; then
     printf '  SKIPPED (no upstream build for %s/%s)\n' "$(uname -s)" "$(uname -m)"
 else
-    for a in "$asset" "$asset.minisig"; do
-        [ -s "$CACHE/$a" ] || curl -fsSL --max-time 60 -o "$CACHE/$a" "https://github.com/jedisct1/minisign/releases/download/0.12/$a" 2>/dev/null || rm -f "$CACHE/$a"
-    done
-    if [ -s "$CACHE/$asset" ] && [ -s "$CACHE/$asset.minisig" ]; then
-        out="$(run "$W/block.sh" "$ros" "$rarch" "$CACHE" 1)" || die "REAL: the real archive did not install — is the pin stale?
-$out"
-        [ -x "$W/prefix/bin/minisign" ] || die "REAL: not installed:
-$out"
-        v="$("$W/prefix/bin/minisign" -v 2>&1)"; has "$v" "minisign 0.12" || die "REAL: installed binary reports '$v'"
-        printf '  OK: real minisign 0.12 installed, pin and upstream signature both hold\n'
+    # The pin the shipped block carries for THIS host's archive — read from the
+    # unmodified extracted copy, so a stale or truncated cache file is rejected
+    # by the same value the bootstrap enforces, and refetched.
+    case "$asset" in
+        *linux*) want="$(sed -n 's/^MINISIGN_LINUX_SHA256="\(.*\)"$/\1/p' "$W/block.sh")" ;;
+        *)       want="$(sed -n 's/^MINISIGN_MACOS_SHA256="\(.*\)"$/\1/p' "$W/block.sh")" ;;
+    esac
+    [ -n "$want" ] || die "REAL: could not read the pin for $asset from the extracted block"
+    if [ -s "$CACHE/$asset" ] && [ "$(sha_of "$CACHE/$asset")" != "$want" ]; then
+        printf '  cached %s does not match the pin — refetching\n' "$asset"
+        rm -f "$CACHE/$asset" "$CACHE/$asset.minisig"
+    fi
+    if [ -n "${RELEASE_TESTS_OFFLINE:-}" ]; then
+        printf '  SKIPPED (offline, by request): RELEASE_TESTS_OFFLINE is set\n'
     else
-        printf '  SKIPPED (offline): could not fetch %s from GitHub\n' "$asset"
+        for a in "$asset" "$asset.minisig"; do
+            [ -s "$CACHE/$a" ] || curl -fsSL --connect-timeout 5 --max-time 60 -o "$CACHE/$a" \
+                "https://github.com/jedisct1/minisign/releases/download/0.12/$a" 2>/dev/null || rm -f "$CACHE/$a"
+        done
+        if [ -s "$CACHE/$asset" ] && [ -s "$CACHE/$asset.minisig" ]; then
+            out="$(run "$W/block.sh" "$ros" "$rarch" "$CACHE" 1)" || die "REAL: the real archive did not install (cache: $CACHE — rm -rf it to refetch; if that does not help the pin is stale):
+$out"
+            [ -x "$W/prefix/bin/minisign" ] || die "REAL: not installed:
+$out"
+            v="$("$W/prefix/bin/minisign" -v 2>&1)"; has "$v" "minisign 0.12" || die "REAL: installed binary reports '$v'"
+            printf '  OK: real minisign 0.12 installed, pin and upstream signature both hold\n'
+        else
+            printf '  SKIPPED (offline): could not fetch %s from GitHub (cache: %s)\n' "$asset" "$CACHE"
+        fi
     fi
 fi
 
