@@ -194,17 +194,25 @@ origin_sync_status() {
 # label is the component name (or "release repo") and appears in every message:
 # a cut reads six trees, so "which one" is the first thing an operator needs.
 #
-# [channel] is stable (default) or beta, consumed ONLY when the next
-# positional is literally "stable" or "beta" — every pre-existing call site
-# (release.sh, test-produce-then-distribute.sh) does not know about channels
-# and passes straight through to [allowed-staged...] unmodified, so the
-# stable path behaves identically to before this parameter existed. beta
-# redirects the whole guard at a second, structurally different origin:
+# [channel] is stable (default) or beta, consumed from the next positional
+# ONLY when it is shaped like a channel token: exactly "stable"/"beta" is
+# accepted; anything containing "/" is assumed to be the first
+# [allowed-staged...] entry (every real tolerance path looks like
+# versions/<comp>[.stamp] — staged_tolerance_for never emits a bare word) and
+# left alone; anything else — empty, wrong case ("Beta"), misspelled
+# ("betaa") — is a caller bug, not a tree finding, so it is refused outright
+# with "✗ <label> unknown channel: <token>" and returns 1 UNCONDITIONALLY,
+# even under mode=report. This is what lets every pre-existing call site
+# (release.sh, test-produce-then-distribute.sh — neither of which knows
+# about channels) keep working unmodified while still closing the door on a
+# computed channel variable (a future caller) landing here empty or
+# misspelled and silently cutting from the wrong tree. beta redirects the
+# whole guard at a second, structurally different origin:
 # <registry-main>/../.worktrees/beta (beta_worktree_for), which must be a
 # LINKED worktree of the registry main repo (is_linked_worktree_of) — never
 # configured separately, so it cannot drift from the registry entry — on
 # branch beta, clean, == origin/beta. A missing beta worktree is refused with
-# its path and the fix; nothing here ever creates one.
+# its path and the fix (spec §5.2); nothing here ever creates one.
 #
 # [allowed-staged...] is the output of staged_tolerance_for — the paths THIS
 # ONE tree may carry staged instead of clean. It applies only to the clean-tree
@@ -213,8 +221,16 @@ origin_sync_status() {
 assert_release_origin() {
     local label="$1" dir="$2" expected="$3" mode="$4"; shift 4
     local channel=stable
-    if [ "$#" -gt 0 ] && { [ "$1" = stable ] || [ "$1" = beta ]; }; then
-        channel="$1"; shift
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            stable|beta) channel="$1"; shift ;;
+            */*) : ;; # path-shaped — the first [allowed-staged...] entry, not a channel
+            *)
+                printf '✗ %s unknown channel: %s\n    a channel positional must be exactly stable or beta\n' \
+                    "${label}" "$1" >&2
+                return 1
+                ;;
+        esac
     fi
     local -a allowed=("$@")
     local mark="✗" rc=1
@@ -226,8 +242,8 @@ assert_release_origin() {
         local beta_dir
         beta_dir="$(beta_worktree_for "${expected}")"
         if [ ! -d "${beta_dir}" ]; then
-            printf '%s %s beta worktree missing: %s\n    open a beta cycle first: git -C %s worktree add ../.worktrees/beta -b beta origin/main\n' \
-                "${mark}" "${label}" "${beta_dir}" "${expected}" >&2
+            printf '%s %s beta worktree missing: %s — open a beta cycle first\n' \
+                "${mark}" "${label}" "${beta_dir}" >&2
             [ "${mode}" = report ] || return 1
         fi
         beta_dir="$(cd "${beta_dir}" 2>/dev/null && pwd)" || beta_dir=""
