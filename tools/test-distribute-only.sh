@@ -60,6 +60,16 @@ CLI_LADDER="run.sh upgrade.sh lib_paths.sh lib_stale_user_bins.sh component.conf
 say "staging fake dist/${STAMP}/"
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}"
+# Deliberately four platforms, not five: this is now the SHORTFALL case
+# assert_platform_coverage (tools/release.sh) exists to catch — exactly what
+# an rkit-produced stage looks like today, since rkit build has not been
+# taught darwin-amd64-legacy (see tools/RUNBOOK.md's rkit-gap note). Step
+# (4b) below proves the undeclared shortfall is refused, by name; step (4c)
+# proves a WRONGLY-declared shortfall (naming the wrong platform) is refused
+# too; step (5)'s invocations declare the real gap expected via
+# RELEASE_SH_EXPECT_MISSING="darwin-amd64-legacy" so the rest of this test
+# can keep exercising the dry-run stub behavior unrelated to platform
+# coverage.
 for plat in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
     # shellcheck disable=SC2086  # ${CLI_LADDER} is an intentional space-list.
     ladder_zip "${STAGE}/burrowee-${COMP}-${plat}.zip" ${CLI_LADDER}
@@ -103,10 +113,67 @@ case "${missing_out}" in
 esac
 printf '  OK: missing stage rejected with a clear error\n'
 
+# ---- (4b) SHORTFALL: the same 4-platform stage, undeclared, is refused ------
+# assert_platform_coverage (tools/release.sh) runs ahead of the dry-run stub,
+# so even a rehearsal over this fixture's deliberately-short stage (see the
+# staging comment above) fails loudly, by component and missing platform,
+# unless RELEASE_SH_EXPECT_MISSING names the exact platform(s) expected
+# absent. This is the exact silent-four-platforms-of-five failure mode the
+# darwin-legacy fix wave closed: `rkit build` -> `release.sh
+# --distribute-only` must not exit 0 looking complete while missing
+# darwin-amd64-legacy.
+say "SHORTFALL: undeclared 4-platform stage is refused, by name"
+set +e
+short_out="$(BURROWEE_SRC_CLI="${FAKE_SRC}" \
+    bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --dry-run 2>&1)"
+short_rc=$?
+set -e
+[ "${short_rc}" -ne 0 ] || die "SHORTFALL: expected non-zero exit for an undeclared short stage, got 0. Output:\n${short_out}"
+case "${short_out}" in
+    *"missing but not declared: darwin-amd64-legacy"*) : ;;
+    *) die "SHORTFALL: expected the missing platform (darwin-amd64-legacy) named. Output:\n${short_out}" ;;
+esac
+case "${short_out}" in
+    *"${COMP}"*"does not match the declared expectation"*) : ;;
+    *) die "SHORTFALL: expected the component named. Output:\n${short_out}" ;;
+esac
+printf '  OK: undeclared short stage refused, naming the component and the missing platform\n'
+
+# ---- (4c) WRONGLY-DECLARED: naming the wrong platform is refused too --------
+# The count-based first cut of this gate (a bare integer override)
+# could not tell "the expected platform is missing" from "some OTHER platform
+# is missing but the total still matches" — a wrong declaration that happened
+# to have the right count would have passed silently. Prove the named-set
+# design catches exactly that: declare linux-arm64 missing when the actually
+# -missing platform is darwin-amd64-legacy. Must fail, naming BOTH the real
+# gap (undeclared) and the wrong claim (declared but actually staged).
+say "WRONGLY-DECLARED: RELEASE_SH_EXPECT_MISSING names the wrong platform — refused"
+set +e
+wrong_out="$(BURROWEE_SRC_CLI="${FAKE_SRC}" RELEASE_SH_EXPECT_MISSING="linux-arm64" \
+    bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --dry-run 2>&1)"
+wrong_rc=$?
+set -e
+[ "${wrong_rc}" -ne 0 ] || die "WRONGLY-DECLARED: expected non-zero exit, got 0. Output:\n${wrong_out}"
+case "${wrong_out}" in
+    *"missing but not declared: darwin-amd64-legacy"*) : ;;
+    *) die "WRONGLY-DECLARED: expected the real gap (darwin-amd64-legacy) named as undeclared. Output:\n${wrong_out}" ;;
+esac
+case "${wrong_out}" in
+    *"declared missing but actually staged: linux-arm64"*) : ;;
+    *) die "WRONGLY-DECLARED: expected the wrong claim (linux-arm64) named as stale. Output:\n${wrong_out}" ;;
+esac
+printf '  OK: a wrongly-declared shortfall is refused, naming both the real gap and the wrong claim\n'
+
 # ---- (5) DRY-RUN: run --distribute-only against the staged dir ---------------
+# RELEASE_SH_EXPECT_MISSING="darwin-amd64-legacy" declares this fixture's
+# deliberate four-platform stage as expected (see the staging comment above
+# and (4b)/(4c) just above) so the rest of this step can exercise the
+# dry-run stub's OTHER behavior — the "would:" action lines, no-side-effects,
+# no-ghp-dependency — without tripping the shortfall gate this test now also
+# covers.
 say "DRY-RUN: release.sh --distribute-only ${COMP} ${STAMP} --dry-run"
 set +e
-out="$(BURROWEE_SRC_CLI="${FAKE_SRC}" \
+out="$(BURROWEE_SRC_CLI="${FAKE_SRC}" RELEASE_SH_EXPECT_MISSING="darwin-amd64-legacy" \
     bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --dry-run 2>&1)"
 rc=$?
 set -e
@@ -172,7 +239,7 @@ printf '  OK: working tree status unchanged outside dist/ (no scp/ghp/local-file
 say "DRY-RUN with a system-only PATH (no ~/.claude/bin ghp wrapper) — must still succeed"
 SYSTEM_ONLY_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 set +e
-out2="$(BURROWEE_SRC_CLI="${FAKE_SRC}" PATH="${SYSTEM_ONLY_PATH}" \
+out2="$(BURROWEE_SRC_CLI="${FAKE_SRC}" RELEASE_SH_EXPECT_MISSING="darwin-amd64-legacy" PATH="${SYSTEM_ONLY_PATH}" \
     bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --dry-run 2>&1)"
 rc2=$?
 set -e
@@ -267,4 +334,4 @@ case "${beta_out}" in
 esac
 printf '  OK: --distribute-only cli <stamp> --channel beta exits 2 with the stable-channel-verb refusal\n'
 
-printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + dry-run stub + no-side-effects + no-tool-dependency + relay-private + relay-ladder-gate + beta-refused)\n'
+printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + platform-shortfall-gate + wrong-declaration-gate + dry-run stub + no-side-effects + no-tool-dependency + relay-private + relay-ladder-gate + beta-refused)\n'

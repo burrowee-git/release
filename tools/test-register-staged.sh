@@ -78,6 +78,7 @@ trap cleanup EXIT INT TERM
 TARGETS=(
     "darwin arm64"
     "darwin amd64"
+    "darwin amd64 legacy"
     "linux arm64"
     "linux amd64"
 )
@@ -111,9 +112,16 @@ GO_ENV=(GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/b
 # tools/updater_pin.sh` — so the extracted file must source the real helper
 # too, or every register_staged call below would fail with "updater_pin:
 # command not found" instead of exercising the actual resolution path.
+#
+# register_staged also calls plat_of() — "the one spelling" of the platform
+# string, defined once beside TARGETS in release.sh — rather than re-deriving
+# it inline. Grep the real one-line definition out of release.sh (not a
+# hand-copied duplicate here, which would drift silently) so the extracted
+# function has it available too.
 extract_register_staged() {
     local out="$1"
     printf 'source "%s/tools/updater_pin.sh"\n' "${REPO_ROOT}" > "${out}"
+    grep '^plat_of()' "${REPO_ROOT}/tools/release.sh" >> "${out}"
     python3 - "${REPO_ROOT}/tools/release.sh" "${out}.body" <<'PYEOF'
 import sys
 
@@ -157,25 +165,27 @@ PYEOF
 }
 
 # make_stage <dir> <comp>
-# Creates a minimal stage dir with 4 platform zips + SHA256SUMS.txt matching
+# Creates a minimal stage dir with 5 platform zips + SHA256SUMS.txt matching
 # release.sh output:
-#   public comps: burrowee-<comp>-<os>-<arch>.zip
-#   relay:        latest.<os>-<arch>.zip
+#   public comps: burrowee-<comp>-<plat>.zip
+#   relay:        latest.<plat>.zip
+# where <plat> is "<os>-<arch>" or "<os>-<arch>-<variant>" (plat_of()).
 make_stage() {
     local dir="$1" comp="$2"
     mkdir -p "${dir}"
-    local pair os arch zip_name
-    for pair in "${TARGETS[@]}"; do
-        read -r os arch <<<"${pair}"
+    local triple os arch variant plat zip_name
+    for triple in "${TARGETS[@]}"; do
+        read -r os arch variant <<<"${triple}"
+        plat="${os}-${arch}${variant:+-${variant}}"
         if [ "${comp}" = relay ]; then
-            zip_name="latest.${os}-${arch}.zip"
+            zip_name="latest.${plat}.zip"
         else
-            zip_name="burrowee-${comp}-${os}-${arch}.zip"
+            zip_name="burrowee-${comp}-${plat}.zip"
         fi
         # Write a tiny deterministic zip with a dummy file.
-        local tmp_content="${dir}/.dummy-${os}-${arch}"
-        printf 'dummy-%s-%s\n' "${os}" "${arch}" > "${tmp_content}"
-        ( cd "${dir}" && zip -q "${zip_name}" "./.dummy-${os}-${arch}" )
+        local tmp_content="${dir}/.dummy-${plat}"
+        printf 'dummy-%s\n' "${plat}" > "${tmp_content}"
+        ( cd "${dir}" && zip -q "${zip_name}" "./.dummy-${plat}" )
         rm -f "${tmp_content}"
     done
     # Compute SHA256SUMS.txt.
@@ -217,7 +227,7 @@ RESULT1="$(
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
     bash -c "
-        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"darwin amd64 legacy\" \"linux arm64\" \"linux amd64\")
         . '${EXTRACT1}'
         register_staged cli v0.1.0.2026.06.17.abcd1234 0.1.0 '${STAGE1}' '${CLI_SRC}' cli/v0.1.0.2026.06.17.abcd1234
     " 2>&1
@@ -233,6 +243,17 @@ printf '%s\n' "${RESULT1}" | grep -q '"gated":false' \
     || die "TEST 1: '\"gated\":false' not found. Output:\n${RESULT1}"
 printf '%s\n' "${RESULT1}" | grep -q 'github.com' \
     || die "TEST 1: expected GitHub artifact URL. Output:\n${RESULT1}"
+# The fifth platform: key "darwin-amd64-legacy" (never "darwin-amd64-''" or any
+# other spelling), pointing at the zip name every other assembly/publish site
+# uses for it — proves register_staged's TARGETS loop actually reached the
+# legacy triple and derived its key/zip name via plat_of(), not a stale
+# 4-entry copy. "artifacts" rides the body as a JSON *string* (see
+# register_staged's own comment on that), so its embedded quotes are
+# backslash-escaped in RESULT1 — BQ below is that literal two-byte sequence.
+BQ='\"'
+LEGACY_ARTIFACT1="${BQ}darwin-amd64-legacy${BQ}:{${BQ}url_or_key${BQ}:${BQ}https://github.com/${RELEASE_REPO}/releases/download/cli/v0.1.0.2026.06.17.abcd1234/burrowee-cli-darwin-amd64-legacy.zip${BQ}"
+printf '%s\n' "${RESULT1}" | grep -qF "${LEGACY_ARTIFACT1}" \
+    || die "TEST 1: expected a darwin-amd64-legacy artifacts entry pointing at burrowee-cli-darwin-amd64-legacy.zip. Output:\n${RESULT1}"
 printf '%s' "$(body_of "${RESULT1}")" | json_ok \
     || die "TEST 1: register body is not valid JSON. Output:\n${RESULT1}"
 
@@ -255,7 +276,7 @@ RESULT2="$(
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
     bash -c "
-        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"darwin amd64 legacy\" \"linux arm64\" \"linux amd64\")
         . '${EXTRACT2}'
         register_staged relay v0.1.0.2026.06.17.abcd9999 0.1.0 '${STAGE2}' '${RELAY_SRC}'
     " 2>&1
@@ -269,6 +290,14 @@ printf '%s\n' "${RESULT2}" | grep -q 'relay/v0.1.0.2026.06.17.abcd9999/' \
     || die "TEST 2: expected relay R2 key in artifacts. Output:\n${RESULT2}"
 printf '%s\n' "${RESULT2}" | grep -q '"component":"relay"' \
     || die "TEST 2: expected component=relay. Output:\n${RESULT2}"
+# The fifth platform for relay: key "darwin-amd64-legacy", R2 key
+# relay/<stamp>/latest.darwin-amd64-legacy.zip — same plat_of() spelling as
+# the public-comp assertion in TEST 1, over the R2-key branch instead of the
+# GitHub-URL branch. Same escaped-JSON-string caveat as TEST 1 (BQ).
+BQ='\"'
+LEGACY_ARTIFACT2="${BQ}darwin-amd64-legacy${BQ}:{${BQ}url_or_key${BQ}:${BQ}relay/v0.1.0.2026.06.17.abcd9999/latest.darwin-amd64-legacy.zip${BQ}"
+printf '%s\n' "${RESULT2}" | grep -qF "${LEGACY_ARTIFACT2}" \
+    || die "TEST 2: expected a darwin-amd64-legacy artifacts entry pointing at relay/<stamp>/latest.darwin-amd64-legacy.zip. Output:\n${RESULT2}"
 printf '%s' "$(body_of "${RESULT2}")" | json_ok \
     || die "TEST 2: relay register body is not valid JSON. Output:\n${RESULT2}"
 
@@ -297,7 +326,7 @@ TEST3_OUT="$(
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
     bash -c "
-        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"darwin amd64 legacy\" \"linux arm64\" \"linux amd64\")
         . '${EXTRACT3}'
         register_staged edge v0.1.0.2026.06.17.abcdefgh 0.1.0 '${STAGE3}' '${EDGE_SRC}' edge/v0.1.0.2026.06.17.abcdefgh
         echo 'exit_code:0'
@@ -333,7 +362,7 @@ RESULT4="$(
     SHA256="${SHA256}" \
     EVIL_STAMP="${EVIL_STAMP}" \
     bash -c '
-        TARGETS=("darwin arm64" "darwin amd64" "linux arm64" "linux amd64")
+        TARGETS=("darwin arm64" "darwin amd64" "darwin amd64 legacy" "linux arm64" "linux amd64")
         . '"'${EXTRACT4}'"'
         register_staged cli "${EVIL_STAMP}" "${EVIL_STAMP}" '"'${STAGE4}'"' '"'${CLI_SRC}'"' "cli/${EVIL_STAMP}"
     ' 2>&1
@@ -381,7 +410,7 @@ else
         RELEASE_REPO="${RELEASE_REPO}" \
         SHA256="${SHA256}" \
         bash -c "
-            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"darwin amd64 legacy\" \"linux arm64\" \"linux amd64\")
             . '${EXTRACT5}'
             register_staged edge v0.1.0.2026.06.17.edgepin 0.1.0 '${STAGE5}' '${EDGE_SRC}' edge/v0.1.0.2026.06.17.edgepin
         " 2>&1
@@ -425,7 +454,7 @@ else
         RELEASE_REPO="${RELEASE_REPO}" \
         SHA256="${SHA256}" \
         bash -c "
-            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"darwin amd64 legacy\" \"linux arm64\" \"linux amd64\")
             . '${EXTRACT6}'
             register_staged relay v0.1.0.2026.06.17.relaypin 0.1.0 '${STAGE6}' '${RELAY_SRC}'
         " 2>&1
@@ -460,7 +489,7 @@ else
         RELEASE_REPO="${RELEASE_REPO}" \
         SHA256="${SHA256}" \
         bash -c "
-            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"darwin amd64 legacy\" \"linux arm64\" \"linux amd64\")
             . '${EXTRACT7}'
             register_staged agent v0.1.0.2026.06.17.agentpin 0.1.0 '${STAGE7}' '${AGENT_SRC}' agent/v0.1.0.2026.06.17.agentpin
             echo 'exit_code:0'
@@ -515,7 +544,7 @@ else
         SHA256="${SHA256}" \
         bash -c "
             set -euo pipefail
-            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+            TARGETS=(\"darwin arm64\" \"darwin amd64\" \"darwin amd64 legacy\" \"linux arm64\" \"linux amd64\")
             # bins_for() lives earlier in release.sh, outside what
             # extract_register_staged pulls out — stub it (real cli value)
             # so THIS test isolates the updater_version failure path, not an

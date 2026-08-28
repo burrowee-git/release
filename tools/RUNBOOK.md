@@ -5,6 +5,79 @@ manual". Each note records a hazard that the tooling does **not** prevent.
 
 ---
 
+## darwin-amd64-legacy: two landing-order hazards — read before cutting it
+
+### (a) `rkit build` cannot produce this platform. This is unimplemented, not pending.
+
+**`rkit build` is the primary produce path** (see the very next section below:
+`tools/release.sh` never builds anything, it distributes what rkit already
+staged into `dist/<stamp>/`). Today `rkit build` produces exactly the four
+original targets — `darwin/arm64`, `darwin/amd64`, `linux/arm64`,
+`linux/amd64` — and has no concept of a fifth target or of a build-time
+overlay at all. The list is hardcoded in
+`internal/relconfig/relconfig.go`'s `Targets()`, in the `burrowee-git/release`
+module itself, and `cmd/rkit` has no `VARIANT=legacy` equivalent to
+`tools/build.sh`'s.
+
+Until `Targets()` (and `cmd/rkit`'s build loop) are taught the fifth target
+and the `tools/legacy/darwin/` overlay — work that lives in a **fourth
+repository, `burrowee-git/release-kit`**, which nothing in this effort's
+spec, plan, or task briefs ever scoped — **`darwin-amd64-legacy` can only be
+produced by `tools/release.sh`'s own full-cut path** (`do_release`, which
+builds all five `TARGETS` itself under `set -e`), never by `rkit build` and
+never by `release.sh --distribute-only` over an `rkit build` stage. An
+operator running the documented `rkit build` → `--distribute-only` flow will
+get four platforms, not five, and (as of this fix wave) `release.sh` now
+refuses to register that short stage silently — see
+`assert_platform_coverage` in `tools/release.sh` — but the fix is "fail
+loudly", not "produce the fifth platform." Producing it from `rkit` is a
+deliberate future decision for the operator to make in `release-kit`, not
+something this repo can do on its own.
+
+If you are knowingly distributing a partial stage anyway (e.g. re-running
+`--distribute-only` for one already-known-short component), declare it
+explicitly rather than working around the gate: `RELEASE_SH_EXPECT_MISSING`
+(optionally component-scoped as `RELEASE_SH_EXPECT_MISSING_<COMP>`, e.g.
+`RELEASE_SH_EXPECT_MISSING_CLI`) names the exact platform(s) expected
+absent — space- or comma-separated — and is checked against the actual
+missing set, not a count: a platform missing that you didn't declare still
+fails, and a platform you declared that turns out NOT to be missing also
+fails (so the declaration cannot outlive the gap it was written for). Never
+set it for a real cut.
+
+### (b) Landing order: the update path must not learn about this platform before core + console do
+
+`darwin-amd64-legacy` exists specifically so a pre-macOS-12 Intel Mac gets a
+build that doesn't die at `_SecTrustCopyCertificateChain` before `main`. That
+protection covers **install** the moment this repo's bootstrap picks the
+right platform by host. It does **not** yet cover **self-update**: today the
+updater (`updater/fetch.go` et al.) and the gateway
+(`internal/gateway/service_install.go`'s `OsArch()`) still compute the
+platform as the bare `runtime.GOOS + "-" + runtime.GOARCH` — they have not
+been taught the legacy platform key. Tasks B2 (updater) and B3 (gateway) —
+re-pinning `updater/go.mod` to a tagged core that exposes the platform key,
+and switching `OsArch()` to use it — have **not landed**.
+
+The failure mode this creates is not a clean error, which is what makes it
+dangerous: `darwin-amd64` **exists** in the release catalog (it's one of the
+original four targets), so a Catalina host that installed the legacy build
+via the bootstrap will, on its next self-update, ask the catalog for
+`darwin-amd64` — a real, signed, notarized, perfectly valid entry — download
+it, and install a binary that dies before `main` on that exact host. That is
+the precise bug this entire effort exists to fix, reintroduced through the
+one code path (self-update) that this work has not yet touched.
+
+**Spec §13's landing order — core tagged and console-registered, then
+`updater/go.mod` re-pinned (B2) and the gateway switched (B3), all landed
+*before* the first `darwin-amd64-legacy` release is cut — is therefore a hard
+gate, not a suggestion.** Cutting `darwin-amd64-legacy` ahead of that order
+does not fail to help pre-macOS-12 hosts; it actively breaks them on their
+first subsequent self-update, which is strictly worse than never having
+built the platform at all — those hosts were, until this effort landed, at
+least still running.
+
+---
+
 ## Cutting a public release: the Apple environment
 
 **`rkit build` is the primary produce path.** `tools/release.sh` never invokes
@@ -509,6 +582,23 @@ update the constants, bump the module version, re-lock, regenerate, run
 `tools/test-install-minisign.sh`), land it through a PR, and then sync it into
 Clawee and Umbree with `tools/sync-modules.sh`. Nothing in `release.sh` touches
 it; a cut simply ships whatever the committed bootstraps carry.
+
+## Go bump and the legacy overlay
+
+`tools/legacy/darwin/` overlays three `crypto/x509` files so the
+`darwin-amd64-legacy` target keeps verifying TLS chains with the macOS-10.7+
+`SecTrustGetCertificateAtIndex` API instead of the macOS-12-only
+`SecTrustCopyCertificateChain` that current Go imports non-lazily. It is
+pinned to one Go minor (`tools/legacy/darwin/GO_VERSION`) and guarded by
+`tools/legacy/darwin/overlay.test.sh`, which `build.sh` runs before every
+`VARIANT=legacy` build: a Go bump — even a patch release — fails that guard
+until a human re-derives the three files against the new stdlib and updates
+the pin, rather than silently shipping a stale overlay that either doesn't
+apply or reintroduces the macOS-12 symbol. Re-deriving the overlay after a Go
+bump is not a cut-time task; do it ahead of the bump, not during a release.
+Full procedure, the drift guard's guarantees and its two known gaps, and the
+condition under which the variant is dropped entirely: see
+`tools/legacy/darwin/README.md` → "Go-bump procedure".
 
 ---
 

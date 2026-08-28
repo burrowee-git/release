@@ -506,6 +506,20 @@ case "$(uname -m)" in
     *)             fail "unsupported arch: $(uname -m) (burrowee ships arm64 + amd64 only)" ;;
 esac
 
+# Intel Macs below macOS 12 need the darwin-amd64-legacy artifact (Go >= 1.25
+# imports a macOS-12-only Security.framework symbol; the legacy build does not).
+# Apple Silicon below 12 is not shipped: refuse with the upgrade path.
+if [ "$OS" = darwin ]; then
+    _pd_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+    case "$_pd_major" in ''|*[!0-9]*) _pd_major=99 ;; esac
+    if [ "$_pd_major" -lt 12 ]; then
+        case "$ARCH" in
+            amd64) ARCH=amd64-legacy ;;
+            arm64) fail "macOS $_pd_major on Apple Silicon is not supported — upgrade to macOS 12 or later" ;;
+        esac
+    fi
+fi
+
 printf '\n  burrowee %s installer  (%s/%s)\n\n' "$COMP" "$OS" "$ARCH"
 # END platform-detect
 

@@ -78,7 +78,7 @@ CALL_LOG="${W}/build.calls"
 cat > "${FAKE_REPO}/tools/build.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s %s-%s\n' "${COMP}" "${TARGETOS}" "${TARGETARCH}" >> "${CALL_LOG}"
+printf '%s %s-%s%s\n' "${COMP}" "${TARGETOS}" "${TARGETARCH}" "${VARIANT:+ ${VARIANT}}" >> "${CALL_LOG}"
 mkdir -p "${OUT_DIR}"
 {
     printf '\317\372\355\376'                       # Mach-O 64-bit LE magic
@@ -144,8 +144,8 @@ FAKE_SRC="${W}/dispatcher-src"      # never the real burrowee checkout
 mkdir -p "${FAKE_SRC}"
 REPO_ROOT_REAL="${REPO_ROOT}"       # REPO_ROOT is reassigned inside the subshell
 
-# run_build_dispatcher <apple_sign> <os> <arch> — build_dispatcher in a clean
-# subshell, on a PATH holding only the stubs plus coreutils.
+# run_build_dispatcher <apple_sign> <os> <arch> [<variant>] — build_dispatcher
+# in a clean subshell, on a PATH holding only the stubs plus coreutils.
 run_build_dispatcher() {
     # shellcheck disable=SC2034  # every var below is read by build_dispatcher in ${HELPER}, sourced at the end of this subshell.
     (
@@ -160,9 +160,11 @@ run_build_dispatcher() {
         export APPLE_SIGN="$1"      # release.sh exports it; build.sh reads it
         # shellcheck source=/dev/null
         source "${REPO_ROOT_REAL}/tools/apple_sign.sh"
+        # shellcheck disable=SC1090
+        plat_of() { printf '%s-%s%s' "$1" "$2" "${3:+-$3}"; }
         # shellcheck source=/dev/null
         source "${HELPER}"
-        build_dispatcher "$2" "$3"
+        build_dispatcher "$2" "$3" "${4:-}"
     )
 }
 
@@ -246,6 +248,32 @@ run_build_dispatcher 1 darwin arm64 >/dev/null 2>&1 || die "(f) public leg faile
     || die "(f) the --public cut bundled the dry-run's $(marker_of darwin-arm64) dispatcher — THE BUG"
 [ "$(builds)" = 2 ] || die "(f) expected 2 builds (dry-run + re-sign), got $(builds)"
 echo "PASS (f): the --public cut rebuilt the dry-run's ad-hoc dispatcher"
+
+
+# ---- (g) darwin/amd64 legacy variant caches SEPARATELY from stock darwin-amd64
+# THE BUG THIS GUARDS: build_dispatcher's cache key used to be "${os}-${arch}"
+# with the variant silently dropped, so building darwin/amd64 stock and then
+# darwin/amd64/legacy would hit the SAME cache dir — the second call would
+# see the first build's cached binary as "already built" and reuse it
+# verbatim, shipping a non-legacy dispatcher inside the legacy zip (the exact
+# crash-before-main defect this platform exists to fix). A correct cache key
+# must produce two builds and two distinct cache directories.
+say "(g) darwin/amd64 legacy variant caches separately from stock darwin-amd64"
+rm -rf "${CACHE}"
+reset_builds
+run_build_dispatcher "" darwin amd64 >/dev/null 2>&1 || die "(g) darwin-amd64 (stock) build failed"
+run_build_dispatcher "" darwin amd64 legacy >/dev/null 2>&1 || die "(g) darwin-amd64-legacy build failed"
+[ "$(builds)" = 2 ] \
+    || die "(g) expected 2 separate builds (stock + legacy), got $(builds) — the legacy variant reused the stock cache entry"
+[ -f "${CACHE}/darwin-amd64/burrowee" ] \
+    || die "(g) stock cache dir missing: ${CACHE}/darwin-amd64"
+[ -f "${CACHE}/darwin-amd64-legacy/burrowee" ] \
+    || die "(g) legacy cache dir missing: ${CACHE}/darwin-amd64-legacy — cache key did not include the variant"
+grep -q '^burrowee darwin-amd64$' "${CALL_LOG}" \
+    || die "(g) stock build.sh call was not logged as plain darwin-amd64 (no VARIANT). Log:\n$(cat "${CALL_LOG}")"
+grep -q '^burrowee darwin-amd64 legacy$' "${CALL_LOG}" \
+    || die "(g) legacy build.sh call did not receive VARIANT=legacy. Log:\n$(cat "${CALL_LOG}")"
+echo "PASS (g): darwin-amd64-legacy cached separately from darwin-amd64, and VARIANT threaded to build.sh"
 
 echo
 echo "✓ ALL DISPATCHER-SIGN-CACHE TESTS PASSED"
