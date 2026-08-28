@@ -74,10 +74,62 @@ func zipFilename(comp, plat string) string {
 	return "burrowee-" + comp + "-" + plat + ".zip"
 }
 
+// basePlatforms are the platforms every component ships on every channel. They
+// are a FLOOR, not the list to upload: components may carry additional
+// platforms (darwin-amd64-legacy, tools/release.sh's fifth TARGETS entry) and
+// are not required to carry them uniformly — relay deliberately has no legacy
+// build. See zipsFromSums.
+var basePlatforms = []string{"darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64"}
+
+// zipsFromSums returns comp's platform zip filenames, sorted, taken from the
+// parsed SHA256SUMS.txt rather than from a platform list held here.
+//
+// It used to be a literal four-entry list, and that is precisely how the first
+// beta cut shipped a broken install: tools/release.sh's TARGETS grew a fifth
+// platform (darwin-amd64-legacy) and this list did not, so the R2 upload
+// published four zips while the register payload — built from the actual dist
+// contents — advertised five. The console then minted a presigned URL for an
+// object that had never been uploaded, and every legacy Mac got a 404 from a
+// release that reported success. tools/release.sh's assert_platform_coverage
+// does not catch it: that guards distribute_only()'s GitHub path, not this one.
+//
+// SHA256SUMS.txt is the right source because it is generated from what was
+// actually built and is covered by the minisign signature, so "what was built"
+// and "what is uploaded" cannot drift apart again — a sixth platform needs no
+// change here. basePlatforms remains a floor so a catastrophically short build
+// is refused rather than published quietly.
+func zipsFromSums(comp string, hashByFile map[string]string) ([]string, error) {
+	prefix, suffix := "burrowee-"+comp+"-", ".zip"
+	if comp == "relay" {
+		prefix = "latest."
+	}
+	var names []string
+	seen := map[string]bool{}
+	for filename := range hashByFile {
+		if !strings.HasPrefix(filename, prefix) || !strings.HasSuffix(filename, suffix) {
+			continue
+		}
+		names = append(names, filename)
+		seen[strings.TrimSuffix(strings.TrimPrefix(filename, prefix), suffix)] = true
+	}
+	var missing []string
+	for _, plat := range basePlatforms {
+		if !seen[plat] {
+			missing = append(missing, plat)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("publish-dir: %s: SHA256SUMS.txt is missing platform(s) %s — refusing to publish a short build",
+			comp, strings.Join(missing, ", "))
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // PublishFromDir uploads a component's artifacts from a local directory to R2
-// under <comp>/<stamp>/. It uploads the four platform zips (see zipFilename),
-// SHA256SUMS.txt, and SHA256SUMS.txt.minisig found in dir. Size+sha256 are
-// verified against SHA256SUMS.txt before upload.
+// under <comp>/<stamp>/. It uploads every platform zip SHA256SUMS.txt lists
+// (see zipsFromSums), SHA256SUMS.txt, and SHA256SUMS.txt.minisig found in dir.
+// Size+sha256 are verified against SHA256SUMS.txt before upload.
 //
 // relay was the first (and, before beta, only) private component, so this was
 // written for it and driven by the relay cut flow (do_release_relay in
@@ -113,10 +165,19 @@ func PublishFromDir(ctx context.Context, r2 Putter, comp, dir, stamp string, out
 		hashByFile[fields[1]] = fields[0]
 	}
 
-	// Upload the four platform zips with sha256 verification.
-	platforms := []string{"darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64"}
-	for _, plat := range platforms {
-		filename := zipFilename(comp, plat)
+	// Every platform zip SHA256SUMS.txt lists, verified in full BEFORE anything
+	// is uploaded. Verifying inside the upload loop would leave a mismatch
+	// partially published — the zips that happened to sort earlier are already
+	// in R2 when the bad one aborts, so a half-written version is visible to
+	// the presigner while the cut reports failure. The split makes the "abort
+	// uploads nothing" guarantee hold for a mismatch on ANY platform rather
+	// than only on whichever one the iteration order happens to reach first.
+	filenames, err := zipsFromSums(comp, hashByFile)
+	if err != nil {
+		return err
+	}
+	verified := make([][]byte, len(filenames))
+	for i, filename := range filenames {
 		body, err := os.ReadFile(dir + "/" + filename)
 		if err != nil {
 			return fmt.Errorf("publish-dir: read %s: %w", filename, err)
@@ -129,8 +190,11 @@ func PublishFromDir(ctx context.Context, r2 Putter, comp, dir, stamp string, out
 		if got := hex.EncodeToString(sum[:]); got != expectedHash {
 			return fmt.Errorf("publish-dir: %s: sha256 mismatch (sums %s, got %s)", filename, expectedHash, got)
 		}
+		verified[i] = body
+	}
+	for i, filename := range filenames {
 		key := comp + "/" + stamp + "/" + filename
-		if err := r2.Put(ctx, key, body, "application/zip"); err != nil {
+		if err := r2.Put(ctx, key, verified[i], "application/zip"); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "✓ %s\n", key)

@@ -269,3 +269,125 @@ func TestPublishSizeMismatchAborts(t *testing.T) {
 		t.Errorf("must not PUT on size mismatch: %v", p.puts)
 	}
 }
+
+// TestPublishFromDirUploadsTheFifthPlatform is the regression test for the
+// first beta cut's broken install: the upload list was a literal four-entry
+// platform slice, so when tools/release.sh's TARGETS grew darwin-amd64-legacy
+// the R2 push silently published four zips out of five. The register payload
+// was built from the real dist contents and advertised all five, so the console
+// minted a presigned URL for an object that had never been uploaded and every
+// macOS-below-12 host got a 404 from a cut that reported success.
+//
+// A gateway stage carrying five platforms must upload five zips. Pinning the
+// count as well as the key means dropping the fifth arm again fails here rather
+// than in production.
+func TestPublishFromDirUploadsTheFifthPlatform(t *testing.T) {
+	dir := t.TempDir()
+	stamp := "v0.2.17.beta.2026.08.28.acd89694"
+
+	platforms := []string{"darwin-arm64", "darwin-amd64", "darwin-amd64-legacy", "linux-arm64", "linux-amd64"}
+	bodies := map[string]string{}
+	var sums strings.Builder
+	for _, plat := range platforms {
+		name := "burrowee-gateway-" + plat + ".zip"
+		bodies[name] = "ZIP-" + plat
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(bodies[name]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256([]byte(bodies[name]))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt.minisig"), []byte("SIG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakePutter{}
+	if err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard); err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+
+	// 5 zips + SHA256SUMS.txt + .minisig = 7.
+	if len(p.puts) != 7 {
+		t.Fatalf("want 7 R2 puts, got %d: %v", len(p.puts), p.puts)
+	}
+	legacy := "gateway/" + stamp + "/burrowee-gateway-darwin-amd64-legacy.zip"
+	if _, ok := p.puts[legacy]; !ok {
+		t.Errorf("the legacy zip was never uploaded: missing R2 key %s; got %v", legacy, p.puts)
+	}
+}
+
+// TestPublishFromDirRelayNeedsNoLegacy pins the other half of the contract:
+// the upload set follows SHA256SUMS.txt, so a component that deliberately
+// ships no legacy build is not forced to have one. relay is that component —
+// it is gated, never installed on a legacy Mac, and does not build the fifth
+// platform. A four-platform relay stage must publish cleanly.
+func TestPublishFromDirRelayNeedsNoLegacy(t *testing.T) {
+	dir := t.TempDir()
+	stamp := "v0.2.20.beta.2026.08.28.5c285586"
+
+	platforms := []string{"darwin-arm64", "darwin-amd64", "linux-arm64", "linux-amd64"}
+	var sums strings.Builder
+	for _, plat := range platforms {
+		name := "latest." + plat + ".zip"
+		body := "ZIP-" + plat
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256([]byte(body))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt.minisig"), []byte("SIG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakePutter{}
+	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+	if len(p.puts) != 6 {
+		t.Fatalf("want 6 R2 puts for a legacy-free relay, got %d: %v", len(p.puts), p.puts)
+	}
+}
+
+// TestPublishFromDirRefusesAShortBuild pins the floor. Deriving the list from
+// SHA256SUMS.txt means an under-built stage would otherwise publish whatever it
+// happened to contain and report success — the same silent-shortfall shape as
+// the bug above, one level down. A stage missing a base platform is refused by
+// name.
+func TestPublishFromDirRefusesAShortBuild(t *testing.T) {
+	dir := t.TempDir()
+	stamp := "v0.2.17.beta.2026.08.28.acd89694"
+
+	// linux-arm64 absent.
+	var sums strings.Builder
+	for _, plat := range []string{"darwin-arm64", "darwin-amd64", "linux-amd64"} {
+		name := "burrowee-gateway-" + plat + ".zip"
+		body := "ZIP-" + plat
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256([]byte(body))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakePutter{}
+	err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard)
+	if err == nil {
+		t.Fatal("want a refusal for a stage missing linux-arm64, got nil")
+	}
+	if !strings.Contains(err.Error(), "linux-arm64") {
+		t.Errorf("the refusal must name the missing platform, got: %v", err)
+	}
+	if len(p.puts) != 0 {
+		t.Errorf("a refused short build must upload nothing, got %v", p.puts)
+	}
+}
