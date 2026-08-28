@@ -104,7 +104,7 @@ func TestPruneRelayKeepsThree(t *testing.T) {
 		"v0.1.5.2026.06.05.eeeeeeee",
 	}
 	store := &fakeStore{keys: keysFor(versions)}
-	n, err := Prune(context.Background(), store, "relay", true, io.Discard)
+	n, err := Prune(context.Background(), store, "relay", "stable", true, io.Discard)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -126,33 +126,171 @@ func TestPruneRelayKeepsThree(t *testing.T) {
 func TestPrunePublicKeepsTen(t *testing.T) {
 	var versions []string
 	for i := 1; i <= 13; i++ {
-		// zero-pad so plain lexical order would disagree with numeric order,
-		// proving the version comparator (not string order) drives selection.
-		versions = append(versions, "v0.1."+itoa(i))
+		// Full §4.1 stamp shape (date+sha) so chOf's shape validation matches
+		// it; patch number i (not the date/sha suffix) drives ordering, and
+		// i runs past 9 so plain lexical order would disagree with numeric
+		// order — proving the version comparator, not string order, decides.
+		versions = append(versions, "v0.1."+itoa(i)+".2026.06."+pad2(i)+"."+hex8(i))
 	}
 	var keys []string
 	for _, v := range versions {
 		keys = append(keys, "cli/"+v+"/burrowee-cli-darwin-arm64.zip")
 	}
 	store := &fakeStore{keys: keys}
-	n, err := Prune(context.Background(), store, "cli", true, io.Discard)
+	n, err := Prune(context.Background(), store, "cli", "stable", true, io.Discard)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	// 13 versions → keep 10 → drop 3 (v0.1.1, v0.1.2, v0.1.3), 1 object each.
+	// 13 versions → keep 10 → drop 3 oldest (v0.1.1, v0.1.2, v0.1.3), 1 object each.
 	if n != 3 {
 		t.Errorf("deleted count: got %d want 3", n)
 	}
 	want := map[string]bool{
-		"cli/v0.1.1/burrowee-cli-darwin-arm64.zip": true,
-		"cli/v0.1.2/burrowee-cli-darwin-arm64.zip": true,
-		"cli/v0.1.3/burrowee-cli-darwin-arm64.zip": true,
+		"cli/" + versions[0] + "/burrowee-cli-darwin-arm64.zip": true,
+		"cli/" + versions[1] + "/burrowee-cli-darwin-arm64.zip": true,
+		"cli/" + versions[2] + "/burrowee-cli-darwin-arm64.zip": true,
 	}
 	for _, k := range store.deleted {
 		if !want[k] {
 			t.Errorf("deleted unexpected key: %s", k)
 		}
 	}
+	if len(store.deleted) != len(want) {
+		t.Errorf("deleted %d objects, want exactly %d: %v", len(store.deleted), len(want), store.deleted)
+	}
+}
+
+// TestPruneChannelsNeverMix is the guard on the destructive part of spec
+// §5.5: a stable prune must never count or delete a beta version, and a beta
+// prune must never count or delete a stable one, even though both channels'
+// keys sit side by side under the same <comp>/ prefix in R2.
+func TestPruneChannelsNeverMix(t *testing.T) {
+	var stable, beta []string
+	for i := 1; i <= 12; i++ {
+		stable = append(stable, "cli/v0.1."+itoa(i)+".2026.06."+pad2(i)+"."+hex8(i)+"/burrowee-cli-darwin-arm64.zip")
+	}
+	for i := 1; i <= 7; i++ {
+		beta = append(beta, "cli/v0.2."+itoa(i)+".beta.2026.07."+pad2(i)+"."+hex8(i)+"/burrowee-cli-darwin-arm64.zip")
+	}
+	keys := append(append([]string(nil), stable...), beta...)
+
+	stableStore := &fakeStore{keys: keys}
+	n, err := Prune(context.Background(), stableStore, "cli", "stable", true, io.Discard)
+	if err != nil {
+		t.Fatalf("Prune stable: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("stable deleted count: got %d want 2", n)
+	}
+	// 12 stable → keep 10 → drop the 2 oldest (stable[0], stable[1]) — pinned
+	// exactly, not just "no beta key showed up", per TestPrunePublicKeepsTen's
+	// sibling style: on a destructive path "the oldest 2" should be explicit.
+	wantStable := map[string]bool{stable[0]: true, stable[1]: true}
+	for _, k := range stableStore.deleted {
+		if !wantStable[k] {
+			t.Errorf("stable prune deleted unexpected key: %s", k)
+		}
+	}
+	if len(stableStore.deleted) != len(wantStable) {
+		t.Errorf("stable prune deleted %d objects, want exactly %d: %v", len(stableStore.deleted), len(wantStable), stableStore.deleted)
+	}
+
+	betaStore := &fakeStore{keys: keys}
+	n, err = Prune(context.Background(), betaStore, "cli", "beta", true, io.Discard)
+	if err != nil {
+		t.Fatalf("Prune beta: %v", err)
+	}
+	if n != 6 {
+		t.Errorf("beta deleted count: got %d want 6", n)
+	}
+	// 7 beta → keep 1 (the latest only — beta is disposable, spec §5.5) →
+	// drop the 6 oldest (beta[0]..beta[5]), keeping only beta[6].
+	wantBeta := map[string]bool{}
+	for _, k := range beta[:6] {
+		wantBeta[k] = true
+	}
+	for _, k := range betaStore.deleted {
+		if !wantBeta[k] {
+			t.Errorf("beta prune deleted unexpected key: %s", k)
+		}
+	}
+	if len(betaStore.deleted) != len(wantBeta) {
+		t.Errorf("beta prune deleted %d objects, want exactly %d: %v", len(betaStore.deleted), len(wantBeta), betaStore.deleted)
+	}
+}
+
+// TestPruneNeverCountsANonConformingKey is the guard on spec §4.1's "a tag
+// matching neither [channel pattern] is ignored — everywhere": a version that
+// matches neither the stable nor the beta shape (a legacy directory, a manual
+// upload, a typo'd stamp) must never be counted toward either channel's
+// keepFor budget, and must never be deleted by either channel's prune.
+//
+// nonConforming has no date/sha suffix at all, so it matches neither §4.1
+// pattern. It sorts before every well-formed version below (its second
+// version-number field is "0" vs their "1", and verrevcmp's digit-run
+// comparison decides on that difference alone) — so a classifier that
+// mislabels it "stable" on a bare ".beta." substring probe would count it as
+// the very oldest "stable" entry and DELETE it once keep=3 forces a drop.
+// Pinning that it survives (and that only the true oldest well-formed
+// version is dropped) proves the shape check gates deletion, not just
+// classification.
+func TestPruneNeverCountsANonConformingKey(t *testing.T) {
+	wellFormed := []string{
+		"relay/v0.1.1.2026.06.01.aaaaaaaa/latest.darwin-arm64.zip",
+		"relay/v0.1.2.2026.06.02.bbbbbbbb/latest.darwin-arm64.zip",
+		"relay/v0.1.3.2026.06.03.cccccccc/latest.darwin-arm64.zip",
+		"relay/v0.1.4.2026.06.04.dddddddd/latest.darwin-arm64.zip",
+	}
+	nonConforming := "relay/v0.0.1-legacy/latest.darwin-arm64.zip"
+	keys := append(append([]string(nil), wellFormed...), nonConforming)
+
+	stableStore := &fakeStore{keys: keys}
+	n, err := Prune(context.Background(), stableStore, "relay", "stable", true, io.Discard)
+	if err != nil {
+		t.Fatalf("Prune stable: %v", err)
+	}
+	// 4 well-formed → keep 3 (relay) → drop only the oldest well-formed
+	// version. The non-conforming key must never be counted in, so this is 1,
+	// not 2.
+	if n != 1 {
+		t.Errorf("stable deleted count: got %d want 1", n)
+	}
+	if len(stableStore.deleted) != 1 || stableStore.deleted[0] != wellFormed[0] {
+		t.Errorf("stable prune deleted %v, want exactly [%q]", stableStore.deleted, wellFormed[0])
+	}
+	for _, k := range stableStore.deleted {
+		if k == nonConforming {
+			t.Errorf("stable prune deleted the non-conforming key: %s", k)
+		}
+	}
+
+	betaStore := &fakeStore{keys: keys}
+	n, err = Prune(context.Background(), betaStore, "relay", "beta", true, io.Discard)
+	if err != nil {
+		t.Fatalf("Prune beta: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("beta deleted count: got %d want 0 (no beta-shaped keys present)", n)
+	}
+	for _, k := range betaStore.deleted {
+		if k == nonConforming {
+			t.Errorf("beta prune deleted the non-conforming key: %s", k)
+		}
+	}
+}
+
+// pad2 zero-pads i to 2 digits (day-of-month position in the stamp).
+func pad2(i int) string {
+	if i < 10 {
+		return "0" + itoa(i)
+	}
+	return itoa(i)
+}
+
+// hex8 renders i as an 8-hex-digit sha stand-in, distinct per i.
+func hex8(i int) string {
+	s := itoa(i)
+	return strings.Repeat("0", 8-len(s)) + s
 }
 
 func TestPruneDryRunDeletesNothing(t *testing.T) {
@@ -164,7 +302,7 @@ func TestPruneDryRunDeletesNothing(t *testing.T) {
 	}
 	store := &fakeStore{keys: keysFor(versions)}
 	var buf strings.Builder
-	n, err := Prune(context.Background(), store, "relay", false, &buf)
+	n, err := Prune(context.Background(), store, "relay", "stable", false, &buf)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -180,8 +318,14 @@ func TestPruneDryRunDeletesNothing(t *testing.T) {
 }
 
 func TestPruneUnderKeepIsNoOp(t *testing.T) {
-	store := &fakeStore{keys: keysFor([]string{"v0.1.1.x", "v0.1.2.x"})}
-	n, err := Prune(context.Background(), store, "relay", true, io.Discard)
+	// Full §4.1 stable shape — chOf's shape validation must accept these (see
+	// TestPruneNeverCountsANonConformingKey) so this test exercises the
+	// under-keep no-op branch itself, not the non-conforming-key exclusion.
+	store := &fakeStore{keys: keysFor([]string{
+		"v0.1.1.2026.06.01.aaaaaaaa",
+		"v0.1.2.2026.06.02.bbbbbbbb",
+	})}
+	n, err := Prune(context.Background(), store, "relay", "stable", true, io.Discard)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}

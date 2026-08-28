@@ -38,6 +38,30 @@ is_primary_worktree() {
     [ "${git_dir}" = "${common_dir}" ]
 }
 
+# beta_worktree_for <registry-main-dir> — the beta cut origin, DERIVED from the
+# registry main path rather than configured on its own: there is no separate
+# registry entry for a beta worktree, so the two can never drift apart.
+# <code>/.worktrees/beta, sibling to the main folder. Prints an unresolved
+# (".."-bearing) but absolute path; callers that need the canonical form
+# resolve it themselves (e.g. `cd "$(beta_worktree_for "$m")" && pwd`), the
+# same way is_primary_worktree's callers resolve git's own path output.
+beta_worktree_for() {
+    printf '%s/../.worktrees/beta' "$1"
+}
+
+# is_linked_worktree_of <dir> <main> — dir is a LINKED worktree belonging to
+# main's repo (not main itself, not some unrelated repo that happens to sit at
+# the derived path). Mirrors is_primary_worktree's git-dir/git-common-dir
+# comparison, plus a second comparison against main's own common dir so a
+# same-shaped worktree of a DIFFERENT repo cannot pass.
+is_linked_worktree_of() {
+    local dir="$1" main="$2" git_dir common_dir main_common
+    git_dir="$(/usr/bin/git -C "${dir}" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || return 1
+    common_dir="$(/usr/bin/git -C "${dir}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+    main_common="$(/usr/bin/git -C "${main}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+    [ "${git_dir}" != "${common_dir}" ] && [ "${common_dir}" = "${main_common}" ]
+}
+
 # worktree_branch <dir> — prints the checked-out branch name ("HEAD" when
 # detached). Printing rather than asserting keeps the branch available for the
 # failure message. Non-repo inputs make git exit 128; the predicate contract is
@@ -113,15 +137,17 @@ staged_tolerance_for() {
     printf '%s\n%s\n' "versions/${comp}" "versions/${comp}.stamp"
 }
 
-# origin_sync_status <dir> — fetches origin/main and prints the relationship
-# between HEAD and it: in-sync | behind:<n> | ahead:<n> |
-# diverged:<ahead>:<behind> | fetch-failed. Returns 0 only for in-sync.
+# origin_sync_status <dir> [branch] — fetches origin/<branch> (branch defaults
+# to main, so every pre-existing single-arg call keeps fetching origin/main
+# unchanged) and prints the relationship between HEAD and it: in-sync |
+# behind:<n> | ahead:<n> | diverged:<ahead>:<behind> | fetch-failed. Returns 0
+# only for in-sync.
 #
-# Compares against FETCH_HEAD rather than refs/remotes/origin/main: FETCH_HEAD
-# is exactly what this call just fetched, whereas the remote-tracking ref is
-# only opportunistically updated by `git fetch origin main` and can be stale
-# from an earlier fetch — comparing against it is the very mistake this check
-# exists to catch.
+# Compares against FETCH_HEAD rather than refs/remotes/origin/<branch>:
+# FETCH_HEAD is exactly what this call just fetched, whereas the
+# remote-tracking ref is only opportunistically updated by
+# `git fetch origin <branch>` and can be stale from an earlier fetch —
+# comparing against it is the very mistake this check exists to catch.
 #
 # A failed fetch is NOT treated as "assume in-sync" or "compare against what we
 # have": a delayed cut costs minutes, and a wrongly stamped artifact cannot be
@@ -131,8 +157,8 @@ staged_tolerance_for() {
 # never merges, pulls, checks out or stashes: a release tool that moves the
 # operator's checkout turns a typo into a shipped artifact.
 origin_sync_status() {
-    local dir="$1" counts ahead behind
-    if ! /usr/bin/git -C "${dir}" fetch --quiet origin main 2>/dev/null; then
+    local dir="$1" branch="${2:-main}" counts ahead behind
+    if ! /usr/bin/git -C "${dir}" fetch --quiet origin "${branch}" 2>/dev/null; then
         printf 'fetch-failed'
         return 1
     fi
@@ -156,9 +182,9 @@ origin_sync_status() {
     return 1
 }
 
-# assert_release_origin <label> <dir> <expected> <mode> [allowed-staged...] — the
-# whole guard for one tree, cheapest check first so a local mistake fails in
-# milliseconds and only a fully-local-clean tree costs a network round trip.
+# assert_release_origin <label> <dir> <expected> <mode> [channel] [allowed-staged...]
+# — the whole guard for one tree, cheapest check first so a local mistake fails
+# in milliseconds and only a fully-local-clean tree costs a network round trip.
 #
 # mode=strict  → first failure prints "✗ …" to stderr and returns 1 (a real cut)
 # mode=report  → findings print "⚠ …" to stderr and 0 is returned (--dry-run,
@@ -168,30 +194,86 @@ origin_sync_status() {
 # label is the component name (or "release repo") and appears in every message:
 # a cut reads six trees, so "which one" is the first thing an operator needs.
 #
+# [channel] is stable (default) or beta, consumed from the next positional
+# ONLY when it is shaped like a channel token: exactly "stable"/"beta" is
+# accepted; anything containing "/" is assumed to be the first
+# [allowed-staged...] entry (every real tolerance path looks like
+# versions/<comp>[.stamp] — staged_tolerance_for never emits a bare word) and
+# left alone; anything else — empty, wrong case ("Beta"), misspelled
+# ("betaa") — is a caller bug, not a tree finding, so it is refused outright
+# with "✗ <label> unknown channel: <token>" and returns 1 UNCONDITIONALLY,
+# even under mode=report. This is what lets every pre-existing call site
+# (release.sh, test-produce-then-distribute.sh — neither of which knows
+# about channels) keep working unmodified while still closing the door on a
+# computed channel variable (a future caller) landing here empty or
+# misspelled and silently cutting from the wrong tree. beta redirects the
+# whole guard at a second, structurally different origin:
+# <registry-main>/../.worktrees/beta (beta_worktree_for), which must be a
+# LINKED worktree of the registry main repo (is_linked_worktree_of) — never
+# configured separately, so it cannot drift from the registry entry — on
+# branch beta, clean, == origin/beta. A missing beta worktree is refused with
+# its path and the fix (spec §5.2); nothing here ever creates one.
+#
 # [allowed-staged...] is the output of staged_tolerance_for — the paths THIS
 # ONE tree may carry staged instead of clean. It applies only to the clean-tree
 # check below, and only to the single <dir> being asserted here; every other
 # tree a caller asserts in the same run gets its own (typically empty) list.
 assert_release_origin() {
     local label="$1" dir="$2" expected="$3" mode="$4"; shift 4
+    local channel=stable
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            stable|beta) channel="$1"; shift ;;
+            */*) : ;; # path-shaped — the first [allowed-staged...] entry, not a channel
+            *)
+                printf '✗ %s unknown channel: %s\n    a channel positional must be exactly stable or beta\n' \
+                    "${label}" "$1" >&2
+                return 1
+                ;;
+        esac
+    fi
     local -a allowed=("$@")
     local mark="✗" rc=1
     if [ "${mode}" = report ]; then mark="⚠"; rc=0; fi
 
-    if ! is_registry_source "${dir}" "${expected}"; then
-        printf '%s %s source must be the registry main folder\n    expected: %s\n    got:      %s\n    (BURROWEE_SRC_* overrides are permitted only with --dry-run)\n' \
-            "${mark}" "${label}" "${expected}" "${dir}" >&2
-        [ "${mode}" = report ] || return 1
+    local want_branch=main
+    if [ "${channel}" = beta ]; then
+        want_branch=beta
+        local beta_dir
+        beta_dir="$(beta_worktree_for "${expected}")"
+        if [ ! -d "${beta_dir}" ]; then
+            printf '%s %s beta worktree missing: %s — open a beta cycle first\n' \
+                "${mark}" "${label}" "${beta_dir}" >&2
+            [ "${mode}" = report ] || return 1
+        fi
+        beta_dir="$(cd "${beta_dir}" 2>/dev/null && pwd)" || beta_dir=""
+        if [ "$(cd "${dir}" 2>/dev/null && pwd)" != "${beta_dir}" ]; then
+            printf '%s %s beta source must be the registry beta worktree\n    expected: %s\n    got:      %s\n' \
+                "${mark}" "${label}" "${beta_dir}" "${dir}" >&2
+            [ "${mode}" = report ] || return 1
+        fi
+        if ! is_linked_worktree_of "${dir}" "${expected}"; then
+            printf '%s %s beta source is not a linked worktree of %s: %s\n' \
+                "${mark}" "${label}" "${expected}" "${dir}" >&2
+            [ "${mode}" = report ] || return 1
+        fi
+    else
+        if ! is_registry_source "${dir}" "${expected}"; then
+            printf '%s %s source must be the registry main folder\n    expected: %s\n    got:      %s\n    (BURROWEE_SRC_* overrides are permitted only with --dry-run)\n' \
+                "${mark}" "${label}" "${expected}" "${dir}" >&2
+            [ "${mode}" = report ] || return 1
+        fi
+        if ! is_primary_worktree "${dir}"; then
+            printf '%s %s source is a linked worktree, not the main-branch folder: %s\n    a cut runs only from the primary checkout on main\n' \
+                "${mark}" "${label}" "${dir}" >&2
+            [ "${mode}" = report ] || return 1
+        fi
     fi
-    if ! is_primary_worktree "${dir}"; then
-        printf '%s %s source is a linked worktree, not the main-branch folder: %s\n    a cut runs only from the primary checkout on main\n' \
-            "${mark}" "${label}" "${dir}" >&2
-        [ "${mode}" = report ] || return 1
-    fi
+
     local branch
     branch="$(worktree_branch "${dir}")"
-    if [ "${branch}" != main ]; then
-        printf '%s %s source not on main (on %s): %s\n' "${mark}" "${label}" "${branch}" "${dir}" >&2
+    if [ "${branch}" != "${want_branch}" ]; then
+        printf '%s %s source not on %s (on %s): %s\n' "${mark}" "${label}" "${want_branch}" "${branch}" "${dir}" >&2
         [ "${mode}" = report ] || return 1
     fi
     if ! tree_clean_except_staged "${dir}" ${allowed[@]+"${allowed[@]}"}; then
@@ -209,22 +291,22 @@ assert_release_origin() {
     # variable: status" — right at this check, the one the design calls the
     # hole that matters.
     local sync_status
-    sync_status="$(origin_sync_status "${dir}")" || true
+    sync_status="$(origin_sync_status "${dir}" "${want_branch}")" || true
     case "${sync_status}" in
         in-sync) return 0 ;;
         behind:*)
-            printf '%s %s source is %s commit(s) behind origin/main: %s\n    run '"'"'git pull --ff-only'"'"' there, then re-run the cut\n' \
-                "${mark}" "${label}" "${sync_status#behind:}" "${dir}" >&2 ;;
+            printf '%s %s source is %s commit(s) behind origin/%s: %s\n    run '"'"'git pull --ff-only'"'"' there, then re-run the cut\n' \
+                "${mark}" "${label}" "${sync_status#behind:}" "${want_branch}" "${dir}" >&2 ;;
         ahead:*)
-            printf '%s %s source is %s commit(s) ahead of origin/main: %s\n    merge it through a PR first — a cut may only stamp a commit that exists on the remote\n' \
-                "${mark}" "${label}" "${sync_status#ahead:}" "${dir}" >&2 ;;
+            printf '%s %s source is %s commit(s) ahead of origin/%s: %s\n    merge it through a PR first — a cut may only stamp a commit that exists on the remote\n' \
+                "${mark}" "${label}" "${sync_status#ahead:}" "${want_branch}" "${dir}" >&2 ;;
         diverged:*)
             local counts="${sync_status#diverged:}"
-            printf '%s %s source has diverged from origin/main (%s ahead, %s behind): %s\n' \
-                "${mark}" "${label}" "${counts%%:*}" "${counts##*:}" "${dir}" >&2 ;;
+            printf '%s %s source has diverged from origin/%s (%s ahead, %s behind): %s\n' \
+                "${mark}" "${label}" "${want_branch}" "${counts%%:*}" "${counts##*:}" "${dir}" >&2 ;;
         fetch-failed)
-            printf '%s %s could not fetch origin/main: %s\n    a cut may not proceed against a stale remote ref — fix connectivity or credentials and re-run\n' \
-                "${mark}" "${label}" "${dir}" >&2 ;;
+            printf '%s %s could not fetch origin/%s: %s\n    a cut may not proceed against a stale remote ref — fix connectivity or credentials and re-run\n' \
+                "${mark}" "${label}" "${want_branch}" "${dir}" >&2 ;;
         *)
             printf '%s %s unrecognised origin status '"'"'%s'"'"': %s\n    a cut may not proceed on an unknown status — investigate before re-running\n' \
                 "${mark}" "${label}" "${sync_status}" "${dir}" >&2 ;;

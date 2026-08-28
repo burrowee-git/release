@@ -314,4 +314,24 @@ esac
 cleanup_relay
 printf '  OK: relay staged kit missing the shared adoption rung is refused, by name\n'
 
-printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + platform-shortfall-gate + wrong-declaration-gate + dry-run stub + no-side-effects + no-tool-dependency + relay-private + relay-ladder-gate)\n'
+# ---- --distribute-only refuses --channel beta ---------------------------------
+# A beta cut uploads to R2 in one step (release.sh's do_release CHANNEL=beta
+# branch) — it never creates a GitHub Release or a staged dist/<stamp>/ for
+# `rkit build` to hand off, so --distribute-only (which re-publishes exactly
+# that kind of already-staged, already-released component) is meaningless for
+# beta and must be refused BEFORE anything else runs — no dist/<stamp>/ needed
+# for this fixture, since the refusal fires at arg-parse, ahead of the
+# staged-dir check.
+say "--distribute-only refuses --channel beta"
+set +e
+beta_out="$(bash "${REPO_ROOT}/tools/release.sh" --distribute-only "${COMP}" "${STAMP}" --channel beta --dry-run 2>&1)"
+beta_rc=$?
+set -e
+[ "${beta_rc}" -eq 2 ] || die "--distribute-only --channel beta exited ${beta_rc} (expected 2). Output:\n${beta_out}"
+case "${beta_out}" in
+    *"--distribute-only is a stable-channel verb; a beta cut uploads to R2 in one step"*) : ;;
+    *) die "--distribute-only --channel beta refusal text missing or changed. Output:\n${beta_out}" ;;
+esac
+printf '  OK: --distribute-only cli <stamp> --channel beta exits 2 with the stable-channel-verb refusal\n'
+
+printf '\n  DISTRIBUTE-ONLY TEST PASSED (missing-stage + platform-shortfall-gate + wrong-declaration-gate + dry-run stub + no-side-effects + no-tool-dependency + relay-private + relay-ladder-gate + beta-refused)\n'

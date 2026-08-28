@@ -33,10 +33,21 @@ command -v "${MINISIGN}" >/dev/null 2>&1 || MINISIGN="/opt/homebrew/bin/minisign
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\n✗ TAG-BINDING TEST FAILED: %s\n' "$*" >&2; exit 1; }
 
+# The beta.* entries only exist while a beta cycle is open (versions/<comp>.beta.stamp
+# present — see tools/gen-bootstraps.sh) — absent today for every component in this
+# repo. They are listed anyway: TestTestSuitesRestoreEveryRenderedArtifact
+# (cmd/rkit/upgrade_bootstrap_test.go) requires every suite that re-renders the
+# bootstraps to name every artifact gen-bootstraps.sh can produce, so a future cut
+# that opens a beta cycle does not silently leave a TEST-keyed beta.*.sh behind. The
+# save/restore/drift logic below is written to tolerate an entry that does not exist,
+# in either direction.
 GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
 cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
 cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh
-edge/updater.install.sh gateway/updater.install.sh"
+edge/updater.install.sh gateway/updater.install.sh
+cli/beta.install.sh gateway/beta.install.sh edge/beta.install.sh agent/beta.install.sh
+cli/beta.upgrade.sh gateway/beta.upgrade.sh edge/beta.upgrade.sh agent/beta.upgrade.sh
+edge/beta.updater.install.sh gateway/beta.updater.install.sh"
 
 # ---- work dir + cleanup ------------------------------------------------------
 # The bootstraps are regenerated twice below (real key, then an ephemeral one),
@@ -46,6 +57,7 @@ W="$(mktemp -d "${TMPDIR:-/tmp}/test-tag-binding-XXXXXX")"
 SERVER_PID=""
 mkdir -p "${W}/orig"
 for f in ${GENERATED}; do
+    [ -f "${REPO_ROOT}/${f}" ] || continue   # not rendered (e.g. no beta cycle open) — nothing to save
     mkdir -p "${W}/orig/$(dirname "${f}")"
     cp "${REPO_ROOT}/${f}" "${W}/orig/${f}"
 done
@@ -53,7 +65,11 @@ done
 cleanup() {
     [ -n "${SERVER_PID}" ] && kill "${SERVER_PID}" 2>/dev/null || true
     for g in ${GENERATED}; do
-        [ -f "${W}/orig/${g}" ] && cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"
+        if [ -f "${W}/orig/${g}" ]; then
+            cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"
+        else
+            rm -f "${REPO_ROOT}/${g}"
+        fi
     done
     rm -rf "${W}"
 }
@@ -66,6 +82,14 @@ trap cleanup EXIT INT TERM
 say "DRIFT: gen-bootstraps.sh reproduces the checked-in bootstraps"
 sh tools/gen-bootstraps.sh >/dev/null
 for f in ${GENERATED}; do
+    had_before=0; [ -f "${W}/orig/${f}" ] && had_before=1
+    has_after=0;  [ -f "${REPO_ROOT}/${f}" ] && has_after=1
+    if [ "${had_before}" = 0 ] && [ "${has_after}" = 0 ]; then
+        continue   # never rendered before or after (no beta cycle open) — nothing to compare
+    fi
+    if [ "${had_before}" != "${has_after}" ]; then
+        die "${f} existence changed across regeneration (existed before: ${had_before}, exists after: ${has_after}) — drifted"
+    fi
     diff -u "${W}/orig/${f}" "${REPO_ROOT}/${f}" >&2 \
         || die "${f} drifted from its template — edit tools/*.template.sh and re-run tools/gen-bootstraps.sh, never the generated file"
 done

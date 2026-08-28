@@ -26,8 +26,12 @@ W="$(mktemp -d "${TMPDIR:-/tmp}/test-comp-version-freeze-XXXXXX")"
 cleanup() { rm -rf "${W}"; }
 trap cleanup EXIT INT TERM
 
-# ---- (1) extract resolve_comp_stamp() from release.sh into a sourceable
-#          file, by text ----------------------------------------------------
+# ---- (1) extract resolve_comp_stamp() (+ version_sh(), its tools/version.sh
+#          wrapper) from release.sh into a sourceable file, by text ----------
+# version_sh threads --channel "${CHANNEL}" through every tools/version.sh
+# call resolve_comp_stamp makes; without it every one of those calls fails
+# "command not found" the moment this harness sources resolve_comp_stamp in
+# isolation.
 extract_resolve_comp_stamp() {
     local out="$1"
     python3 - "${REPO_ROOT}/tools/release.sh" "${out}" <<'PYEOF'
@@ -36,22 +40,27 @@ import sys
 src_path, out_path = sys.argv[1], sys.argv[2]
 lines = open(src_path).readlines()
 
-in_func = False
-depth = 0
+wanted = ("version_sh()", "resolve_comp_stamp()")
 result = []
-
-for line in lines:
-    if not in_func:
-        if line.startswith('resolve_comp_stamp()'):
-            in_func = True
-            depth = 0
-        else:
-            continue
-
-    result.append(line)
-    depth += line.count('{') - line.count('}')
-    if depth <= 0 and len(result) > 2:
-        break  # closing brace of resolve_comp_stamp reached
+for name in wanted:
+    in_func = False
+    depth = 0
+    captured = []
+    for line in lines:
+        if not in_func:
+            if line.startswith(name):
+                in_func = True
+                depth = 0
+            else:
+                continue
+        captured.append(line)
+        depth += line.count('{') - line.count('}')
+        if depth <= 0 and len(captured) > 2:
+            break  # closing brace of this function reached
+    if not captured:
+        sys.exit("extract: %s not found in %s" % (name, src_path))
+    result.extend(captured)
+    result.append("\n")
 
 open(out_path, 'w').writelines(result)
 PYEOF
@@ -59,6 +68,8 @@ PYEOF
 
 HELPER="${W}/resolve_comp_stamp.sh"
 extract_resolve_comp_stamp "${HELPER}"
+grep -q '^version_sh() {' "${HELPER}" \
+    || die "extraction failed — version_sh() not found in ${HELPER}"
 grep -q '^resolve_comp_stamp() {' "${HELPER}" \
     || die "extraction failed — resolve_comp_stamp() not found in ${HELPER}"
 grep -q '^}$' "${HELPER}" \

@@ -576,5 +576,49 @@ else
 fi
 
 # =============================================================================
+# TEST 9 — beta channel (Task B3): CHANNEL=beta cli body carries
+# "channel":"beta", "gated":false (relay-only rule unaffected by channel),
+# "github_release":"" (a beta cut never creates a GitHub Release), and an R2
+# url_or_key under <comp>/<stamp>/ — never a github.com asset URL.
+# =============================================================================
+say "TEST 9 — beta channel: cli body carries channel=beta, gated=false, empty github_release, R2 url_or_key"
+
+STAGE9="${W}/stage9"
+make_stage "${STAGE9}" "cli"
+EXTRACT9="${W}/fn9.sh"
+extract_register_staged "${EXTRACT9}"
+
+BETA_STAMP="v0.3.0.beta.2026.08.28.1f0c9e2a"
+
+RESULT9="$(
+    env \
+    "${GO_ENV[@]}" \
+    DRY_RUN=1 \
+    CHANNEL=beta \
+    RELEASE_REPO="${RELEASE_REPO}" \
+    SHA256="${SHA256}" \
+    bash -c "
+        TARGETS=(\"darwin arm64\" \"darwin amd64\" \"linux arm64\" \"linux amd64\")
+        . '${EXTRACT9}'
+        register_staged cli '${BETA_STAMP}' 0.3.0 '${STAGE9}' '${CLI_SRC}' 'cli/${BETA_STAMP}'
+    " 2>&1
+)"
+
+printf '%s\n' "${RESULT9}" | grep -q '"channel":"beta"' \
+    || die "TEST 9: expected \"channel\":\"beta\" in register body. Output:\n${RESULT9}"
+printf '%s\n' "${RESULT9}" | grep -q '"gated":false' \
+    || die "TEST 9: expected \"gated\":false for beta cli (only relay is gated). Output:\n${RESULT9}"
+printf '%s\n' "${RESULT9}" | grep -q '"github_release":""' \
+    || die "TEST 9: expected empty github_release for a beta cut (no GitHub Release). Output:\n${RESULT9}"
+printf '%s\n' "${RESULT9}" | grep -q "cli/${BETA_STAMP}/burrowee-cli-linux-amd64.zip" \
+    || die "TEST 9: expected R2 url_or_key cli/${BETA_STAMP}/burrowee-cli-linux-amd64.zip. Output:\n${RESULT9}"
+printf '%s\n' "${RESULT9}" | grep -q 'github.com' \
+    && die "TEST 9: a beta body must never carry a github.com asset URL. Output:\n${RESULT9}"
+printf '%s' "$(body_of "${RESULT9}")" | json_ok \
+    || die "TEST 9: beta register body is not valid JSON. Output:\n${RESULT9}"
+
+echo "✓ TEST 9 PASSED — beta channel: channel=beta, gated=false, empty github_release, R2 url_or_key, valid JSON"
+
+# =============================================================================
 echo ""
 echo "✓ ALL TESTS PASSED"

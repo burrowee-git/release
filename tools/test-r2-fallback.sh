@@ -47,10 +47,21 @@ CATALOG_PID=""
 # silently cancelled the restore of all the others: a failed run then left every
 # bootstrap carrying an ephemeral key that verifies nothing we sign, staged by
 # whoever committed next.
+# The beta.* entries only exist while a beta cycle is open (versions/<comp>.beta.stamp
+# present — see tools/gen-bootstraps.sh) — absent today for every component in this
+# repo. They are listed anyway: TestTestSuitesRestoreEveryRenderedArtifact
+# (cmd/rkit/upgrade_bootstrap_test.go) requires every suite that re-renders the
+# bootstraps to name every artifact gen-bootstraps.sh can produce, so a future cut
+# that opens a beta cycle does not silently leave a TEST-keyed beta.*.sh behind. The
+# save/restore loop below already tolerates a missing entry on save; cleanup now
+# does the same in both directions (restore if it existed before, remove if not).
 GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
 cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
 cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh
-edge/updater.install.sh gateway/updater.install.sh"
+edge/updater.install.sh gateway/updater.install.sh
+cli/beta.install.sh gateway/beta.install.sh edge/beta.install.sh agent/beta.install.sh
+cli/beta.upgrade.sh gateway/beta.upgrade.sh edge/beta.upgrade.sh agent/beta.upgrade.sh
+edge/beta.updater.install.sh gateway/beta.updater.install.sh"
 
 mkdir -p "${W}/orig"
 for f in ${GENERATED}; do
@@ -63,7 +74,11 @@ cleanup() {
     [ -n "${SERVER_PID}"  ] && kill "${SERVER_PID}"  2>/dev/null || true
     [ -n "${CATALOG_PID}" ] && kill "${CATALOG_PID}" 2>/dev/null || true
     for g in ${GENERATED}; do
-        if [ -f "${W}/orig/${g}" ]; then cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"; fi
+        if [ -f "${W}/orig/${g}" ]; then
+            cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"
+        else
+            rm -f "${REPO_ROOT}/${g}"
+        fi
     done
     rm -rf "${W}"
 }
@@ -146,7 +161,11 @@ done
 say "asset server up"
 
 # ---- (4) run a fake console catalog server -------------------------------------
-# Serves GET /api/v1/releases/cli/current → JSON with the test TAG.
+# Serves GET /api/v1/releases/stable/cli/current → JSON with the test TAG. The
+# channel is a PATH SEGMENT (tools/modules/version-resolve.sh v4); the retired
+# ?channel= form put it in the query string, which this exact-match handler never
+# saw — self.path carries the query — so every request 404'd and the fallback
+# resolved nothing.
 say "starting fake console catalog on 127.0.0.1:${CATALOG_PORT}"
 CATALOG_SCRIPT="${W}/catalog_server.py"
 cat > "${CATALOG_SCRIPT}" <<PYEOF
@@ -157,7 +176,7 @@ RESPONSE = b'{"version":"${TEST_TAG}","component":"cli"}'
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        if self.path == "/api/v1/releases/cli/current":
+        if self.path == "/api/v1/releases/stable/cli/current":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(RESPONSE)))
@@ -177,7 +196,7 @@ CATALOG_PID=$!
 
 # Wait for catalog server.
 i=0
-until curl -fsS "http://127.0.0.1:${CATALOG_PORT}/api/v1/releases/cli/current" \
+until curl -fsS "http://127.0.0.1:${CATALOG_PORT}/api/v1/releases/stable/cli/current" \
         -o /dev/null 2>/dev/null; do
     i=$((i+1)); [ "${i}" -lt 80 ] || die "catalog server did not come up on ${CATALOG_PORT}"
     sleep 0.1

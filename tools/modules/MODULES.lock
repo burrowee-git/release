@@ -13,4 +13,4 @@ sha256             v1       1a2a41632b5f95e045ddd18ca3bc9ddcf9c17a1352658bbc0ea4
 tmp-workspace      v1       e5bd7ab63d84144a6447b33d8ad83a45b7533a225527be91e9a162c6e216455c
 verify-checksum    v4       ecfbe39b11760ee87dfff6badd58b689afcae674a132a1f09a05985bac763618
 verify-signature   v1       d961db0d206f155ce44cc8cc58164cbc4ae39d5532e51f250d283b3dfcb3cc47
-version-resolve    v1       5ba7b020d50e051daa8e517f225c25d0e441818a2ae91ccdb17ba1a44fceac9c
+version-resolve    v4       cc802c6ac77afe26dff9f973647d9e3c8ab67a8137edd5233c74c236a2b05a44

@@ -39,6 +39,9 @@ cd "${REPO_ROOT}"
 
 say() { printf '\n=== %s ===\n' "$*"; }
 die() { printf '\n✗ VERSION-FLOOR TEST FAILED: %s\n' "$*" >&2; exit 1; }
+check() { # check <label> <got> <want>
+    [ "$2" = "$3" ] || die "$1 — got '$2' want '$3'"
+}
 
 # ---- work dir + cleanup ------------------------------------------------------
 # Section (5) re-renders the bootstraps (deliberately with a bad floor), so this
@@ -48,21 +51,43 @@ die() { printf '\n✗ VERSION-FLOOR TEST FAILED: %s\n' "$*" >&2; exit 1; }
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-version-floor-XXXXXX")"
 
 COMPS="cli gateway edge agent"
+# The beta.* entries only exist while a beta cycle is open (versions/<comp>.beta.stamp
+# present — see tools/gen-bootstraps.sh) — absent today for every component in this
+# repo. They are listed anyway: TestTestSuitesRestoreEveryRenderedArtifact
+# (cmd/rkit/upgrade_bootstrap_test.go) requires every suite that re-renders the
+# bootstraps to name every artifact gen-bootstraps.sh can produce, so a future cut
+# that opens a beta cycle does not silently leave a TEST-keyed beta.*.sh behind. The
+# save/restore loops below are written to tolerate an entry that does not exist,
+# in either direction.
 GENERATED="cli/install.sh gateway/install.sh edge/install.sh agent/install.sh relay/install.sh
 cli/upgrade.sh gateway/upgrade.sh edge/upgrade.sh agent/upgrade.sh
 cli/preflight.sh gateway/preflight.sh edge/preflight.sh agent/preflight.sh
-edge/updater.install.sh gateway/updater.install.sh"
+edge/updater.install.sh gateway/updater.install.sh
+cli/beta.install.sh gateway/beta.install.sh edge/beta.install.sh agent/beta.install.sh
+cli/beta.upgrade.sh gateway/beta.upgrade.sh edge/beta.upgrade.sh agent/beta.upgrade.sh
+edge/beta.updater.install.sh gateway/beta.updater.install.sh"
 
 mkdir -p "${W}/orig"
 for f in ${GENERATED}; do
+    [ -f "${REPO_ROOT}/${f}" ] || continue   # not rendered (e.g. no beta cycle open) — nothing to save
     mkdir -p "${W}/orig/$(dirname "${f}")"
     cp "${REPO_ROOT}/${f}" "${W}/orig/${f}"
 done
 
-cleanup() {
+# restore_generated — put back every entry that existed before the test ran, and
+# REMOVE every entry that did not (a TEST/ephemeral-keyed render must never survive
+# past this script, whether or not the file existed beforehand).
+restore_generated() {
     for g in ${GENERATED}; do
-        if [ -f "${W}/orig/${g}" ]; then cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"; fi
+        if [ -f "${W}/orig/${g}" ]; then
+            cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"
+        else
+            rm -f "${REPO_ROOT}/${g}"
+        fi
     done
+}
+cleanup() {
+    restore_generated
     rm -rf "${W}"
 }
 trap cleanup EXIT INT TERM
@@ -80,6 +105,39 @@ for comp in ${COMPS}; do
         || die "${comp}/install.sh bakes floor '${got}' but versions/${comp}.stamp says '${want}' — re-run tools/gen-bootstraps.sh"
 done
 printf '  OK: all four floors match their stamp files\n'
+
+# ---- (1b) CATALOG URL: the channel is a PATH SEGMENT, not a query parameter --
+# The console catalog is read at /api/v1/releases/<channel>/<comp>/current. The
+# retired ?channel= form is the whole reason for the change: a console that did
+# not recognise the parameter answered the STABLE current with 200, so a beta
+# host installed stable and nothing anywhere said so. A path segment cannot be
+# silently ignored — an unknown channel is a 4xx.
+#
+# assert_catalog_url <rendered bootstrap> <channel> <comp> — pull the shipped
+# assignment out of the rendered file and EVALUATE it, so this checks the URL the
+# installer actually builds rather than the shape of a line of text.
+assert_catalog_url() {
+    _f="$1"; _ch="$2"; _comp="$3"
+    _line="$(sed -n 's/^[[:space:]]*\(catalog_url=.*\)$/\1/p' "${_f}" | head -n1)"
+    [ -n "${_line}" ] \
+        || die "${_f}: no catalog_url= assignment — the console-catalog fallback has no URL to read"
+    _got="$(CONSOLE_URL="https://console.invalid" CHANNEL="${_ch}" \
+        sh -c "${_line}"'; printf %s "$catalog_url"')"
+    _want="https://console.invalid/api/v1/releases/${_ch}/${_comp}/current"
+    [ "${_got}" = "${_want}" ] \
+        || die "${_f} builds catalog URL '${_got}', want '${_want}' — the channel selects WHICH catalog is read, so it is a path segment, never a query parameter"
+    ! grep -q '?channel=' "${_f}" \
+        || die "${_f} still carries a '?channel=' query parameter — a console that ignores it serves the stable current with 200 and the wrong channel installs silently"
+}
+
+say "CATALOG URL: every rendered bootstrap reads /api/v1/releases/<channel>/<comp>/current"
+for comp in ${COMPS}; do
+    for mode in install upgrade updater.install; do
+        [ -f "${REPO_ROOT}/${comp}/${mode}.sh" ] || continue   # only edge/gateway have updater.install
+        assert_catalog_url "${REPO_ROOT}/${comp}/${mode}.sh" stable "${comp}"
+    done
+done
+printf '  OK: the committed stable bootstraps put the channel in the path\n'
 
 # ---- (2) extract the shipped predicate --------------------------------------
 # The block is delimited in tools/bootstrap.template.sh; pull it out of the
@@ -161,12 +219,83 @@ if BURROWEE_MIN_VERSION="not-a-version" sh tools/gen-bootstraps.sh >/dev/null 2>
 fi
 printf '  OK: generator fails closed on an uncomparable stamp\n'
 
+# ---- (5b) GENERATOR: beta twins render only while a beta cycle is open ------
+# gen-bootstraps.sh:269-303's channel loop, prefix, BURROWEE_MIN_VERSION_FILE
+# floor and the beta.*.sh sweep have no other automated coverage — this is the
+# path Task B3 calls from inside a real cut, where a silent regression matters.
+# Fully hermetic: a SCRATCH root, never the real repo, with its own copies of
+# the generator, templates and modules — same technique test-modules.sh's
+# GENERATOR-FAILS-CLOSED case uses.
+say "GENERATOR: beta twins render with versions/<comp>.beta.stamp, and are swept without it"
+BSCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/test-version-floor-beta-XXXXXX")"
+mkdir -p "${BSCRATCH}/tools/modules" "${BSCRATCH}/versions"
+cp "${REPO_ROOT}/tools/gen-bootstraps.sh" "${BSCRATCH}/tools/gen-bootstraps.sh"
+cp "${REPO_ROOT}/tools/public_components.sh" "${BSCRATCH}/tools/public_components.sh"
+cp "${REPO_ROOT}/tools/bootstrap.template.sh" "${BSCRATCH}/tools/bootstrap.template.sh"
+cp "${REPO_ROOT}/tools/preflight.template.sh" "${BSCRATCH}/tools/preflight.template.sh"
+cp "${REPO_ROOT}/tools/relay-bootstrap.template.sh" "${BSCRATCH}/tools/relay-bootstrap.template.sh"
+cp "${REPO_ROOT}"/tools/modules/*.sh "${BSCRATCH}/tools/modules/"
+for c in cli gateway edge agent; do
+    echo "v0.1.0.2026.01.01.aaaaaaaa" > "${BSCRATCH}/versions/${c}.stamp"
+done
+BPUB="${REPO_ROOT}/tools/testkeys/test.pub"
+BSTAMP="${BSCRATCH}/versions/cli.beta.stamp"
+
+# (a) no beta cycle open — the twins must not render.
+BURROWEE_PUBKEY_FILE="${BPUB}" sh "${BSCRATCH}/tools/gen-bootstraps.sh" >/dev/null \
+    || die "gen-bootstraps.sh failed in the scratch root with no beta cycle open"
+[ ! -e "${BSCRATCH}/cli/beta.install.sh" ] \
+    || die "cli/beta.install.sh rendered with no versions/cli.beta.stamp present"
+
+# (b) open a beta cycle for cli only — its twins render, floored from
+# .beta.stamp (not versions/cli.stamp); cli/install.sh (stable) is unaffected.
+echo "v0.2.0.beta.2026.01.02.bbbbbbbb" > "${BSTAMP}"
+BURROWEE_PUBKEY_FILE="${BPUB}" sh "${BSCRATCH}/tools/gen-bootstraps.sh" >/dev/null \
+    || die "gen-bootstraps.sh failed in the scratch root with a beta cycle open"
+for f in beta.install.sh beta.upgrade.sh; do
+    [ -f "${BSCRATCH}/cli/${f}" ] \
+        || die "cli/${f} did not render while versions/cli.beta.stamp exists"
+done
+got_channel="$(sed -n 's/^CHANNEL="\(.*\)"$/\1/p' "${BSCRATCH}/cli/beta.install.sh")"
+[ "${got_channel}" = "beta" ] \
+    || die "cli/beta.install.sh bakes CHANNEL='${got_channel}', want 'beta'"
+got_floor="$(sed -n 's/^MIN_VERSION="\(.*\)"$/\1/p' "${BSCRATCH}/cli/beta.install.sh")"
+[ "${got_floor}" = "v0.2.0.beta.2026.01.02.bbbbbbbb" ] \
+    || die "cli/beta.install.sh bakes MIN_VERSION='${got_floor}', want versions/cli.beta.stamp's value (not versions/cli.stamp's)"
+stable_channel="$(sed -n 's/^CHANNEL="\(.*\)"$/\1/p' "${BSCRATCH}/cli/install.sh")"
+[ "${stable_channel}" = "stable" ] \
+    || die "cli/install.sh bakes CHANNEL='${stable_channel}' while a beta cycle is open — the beta cycle must not leak into the stable render"
+stable_floor="$(sed -n 's/^MIN_VERSION="\(.*\)"$/\1/p' "${BSCRATCH}/cli/install.sh")"
+[ "${stable_floor}" = "v0.1.0.2026.01.01.aaaaaaaa" ] \
+    || die "cli/install.sh bakes MIN_VERSION='${stable_floor}' while a beta cycle is open, want versions/cli.stamp's value unchanged"
+
+# The beta twin's catalog URL, checked the same way (1b) checks the committed
+# stable ones — this is the render the query form's failure mode actually hurt:
+# a ?channel=beta a console did not recognise came back as the STABLE current,
+# with 200, and a beta host installed stable in silence.
+for f in beta.install.sh beta.upgrade.sh; do
+    assert_catalog_url "${BSCRATCH}/cli/${f}" beta cli
+done
+assert_catalog_url "${BSCRATCH}/cli/install.sh" stable cli
+printf '  OK: the beta twin reads the beta catalog by path, the stable render the stable one\n'
+
+# (c) close the cycle — the twins are swept, the stable render is untouched.
+rm -f "${BSTAMP}"
+BURROWEE_PUBKEY_FILE="${BPUB}" sh "${BSCRATCH}/tools/gen-bootstraps.sh" >/dev/null \
+    || die "gen-bootstraps.sh failed in the scratch root after closing the beta cycle"
+for f in beta.install.sh beta.upgrade.sh; do
+    [ ! -e "${BSCRATCH}/cli/${f}" ] \
+        || die "cli/${f} survived after versions/cli.beta.stamp was removed — a closed cycle must not leave a live beta bootstrap"
+done
+[ -f "${BSCRATCH}/cli/install.sh" ] \
+    || die "cli/install.sh vanished after closing the beta cycle — the stable render must be unaffected"
+rm -rf "${BSCRATCH}"
+printf '  OK: beta twins render only while a beta cycle is open, and are swept when it closes\n'
+
 # Restore now, not just on exit: the resolver section below extracts blocks from
 # cli/install.sh and must read the checked-in bytes, not a half-written render.
 cleanup_restore() {
-    for g in ${GENERATED}; do
-        if [ -f "${W}/orig/${g}" ]; then cp "${W}/orig/${g}" "${REPO_ROOT}/${g}"; fi
-    done
+    restore_generated
 }
 cleanup_restore
 
@@ -199,6 +328,11 @@ info() { :; }
 ok()   { :; }
 
 COMP=cli
+CHANNEL="${STUB_CHANNEL:-stable}"
+case "${CHANNEL}" in
+    beta) TAG_RE="^cli/v[0-9]+\.[0-9]+\.[0-9]+\.beta\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+    *)    TAG_RE="^cli/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9a-f]{8}$" ;;
+esac
 REPO=burrowee-git/release
 DL_BASE=""
 BURROWEE_CLI_VERSION=""        # no operator pin: exercise the resolution flow
@@ -241,7 +375,7 @@ RUNNER
 chmod +x "${W}/resolve-run.sh"
 
 API_URL="https://api.github.com/repos/burrowee-git/release/releases?per_page=100"
-CATALOG_URL="https://console.invalid/api/v1/releases/cli/current"
+CATALOG_URL="https://console.invalid/api/v1/releases/stable/cli/current"
 
 slug() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/_/g'; }
 
@@ -253,12 +387,13 @@ fixture() {
     [ -z "${head}" ] || printf '%s' "${head}" > "${dir}/$(slug "${url}").head"
 }
 
-# resolve <fixture-dir> <floor> <proxies> -> prints resolved tag, exits non-zero
-# exactly where the shipped installer would abort.
+# resolve <fixture-dir> <floor> <proxies> [<channel>] -> prints resolved tag,
+# exits non-zero exactly where the shipped installer would abort. <channel>
+# defaults to stable (matches the resolve-run.sh default).
 resolve() {
     local tmp="${W}/run-tmp"
     rm -rf "${tmp}"; mkdir -p "${tmp}"
-    STUB_BLOCKS="${W}" STUB_FIXTURES="$1" STUB_FLOOR="$2" STUB_PROXIES="$3" TMP="${tmp}" \
+    STUB_BLOCKS="${W}" STUB_FIXTURES="$1" STUB_FLOOR="$2" STUB_PROXIES="$3" STUB_CHANNEL="${4:-stable}" TMP="${tmp}" \
         sh "${W}/resolve-run.sh" 2>&1
 }
 
@@ -341,4 +476,125 @@ if got="$(resolve "${BAD}" "${FLOOR}" "")"; then
 fi
 printf '  OK: catalog answers are shape-checked before use\n'
 
-printf '\n  VERSION-FLOOR TEST PASSED (bake + predicate + fail-closed + generator + resolver)\n'
+# (6f) THE LEAK: a stable resolve on a GitHub-blocked host must not accept a
+# .beta. tag from the catalog. Before $TAG_RE was hoisted and applied here, the
+# catalog's only shape check was a bare "$COMP/v*" prefix — which a beta tag
+# satisfies — so this exact scenario (GH_ANSWERED=0, the beta guard in
+# version-resolve.sh never runs, catalog is the only path a GitHub-blocked host
+# has) installed beta code on a stable host.
+say "RESOLVER: a stable resolve on a GitHub-blocked host rejects a .beta. catalog answer"
+LEAK_STABLE="${W}/fx-catalog-leak-stable"
+fixture "${LEAK_STABLE}" "${CATALOG_URL}" '{"version":"cli/v0.3.0.beta.2026.08.28.1f0c9e2a"}'
+if got="$(resolve "${LEAK_STABLE}" "${FLOOR}" "" stable)"; then
+    die "a stable resolve accepted a .beta. tag from the console catalog ('${got}') — this is the channel leak"
+fi
+printf '  OK: a stable resolve never accepts a .beta. catalog answer\n'
+
+# (6g) The mirror image: a beta resolve on a GitHub-blocked host must not
+# accept a stable (no ".beta.") tag from the catalog.
+say "RESOLVER: a beta resolve on a GitHub-blocked host rejects a stable catalog answer"
+CATALOG_URL_BETA="https://console.invalid/api/v1/releases/beta/cli/current"
+LEAK_BETA="${W}/fx-catalog-leak-beta"
+fixture "${LEAK_BETA}" "${CATALOG_URL_BETA}" '{"version":"cli/v0.2.9.2026.08.28.aa21f55c"}'
+if got="$(resolve "${LEAK_BETA}" "${FLOOR}" "" beta)"; then
+    die "a beta resolve accepted a stable tag from the console catalog ('${got}') — this is the mirror-image channel leak"
+fi
+printf '  OK: a beta resolve never accepts a stable catalog answer\n'
+
+# ---- (7) CHANNEL: latest_tag() matches only its own channel's tag shape -----
+# A stable resolve must ignore a higher beta, and a beta resolve must ignore
+# every stable, in both orderings — the property that keeps a beta tag from
+# ever reaching a stable install.sh and vice versa. Drive latest_tag() directly
+# (already extracted into resolver.sh above) against canned page bodies on
+# stdin, with and without jq on PATH — the same two code paths latest_tag()
+# itself branches on.
+say "CHANNEL: latest_tag() filters by \$CHANNEL, with and without jq"
+cat > "${W}/latest-tag-run.sh" <<'RUNNER'
+#!/bin/sh
+set -eu
+. "$1"
+latest_tag
+RUNNER
+chmod +x "${W}/latest-tag-run.sh"
+
+# tag_re_for <comp> <channel> — the SAME case statement bootstrap.template.sh's
+# knobs section uses to set $TAG_RE beside $CHANNEL (latest_tag() itself no
+# longer computes this — it reads the caller's $TAG_RE, see the "not computed
+# locally" comment on latest_tag() in the extracted resolver.sh).
+tag_re_for() {
+    case "$2" in
+        beta) printf '^%s/v[0-9]+\\.[0-9]+\\.[0-9]+\\.beta\\.[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.[0-9a-f]{8}$' "$1" ;;
+        *)    printf '^%s/v[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.[0-9a-f]{8}$' "$1" ;;
+    esac
+}
+
+# run_latest_tag <comp> <channel> <path> — reads the page JSON on stdin.
+run_latest_tag() {
+    COMP="$1" CHANNEL="$2" TAG_RE="$(tag_re_for "$1" "$2")" PATH="$3" \
+        sh "${W}/latest-tag-run.sh" "${W}/resolver.sh"
+}
+
+# A curated bin dir, not a trimmed system PATH: some hosts (this one included)
+# ship a real /usr/bin/jq, so "/usr/bin:/bin" would still find it and silently
+# skip the no-jq branch. Symlink only what latest_tag()'s grep/sed fallback
+# needs, deliberately omitting jq, then PROVE it is really gone before trusting it.
+NO_JQ_DIR="${W}/no-jq-bin"
+mkdir -p "${NO_JQ_DIR}"
+for _njt in sh grep sed sort tail; do
+    # type -p, not command -v: a shell FUNCTION named grep/sed/etc. (this host
+    # has one) makes `command -v` print the bare name back, which then
+    # symlinks to itself and disappears. type -p only ever names a real file.
+    _njp="$(type -p "${_njt}" 2>/dev/null || true)"
+    [ -n "${_njp}" ] || die "cannot build a no-jq PATH: '${_njt}' not found on this host"
+    ln -sf "${_njp}" "${NO_JQ_DIR}/${_njt}"
+done
+NO_JQ_PATH="${NO_JQ_DIR}"
+if PATH="${NO_JQ_PATH}" command -v jq >/dev/null 2>&1; then
+    die "NO_JQ_PATH (${NO_JQ_PATH}) still finds jq on this host — fix the curated no-jq bin dir so the no-jq branch is really exercised"
+fi
+
+# mk_page <tag_name>... — a GitHub-shaped /releases page body: pretty-printed,
+# one field per line (the real api.github.com response shape — confirmed by
+# inspection above), NOT the minified single-line JSON the grep/sed fallback's
+# line-anchored match cannot see a "tag_name" field inside. The jq branch reads
+# either shape; this is what makes the grep/sed branch exercisable at all.
+mk_page() {
+    printf '[\n'
+    _mkp_first=1
+    for _mkp_t in "$@"; do
+        [ "${_mkp_first}" = 1 ] || printf ',\n'
+        _mkp_first=0
+        printf '  {\n    "tag_name": "%s"\n  }' "${_mkp_t}"
+    done
+    printf '\n]\n'
+}
+
+run_channel_pairs() {
+    _rcp_path="$1"
+    _rcp_label="$2"
+    page="$(mk_page cli/v0.3.0.beta.2026.08.28.1f0c9e2a cli/v0.2.9.2026.08.28.aa21f55c cli/v0.2.8.2026.08.27.7a56bdc5)"
+    check "stable ignores a higher beta (${_rcp_label})" \
+        "$(printf '%s' "${page}" | run_latest_tag cli stable "${_rcp_path}")" \
+        "cli/v0.2.9.2026.08.28.aa21f55c"
+    check "beta ignores every stable (${_rcp_label})" \
+        "$(printf '%s' "${page}" | run_latest_tag cli beta "${_rcp_path}")" \
+        "cli/v0.3.0.beta.2026.08.28.1f0c9e2a"
+    page2="$(mk_page cli/v0.3.1.2026.08.29.aa21f55c cli/v0.3.0.beta.2026.08.28.1f0c9e2a)"
+    check "beta ignores a higher stable (${_rcp_label})" \
+        "$(printf '%s' "${page2}" | run_latest_tag cli beta "${_rcp_path}")" \
+        "cli/v0.3.0.beta.2026.08.28.1f0c9e2a"
+    page3="$(mk_page cli/v0.2.9.2026.08.28.aa21f55c)"
+    check "beta with no beta tags is empty (${_rcp_label})" \
+        "$(printf '%s' "${page3}" | run_latest_tag cli beta "${_rcp_path}")" \
+        ""
+}
+
+if command -v jq >/dev/null 2>&1; then
+    run_channel_pairs "${PATH}" "with jq"
+else
+    printf '  (skipping the with-jq pass — no jq on this host'"'"'s PATH)\n'
+fi
+run_channel_pairs "${NO_JQ_PATH}" "without jq"
+printf '  OK: latest_tag() never crosses channels, with or without jq\n'
+
+printf '\n  VERSION-FLOOR TEST PASSED (bake + predicate + fail-closed + generator + resolver + channel)\n'

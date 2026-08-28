@@ -216,8 +216,8 @@ run_launcher "${REQ_TWO}"; rc=$?
 check "cli gateway accepted (rc)" "${rc}" "0"
 check "cli gateway: exactly one RELEASE-EXIT line" "$(sentinel_count)" "1"
 check "cli gateway: sentinel says success" "$(sentinel_code)" "0"
-check "cli gateway: both cut, in order, with FLAGS" "$(calls)" "cli --dry-run
-gateway --dry-run"
+check "cli gateway: both cut, in order, with FLAGS" "$(calls)" "cli --channel stable --dry-run
+gateway --channel stable --dry-run"
 check_contains "cli gateway: --dry-run is announced" "$(log_text)" "no marker will be pushed"
 
 # Every accepted name, one run each, so the list cannot rot to a subset.
@@ -226,8 +226,38 @@ for comp in cli gateway edge agent relay; do
     printf 'COMPONENTS="%s"\nFLAGS="--dry-run"\n' "${comp}" > "${REQ_ONE}"
     run_launcher "${REQ_ONE}"; rc=$?
     check "component '${comp}' is accepted (rc)" "${rc}" "0"
-    check "component '${comp}' reaches release.sh" "$(calls)" "${comp} --dry-run"
+    check "component '${comp}' reaches release.sh" "$(calls)" "${comp} --channel stable --dry-run"
 done
+
+echo "--- CHANNEL validation --------------------------------------------------"
+
+# CHANNEL="beta" passes --channel beta through to every cut, same position as
+# the stable default (right after the component, ahead of FLAGS).
+REQ_BETA="${WORK}/req-beta"
+printf 'COMPONENTS="cli"\nFLAGS="--dry-run"\nCHANNEL="beta"\n' > "${REQ_BETA}"
+run_launcher "${REQ_BETA}"; rc=$?
+check "CHANNEL=beta accepted (rc)" "${rc}" "0"
+check "CHANNEL=beta: --channel beta reaches release.sh" "$(calls)" "cli --channel beta --dry-run"
+check_contains "CHANNEL=beta is echoed in the request line" "$(log_text)" "channel=beta"
+
+# An unrecognised channel is refused BEFORE anything builds — same shape as the
+# COMPONENTS validation above (checked ahead of the cut loop, not left to
+# release.sh's own --channel refusal to catch it after work has started).
+REQ_NIGHTLY="${WORK}/req-nightly"
+printf 'COMPONENTS="cli"\nFLAGS="--dry-run"\nCHANNEL="nightly"\n' > "${REQ_NIGHTLY}"
+run_launcher "${REQ_NIGHTLY}"; rc=$?
+check_refusal "CHANNEL=nightly" "${rc}"
+check_contains "CHANNEL=nightly is named" "$(log_text)" "CHANNEL must be stable or beta (got 'nightly')"
+check "CHANNEL=nightly cuts nothing" "$(calls)" ""
+
+# A request with no CHANNEL= line at all (every request file above this point)
+# defaults to stable — the negative control that the new validation didn't
+# silently start requiring the key.
+REQ_NOCHANNEL="${WORK}/req-nochannel"
+printf 'COMPONENTS="cli"\nFLAGS="--dry-run"\n' > "${REQ_NOCHANNEL}"
+run_launcher "${REQ_NOCHANNEL}"; rc=$?
+check "no CHANNEL= line accepted (rc)" "${rc}" "0"
+check "no CHANNEL= line defaults to stable" "$(calls)" "cli --channel stable --dry-run"
 
 echo "--- window disposition ---------------------------------------------"
 
@@ -261,7 +291,7 @@ PREFS_ALWAYS="${WORK}/prefs-1.plist"
 make_prefs "${PREFS_ALWAYS}" "Cut Profile" 1
 TEST_TERMINAL_PREFS="${PREFS_ALWAYS}" run_launcher "${REQ_OK}"; rc=$?
 check "shellExitAction=1 still cuts — it is a note, not a gate" "${rc}" "0"
-check "shellExitAction=1 still reaches release.sh" "$(calls)" "cli --dry-run"
+check "shellExitAction=1 still reaches release.sh" "$(calls)" "cli --channel stable --dry-run"
 check_contains "shellExitAction=1 warns that a failure would vanish" "$(log_text)" \
     "a FAILED cut would vanish off the screen"
 check_contains "the profile is named, so the right one gets fixed" "$(log_text)" "'Cut Profile'"
@@ -343,7 +373,7 @@ REQ_KEEP="${WORK}/req-keep"
 printf 'COMPONENTS="cli"\nFLAGS="--dry-run"\nKEEP_WINDOW=1\n' > "${REQ_KEEP}"
 run_launcher "${REQ_KEEP}"; rc=$?
 check "KEEP_WINDOW=1 still cuts (rc)" "${rc}" "0"
-check "KEEP_WINDOW=1 still cuts (component)" "$(calls)" "cli --dry-run"
+check "KEEP_WINDOW=1 still cuts (component)" "$(calls)" "cli --channel stable --dry-run"
 check "KEEP_WINDOW=1: exactly one RELEASE-EXIT line" "$(sentinel_count)" "1"
 check "KEEP_WINDOW=1: sentinel is still the LAST line of the log" "$(sentinel_is_last)" "RELEASE-EXIT"
 check_contains "KEEP_WINDOW=1 is echoed back" "$(log_text)" \
@@ -403,7 +433,7 @@ unset RELEASE_STUB_RC
 check "failing component propagates its exit code" "${rc}" "3"
 check "failing component: exactly one RELEASE-EXIT line" "$(sentinel_count)" "1"
 check "failing component: sentinel carries the exit code" "$(sentinel_code)" "3"
-check "failing component stops the batch" "$(calls)" "cli --dry-run"
+check "failing component stops the batch" "$(calls)" "cli --channel stable --dry-run"
 check_contains "failure warns that earlier cuts are published" "$(log_text)" "are PUBLISHED"
 
 echo "--- log rotation ------------------------------------------------------"

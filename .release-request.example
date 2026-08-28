@@ -5,7 +5,7 @@
 # write here executes with the toolchain on PATH. One NAME="value" per line;
 # `#` comments and blank lines are fine. LF endings only: a CRLF copy leaves a
 # trailing \r inside the last value, and the cut aborts on a component name it
-# cannot match. Only COMPONENTS, FLAGS and KEEP_WINDOW are read — a mistyped
+# cannot match. Only COMPONENTS, FLAGS, CHANNEL and KEEP_WINDOW are read — a mistyped
 # FLAG= is not an error, it is silently ignored, and the run proceeds as if you
 # had set nothing.
 #
@@ -58,6 +58,23 @@
 # run by hand. --distribute-only is recognised only as release.sh's FIRST
 # argument, because it takes its component and stamp positionally — so it cannot
 # be expressed in FLAGS at all.
+#
+# CHANNEL — stable (the default; also what an unset/absent CHANNEL= line
+# means) or beta.
+#
+# Beta cuts from the registry's beta worktree instead of the main folder,
+# stamps with a .beta. segment, skips GitHub entirely and uploads straight to
+# R2 as a private, staged row — see the RUNBOOK's "Beta channel" section for
+# opening/closing a cycle. --public is STILL required for a beta cut: a beta
+# becomes publicly installable the moment the console promotes it, so signing,
+# notarization and the CVE gate apply exactly as they do to stable. A beta
+# cycle has to already be open (versions/<comp>.beta committed, the beta
+# worktree present) — release.sh refuses with "open a beta cycle first"
+# otherwise. Not compatible with --distribute-only (refused): that path
+# republishes an already-GitHub-released component, which a beta cut never
+# produces.
+#
+#     CHANNEL="beta"
 #
 # KEEP_WINDOW — hold the Terminal window open after the cut finishes.
 #
