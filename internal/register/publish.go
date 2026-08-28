@@ -81,6 +81,36 @@ func zipFilename(comp, plat string) string {
 // build. See zipsFromSums.
 var basePlatforms = []string{"darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64"}
 
+// isPlatformToken reports whether s is a bare platform token: lowercase
+// alphanumerics and interior hyphens, nothing else. "darwin-amd64-legacy" is
+// the longest real one.
+//
+// This is the boundary check on SHA256SUMS.txt. zipsFromSums derives filenames
+// from that file's CONTENT and they become both an os.ReadFile path and an R2
+// object key, so without it a crafted line decides where publish-dir reads and
+// what it writes. Anchoring the prefix and suffix is not enough on its own:
+// "burrowee-gateway-" + "../../x" + ".zip" satisfies both. In the real cut flow
+// the file is generated moments earlier by the same script, so this is not a
+// reachable exploit — escaping needs someone who already controls the directory
+// being published, and they could simply swap the zips. It is a trust-boundary
+// check, not a patch for a live hole: PublishFromDir reads SHA256SUMS.txt
+// straight off disk and does NOT verify the .minisig beside it, so the file is
+// trusted by location alone, and content trusted by location deserves a shape
+// check before it becomes a path.
+func isPlatformToken(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") || strings.HasSuffix(s, "-") {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // zipsFromSums returns comp's platform zip filenames, sorted, taken from the
 // parsed SHA256SUMS.txt rather than from a platform list held here.
 //
@@ -94,10 +124,14 @@ var basePlatforms = []string{"darwin-amd64", "darwin-arm64", "linux-amd64", "lin
 // does not catch it: that guards distribute_only()'s GitHub path, not this one.
 //
 // SHA256SUMS.txt is the right source because it is generated from what was
-// actually built and is covered by the minisign signature, so "what was built"
-// and "what is uploaded" cannot drift apart again — a sixth platform needs no
-// change here. basePlatforms remains a floor so a catastrophically short build
-// is refused rather than published quietly.
+// actually built, so "what was built" and "what is uploaded" cannot drift apart
+// again — a sixth platform needs no change here. basePlatforms remains a floor
+// so a catastrophically short build is refused rather than published quietly.
+//
+// It is trusted by LOCATION, not by signature: this function reads it off disk
+// and never verifies the .minisig it uploads beside it. Hence isPlatformToken —
+// every filename taken from it becomes a read path and an R2 key, so its shape
+// is checked before it is used as either.
 func zipsFromSums(comp string, hashByFile map[string]string) ([]string, error) {
 	prefix, suffix := "burrowee-"+comp+"-", ".zip"
 	if comp == "relay" {
@@ -109,8 +143,13 @@ func zipsFromSums(comp string, hashByFile map[string]string) ([]string, error) {
 		if !strings.HasPrefix(filename, prefix) || !strings.HasSuffix(filename, suffix) {
 			continue
 		}
+		plat := strings.TrimSuffix(strings.TrimPrefix(filename, prefix), suffix)
+		if !isPlatformToken(plat) {
+			return nil, fmt.Errorf("publish-dir: %s: SHA256SUMS.txt names %q, whose platform segment %q is not a bare [a-z0-9-] token — refusing",
+				comp, filename, plat)
+		}
 		names = append(names, filename)
-		seen[strings.TrimSuffix(strings.TrimPrefix(filename, prefix), suffix)] = true
+		seen[plat] = true
 	}
 	var missing []string
 	for _, plat := range basePlatforms {

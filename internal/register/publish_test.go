@@ -391,3 +391,46 @@ func TestPublishFromDirRefusesAShortBuild(t *testing.T) {
 		t.Errorf("a refused short build must upload nothing, got %v", p.puts)
 	}
 }
+
+// TestZipsFromSumsRefusesANonBasename pins the trust boundary on SHA256SUMS.txt.
+// zipsFromSums derives filenames from that file's content and they become both
+// an os.ReadFile path and an R2 object key, so a crafted line would otherwise
+// choose where publish-dir reads and what it writes. Anchoring the prefix and
+// suffix does not cover it on its own: every input below satisfies both.
+func TestZipsFromSumsRefusesANonBasename(t *testing.T) {
+	for _, plat := range []string{
+		"../../etc/passwd",
+		"/../../etc/passwd",
+		"darwin-amd64/../../x",
+		"darwin_amd64",
+		"Darwin-amd64",
+		"",
+	} {
+		hashByFile := map[string]string{}
+		for _, base := range basePlatforms {
+			hashByFile["burrowee-gateway-"+base+".zip"] = "hash"
+		}
+		hashByFile["burrowee-gateway-"+plat+".zip"] = "hash"
+
+		if _, err := zipsFromSums("gateway", hashByFile); err == nil {
+			t.Errorf("platform segment %q: want a refusal, got nil", plat)
+		}
+	}
+}
+
+// TestZipsFromSumsAcceptsRealPlatforms is the other half: the check must not
+// reject the platforms actually shipped, legacy's two hyphens included.
+func TestZipsFromSumsAcceptsRealPlatforms(t *testing.T) {
+	hashByFile := map[string]string{}
+	want := append([]string{"darwin-amd64-legacy"}, basePlatforms...)
+	for _, plat := range want {
+		hashByFile["burrowee-gateway-"+plat+".zip"] = "hash"
+	}
+	got, err := zipsFromSums("gateway", hashByFile)
+	if err != nil {
+		t.Fatalf("zipsFromSums: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("want %d zips, got %d: %v", len(want), len(got), got)
+	}
+}
