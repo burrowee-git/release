@@ -118,6 +118,8 @@ source "${REPO_ROOT}/tools/marker_commit.sh"
 source "${REPO_ROOT}/tools/batch.sh"
 # shellcheck source=tools/public_components.sh
 source "${REPO_ROOT}/tools/public_components.sh"
+# shellcheck source=tools/targets.sh
+source "${REPO_ROOT}/tools/targets.sh"
 
 # ---- go on PATH (the Burrowee per-dir hook strips /opt/homebrew/bin) ---------
 GO_BIN="${GO_BIN:-go}"
@@ -641,23 +643,6 @@ resolve_comp_stamp() {
 
 # edge skills source-of-truth (the edge repo owns these)
 EDGE_SKILLS_SRC="${SRC_EDGE}/skills"
-
-TARGETS=(
-    "darwin arm64"
-    "darwin amd64"
-    "darwin amd64 legacy"
-    "linux arm64"
-    "linux amd64"
-)
-
-# plat_of <os> <arch> <variant> — the one spelling of the platform string used
-# for build output dirs, the dispatcher cache, assembly dirs, zip names, the
-# relay .latest set and the artifacts.json/register key: "<os>-<arch>" for the
-# empty (stock) variant, "<os>-<arch>-<variant>" otherwise. <variant> is
-# frequently the empty string — bash 3.2's `read` into three variables from a
-# two-word TARGETS entry already leaves the third empty, so no sentinel value
-# is needed to represent "no variant" in the space-separated triples below.
-plat_of() { printf '%s-%s%s' "$1" "$2" "${3:+-$3}"; }
 
 # assert_platform_coverage <comp> <stage_dir> — fails loudly, naming the
 # component and the missing platform(s), when <stage_dir> does not carry
@@ -1737,6 +1722,7 @@ do_release_relay() {
     local zips=() triple os arch variant plat out_bins assemble asset b d
     for triple in "${TARGETS[@]}"; do
         read -r os arch variant <<<"${triple}"
+        ships_target "${comp}" "${variant}" || continue
         plat="$(plat_of "${os}" "${arch}" "${variant}")"
         out_bins="${stage}/.bins-${plat}"
         mkdir -p "${out_bins}"
@@ -1832,6 +1818,7 @@ do_release_relay() {
     mkdir -p "${latest_stage}"
     for triple in "${TARGETS[@]}"; do
         read -r os arch variant <<<"${triple}"
+        ships_target "${comp}" "${variant}" || continue
         plat="$(plat_of "${os}" "${arch}" "${variant}")"
         cp "${stage}/burrowee-${comp}-${plat}.zip" \
            "${latest_stage}/latest.${plat}.zip"
@@ -1854,6 +1841,7 @@ do_release_relay() {
         echo "  R2 keys:"
         for triple in "${TARGETS[@]}"; do
             read -r os arch variant <<<"${triple}"
+            ships_target "${comp}" "${variant}" || continue
             echo "    relay/${stamp}/latest.$(plat_of "${os}" "${arch}" "${variant}").zip"
         done
         echo "    relay/${stamp}/SHA256SUMS.txt"
