@@ -19,7 +19,7 @@ import (
 
 type Options struct {
 	Component, OutDir, RepoDir, DispatcherDir string
-	// SrcDir is the COMPONENT source worktree (e.g. cli/code/cli) — distinct
+	// SrcDir is the COMPONENT source worktree (e.g. cli/code/main) — distinct
 	// from RepoDir, which is the release repo holding versions/, inner/, and
 	// tools/. Defaults to RepoDir when empty, so the fixture-based
 	// orchestrate tests (which double one dir as both) keep working
@@ -160,7 +160,7 @@ func absolutizeBuildDirs(o *buildOpts) error {
 // resolveComponentDirs fills SrcDir/DispatcherDir from the standard
 // BURROWEE_SRC_<COMP>/BB locations (the same resolver the harness uses) unless
 // --src/--dispatcher already set them. A real component's source lives in its
-// OWN repo worktree (e.g. cli/code/cli), distinct from --repo (the release repo
+// OWN repo worktree (e.g. cli/code/main), distinct from --repo (the release repo
 // that holds versions/ + inner/ + tools/); without this, SrcDir would fall back
 // to --repo in buildRun and rkit would try to build the component from the
 // release repo.

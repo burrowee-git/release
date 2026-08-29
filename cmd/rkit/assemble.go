@@ -116,7 +116,7 @@ func ledgerMigrations(runSh string) ([]string, error) {
 //   - edge additionally carries covers/admin.html + covers/default.html, decoy
 //     cover pages copied from the edge.web repo at package time (release.sh lines
 //     1063-1068): admin.html → covers/admin.html, login.html → covers/default.html.
-//     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/edge.web (release.sh line 1064).
+//     Resolved via EDGE_WEB_DIR, else $BB/edge.web/code/main (release.sh line 1064).
 //   - edge + gateway carry updater.install.sh, copied from THIS repo's own
 //     inner/<comp>/ (not the component source worktree) if it exists there —
 //     see updaterInstallPayload. cli's updater is a one-shot binary with no
