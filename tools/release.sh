@@ -106,6 +106,8 @@ source "${REPO_ROOT}/tools/apple_sign.sh"
 source "${REPO_ROOT}/tools/updater_pin.sh"
 # shellcheck source=tools/release_origin.sh
 source "${REPO_ROOT}/tools/release_origin.sh"
+# shellcheck source=tools/dispatcher_src.sh
+source "${REPO_ROOT}/tools/dispatcher_src.sh"
 # shellcheck source=tools/payload.sh
 source "${REPO_ROOT}/tools/payload.sh"
 # shellcheck source=tools/binmap.sh
@@ -167,6 +169,7 @@ registry_src_for() {
         edge)    printf '%s' "${REG_EDGE}" ;;
         agent)   printf '%s' "${REG_AGENT}" ;;
         relay)   printf '%s' "${REG_RELAY}" ;;
+        dispatcher) printf '%s' "${REG_DISPATCHER}" ;;
         *) echo "registry_src_for: unknown component: $1" >&2; return 1 ;;
     esac
 }
@@ -189,6 +192,7 @@ src_for() {
         edge)    reg="${REG_EDGE}";    cur="${SRC_EDGE}" ;;
         agent)   reg="${REG_AGENT}";   cur="${SRC_AGENT}" ;;
         relay)   reg="${REG_RELAY}";   cur="${SRC_RELAY}" ;;
+        dispatcher) reg="${REG_DISPATCHER}"; cur="${SRC_DISPATCHER}" ;;
     esac
     if [ "${cur}" != "${reg}" ]; then
         printf '%s' "${cur}"                          # BURROWEE_SRC_* override
@@ -236,8 +240,9 @@ assert_release_origins() {
             assert_release_origin edge.web "${EDGE_WEB}" "${REG_EDGE_WEB}" "${mode}" stable || return 1
             ;;
     esac
-    [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; return 1; }
-    assert_release_origin dispatcher "${SRC_DISPATCHER}" "${REG_DISPATCHER}" "${mode}" stable || return 1
+    _disp_src="$(src_for dispatcher)"
+    [ -d "${_disp_src}" ] || { echo "✗ dispatcher source worktree missing: ${_disp_src}" >&2; return 1; }
+    assert_release_origin dispatcher "${_disp_src}" "${REG_DISPATCHER}" "${mode}" "${CHANNEL:-stable}" || return 1
     assert_release_origin "release repo" "${REPO_ROOT}" "${REG_RELEASE}" "${mode}" stable \
         ${RELEASE_REPO_STAGED_OK[@]+"${RELEASE_REPO_STAGED_OK[@]}"} || return 1
 }
@@ -460,11 +465,17 @@ AGE_IDENTITY="${AGE_IDENTITY:-${HOME}/.age/burrowee-release.txt}"
 # date. Defined here (ahead of the --distribute-only early-exit below) so
 # every DISP_STAMP call site — distribute_relay, distribute_only, and the
 # dispatcher build-cache section — resolves the same way.
-DISP_STAMP_FILE="${REPO_ROOT}/versions/burrowee.stamp"
+# All three of source, semver and stamp file follow the CUT's channel. They used
+# to be pinned to stable, which meant a beta cut bundled the dispatcher built
+# from main, numbered from versions/burrowee, and RECORDED into
+# versions/burrowee.stamp — a beta cut mutating stable state, and dispatcher work
+# on the beta branch never reaching a beta build at all.
 resolve_disp_stamp() {
-    local cur_sha semver recorded rec_sha rec_sv fresh
-    cur_sha="$(git -C "${SRC_DISPATCHER}" rev-parse --short=8 HEAD)"
-    semver="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --semver | tr -d '[:space:]')"
+    local cur_sha semver recorded rec_sha rec_sv fresh src DISP_STAMP_FILE
+    src="$(src_for dispatcher)"
+    DISP_STAMP_FILE="$(disp_stamp_file "${REPO_ROOT}")"
+    cur_sha="$(git -C "${src}" rev-parse --short=8 HEAD)"
+    semver="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" burrowee $(disp_channel_args) --semver | tr -d '[:space:]')"
     if [ -f "${DISP_STAMP_FILE}" ]; then
         recorded="$(tr -d '[:space:]' < "${DISP_STAMP_FILE}")"
         rec_sha="${recorded##*.}"                 # trailing sha8 segment
@@ -473,14 +484,14 @@ resolve_disp_stamp() {
             printf '%s' "${recorded}"; return 0   # unchanged → reuse (date frozen)
         fi
     fi
-    fresh="$(SRC_DIR="${SRC_DISPATCHER}" bash "${REPO_ROOT}/tools/version.sh" burrowee --stamp | tr -d '[:space:]')"
+    fresh="$(SRC_DIR="${src}" bash "${REPO_ROOT}/tools/version.sh" burrowee $(disp_channel_args) --stamp | tr -d '[:space:]')"
     if [ "${DRY_RUN:-0}" != 1 ]; then
         printf '%s\n' "${fresh}" > "${DISP_STAMP_FILE}"
         # Rides the [RELEASED] marker commit; if the cut aborts before that
         # commit, revert_dispatcher_version() (below, in the EXIT/INT/TERM
         # trap) restores this staged write so a never-released date isn't
         # left behind for the next unchanged-source cut to reuse.
-        ( cd "${REPO_ROOT}" && git add "versions/burrowee.stamp" )
+        ( cd "${REPO_ROOT}" && git add "${DISP_STAMP_FILE#"${REPO_ROOT}"/}" )
     fi
     printf '%s' "${fresh}"
 }
@@ -1215,7 +1226,7 @@ distribute_only() {
     # execution ever reaches need()'s definition.
     command -v jq >/dev/null 2>&1 || { echo "✗ required tool not found: jq" >&2; exit 1; }
 
-    [ -d "${SRC_DISPATCHER}" ] || { echo "✗ dispatcher source worktree missing: ${SRC_DISPATCHER}" >&2; exit 1; }
+    [ -d "$(src_for dispatcher)" ] || { echo "✗ dispatcher source worktree missing: $(src_for dispatcher)" >&2; exit 1; }
     DISP_STAMP="$(resolve_disp_stamp)"
     if command -v shasum >/dev/null 2>&1; then SHA256="shasum -a 256"
     elif command -v sha256sum >/dev/null 2>&1; then SHA256="sha256sum"
@@ -1652,7 +1663,7 @@ build_dispatcher() {
         rm -f "${out}/burrowee"
     fi
     mkdir -p "${out}"
-    COMP=burrowee SRC_DIR="${SRC_DISPATCHER}" TARGETOS="${os}" TARGETARCH="${arch}" VARIANT="${variant}" \
+    COMP=burrowee SRC_DIR="$(src_for dispatcher)" TARGETOS="${os}" TARGETARCH="${arch}" VARIANT="${variant}" \
         STAMP="${DISP_STAMP}" OUT_DIR="${out}" GO_BIN="${GO_BIN}" \
         bash "${REPO_ROOT}/tools/build.sh" >&2
 }
@@ -1710,7 +1721,7 @@ do_release_relay() {
     fi
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
-    echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
+    echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump $(disp_version_rel) manually if the dispatcher source changed)"
     echo "Channel : ${CHANNEL}"
     echo "Dry-run : ${DRY_RUN}"
 
@@ -1940,7 +1951,7 @@ do_release() {
     fi
     echo "Stamp   : ${stamp}"
     echo "Source  : ${src} @ $(git -C "${src}" rev-parse --short=8 HEAD)"
-    echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump versions/burrowee manually if the dispatcher source changed)"
+    echo "Disp    : ${DISP_STAMP}  (not auto-bumped — bump $(disp_version_rel) manually if the dispatcher source changed)"
     echo "Channel : ${CHANNEL}"
     echo "Dry-run : ${DRY_RUN}"
 
