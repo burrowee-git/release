@@ -91,10 +91,10 @@ RELEASE_REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 # component must pass a REAL src_dir (a bogus placeholder path would make
 # register_staged fail loudly, which is now correct behavior, not a test
 # artifact).
-CLI_SRC="${BURROWEE_SRC_CLI:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/cli/code/cli}"
-EDGE_SRC="${BURROWEE_SRC_EDGE:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/edge/code/edge}"
-RELAY_SRC="${BURROWEE_SRC_RELAY:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/relay/code/relay}"
-AGENT_SRC="${BURROWEE_SRC_AGENT:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/agent/code/agent}"
+CLI_SRC="${BURROWEE_SRC_CLI:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/cli/code/main}"
+EDGE_SRC="${BURROWEE_SRC_EDGE:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/edge/code/main}"
+RELAY_SRC="${BURROWEE_SRC_RELAY:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/relay/code/main}"
+AGENT_SRC="${BURROWEE_SRC_AGENT:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/agent/code/main}"
 # go env for real pin resolution (mirrors release.sh's own GO_BIN + the
 # private-module env the repo's other tests already export).
 GO_ENV=(GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/burrowee-git/*")

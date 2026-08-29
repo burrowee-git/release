@@ -17,7 +17,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AGENT_SRC="${BURROWEE_SRC_AGENT:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/agent/code/agent}"
+AGENT_SRC="${BURROWEE_SRC_AGENT:-/Volumes/MacintoshED/Workstation/Coding/Burrowee/agent/code/main}"
 
 GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go

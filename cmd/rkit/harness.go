@@ -13,10 +13,10 @@ import (
 )
 
 // srcDirsForRepo resolves each component's source worktree exactly like
-// tools/release.sh (lines 147-154): SRC_CLI=${BURROWEE_SRC_CLI:-$BB/cli/code/cli},
-// SRC_GATEWAY=$BB/gateway/code/gateway, SRC_EDGE=$BB/edge/code/edge,
-// SRC_AGENT=$BB/agent/code/agent, SRC_RELAY=$BB/relay/code/relay, and the
-// dispatcher SRC_DISPATCHER=${BURROWEE_SRC_DISPATCHER:-$BB/burrowee/code/burrowee}.
+// tools/release.sh (lines 147-154): SRC_CLI=${BURROWEE_SRC_CLI:-$BB/cli/code/main},
+// SRC_GATEWAY=$BB/gateway/code/main, SRC_EDGE=$BB/edge/code/main,
+// SRC_AGENT=$BB/agent/code/main, SRC_RELAY=$BB/relay/code/main, and the
+// dispatcher SRC_DISPATCHER=${BURROWEE_SRC_DISPATCHER:-$BB/burrowee/code/main}.
 // release.sh hardcodes BB; the harness additionally honors a BB env override
 // (harness-only — for test isolation, not a release.sh behavior change).
 // defaultBB is the burrowee product-root the harness (and edge.web cover

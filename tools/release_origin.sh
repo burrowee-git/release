@@ -41,12 +41,12 @@ is_primary_worktree() {
 # beta_worktree_for <registry-main-dir> — the beta cut origin, DERIVED from the
 # registry main path rather than configured on its own: there is no separate
 # registry entry for a beta worktree, so the two can never drift apart.
-# <code>/.worktrees/beta, sibling to the main folder. Prints an unresolved
+# <code>/beta, sibling to the main folder. Prints an unresolved
 # (".."-bearing) but absolute path; callers that need the canonical form
 # resolve it themselves (e.g. `cd "$(beta_worktree_for "$m")" && pwd`), the
 # same way is_primary_worktree's callers resolve git's own path output.
 beta_worktree_for() {
-    printf '%s/../.worktrees/beta' "$1"
+    printf '%s/../beta' "$1"
 }
 
 # is_linked_worktree_of <dir> <main> — dir is a LINKED worktree belonging to
@@ -208,7 +208,7 @@ origin_sync_status() {
 # computed channel variable (a future caller) landing here empty or
 # misspelled and silently cutting from the wrong tree. beta redirects the
 # whole guard at a second, structurally different origin:
-# <registry-main>/../.worktrees/beta (beta_worktree_for), which must be a
+# <registry-main>/../beta (beta_worktree_for), which must be a
 # LINKED worktree of the registry main repo (is_linked_worktree_of) — never
 # configured separately, so it cannot drift from the registry entry — on
 # branch beta, clean, == origin/beta. A missing beta worktree is refused with

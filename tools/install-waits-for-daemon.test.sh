@@ -254,8 +254,8 @@ ok_clean "binary_version_stamp reads the binary's own stamp, dispatcher row and 
 BRAND=""
 _p="$HERE"
 while [ "$_p" != "/" ]; do
-    if [ -f "$_p/edge/code/edge/internal/edgeroot/roots.go" ] \
-        && [ -f "$_p/gateway/code/gateway/internal/gateway/home.go" ]; then
+    if [ -f "$_p/edge/code/main/internal/edgeroot/roots.go" ] \
+        && [ -f "$_p/gateway/code/main/internal/gateway/home.go" ]; then
         BRAND="$_p"
         break
     fi
@@ -280,8 +280,8 @@ if [ -z "$BRAND" ]; then
 else
     # edge — cmd/burrowee-edge/config.go writes through edgeData(), which is
     # edgeroot.DataDirFor(edgeHome()): the DATA tree, not the config tree.
-    ecfg="$BRAND/edge/code/edge/cmd/burrowee-edge/config.go"
-    eroots="$BRAND/edge/code/edge/internal/edgeroot/roots.go"
+    ecfg="$BRAND/edge/code/main/cmd/burrowee-edge/config.go"
+    eroots="$BRAND/edge/code/main/internal/edgeroot/roots.go"
     grep -q 'WriteRunning(edgeData(), version)' "$ecfg" \
         || note "edge: recordRunningVersion no longer writes through edgeData() — re-derive the installer's path"
     edge_daemon="$(go_const "$eroots" systemDataRoot)/$(go_const "$eroots" Name)"
@@ -301,8 +301,8 @@ else
 
     # gateway — cmd/burrowee-gateway/main.go writes to cfg.paths.Home, and
     # GatewayPaths sets Home from dataDir (internal/gateway/home.go).
-    gmain="$BRAND/gateway/code/gateway/cmd/burrowee-gateway/main.go"
-    ghome="$BRAND/gateway/code/gateway/internal/gateway/home.go"
+    gmain="$BRAND/gateway/code/main/cmd/burrowee-gateway/main.go"
+    ghome="$BRAND/gateway/code/main/internal/gateway/home.go"
     grep -q 'WriteRunning(cfg.paths.Home, version)' "$gmain" \
         || note "gateway: main.go no longer writes running.json to cfg.paths.Home — re-derive the installer's path"
     grep -q 'Home:  *dataDir,' "$ghome" \

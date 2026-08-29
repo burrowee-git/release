@@ -614,7 +614,7 @@ worktree, straight to R2, and never touches GitHub. Design:
 A beta cycle is two files' presence, nothing more — there is no `open` verb:
 
 1. Create the linked worktree the channel is cut from, sibling to the
-   registry's main folder: `<code>/<repo>/../.worktrees/beta`, on branch
+   registry's main folder: `<code>/beta`, sibling of `<code>/main`, on branch
    `beta`, tracking `origin/beta` (`tools/release_origin.sh`'s
    `beta_worktree_for` derives this path from the registry entry — it is never
    configured separately). Standard `git worktree add` flow, same shape as any
@@ -740,7 +740,7 @@ There is no `close` verb either — closing is deleting the two files that mean
    remove the served file by hand, over ssh, if the closed cycle's public
    beta must actually stop being installable rather than merely stop being
    pointed at.
-2. Remove the beta worktree: `git worktree remove <code>/<repo>/../.worktrees/beta`
+2. The beta worktree is permanent — it is NOT removed at release (see beta.md)
    (standard worktree teardown — nothing beta-specific about the removal
    itself).
 3. Any `staged`/`public` beta rows already in the console catalog are left

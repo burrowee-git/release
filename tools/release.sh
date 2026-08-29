@@ -4,7 +4,7 @@
 # Usage:
 #   bash tools/release.sh <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--apple] [--vulncheck|--public] [--dry-run] [--bump-minor|--bump-major|--keep-version] [--force]
 #
-# --channel beta: cut from the registry's beta worktree (<code>/.worktrees/beta,
+# --channel beta: cut from the registry's beta worktree (<code>/beta,
 #   see tools/release_origin.sh's beta_worktree_for) instead of the registry main
 #   folder, stamp with the .beta. segment (tools/version.sh --channel beta), skip
 #   GitHub entirely, and upload straight to R2 as a private, staged row — see
@@ -87,7 +87,7 @@
 #   EDGE_WEB_DIR            edge.web tree (admin.html/login.html covers baked into
 #                           the edge payload) — DRY-RUN ONLY; a real cut is refused
 #                           unless the source is the registry main folder
-#                           (<Brand>/edge.web/code/edge.web), primary worktree, on
+#                           (<Brand>/edge.web/code/main), primary worktree, on
 #                           main, clean, == origin/main. See tools/release_origin.sh.
 #   BURROWEE_RELEASE_REPO   GitHub repo for releases (default burrowee-git/release)
 #   BURROWEE_RELEASE_YES    skip the interactive minor/major bump confirm
@@ -141,14 +141,14 @@ export GO_BIN
 # precede it: every value below reads only REPO_ROOT, BB, and the operator's
 # environment.
 BB="/Volumes/MacintoshED/Workstation/Coding/Burrowee"
-REG_CLI="${BB}/cli/code/cli"
-REG_GATEWAY="${BB}/gateway/code/gateway"
-REG_EDGE="${BB}/edge/code/edge"
-REG_EDGE_WEB="${BB}/edge.web/code/edge.web"
-REG_AGENT="${BB}/agent/code/agent"
-REG_DISPATCHER="${BB}/burrowee/code/burrowee"
-REG_RELAY="${BB}/relay/code/relay"
-REG_RELEASE="${BB}/release/code/release"
+REG_CLI="${BB}/cli/code/main"
+REG_GATEWAY="${BB}/gateway/code/main"
+REG_EDGE="${BB}/edge/code/main"
+REG_EDGE_WEB="${BB}/edge.web/code/main"
+REG_AGENT="${BB}/agent/code/main"
+REG_DISPATCHER="${BB}/burrowee/code/main"
+REG_RELAY="${BB}/relay/code/main"
+REG_RELEASE="${BB}/release/code/main"
 
 SRC_CLI="${BURROWEE_SRC_CLI:-${REG_CLI}}"
 SRC_GATEWAY="${BURROWEE_SRC_GATEWAY:-${REG_GATEWAY}}"
@@ -443,7 +443,7 @@ fi
 RELEASE_HOST="${RELEASE_HOST:-nsm.renative.com}"
 STATIC_DIR="${STATIC_DIR:-/ebs_storage/apps/release.burrowee.com/static}"
 RELEASE_REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
-DP_DIR="${DP_DIR:-${REPO_ROOT}/../../../release.dp/code/release.dp}"
+DP_DIR="${DP_DIR:-${REPO_ROOT}/../../../release.dp/code/main}"
 AGE_KEY_AGE="${DP_DIR}/burrowee-release.key.age"
 AGE_IDENTITY="${AGE_IDENTITY:-${HOME}/.age/burrowee-release.txt}"
 

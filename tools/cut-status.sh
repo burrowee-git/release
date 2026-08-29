@@ -27,13 +27,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/.." && pwd)"
 
 # Ascend to the brand root rather than counting path levels: this repo is
-# checked out at <BB>/release/code/release normally but at
+# checked out at <BB>/release/code/main normally but at
 # <BB>/release/code/.worktrees/<branch> in a feature worktree, and a fixed
 # ../../.. silently resolves to the wrong directory in the second case.
 find_brand_root() {
     local d="$1"
     while [ "${d}" != "/" ]; do
-        [ -d "${d}/gateway/code/gateway" ] && { printf '%s' "${d}"; return 0; }
+        [ -d "${d}/gateway/code" ] && { printf '%s' "${d}"; return 0; }
         d="$(dirname "${d}")"
     done
     return 1
@@ -53,12 +53,12 @@ done
 # the SET is derived below from versions/.
 src_for() {
     case "$1" in
-        cli)      printf '%s' "${BURROWEE_SRC_CLI:-${BB}/cli/code/cli}" ;;
-        gateway)  printf '%s' "${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/gateway}" ;;
-        edge)     printf '%s' "${BURROWEE_SRC_EDGE:-${BB}/edge/code/edge}" ;;
-        agent)    printf '%s' "${BURROWEE_SRC_AGENT:-${BB}/agent/code/agent}" ;;
-        relay)    printf '%s' "${BURROWEE_SRC_RELAY:-${BB}/relay/code/relay}" ;;
-        burrowee) printf '%s' "${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/burrowee}" ;;
+        cli)      printf '%s' "${BURROWEE_SRC_CLI:-${BB}/cli/code/main}" ;;
+        gateway)  printf '%s' "${BURROWEE_SRC_GATEWAY:-${BB}/gateway/code/main}" ;;
+        edge)     printf '%s' "${BURROWEE_SRC_EDGE:-${BB}/edge/code/main}" ;;
+        agent)    printf '%s' "${BURROWEE_SRC_AGENT:-${BB}/agent/code/main}" ;;
+        relay)    printf '%s' "${BURROWEE_SRC_RELAY:-${BB}/relay/code/main}" ;;
+        burrowee) printf '%s' "${BURROWEE_SRC_DISPATCHER:-${BB}/burrowee/code/main}" ;;
         *)        printf '' ;;
     esac
 }

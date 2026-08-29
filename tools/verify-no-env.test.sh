@@ -5,7 +5,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD="${HERE}/verify-no-env.sh"
 GO_BIN=/opt/homebrew/bin/go
-GW=/Volumes/MacintoshED/Workstation/Coding/Burrowee/gateway/code/gateway
+GW=/Volumes/MacintoshED/Workstation/Coding/Burrowee/gateway/code/main
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "${TMP}/stale"

@@ -479,17 +479,17 @@ check "case (h): staged_tolerance_for 1 cli names exactly versions/cli and its s
 # that the stable path is unchanged — a stable-shaped call five sections up
 # never became wrong once beta support landed. beta redirects the whole guard
 # at a SECOND, structurally different origin: a LINKED worktree at
-# <registry-main>/../.worktrees/beta, derived from the registry main path
+# <registry-main>/../beta, derived from the registry main path
 # (never configured separately), on branch beta, clean, == origin/beta.
 new_origin_and_clone beta_ok >/dev/null
 MAIN="${WORK}/beta_ok"
-/usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${WORK}/.worktrees/beta" origin/main 2>/dev/null \
-    || /usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${MAIN}/../.worktrees/beta" origin/main
-BETA="$(cd "${MAIN}/../.worktrees/beta" && pwd)"
+/usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${WORK}/beta" origin/main 2>/dev/null \
+    || /usr/bin/git -C "${MAIN}" worktree add --quiet -b beta "${MAIN}/../beta" origin/main
+BETA="$(cd "${MAIN}/../beta" && pwd)"
 /usr/bin/git -C "${BETA}" push --quiet -u origin beta
 out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: clean synced beta worktree accepted" "$?" "0"
 out="$(assert_release_origin cli "${MAIN}" "${MAIN}" strict beta 2>&1)"; check "beta: primary main folder refused" "$?" "1"
-check_contains "beta: refusal names the beta worktree" "${out}" ".worktrees/beta"
+check_contains "beta: refusal names the beta worktree" "${out}" "${BETA}"
 out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict stable 2>&1)"; check "stable: beta worktree refused" "$?" "1"
 echo dirty > "${BETA}/README.md"
 out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: dirty refused" "$?" "1"
@@ -498,13 +498,13 @@ echo more > "${BETA}/x"; /usr/bin/git -C "${BETA}" add x; /usr/bin/git -C "${BET
 out="$(assert_release_origin cli "${BETA}" "${MAIN}" strict beta 2>&1)"; check "beta: ahead of origin/beta refused" "$?" "1"
 check_contains "beta: ahead message names origin/beta" "${out}" "origin/beta"
 /usr/bin/git -C "${MAIN}" worktree remove --force "${BETA}"
-out="$(assert_release_origin cli "${MAIN}/../.worktrees/beta" "${MAIN}" strict beta 2>&1)"; check "beta: missing worktree refused" "$?" "1"
+out="$(assert_release_origin cli "${MAIN}/../beta" "${MAIN}" strict beta 2>&1)"; check "beta: missing worktree refused" "$?" "1"
 check_contains "beta: missing worktree hint" "${out}" "open a beta cycle"
 # Spec §5.2 quotes this refusal as ONE line with an em-dash — not the two-line
 # form with a separate "git worktree add" hint — so pin the exact shape,
 # not just a loose substring.
 check_contains "beta: missing worktree message matches the spec's single em-dash line" \
-    "${out}" "beta worktree missing: ${MAIN}/../.worktrees/beta — open a beta cycle first"
+    "${out}" "beta worktree missing: ${MAIN}/../beta — open a beta cycle first"
 
 # is_linked_worktree_of provenance: every case above refuses on a PATH
 # mismatch before that predicate is ever reached, so a regression inside the
@@ -521,13 +521,12 @@ DECOY_MAIN="${WORK}/beta_decoy_main"
 new_origin_and_clone beta_decoy_unrelated >/dev/null
 /usr/bin/git -C "${WORK}/beta_decoy_unrelated" checkout --quiet -b beta
 /usr/bin/git -C "${WORK}/beta_decoy_unrelated" push --quiet -u origin beta
-mkdir -p "${WORK}/.worktrees"
-mv "${WORK}/beta_decoy_unrelated" "${WORK}/.worktrees/beta"
-DECOY_BETA="$(cd "${WORK}/.worktrees/beta" && pwd)"
+mv "${WORK}/beta_decoy_unrelated" "${WORK}/beta"
+DECOY_BETA="$(cd "${WORK}/beta" && pwd)"
 out="$(assert_release_origin cli "${DECOY_BETA}" "${DECOY_MAIN}" strict beta 2>&1)"
 check "beta: same-path decoy with different provenance refused" "$?" "1"
 check_contains "beta: decoy refusal names 'not a linked worktree'" "${out}" "not a linked worktree"
-rm -rf "${WORK}/.worktrees/beta"
+rm -rf "${WORK}/beta"
 
 # channel=beta combined with a beta worktree on the WRONG branch: the shared
 # branch check is exercised for stable elsewhere in this file, but never in
@@ -536,9 +535,9 @@ rm -rf "${WORK}/.worktrees/beta"
 # every case above and only show up here.
 new_origin_and_clone beta_wrong_branch >/dev/null
 WB_MAIN="${WORK}/beta_wrong_branch"
-/usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WORK}/.worktrees/beta" origin/main 2>/dev/null \
-    || /usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WB_MAIN}/../.worktrees/beta" origin/main
-WB_BETA="$(cd "${WB_MAIN}/../.worktrees/beta" && pwd)"
+/usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WORK}/beta" origin/main 2>/dev/null \
+    || /usr/bin/git -C "${WB_MAIN}" worktree add --quiet -b not-beta "${WB_MAIN}/../beta" origin/main
+WB_BETA="$(cd "${WB_MAIN}/../beta" && pwd)"
 out="$(assert_release_origin cli "${WB_BETA}" "${WB_MAIN}" strict beta 2>&1)"
 check "beta: wrong-branch beta worktree refused" "$?" "1"
 check_contains "beta: wrong-branch refusal names 'not on beta'" "${out}" "not on beta"
