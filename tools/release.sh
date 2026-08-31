@@ -268,10 +268,17 @@ build_register_helper() {
 # path never reads cli/gateway/edge/agent/relay source) — only the dispatcher
 # and the release repo itself, via assert_release_origins' unconditional tail.
 #
-# After the R2 push, retention is reported (NOT applied): the R2 prune-to-10 and
-# the GitHub prune-to-10 both run DRY-RUN so the cut surfaces what is now over
-# the retention limit. The destructive drain (--execute) is a deploy-phase step,
-# never run automatically from a publish.
+# Retention runs HERE, after the publish succeeded — never before. The
+# publish (just above) is what establishes that the newest stamp is safely
+# uploaded, and pruning to "newest 10" against a count that is about to
+# change is exactly how a retention pass deletes something it should have
+# kept.
+#
+# This replaces the report-then-drain contract this RUNBOOK used to
+# document. That contract was sound in principle and empty in practice:
+# nothing ran the drain, on either brand, for months, and the buckets
+# reached 27.3 GB and 6.5 GB of unreachable artifacts. A control nobody
+# executes is not a control.
 if [ "${1:-}" = "publish" ]; then
     shift
     comp="${1:-}"
@@ -281,13 +288,23 @@ if [ "${1:-}" = "publish" ]; then
     build_register_helper
     "${REGISTER_BIN}" publish --comp "${comp}" "$@"
     echo
-    echo "→ retention (dry-run — run prune with --execute in the deploy phase to apply):"
-    "${REGISTER_BIN}" prune --comp "${comp}" || true
+    echo "→ retention (applying):"
+    # register publish (above) is stable-only — Publish() takes no --channel
+    # flag at all — so CHANNEL is never set reaching this branch (it is a
+    # plain literal default set further down, past this branch's `exit 0`,
+    # see the CHANNEL="stable" comment below). Default it explicitly rather
+    # than reference it bare: this file is `set -u` (line 94), and a bare
+    # "${CHANNEL}" here would die with "CHANNEL: unbound variable" right
+    # after the R2 push already succeeded — failing the retention step in
+    # the one way `|| true` cannot catch, because the shell never reaches the
+    # command it's attached to.
+    "${REGISTER_BIN}" prune --comp "${comp}" --channel "${CHANNEL:-stable}" --execute || true
     # GitHub prune scope is cli/gateway/edge/agent (relay has no GitHub release)
     # — PUBLIC_COMPONENTS (tools/public_components.sh), not a second copy.
     gh_comps="${comp}"
     [ "${comp}" = all ] && gh_comps="${PUBLIC_COMPONENTS}"
-    COMPONENTS="${gh_comps}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
+    COMPONENTS="${gh_comps}" CHANNEL="${CHANNEL:-stable}" \
+        bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
     exit 0
 fi
 
