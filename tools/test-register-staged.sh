@@ -71,8 +71,63 @@ skip() { printf '\n⚠ SKIPPED: %s\n' "$*"; }
 
 # ---- workdir + cleanup -------------------------------------------------------
 W="$(mktemp -d "${TMPDIR:-/tmp}/test-register-staged-XXXXXX")"
-cleanup() { rm -rf "${W}"; }
+# chmod before rm: TEST 3 runs with HOME pointed at a dir inside ${W}, so a
+# `go list -m` under it can materialise a Go module cache there — and module
+# cache trees are deliberately read-only (0555 dirs), which `rm -rf` cannot
+# remove. That made the EXIT trap fail and the whole suite report exit 1
+# immediately after printing "ALL TESTS PASSED". `|| true` on the rm keeps a
+# cleanup failure from doing that again, and the rm still reports to stderr.
+cleanup() {
+    chmod -R u+w "${W}" 2>/dev/null || true
+    rm -rf "${W}" || true
+}
 trap cleanup EXIT INT TERM
+
+# The real module cache, passed into the tests that redirect HOME so they read
+# an already-populated cache instead of downloading a whole Go toolchain into
+# ${W} on every run. Resolved from the ambient go, never hardcoded, and left
+# unset (not set-to-empty, which `go` rejects) if it cannot be resolved.
+#
+# Expanded as ${GO_CACHE_ENV[@]+"${GO_CACHE_ENV[@]}"}: /bin/bash here is 3.2,
+# where a plain "${arr[@]}" on an EMPTY array aborts under `set -u`.
+GO_CACHE_ENV=()
+_gomodcache="$(go env GOMODCACHE 2>/dev/null || true)"
+if [ -n "${_gomodcache}" ]; then
+    GO_CACHE_ENV=(GOMODCACHE="${_gomodcache}")
+fi
+
+# ---- REGISTER_BIN ------------------------------------------------------------
+# register_staged asks the register binary for the R2 key layout
+# (`key-prefix --comp <c> --channel <ch>`, internal/register.KeyPrefix) instead
+# of rebuilding it in shell. release.sh provides ${REGISTER_BIN} via
+# build_register_helper; this harness extracts the function into a bare
+# `bash -c` and so must provide it too.
+#
+# It is not optional. With REGISTER_BIN unset the command substitution runs
+# `key-prefix …` as a bare word, "command not found" goes to stderr, and
+# key_prefix becomes the EMPTY STRING — every beta and relay key silently
+# loses its "<comp>/" prefix and the tests below assert against a layout the
+# real cut never produces. Exported once here, so every `env … bash -c` in
+# this file inherits it (none of them use `env -i`).
+#
+# `key-prefix` reads no config and makes no network call — it is a pure
+# function of (comp, channel), so building and running it here is offline.
+REGISTER_BIN="${W}/tools/burrowee-release-register"
+export REGISTER_BIN
+mkdir -p "${W}/tools"
+TEST_GO_BIN="${BURROWEE_GO_BIN:-/opt/homebrew/bin/go}"
+command -v "${TEST_GO_BIN}" >/dev/null 2>&1 || TEST_GO_BIN="go"
+"${TEST_GO_BIN}" build -buildvcs=false -o "${REGISTER_BIN}" ./cmd/burrowee-release-register \
+    || { echo "✗ failed to build burrowee-release-register (register_staged needs its key-prefix verb)" >&2; exit 1; }
+# Prove the dependency resolves BEFORE any test leans on it — an empty
+# key_prefix is the failure mode this whole block exists to prevent, and it is
+# silent at every call site.
+KP_BETA="$("${REGISTER_BIN}" key-prefix --comp cli --channel beta)"
+[ "${KP_BETA}" = "cli/beta/" ] \
+    || die "harness: REGISTER_BIN key-prefix --comp cli --channel beta printed '${KP_BETA}', want 'cli/beta/'"
+KP_STABLE="$("${REGISTER_BIN}" key-prefix --comp cli --channel stable)"
+[ "${KP_STABLE}" = "cli/" ] \
+    || die "harness: REGISTER_BIN key-prefix --comp cli --channel stable printed '${KP_STABLE}', want 'cli/'"
 
 # ---- shared config -----------------------------------------------------------
 TARGETS=(
@@ -114,14 +169,29 @@ GO_ENV=(GO_BIN=/opt/homebrew/bin/go GOTOOLCHAIN=go1.26.5 GOPRIVATE="github.com/b
 # command not found" instead of exercising the actual resolution path.
 #
 # register_staged also calls plat_of() — "the one spelling" of the platform
-# string, defined once beside TARGETS in release.sh — rather than re-deriving
-# it inline. Grep the real one-line definition out of release.sh (not a
+# string, defined once beside TARGETS — rather than re-deriving it inline.
+# Grep the real one-line definition out of the file that owns it (not a
 # hand-copied duplicate here, which would drift silently) so the extracted
 # function has it available too.
+#
+# That file is tools/targets.sh, not tools/release.sh: plat_of and TARGETS
+# moved there and release.sh sources it (line ~124). This grep still named
+# release.sh, matched nothing, and — under `set -e` — aborted the whole
+# harness at TEST 1 with no output at all. Every test in this file was inert.
+# Hence the explicit emptiness check below rather than leaning on `set -e`:
+# a grep that silently stops matching must read as a failure, not as a
+# suite that mysteriously prints one heading and exits 1.
+#
+# targets.sh is grepped, never sourced: it also defines TARGETS, and each test
+# below sets its own TARGETS array before sourcing the extracted file.
 extract_register_staged() {
     local out="$1"
     printf 'source "%s/tools/updater_pin.sh"\n' "${REPO_ROOT}" > "${out}"
-    grep '^plat_of()' "${REPO_ROOT}/tools/release.sh" >> "${out}"
+    local plat_of_def
+    plat_of_def="$(grep '^plat_of()' "${REPO_ROOT}/tools/targets.sh" || true)"
+    [ -n "${plat_of_def}" ] \
+        || die "harness: no '^plat_of()' definition in tools/targets.sh — the extraction helper needs updating (see its comment)"
+    printf '%s\n' "${plat_of_def}" >> "${out}"
     python3 - "${REPO_ROOT}/tools/release.sh" "${out}.body" <<'PYEOF'
 import sys
 
@@ -322,6 +392,7 @@ TEST3_OUT="$(
     PATH="${W}/bin:${PATH}" \
     HOME="${FAKE_HOME}" \
     "${GO_ENV[@]}" \
+    ${GO_CACHE_ENV[@]+"${GO_CACHE_ENV[@]}"} \
     DRY_RUN=0 \
     RELEASE_REPO="${RELEASE_REPO}" \
     SHA256="${SHA256}" \
@@ -579,9 +650,19 @@ fi
 # TEST 9 — beta channel (Task B3): CHANNEL=beta cli body carries
 # "channel":"beta", "gated":false (relay-only rule unaffected by channel),
 # "github_release":"" (a beta cut never creates a GitHub Release), and an R2
-# url_or_key under <comp>/<stamp>/ — never a github.com asset URL.
+# url_or_key under <comp>/beta/<stamp>/ — never a github.com asset URL, and
+# never the old FLAT <comp>/<stamp>/ this branch moved away from.
+#
+# The two key assertions below are a matched pair on purpose. The positive one
+# ("cli/beta/<stamp>/…") fails if key_prefix comes back empty — the exact
+# regression an unset REGISTER_BIN produces, which is why the harness now
+# builds one and asserts on it above. The negative one ("cli/<stamp>/" must
+# NOT appear) fails if the prefix regresses to the pre-branch flat layout,
+# which the positive assertion alone would also catch but which is worth
+# naming, since a row pointing at the flat key is a row pointing at objects
+# no publish writes and no prune can reach.
 # =============================================================================
-say "TEST 9 — beta channel: cli body carries channel=beta, gated=false, empty github_release, R2 url_or_key"
+say "TEST 9 — beta channel: cli body carries channel=beta, gated=false, empty github_release, R2 url_or_key under <comp>/beta/"
 
 STAGE9="${W}/stage9"
 make_stage "${STAGE9}" "cli"
@@ -610,14 +691,19 @@ printf '%s\n' "${RESULT9}" | grep -q '"gated":false' \
     || die "TEST 9: expected \"gated\":false for beta cli (only relay is gated). Output:\n${RESULT9}"
 printf '%s\n' "${RESULT9}" | grep -q '"github_release":""' \
     || die "TEST 9: expected empty github_release for a beta cut (no GitHub Release). Output:\n${RESULT9}"
-printf '%s\n' "${RESULT9}" | grep -q "cli/${BETA_STAMP}/burrowee-cli-linux-amd64.zip" \
-    || die "TEST 9: expected R2 url_or_key cli/${BETA_STAMP}/burrowee-cli-linux-amd64.zip. Output:\n${RESULT9}"
+printf '%s\n' "${RESULT9}" | grep -qF "cli/beta/${BETA_STAMP}/burrowee-cli-linux-amd64.zip" \
+    || die "TEST 9: expected R2 url_or_key cli/beta/${BETA_STAMP}/burrowee-cli-linux-amd64.zip (an empty key_prefix or the old flat layout both land here). Output:\n${RESULT9}"
+printf '%s\n' "${RESULT9}" | grep -qF "cli/beta/${BETA_STAMP}/SHA256SUMS.txt" \
+    || die "TEST 9: expected sums_ref cli/beta/${BETA_STAMP}/SHA256SUMS.txt. Output:\n${RESULT9}"
+if printf '%s\n' "${RESULT9}" | grep -qF "cli/${BETA_STAMP}/"; then
+    die "TEST 9: body carries the OLD flat key cli/${BETA_STAMP}/ — a beta cut publishes under cli/beta/. Output:\n${RESULT9}"
+fi
 printf '%s\n' "${RESULT9}" | grep -q 'github.com' \
     && die "TEST 9: a beta body must never carry a github.com asset URL. Output:\n${RESULT9}"
 printf '%s' "$(body_of "${RESULT9}")" | json_ok \
     || die "TEST 9: beta register body is not valid JSON. Output:\n${RESULT9}"
 
-echo "✓ TEST 9 PASSED — beta channel: channel=beta, gated=false, empty github_release, R2 url_or_key, valid JSON"
+echo "✓ TEST 9 PASSED — beta channel: channel=beta, gated=false, empty github_release, R2 url_or_key under cli/beta/, valid JSON"
 
 # =============================================================================
 echo ""
