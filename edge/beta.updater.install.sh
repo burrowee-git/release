@@ -34,7 +34,7 @@
 # binaries, migrations/upgrade.sh is still migrations-only, and
 # updater.install.sh still touches only the updater. And it is the SAME FILE,
 # not a fork per mode: everything that makes this script a trust anchor — the
-# pinned preflight sha256, the baked pubkey, the v0.2.21.beta.2026.08.28.716c7ede floor, the
+# pinned preflight sha256, the baked pubkey, the v0.3.1.beta.2026.08.31.556fa544 floor, the
 # SHA256SUMS.txt minisign gate — is the same lines for all three modes, because
 # a copy of a trust anchor is a copy that drifts from it.
 #
@@ -163,7 +163,7 @@ PREFLIGHT_SHA256="5bf7689757d985094e05feed5a05c3f06b13e9d3e2d79f8179a4b89ba4b82b
 # It rides the same first-party static channel, over the same TLS fetch, that
 # delivered $PUBKEY, so it costs no trust the installer did not already require;
 # and no download source gets to choose it.
-MIN_VERSION="v0.2.21.beta.2026.08.28.716c7ede"
+MIN_VERSION="v0.3.1.beta.2026.08.31.556fa544"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 
 # resolve_prefix — the install root this bootstrap hands the inner installer.
