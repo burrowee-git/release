@@ -9,6 +9,7 @@
 //	burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
 //	burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> [--channel stable|beta] --stamp <stamp> --from-dir <dir> [--dir <d>]
 //	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
+//	burrowee-release-register fetch-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --to-dir <dir> [--dir <d>]
 //	burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
 //	burrowee-release-register key-prefix --comp <cli|gateway|edge|agent|relay> [--channel stable|beta]
 package main
@@ -20,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/burrowee-git/release/internal/r2"
@@ -46,6 +48,8 @@ func main() {
 		runPublishDir(os.Args[2:])
 	case "publish-relay":
 		runPublishRelay(os.Args[2:])
+	case "fetch-dir":
+		runFetchDir(os.Args[2:])
 	case "prune":
 		runPrune(os.Args[2:])
 	case "key-prefix":
@@ -72,6 +76,7 @@ func usage() {
   burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
   burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
+  burrowee-release-register fetch-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --to-dir <dir> [--dir <d>]
   burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
   burrowee-release-register key-prefix --comp <cli|gateway|edge|agent|relay> [--channel stable|beta]`)
 }
@@ -219,6 +224,59 @@ func runPublishRelay(args []string) {
 
 	if err := register.PublishFromDir(context.Background(), client, "relay", "stable", *fromDir, *stamp, os.Stdout); err != nil {
 		log.Fatalf("publish-relay: %v", err)
+	}
+}
+
+// runFetchDir lists <comp>/<stamp>/ in R2 — the pre-migration flat layout,
+// not register.KeyPrefix's <comp>/beta/<stamp>/ — Gets each object, and
+// writes it into --to-dir under its base name. It is the inverse of
+// publish-dir/PublishFromDir, built for the one-time beta-layout migration
+// (tools/migrate-beta-layout.sh): the only way to re-publish an artifact
+// under a different key without rebuilding it from source is to read the
+// bytes back out first.
+func runFetchDir(args []string) {
+	fs := flag.NewFlagSet("fetch-dir", flag.ExitOnError)
+	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
+	comp := fs.String("comp", "", "component: cli|gateway|edge|agent|relay (required)")
+	stamp := fs.String("stamp", "", "release stamp (e.g. v0.2.21.beta.2026.08.28.716c7ede) — read from R2 prefix <comp>/<stamp>/ (required)")
+	toDir := fs.String("to-dir", "", "local directory to write the fetched objects into (required)")
+	fs.Parse(args) //nolint:errcheck
+
+	if *comp == "" || *stamp == "" || *toDir == "" {
+		fmt.Fprintln(os.Stderr, "fetch-dir: --comp, --stamp and --to-dir are required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	_, r2cfg, err := register.LoadPublishConfig(*dir)
+	if err != nil {
+		log.Fatalf("fetch-dir: %v", err)
+	}
+	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
+
+	if err := os.MkdirAll(*toDir, 0o755); err != nil {
+		log.Fatalf("fetch-dir: mkdir %s: %v", *toDir, err)
+	}
+
+	ctx := context.Background()
+	prefix := *comp + "/" + *stamp + "/"
+	keys, err := client.List(ctx, prefix)
+	if err != nil {
+		log.Fatalf("fetch-dir: list %s: %v", prefix, err)
+	}
+	if len(keys) == 0 {
+		log.Fatalf("fetch-dir: no objects found under %s", prefix)
+	}
+	for _, key := range keys {
+		body, err := client.Get(ctx, key)
+		if err != nil {
+			log.Fatalf("fetch-dir: %v", err)
+		}
+		dest := filepath.Join(*toDir, path.Base(key))
+		if err := os.WriteFile(dest, body, 0o644); err != nil {
+			log.Fatalf("fetch-dir: write %s: %v", dest, err)
+		}
+		fmt.Printf("✓ %s -> %s\n", key, dest)
 	}
 }
 
