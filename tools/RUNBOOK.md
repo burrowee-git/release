@@ -640,8 +640,23 @@ is unchanged. What it does, once built/signed/notarized:
 
 - **No** git tag, **no** GitHub Release — `gh_release_publish` is skipped
   entirely (see `do_release`'s `CHANNEL=beta` branch).
-- Uploads the four zips + `SHA256SUMS.txt(.minisig)` to R2 under
-  `<comp>/<stamp>/` (`register publish-dir`).
+- Uploads the five platform zips + `SHA256SUMS.txt(.minisig)` to R2 under
+  **`<comp>/beta/<stamp>/`** (`register publish-dir --channel beta`), then
+  writes `<comp>/beta/latest.json` last, once every artifact is up. Five,
+  not four: every public component ships `darwin-amd64-legacy` alongside
+  the four base platforms (`ships_target` excludes it for relay only).
+
+  **The `beta/` segment is the layout, not a decoration.** A beta stamp
+  used to sit at `<comp>/<stamp>/`, interleaved with the stable stamps,
+  which is why nothing could bound it: the stable retention pass skipped
+  it (the stamp reads `beta`) and no beta pass could list it (there was no
+  prefix to list). Every expression of the layout comes from one place,
+  `register.KeyPrefix(comp, channel)` — `publish-dir`, `prune`, the
+  manifest writer, and `release.sh` via the `key-prefix` verb. Nothing
+  rebuilds the string in shell.
+
+  Relay is the same shape on both channels: `relay/<stamp>/` for stable,
+  `relay/beta/<stamp>/` for beta, via `register publish-relay --channel`.
 - Regenerates the bootstraps (`gen-bootstraps.sh`, idempotent — it renders
   every channel's twin on every invocation, stable and beta both) and scps
   `<comp>/beta.install.sh` + `beta.upgrade.sh` (+ `beta.updater.install.sh`
@@ -652,14 +667,30 @@ is unchanged. What it does, once built/signed/notarized:
   stable `[RELEASED: <comp>]` one, so a batched beta cut through
   `release.command` still pushes its marker before the next component starts.
 - Registers a `staged`, `channel=beta` row with the console (R2 keys, no
-  `github_release`), then drains retention for real — both surfaces, right
-  here at cut time (see below for why beta's "publish" moment is the cut
-  itself, not a later console step).
+  `github_release`), then — **only if that registration succeeded** —
+  drains retention for real, both surfaces, right here at cut time (see
+  below for why beta's "publish" moment is the cut itself, not a later
+  console step, and why the drain is conditional).
 
-**Retention now drains automatically at the five points below, covering
-every component and every channel, on both surfaces but for one narrow,
-deliberate exception** (a plain stable cut's own GitHub report, named after
-the list). Until this change, every retention surface — R2 objects and
+**Retention now drains automatically at the five points below.** Every
+component and every channel is covered on the surface that actually holds
+its artifacts, with two things named rather than glossed:
+
+- **One surface is still report-only, by design** — a plain stable cut's
+  own GitHub tail. Named in full after the list.
+- **R2 for a stable PUBLIC component is drained at console-promote, not at
+  its cut** — because a stable cut does not put it in R2 at all; the
+  promote does (`release.sh publish`). "Every channel" therefore means
+  every channel is drained at the point where its bytes become reachable,
+  which is a different point per channel, not that every site drains
+  everything.
+
+Relay is R2-only on both channels, so it has no GitHub half to miss. And
+`publish --comp all` no longer prunes relay: it publishes cli/gateway/edge/
+agent, so draining relay there was draining a component the command had not
+touched. Relay's own cut drains it, and the nightly agent backstops it.
+
+Until this change, every retention surface — R2 objects and
 GitHub tags, stable and beta alike — only ever *reported*: `register prune` and
 `tools/prune-releases.sh` printed what was over the keep limit, and an
 operator was expected to re-run them with `--execute` as a separate
@@ -674,14 +705,18 @@ safely reachable:
   helper that copies an already-public GitHub Release's binaries into R2
   (`register publish`, `internal/register/publish.go`; the `publish` branch
   near the top of `release.sh`). The moment that R2 push succeeds, it runs
-  `register prune --comp <comp> --channel <ch> --execute` and
-  `tools/prune-releases.sh --execute` for real. `register publish` only
-  ever resolves the *current stable* catalog row, so this site is
-  stable-only — a beta row never reaches it.
+  `register prune --comp <c> --channel stable --execute` for each component
+  and `CHANNEL=stable tools/prune-releases.sh --execute` for real.
+  `register publish` only ever resolves the *current stable* catalog row,
+  so this site is stable-only — a beta row never reaches it, and both calls
+  say `stable` as a literal rather than reading `CHANNEL` out of the
+  environment. `--comp all` expands to `PUBLIC_COMPONENTS`
+  (cli/gateway/edge/agent) on **both** surfaces, not just GitHub: `prune
+  --comp all` includes relay, which this command never publishes.
 - **A beta cut** (`do_release`'s `CHANNEL=beta` branch, above) — unlike
-  stable, a beta cut's R2 upload above *is* the moment its artifacts become
+  stable, a beta cut's R2 upload *is* the moment its artifacts become
   reachable; there is no separate promote-to-R2 step to wait for. So the
-  drain runs right after it, in the same function: `register prune --comp
+  drain runs in the same function, at the end: `register prune --comp
   <comp> --channel beta --execute` (R2, keep 1) followed by `CHANNEL=beta
   COMPONENTS=<comp> tools/prune-releases.sh --execute` (GitHub, keep 1).
   The GitHub call closes a gap this RUNBOOK previously documented as having
@@ -689,13 +724,16 @@ safely reachable:
   console promotes a row to `public`) used to accumulate silently past 1.
 - **A relay cut, either channel** (`do_release_relay`) — relay has no
   GitHub side (R2-only, always), so one call:
-  `register prune --comp relay --channel <ch> --execute`, right after the
-  `register publish-relay` upload a few lines above it.
+  `register prune --comp relay --channel <ch> --execute`, at the end of the
+  function. `<ch>` is the cut's own channel, and so is the `publish-relay
+  --channel <ch>` upload a few steps above it: relay beta artifacts land at
+  `relay/beta/<stamp>/` like any other component's.
 - **`--distribute-only <comp> <stamp>`** (`distribute_only`, the second
   half of the split `rkit build` → `release.sh --distribute-only` flow) —
   drains GitHub only, right after `gh_release_publish` creates the tag +
   Release, the self-hosting scp, the marker commit, and `register_staged`
-  have all already succeeded: `CHANNEL=stable COMPONENTS=<comp>
+  have all already succeeded — a fact the code now *checks*, see "The drain
+  is conditional" below: `CHANNEL=stable COMPONENTS=<comp>
   tools/prune-releases.sh --execute`. `--distribute-only` refuses
   `--channel beta` outright, so `stable` is passed explicitly rather than
   left to the tool's default — it is the only value this path can ever
@@ -703,15 +741,50 @@ safely reachable:
   component to R2 (that is the stable console-promote site above, a later,
   separate step).
 - **`--distribute-only relay <stamp>`** (`distribute_relay`, reached from
-  `distribute_only`'s own dispatch) — drains R2 only, right after
-  `register publish-relay` uploads: `register prune --comp relay --channel
-  stable --execute`. Same reasoning as above for passing `stable`
-  explicitly. Relay has no GitHub Release to prune here either.
+  `distribute_only`'s own dispatch) — drains R2 only, at the end of the
+  function: `register prune --comp relay --channel stable --execute`. Same
+  reasoning as above for passing `stable` explicitly. Relay has no GitHub
+  Release to prune here either.
 
 All seven calls across these five sites are `|| true`: a retention failure
-must not fail a release whose artifacts are already safely out. Order is
-not negotiable at any of them: the drain runs strictly *after* the upload
-or publish that makes the new stamp reachable, never before, because
+must not fail a release whose artifacts are already safely out. (A raw
+`grep -- --execute tools/release.sh` now returns more than seven lines: the
+skip branches described next *echo* the remediation command for an operator
+to copy. Count invocations, not matches.)
+
+**The drain is conditional, not merely last.** For relay (gated on every
+channel) and for any component's beta, the console ROW — not the R2 object
+— is what makes the bytes installable: an artifact in the bucket with no
+catalog row is unreachable. `register_staged` used to warn and return 0
+when its console POST failed, so the drains ran regardless. With beta at
+keep=1 that meant a cut could upload, fail to register, and then delete the
+PREVIOUS beta — leaving the component with no installable beta at all and
+no artifact-level rollback (see `keepFor`'s own doc). `register_staged` now
+returns non-zero on a failed POST — still non-fatal, every caller swallows
+the status — and the four drain sites gate on it. When the gate refuses,
+the skip is loud on stderr and prints the exact commands to run after
+registering by hand.
+
+Two `register_staged` paths still return 0 without creating a row (the
+release identity dir unconfigured; no artifact zips found under the stage
+dir). Both are unreachable on the gated paths: a beta or relay cut passes
+its own `publish-dir`/`publish-relay` first, which reads `config.toml` from
+the same location under `set -e`, and builds every platform zip before
+registering. They remain reachable from `--distribute-only` over an
+externally staged dir, where the drain is stable-only (keep 3/10, not 1)
+and the previous version survives.
+
+**Ambient environment is kept out of every automatic drain.** Both
+surfaces read policy from the environment by design — `prune-releases.sh`
+takes `KEEP="${KEEP:-10}"`, and `CHANNEL` steers a whole cut — which was
+fine while a human typed the command and is not fine now that a cut fires
+it. Every automatic `prune-releases.sh --execute` call runs through `env -u
+KEEP`, and every automatic `--channel` is a literal, never a `${CHANNEL:-…}`
+fallback. A stray `export KEEP=1` or `export CHANNEL=beta` in an operator's
+shell cannot steer a destructive drain.
+
+Order is not negotiable at any of them: the drain runs strictly *after* the
+upload or publish that makes the new stamp reachable, never before, because
 pruning against a count that is about to change is exactly how a retention
 pass deletes something it should have kept. None reaches a `--dry-run`
 invocation — each sits past its function's own
@@ -724,9 +797,21 @@ plain stable and beta cuts of a public component and of relay, plus a
 `rkit build --dry-run`-staged `--distribute-only` of both a public
 component and relay. Every one printed only its pre-existing `would:`
 line, if it had one, and none reached the new `(applying)` text or
-invoked a prune tool. The nightly `com.jc.r2-cleanup` launchd agent
-remains the net for a release that fails, or is interrupted, before its
-own drain completes.
+invoked a prune tool. Two drains have MOVED since those runs —
+`do_release_relay`'s and `distribute_relay`'s, from just after their upload
+to the end of the function, so the registration gate above could exist —
+and both still sit past the same `DRY_RUN` early return; that was
+re-confirmed by reading the control flow, not by re-running the six shapes.
+
+The nightly `com.jc.r2-cleanup` launchd agent remains the net for a release
+that fails, or is interrupted, before its own drain completes — **and it is
+now a net for beta too.** `~/Workstation/Runtime/r2-cleanup.sh` used to run
+a single `register prune --comp all` with no `--channel`; `prune` defaults
+to stable, so nothing on a schedule had ever listed a `<comp>/beta/` prefix.
+It now runs both channels, mirroring the GitHub half in
+`github-cleanup.sh`, which already did. (Those scripts are machine-local
+orchestration, not part of this repo — they own no keep counts, only the
+schedule.)
 
 **One report-only site remains, by design, not by omission.** A plain
 stable cut's own tail (`do_release`, past `gh_release_publish`) still only
@@ -775,11 +860,65 @@ a stable-channel verb; a beta cut uploads to R2 in one step`) — it re-publishe
 an already-staged, already-GitHub-released component, which a beta cut never
 produces.
 
+### `latest.json` — the per-channel pointer in the bucket
+
+Every `publish-dir` / `publish-relay` writes one more object after the
+artifacts: **`<comp>/latest.json`** on stable, **`<comp>/beta/latest.json`**
+on beta (`register.WriteLatest`, keyed off the same
+`register.KeyPrefix(comp, channel)` as everything else). It names the stamp,
+the semver, and the zip filenames of that channel's newest publish.
+
+Three things to know about it when you are looking at the bucket:
+
+- **It is written LAST, on purpose.** It is the pointer that makes a stamp
+  discoverable, so it must never name artifacts that are not uploaded yet.
+  A `publish-dir` that aborts mid-upload leaves the previous pointer intact.
+- **One per channel, never shared.** A beta publish writes only
+  `<comp>/beta/latest.json`; it must not touch `<comp>/latest.json`, which
+  is the stable pointer. Relay is the same:
+  `relay/latest.json` vs `relay/beta/latest.json`. (This was the C-grade
+  defect the branch's final review caught — `publish-relay` hardcoded the
+  stable channel, so a relay beta cut overwrote the stable pointer with a
+  beta stamp. `TestPublishFromDirRelayBetaUsesBetaPrefix` now pins it.)
+- **It is not what the console reads.** The console has its own catalog row
+  and writes `<comp>/latest.beta.json` on promote (below). `latest.json` is
+  the bucket's own record of what the last publish put there.
+
+`prune` never deletes it: it lists a channel's prefix and drops whole
+version directories, and `latest.json` is not one.
+
+### Migrating the pre-`beta/` layout — `tools/migrate-beta-layout.sh`
+
+Beta stamps cut before this branch sit at the old flat `<comp>/<stamp>/`,
+where no retention pass can reach them (the stable pass skips a stamp
+reading `beta`; the beta pass lists `<comp>/beta/` and never sees them).
+`tools/migrate-beta-layout.sh` moves them, using two register verbs:
+`fetch-dir` reads a flat `<comp>/<stamp>/` prefix back out of R2 into a
+local dir — the only way to re-key an artifact without rebuilding it — and
+`publish-dir --channel beta` writes it to `<comp>/beta/<stamp>/`.
+
+- **Dry-run by default.** Without `--execute` it prints the would-fetch and
+  would-publish lines and makes **no** R2 call at all, credentialed or
+  otherwise — both verbs sit inside the single `--execute` branch.
+- **One-time, with the three stamps hardcoded** (`edge`, `gateway`, `relay`,
+  as cut on 2026-08-28). It is not a mode of the retention pass and takes no
+  component argument. Delete the script once the migration is confirmed.
+- **It is an operator step, not part of any cut.** Nothing in `release.sh`
+  calls it. It expects `dist/.tools/burrowee-release-register` to exist —
+  a cut builds it, or `go build -o dist/.tools/burrowee-release-register
+  ./cmd/burrowee-release-register`.
+- **It copies; it does not sweep.** The old flat keys stay where they are
+  after a successful run. Order is not negotiable, and the script's own
+  header says it: copy → repoint the console rows → verify → only then
+  delete the old keys. Deleting before repointing takes the artifacts out
+  from under any host currently running that beta.
+
 ### What the console does on promote
 
 Promoting a `staged`, `channel=beta` row is the **mirror** of a stable
 promote: stable moves GitHub → R2, beta moves **R2 → GitHub**. The console
-verifies the six R2 objects (four zips + sums + minisig) are complete and
+verifies the stamp's R2 objects (the platform zips + `SHA256SUMS.txt` +
+`.minisig`, now under `<comp>/beta/<stamp>/`) are complete and
 checksum-clean, creates a **prerelease** GitHub Release `<comp>/<stamp>` on
 `burrowee-git/release` streaming the assets from R2, flips the row to
 `public` (current within `(component, beta)`), and writes
