@@ -289,21 +289,35 @@ if [ "${1:-}" = "publish" ]; then
     "${REGISTER_BIN}" publish --comp "${comp}" "$@"
     echo
     echo "→ retention (applying):"
-    # register publish (above) is stable-only — Publish() takes no --channel
-    # flag at all — so CHANNEL is never set reaching this branch (it is a
-    # plain literal default set further down, past this branch's `exit 0`,
-    # see the CHANNEL="stable" comment below). Default it explicitly rather
-    # than reference it bare: this file is `set -u` (line 94), and a bare
-    # "${CHANNEL}" here would die with "CHANNEL: unbound variable" right
-    # after the R2 push already succeeded — failing the retention step in
-    # the one way `|| true` cannot catch, because the shell never reaches the
-    # command it's attached to.
-    "${REGISTER_BIN}" prune --comp "${comp}" --channel "${CHANNEL:-stable}" --execute || true
+    # Scope, BOTH surfaces: `publish --comp all` expands to cli/gateway/edge/
+    # agent (runPublish's own list) — relay is never console-promoted, it has
+    # no `publish` step at all. But `prune --comp all` DOES include relay, so
+    # passing "all" straight through drained relay's R2 to keep=3 on behalf of
+    # a publish that had not touched a single relay object. Expand to the same
+    # PUBLIC_COMPONENTS list (tools/public_components.sh), not a second copy,
+    # and loop — `prune --comp` takes exactly one component.
+    prune_comps="${comp}"
+    [ "${comp}" = all ] && prune_comps="${PUBLIC_COMPONENTS}"
+    # Channel: the literal `stable`, NOT "${CHANNEL:-stable}". register publish
+    # (above) is stable-only — Publish() takes no --channel flag at all — and a
+    # `:-` fallback on this name is exactly what the CHANNEL="stable" comment
+    # below forbids: CHANNEL is generic enough that a stray `export
+    # CHANNEL=beta` in an operator's shell would silently skip stable retention
+    # here and run a keep-1 BETA sweep in its place. A bare "${CHANNEL}" is not
+    # the alternative either (`set -u`, and CHANNEL is not assigned until past
+    # this branch's `exit 0`) — a literal is, as at the other two sites.
+    for prune_comp in ${prune_comps}; do
+        "${REGISTER_BIN}" prune --comp "${prune_comp}" --channel stable --execute || true
+    done
     # GitHub prune scope is cli/gateway/edge/agent (relay has no GitHub release)
-    # — PUBLIC_COMPONENTS (tools/public_components.sh), not a second copy.
-    gh_comps="${comp}"
-    [ "${comp}" = all ] && gh_comps="${PUBLIC_COMPONENTS}"
-    COMPONENTS="${gh_comps}" CHANNEL="${CHANNEL:-stable}" \
+    # — the same PUBLIC_COMPONENTS expansion as the R2 half above.
+    # `env -u KEEP`: prune-releases.sh reads KEEP from the environment
+    # (KEEP="${KEEP:-10}"), which was fine while a human typed the command and
+    # is not fine now that a cut fires it automatically — an operator's leftover
+    # `export KEEP=1` would silently turn this drain into a keep-1 sweep of the
+    # component that was just promoted. Strip it so the script's own defaults
+    # govern; this file carries no retention counts.
+    env -u KEEP COMPONENTS="${prune_comps}" CHANNEL=stable \
         bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
     exit 0
 fi
@@ -1423,7 +1437,11 @@ distribute_only() {
     # of this file), which drains R2 retention itself.
     echo
     echo "→ GitHub release retention (applying):"
-    CHANNEL=stable COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+    # `env -u KEEP`: prune-releases.sh takes KEEP from the environment, and this
+    # call is automatic now — a leftover `export KEEP=1` in the operator's shell
+    # must not steer a destructive drain the cut fires on its own. Same strip at
+    # every automatic --execute site; no retention count is written here.
+    env -u KEEP CHANNEL=stable COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
 
     echo "✓ distributed ${comp}/${stamp}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${comp}/${stamp}"
@@ -2277,7 +2295,10 @@ do_release() {
         # component, matching the R2 call above (a beta cut is always
         # exactly one component — WHAT=all is expanded into a per-component
         # loop before do_release is ever called, see COMPONENTS above).
-        CHANNEL=beta COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+        # `env -u KEEP`: the script's KEEP default is what must govern an
+        # automatic drain, never an operator's ambient export — same strip at
+        # every automatic --execute site.
+        env -u KEEP CHANNEL=beta COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
 
         echo "✓ released ${comp} beta ${stamp} (private, R2 ${comp}/${stamp}/)"
         return 0
