@@ -147,8 +147,7 @@ tools/RUNBOOK.md           ← operator notes on hazards the tooling does not pr
 burrowee-release.pub       ← minisign signing public key (added at activation)
 ```
 
-- `burrowee-git/release` (PUBLIC). Trunk: `main`. gh.account: `burrowee-git`.
-- Call gh via `~/bin/ghp`, never bare `gh`.
+- `burrowee-git/release` (PUBLIC). Trunk: `main`.
 
 ## Status
 
