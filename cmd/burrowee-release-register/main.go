@@ -10,6 +10,7 @@
 //	burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
 //	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
 //	burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
+//	burrowee-release-register key-prefix --comp <cli|gateway|edge|agent|relay> [--channel stable|beta]
 package main
 
 import (
@@ -47,6 +48,8 @@ func main() {
 		runPublishRelay(os.Args[2:])
 	case "prune":
 		runPrune(os.Args[2:])
+	case "key-prefix":
+		runKeyPrefix(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		usage()
@@ -69,7 +72,8 @@ func usage() {
   burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
   burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
-  burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]`)
+  burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
+  burrowee-release-register key-prefix --comp <cli|gateway|edge|agent|relay> [--channel stable|beta]`)
 }
 
 func runKeygen(args []string) {
@@ -252,4 +256,27 @@ func runPrune(args []string) {
 			log.Fatalf("prune %s: %v", c, err)
 		}
 	}
+}
+
+// runKeyPrefix prints the R2 key prefix for comp on channel. It exists so
+// tools/release.sh can ask for the layout instead of rebuilding it in shell —
+// see register.KeyPrefix.
+func runKeyPrefix(args []string) {
+	fs := flag.NewFlagSet("key-prefix", flag.ExitOnError)
+	comp := fs.String("comp", "", "component: cli|gateway|edge|agent|relay (required)")
+	channel := fs.String("channel", "stable", "channel: stable|beta (default stable)")
+	fs.Parse(args) //nolint:errcheck
+
+	if *comp == "" {
+		fmt.Fprintln(os.Stderr, "key-prefix: --comp is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+	switch *channel {
+	case "stable", "beta":
+	default:
+		fmt.Fprintf(os.Stderr, "key-prefix: --channel must be stable or beta (got %q)\n", *channel)
+		os.Exit(2)
+	}
+	fmt.Println(register.KeyPrefix(*comp, *channel))
 }
