@@ -656,18 +656,19 @@ is unchanged. What it does, once built/signed/notarized:
   here at cut time (see below for why beta's "publish" moment is the cut
   itself, not a later console step).
 
-**Retention now drains automatically at the end of every successful
-release — every component, every channel, both surfaces.** Until this
-change, every retention surface — R2 objects and GitHub tags, stable and
-beta alike — only ever *reported*: `register prune` and
+**Retention now drains automatically at the five points below, covering
+every component and every channel, on both surfaces but for one narrow,
+deliberate exception** (a plain stable cut's own GitHub report, named after
+the list). Until this change, every retention surface — R2 objects and
+GitHub tags, stable and beta alike — only ever *reported*: `register prune` and
 `tools/prune-releases.sh` printed what was over the keep limit, and an
 operator was expected to re-run them with `--execute` as a separate
 deploy-phase step. That step went unrun, on both brands, for months — by
 the time it surfaced, R2 held 27.3 GB and 6.5 GB of artifacts no installer
 could reach. A control nobody executes is not a control.
 
-The fix reaches three call sites, one per place a release's artifacts
-become safely reachable:
+The fix reaches five call sites, one per place a release's artifacts become
+safely reachable:
 
 - **Stable console-promote** — `tools/release.sh publish <comp>`, the
   helper that copies an already-public GitHub Release's binaries into R2
@@ -690,22 +691,60 @@ become safely reachable:
   GitHub side (R2-only, always), so one call:
   `register prune --comp relay --channel <ch> --execute`, right after the
   `register publish-relay` upload a few lines above it.
+- **`--distribute-only <comp> <stamp>`** (`distribute_only`, the second
+  half of the split `rkit build` → `release.sh --distribute-only` flow) —
+  drains GitHub only, right after `gh_release_publish` creates the tag +
+  Release, the self-hosting scp, the marker commit, and `register_staged`
+  have all already succeeded: `CHANNEL=stable COMPONENTS=<comp>
+  tools/prune-releases.sh --execute`. `--distribute-only` refuses
+  `--channel beta` outright, so `stable` is passed explicitly rather than
+  left to the tool's default — it is the only value this path can ever
+  have. No R2 call here: `distribute_only` never uploads a public
+  component to R2 (that is the stable console-promote site above, a later,
+  separate step).
+- **`--distribute-only relay <stamp>`** (`distribute_relay`, reached from
+  `distribute_only`'s own dispatch) — drains R2 only, right after
+  `register publish-relay` uploads: `register prune --comp relay --channel
+  stable --execute`. Same reasoning as above for passing `stable`
+  explicitly. Relay has no GitHub Release to prune here either.
 
-All of these are `|| true`: a retention failure must not fail a cut whose
-artifacts are already safely up. Order is not negotiable in any of the
-three: the drain runs strictly *after* the upload that makes the new stamp
-reachable, never before, because pruning against a count that is about to
-change is exactly how a retention pass deletes something it should have
-kept. None of the three reaches a `--dry-run` invocation — each site sits
-past its function's own `if [ "${DRY_RUN}" = 1 ]; then ...; return 0; fi`,
-which reports the would-be plan and returns before any upload happens. The
-nightly `com.jc.r2-cleanup` launchd agent remains the net for a cut that
-fails, or is interrupted, before its own drain completes.
+All seven calls across these five sites are `|| true`: a retention failure
+must not fail a release whose artifacts are already safely out. Order is
+not negotiable at any of them: the drain runs strictly *after* the upload
+or publish that makes the new stamp reachable, never before, because
+pruning against a count that is about to change is exactly how a retention
+pass deletes something it should have kept. None reaches a `--dry-run`
+invocation — each sits past its function's own
+`if [ "${DRY_RUN}" = 1 ]; then ...; return 0; fi` (or, for
+`distribute_only`/`distribute_relay`, past every precondition check that
+runs ahead of that same early return), which reports the would-be plan and
+returns before any upload or publish happens — confirmed by running all
+six shapes for real (`--dry-run`, never `--execute`, never `--public`):
+plain stable and beta cuts of a public component and of relay, plus a
+`rkit build --dry-run`-staged `--distribute-only` of both a public
+component and relay. Every one printed only its pre-existing `would:`
+line, if it had one, and none reached the new `(applying)` text or
+invoked a prune tool. The nightly `com.jc.r2-cleanup` launchd agent
+remains the net for a release that fails, or is interrupted, before its
+own drain completes.
 
-The manual commands below still exist and still work, but are no longer a
-required deploy-phase step — every cut now drains itself. Reach for them
-only for an out-of-band drain (a keep-count change, or cleaning up between
-cuts without cutting a new one):
+**One report-only site remains, by design, not by omission.** A plain
+stable cut's own tail (`do_release`, past `gh_release_publish`) still only
+*reports* GitHub retention at cut time — it does not drain. This is
+deliberate, not a leftover gap: at cut time the new tag is not yet
+console-promoted, so pruning GitHub tags there would be pruning while the
+cut's own artifact is mid-flight, the same ordering hazard the other five
+sites exist to avoid. That component's GitHub retention still drains for
+real, just later — at the stable console-promote site above, the first
+time `tools/release.sh publish <comp>` runs for it. Nothing about this
+path is manual-only forever; it is manual **between** a cut and its
+promote, same as it always was.
+
+The manual commands below still work for every surface, and remain the
+only way to drain the one report-only site above out-of-band (e.g. between
+a cut and its promote). For every other path they are no longer a required
+deploy-phase step — reach for them only for an out-of-band drain (a
+keep-count change, or cleaning up without cutting or promoting anything):
 
 ```
 register prune --comp <comp> --channel <stable|beta> --execute   # R2 drain

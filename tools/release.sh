@@ -1181,8 +1181,19 @@ distribute_relay() {
     build_register_helper
     # (3) upload latest.* + SHA256SUMS + minisig to R2 under relay/<stamp>/.
     "${REGISTER_BIN}" publish-relay --stamp "${stamp}" --from-dir "${latest_stage}"
-    echo "→ relay R2 retention (report only — run prune --comp relay --execute to apply):"
-    "${REGISTER_BIN}" prune --comp relay || true
+    # Retention runs HERE, after the R2 upload just above succeeded — never
+    # before, and never on the dry-run path (this line is only reachable
+    # past the `return 0` in the DRY_RUN branch above, which prints
+    # "would: publish-relay" and returns before any upload). --distribute-only
+    # refuses --channel beta (see the DISTRIBUTE_ONLY/CHANNEL guard near the
+    # top of this file), so this path is provably always stable — passed
+    # explicitly rather than left to prune's own default, so the call names
+    # what is actually true here. `|| true`: a retention failure must not
+    # fail a distribution whose artifacts are already up; the nightly
+    # com.jc.r2-cleanup agent is the net for whatever a failure here leaves
+    # behind.
+    echo "→ relay R2 retention (applying):"
+    "${REGISTER_BIN}" prune --comp relay --channel stable --execute || true
     # (4) marker commit (private — no gh release / no git tag).
     git add "versions/${comp}"
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
@@ -1385,9 +1396,23 @@ distribute_only() {
     # the catalog never advertises artifacts that aren't actually live.
     register_staged "${comp}" "${stamp}" "${semver}" "${stage}" "${src}" "${comp}/${stamp}"
 
+    # Retention runs HERE, after the GitHub Release + self-hosting upload +
+    # marker commit + catalog registration above all succeeded — never
+    # before, and never on the dry-run path (this line is only reachable
+    # past the `return 0` in the DRY_RUN branch above, which returns before
+    # gh_release_publish ever runs). --distribute-only refuses --channel
+    # beta (see the DISTRIBUTE_ONLY/CHANNEL guard near the top of this
+    # file), so this path is provably always stable — passed explicitly
+    # rather than left to the tool's own default. `|| true`: a retention
+    # failure must not fail a distribution whose artifacts are already
+    # public; the nightly com.jc.r2-cleanup agent is the net for whatever a
+    # failure here leaves behind. No R2 side here — distribute_only never
+    # uploads to R2 for a public component; that only happens later, via
+    # the stable console-promote helper (the `publish` branch near the top
+    # of this file), which drains R2 retention itself.
     echo
-    echo "→ GitHub release retention (dry-run — run prune-releases.sh --execute in the deploy phase to apply):"
-    COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
+    echo "→ GitHub release retention (applying):"
+    CHANNEL=stable COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
 
     echo "✓ distributed ${comp}/${stamp}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${comp}/${stamp}"
