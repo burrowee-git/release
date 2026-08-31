@@ -350,11 +350,20 @@ func itoa(i int) string {
 	return string(b)
 }
 
-// A stable prune must never see a new-layout beta object. This is currently
-// true incidentally — "beta" as a version segment matches neither anchored
-// pattern, so chOf returns "" — and this test is what keeps it true. A future
-// "simplification" of chOf to a `.beta.` substring probe would arm the stable
-// pass to delete every beta artifact in the bucket.
+// A stable prune must never see a new-layout beta object. The real danger
+// this guards is not a ".beta." substring probe (a stable-vs-beta segment
+// like "beta" trivially contains "beta" under either an anchored regex or a
+// substring check, so that mutation cannot fool THIS test — see chOf's own
+// doc comment and the substring-probe finding in the task report). It is
+// chOf's default branch: if a segment matching neither anchored pattern
+// resolved to "stable" instead of "", the literal "beta" directory segment
+// would be grouped into the stable version set — and because "beta" sorts
+// before every "v…" stamp under `sort -V` (a leading letter's ASCII weight
+// beats a leading digit), it would land FIRST in the drop order, so the
+// stable pass would delete the entire beta prefix in one run. Asserting the
+// exact deleted set (not just "nothing under /beta/") is what catches that:
+// a chOf regression that folds "beta" into the stable versions doesn't just
+// risk deleting beta objects, it also changes which stable stamps are kept.
 func TestStablePruneIgnoresBetaPrefix(t *testing.T) {
 	var stable []string
 	for _, v := range []string{
@@ -377,13 +386,22 @@ func TestStablePruneIgnoresBetaPrefix(t *testing.T) {
 	if _, err := Prune(context.Background(), store, "edge", "stable", true, io.Discard); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
+	// 12 stable stamps, keep 10 → drop exactly the 2 oldest stable stamps,
+	// and nothing else.
+	want := map[string]bool{
+		"edge/v0.1.1.2026.06.13.aaaaaaaa/SHA256SUMS.txt": true,
+		"edge/v0.1.2.2026.06.13.bbbbbbbb/SHA256SUMS.txt": true,
+	}
 	for _, k := range store.deleted {
 		if strings.Contains(k, "/beta/") {
 			t.Fatalf("stable prune deleted a beta object: %s", k)
 		}
+		if !want[k] {
+			t.Errorf("stable prune deleted unexpected key: %s", k)
+		}
 	}
-	if len(store.deleted) != 2 {
-		t.Errorf("stable prune deleted %d objects, want 2 (12 stable stamps, keep 10)", len(store.deleted))
+	if len(store.deleted) != len(want) {
+		t.Errorf("stable prune deleted %d objects, want exactly %d: %v", len(store.deleted), len(want), store.deleted)
 	}
 }
 
