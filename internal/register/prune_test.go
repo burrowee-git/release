@@ -162,15 +162,19 @@ func TestPrunePublicKeepsTen(t *testing.T) {
 
 // TestPruneChannelsNeverMix is the guard on the destructive part of spec
 // §5.5: a stable prune must never count or delete a beta version, and a beta
-// prune must never count or delete a stable one, even though both channels'
-// keys sit side by side under the same <comp>/ prefix in R2.
+// prune must never count or delete a stable one. Stable keys live under
+// <comp>/ and beta keys under <comp>/beta/, but the fakeStore still hands
+// both prefixes' keys to the stable pass (a plain HasPrefix match on "cli/"
+// catches "cli/beta/..." too) — it is chOf's stamp-shape check on the "beta"
+// literal segment, not the prefix alone, that keeps the stable pass from
+// counting or deleting them.
 func TestPruneChannelsNeverMix(t *testing.T) {
 	var stable, beta []string
 	for i := 1; i <= 12; i++ {
 		stable = append(stable, "cli/v0.1."+itoa(i)+".2026.06."+pad2(i)+"."+hex8(i)+"/burrowee-cli-darwin-arm64.zip")
 	}
 	for i := 1; i <= 7; i++ {
-		beta = append(beta, "cli/v0.2."+itoa(i)+".beta.2026.07."+pad2(i)+"."+hex8(i)+"/burrowee-cli-darwin-arm64.zip")
+		beta = append(beta, "cli/beta/v0.2."+itoa(i)+".beta.2026.07."+pad2(i)+"."+hex8(i)+"/burrowee-cli-darwin-arm64.zip")
 	}
 	keys := append(append([]string(nil), stable...), beta...)
 
@@ -344,4 +348,86 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b)
+}
+
+// A stable prune must never see a new-layout beta object. This is currently
+// true incidentally — "beta" as a version segment matches neither anchored
+// pattern, so chOf returns "" — and this test is what keeps it true. A future
+// "simplification" of chOf to a `.beta.` substring probe would arm the stable
+// pass to delete every beta artifact in the bucket.
+func TestStablePruneIgnoresBetaPrefix(t *testing.T) {
+	var stable []string
+	for _, v := range []string{
+		"v0.1.1.2026.06.13.aaaaaaaa", "v0.1.2.2026.06.13.bbbbbbbb",
+		"v0.1.3.2026.06.14.cccccccc", "v0.1.4.2026.06.14.dddddddd",
+		"v0.1.5.2026.06.15.eeeeeeee", "v0.1.6.2026.06.15.ffffffff",
+		"v0.1.7.2026.06.16.11111111", "v0.1.8.2026.06.16.22222222",
+		"v0.1.9.2026.06.17.33333333", "v0.1.10.2026.06.17.44444444",
+		"v0.1.11.2026.06.18.55555555", "v0.1.12.2026.06.18.66666666",
+	} {
+		stable = append(stable, "edge/"+v+"/SHA256SUMS.txt")
+	}
+	keys := append(stable,
+		"edge/beta/v0.2.21.beta.2026.08.28.716c7ede/SHA256SUMS.txt",
+		"edge/beta/v0.2.21.beta.2026.08.28.716c7ede/burrowee-edge-linux-amd64.zip",
+		"edge/beta/latest.json",
+	)
+	store := &fakeStore{keys: keys}
+
+	if _, err := Prune(context.Background(), store, "edge", "stable", true, io.Discard); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	for _, k := range store.deleted {
+		if strings.Contains(k, "/beta/") {
+			t.Fatalf("stable prune deleted a beta object: %s", k)
+		}
+	}
+	if len(store.deleted) != 2 {
+		t.Errorf("stable prune deleted %d objects, want 2 (12 stable stamps, keep 10)", len(store.deleted))
+	}
+}
+
+// The beta prune lists <comp>/beta/ and must never reach a stable stamp.
+func TestBetaPruneOnlyTouchesBetaPrefix(t *testing.T) {
+	keys := []string{
+		"edge/v0.2.19.2026.08.27.716c7ede/SHA256SUMS.txt",
+		"edge/beta/v0.2.20.beta.2026.08.27.aaaaaaaa/SHA256SUMS.txt",
+		"edge/beta/v0.2.21.beta.2026.08.28.716c7ede/SHA256SUMS.txt",
+		"edge/beta/latest.json",
+	}
+	store := &fakeStore{keys: keys}
+
+	if _, err := Prune(context.Background(), store, "edge", "beta", true, io.Discard); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	// keep 1 beta → the older beta stamp goes, nothing else.
+	if len(store.deleted) != 1 {
+		t.Fatalf("beta prune deleted %d objects, want 1: %v", len(store.deleted), store.deleted)
+	}
+	if !strings.Contains(store.deleted[0], "v0.2.20.beta") {
+		t.Errorf("beta prune deleted the wrong object: %s", store.deleted[0])
+	}
+}
+
+// Neither channel's manifest is ever a prune candidate.
+func TestPruneNeverDeletesAManifest(t *testing.T) {
+	for _, channel := range []string{"stable", "beta"} {
+		keys := []string{
+			"edge/latest.json",
+			"edge/beta/latest.json",
+			"edge/v0.2.18.2026.08.26.aaaaaaaa/SHA256SUMS.txt",
+			"edge/v0.2.19.2026.08.27.bbbbbbbb/SHA256SUMS.txt",
+			"edge/beta/v0.2.20.beta.2026.08.27.cccccccc/SHA256SUMS.txt",
+			"edge/beta/v0.2.21.beta.2026.08.28.dddddddd/SHA256SUMS.txt",
+		}
+		store := &fakeStore{keys: keys}
+		if _, err := Prune(context.Background(), store, "edge", channel, true, io.Discard); err != nil {
+			t.Fatalf("Prune(%s): %v", channel, err)
+		}
+		for _, k := range store.deleted {
+			if strings.HasSuffix(k, "latest.json") {
+				t.Errorf("%s prune deleted a manifest: %s", channel, k)
+			}
+		}
+	}
 }
