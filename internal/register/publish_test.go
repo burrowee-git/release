@@ -26,9 +26,9 @@ func (f *fakeGetter) Get(url string) (*http.Response, error) {
 	return &http.Response{StatusCode: st, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
-type fakePutter struct{ puts map[string]string }
+type fakeStringPutter struct{ puts map[string]string }
 
-func (f *fakePutter) Put(_ context.Context, key string, body []byte, _ string) error {
+func (f *fakeStringPutter) Put(_ context.Context, key string, body []byte, _ string) error {
 	if f.puts == nil {
 		f.puts = map[string]string{}
 	}
@@ -51,7 +51,7 @@ func TestPublishHappyPath(t *testing.T) {
 		ghBase + "/SHA256SUMS.txt":                      "SUMS",
 		ghBase + "/SHA256SUMS.txt.minisig":              "SIG",
 	}}
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: p, Out: io.Discard}, "cli", "")
 	if err != nil {
 		t.Fatalf("Publish: %v", err)
@@ -69,7 +69,7 @@ func TestPublishSha256MismatchAborts(t *testing.T) {
 		"https://c.example/api/v1/releases/cli/current": cliCatalog("deadbeef"), // wrong hash
 		ghBase + "/burrowee-cli-darwin-arm64.zip":       "ZIP",
 	}}
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: p, Out: io.Discard}, "cli", "")
 	if err == nil || !strings.Contains(err.Error(), "sha256") {
 		t.Fatalf("want sha256 error, got %v", err)
@@ -85,7 +85,7 @@ func TestPublishRelayAllowed(t *testing.T) {
 	// fakeGetter returns 404 for the relay catalog; Publish should get a catalog
 	// error (not a relay-refused error).
 	g := &fakeGetter{resp: map[string]string{}} // all 404s
-	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: &fakePutter{}, Out: io.Discard}, "relay", "")
+	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: &fakeStringPutter{}, Out: io.Discard}, "relay", "")
 	if err == nil {
 		t.Fatal("want error from catalog fetch, got nil")
 	}
@@ -128,7 +128,7 @@ func TestPublishFromDirHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestPublishFromDirSha256Mismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("want sha256 mismatch error, got %v", err)
@@ -223,7 +223,7 @@ func TestPublishFromDirCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	if err := PublishFromDir(context.Background(), p, "cli", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestPublishSizeMismatchAborts(t *testing.T) {
 		"https://c.example/api/v1/releases/cli/current": cliCatalogSize(99),
 		ghBase + "/burrowee-cli-darwin-arm64.zip":       "ZIP",
 	}}
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: p, Out: io.Discard}, "cli", "")
 	if err == nil || !strings.Contains(err.Error(), "size mismatch") {
 		t.Fatalf("want size mismatch error, got %v", err)
@@ -304,7 +304,7 @@ func TestPublishFromDirUploadsTheFifthPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	if err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestPublishFromDirRelayNeedsNoLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestPublishFromDirRefusesAShortBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard)
 	if err == nil {
 		t.Fatal("want a refusal for a stage missing linux-arm64, got nil")
