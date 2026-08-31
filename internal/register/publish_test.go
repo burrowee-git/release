@@ -129,13 +129,13 @@ func TestPublishFromDirHappyPath(t *testing.T) {
 	}
 
 	p := &fakeStringPutter{}
-	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
+	if err := PublishFromDir(context.Background(), p, "relay", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
 
-	// Expect 4 zips + SHA256SUMS.txt + SHA256SUMS.txt.minisig = 6 keys.
-	if len(p.puts) != 6 {
-		t.Fatalf("want 6 R2 puts, got %d: %v", len(p.puts), p.puts)
+	// Expect 4 zips + SHA256SUMS.txt + SHA256SUMS.txt.minisig + latest.json = 7 keys.
+	if len(p.puts) != 7 {
+		t.Fatalf("want 7 R2 puts, got %d: %v", len(p.puts), p.puts)
 	}
 	for _, plat := range platforms {
 		key := "relay/" + stamp + "/latest." + plat + ".zip"
@@ -181,7 +181,7 @@ func TestPublishFromDirSha256Mismatch(t *testing.T) {
 	}
 
 	p := &fakeStringPutter{}
-	err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard)
+	err := PublishFromDir(context.Background(), p, "relay", "stable", dir, stamp, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("want sha256 mismatch error, got %v", err)
 	}
@@ -224,12 +224,12 @@ func TestPublishFromDirCLI(t *testing.T) {
 	}
 
 	p := &fakeStringPutter{}
-	if err := PublishFromDir(context.Background(), p, "cli", dir, stamp, io.Discard); err != nil {
+	if err := PublishFromDir(context.Background(), p, "cli", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
 
-	if len(p.puts) != 6 {
-		t.Fatalf("want 6 R2 puts, got %d: %v", len(p.puts), p.puts)
+	if len(p.puts) != 7 {
+		t.Fatalf("want 7 R2 puts, got %d: %v", len(p.puts), p.puts)
 	}
 	for _, plat := range platforms {
 		key := "cli/" + stamp + "/burrowee-cli-" + plat + ".zip"
@@ -305,13 +305,13 @@ func TestPublishFromDirUploadsTheFifthPlatform(t *testing.T) {
 	}
 
 	p := &fakeStringPutter{}
-	if err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard); err != nil {
+	if err := PublishFromDir(context.Background(), p, "gateway", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
 
-	// 5 zips + SHA256SUMS.txt + .minisig = 7.
-	if len(p.puts) != 7 {
-		t.Fatalf("want 7 R2 puts, got %d: %v", len(p.puts), p.puts)
+	// 5 zips + SHA256SUMS.txt + .minisig + latest.json = 8.
+	if len(p.puts) != 8 {
+		t.Fatalf("want 8 R2 puts, got %d: %v", len(p.puts), p.puts)
 	}
 	legacy := "gateway/" + stamp + "/burrowee-gateway-darwin-amd64-legacy.zip"
 	if _, ok := p.puts[legacy]; !ok {
@@ -347,11 +347,11 @@ func TestPublishFromDirRelayNeedsNoLegacy(t *testing.T) {
 	}
 
 	p := &fakeStringPutter{}
-	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
+	if err := PublishFromDir(context.Background(), p, "relay", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
-	if len(p.puts) != 6 {
-		t.Fatalf("want 6 R2 puts for a legacy-free relay, got %d: %v", len(p.puts), p.puts)
+	if len(p.puts) != 7 {
+		t.Fatalf("want 7 R2 puts for a legacy-free relay, got %d: %v", len(p.puts), p.puts)
 	}
 }
 
@@ -380,7 +380,7 @@ func TestPublishFromDirRefusesAShortBuild(t *testing.T) {
 	}
 
 	p := &fakeStringPutter{}
-	err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard)
+	err := PublishFromDir(context.Background(), p, "gateway", "stable", dir, stamp, io.Discard)
 	if err == nil {
 		t.Fatal("want a refusal for a stage missing linux-arm64, got nil")
 	}
@@ -432,5 +432,69 @@ func TestZipsFromSumsAcceptsRealPlatforms(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Fatalf("want %d zips, got %d: %v", len(want), len(got), got)
+	}
+}
+
+// writeStageFixture writes a minimal stage directory for comp: the four base
+// platform zips (burrowee-<comp>-<plat>.zip), a SHA256SUMS.txt listing each
+// zip's real sha256, and a placeholder SHA256SUMS.txt.minisig — the trio
+// PublishFromDir needs to run zipsFromSums and the upload loops end to end.
+func writeStageFixture(t *testing.T, dir, comp string) {
+	t.Helper()
+	var sums strings.Builder
+	for _, plat := range basePlatforms {
+		name := "burrowee-" + comp + "-" + plat + ".zip"
+		body := "ZIP-" + plat
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256([]byte(body))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt.minisig"), []byte("SIG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishFromDirBetaUsesBetaPrefix(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFixture(t, dir, "edge") // helper already used by this file's tests
+
+	p := &fakePutter{}
+	err := PublishFromDir(context.Background(), p, "edge", "beta", dir,
+		"v0.2.21.beta.2026.08.28.716c7ede", io.Discard)
+	if err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+	for key := range p.put {
+		if !strings.HasPrefix(key, "edge/beta/") {
+			t.Errorf("beta publish wrote outside the beta prefix: %s", key)
+		}
+	}
+	if _, ok := p.put["edge/beta/latest.json"]; !ok {
+		t.Error("beta publish did not write edge/beta/latest.json")
+	}
+}
+
+func TestPublishFromDirStablePrefixUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFixture(t, dir, "edge")
+
+	p := &fakePutter{}
+	err := PublishFromDir(context.Background(), p, "edge", "stable", dir,
+		"v0.2.19.2026.08.27.716c7ede", io.Discard)
+	if err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+	for key := range p.put {
+		if strings.Contains(key, "/beta/") {
+			t.Errorf("stable publish wrote under a beta prefix: %s", key)
+		}
+	}
+	if _, ok := p.put["edge/latest.json"]; !ok {
+		t.Error("stable publish did not write edge/latest.json")
 	}
 }

@@ -821,6 +821,12 @@ register_staged() {
     # shellcheck disable=SC2086
     sha256_bundle="$(${SHA256} "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')" || sha256_bundle=""
 
+    # Ask the register binary for the layout rather than rebuilding it here —
+    # internal/register/KeyPrefix is the single expression of it, and a shell
+    # copy is a copy that drifts.
+    local key_prefix
+    key_prefix="$("${REGISTER_BIN}" key-prefix --comp "${comp}" --channel "${channel}")"
+
     # Build artifacts JSON.
     # For each platform zip, extract sha256 + size, derive url_or_key.
     # Public comps: zips are named burrowee-<comp>-<plat>.zip in stage_dir.
@@ -844,7 +850,7 @@ register_staged() {
             # component's own prefix instead of relay/ — no GitHub asset to
             # link, since a beta cut never creates a Release.
             zip_name="burrowee-${comp}-${plat}.zip"
-            url_or_key="${comp}/${stamp}/${zip_name}"
+            url_or_key="${key_prefix}${stamp}/${zip_name}"
         else
             zip_name="burrowee-${comp}-${plat}.zip"
             url_or_key="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/${zip_name}"
@@ -908,8 +914,8 @@ register_staged() {
         sums_ref="relay/${stamp}/SHA256SUMS.txt"
         minisig_ref="relay/${stamp}/SHA256SUMS.txt.minisig"
     elif [ "${channel}" = beta ]; then
-        sums_ref="${comp}/${stamp}/SHA256SUMS.txt"
-        minisig_ref="${comp}/${stamp}/SHA256SUMS.txt.minisig"
+        sums_ref="${key_prefix}${stamp}/SHA256SUMS.txt"
+        minisig_ref="${key_prefix}${stamp}/SHA256SUMS.txt.minisig"
     else
         sums_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt"
         minisig_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt.minisig"
@@ -2089,8 +2095,13 @@ do_release() {
     # point (tag, GitHub Release, the stable-only scp block, its marker text,
     # its register_staged gh_tag) is stable-channel-specific.
     if [ "${CHANNEL}" = beta ]; then
+        # Ask the register binary for the layout rather than rebuilding it
+        # here — internal/register/KeyPrefix is the single expression of it.
+        local key_prefix
+        key_prefix="$("${REGISTER_BIN}" key-prefix --comp "${comp}" --channel "${CHANNEL}")"
+
         if [ "${DRY_RUN}" = 1 ]; then
-            echo "→ would: publish-dir to R2 under ${comp}/${stamp}/ (beta: private until promoted)"
+            echo "→ would: publish-dir to R2 under ${key_prefix}${stamp}/ (beta: private until promoted)"
             echo "→ would: gen-bootstraps.sh + scp ${comp}/beta.*.sh (idempotent)"
             echo "→ would: marker commit [RELEASED: ${comp} beta] ${stamp} (private)"
             # (9) dry-run registration preview — the SAME register_staged call
@@ -2112,7 +2123,7 @@ do_release() {
             return 0
         fi
 
-        "${REGISTER_BIN}" publish-dir --comp "${comp}" --stamp "${stamp}" --from-dir "${stage}"
+        "${REGISTER_BIN}" publish-dir --comp "${comp}" --channel "${CHANNEL}" --stamp "${stamp}" --from-dir "${stage}"
 
         # Past the R2 publish — clear the version-revert trap, same reasoning
         # as the stable tail clearing it immediately past gh_release_publish:
