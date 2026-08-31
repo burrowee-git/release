@@ -137,6 +137,41 @@ func TestListErrorsOnNon2xx(t *testing.T) {
 	}
 }
 
+func TestGetSignsAndSends(t *testing.T) {
+	f := &fakeDoer{status: 200}
+	c := New("acct", "downloads", "AKID", "SECRET", f)
+	body, err := c.Get(context.Background(), "relay/v1/a.zip")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if f.got.Method != http.MethodGet {
+		t.Errorf("method: %s", f.got.Method)
+	}
+	if f.got.URL.String() != "https://acct.r2.cloudflarestorage.com/downloads/relay/v1/a.zip" {
+		t.Errorf("url: %s", f.got.URL.String())
+	}
+	if f.got.URL.Path != "/downloads/relay/v1/a.zip" {
+		t.Errorf("path: %s", f.got.URL.Path)
+	}
+	if f.got.Header.Get("Authorization") == "" {
+		t.Error("missing Authorization header (sigv4 not signed)")
+	}
+	if string(body) != "ok" {
+		t.Errorf("body: %s", body)
+	}
+}
+
+func TestGetNon2xxErrors(t *testing.T) {
+	c := New("acct", "downloads", "AKID", "SECRET", &fakeDoer{status: 404})
+	body, err := c.Get(context.Background(), "relay/gone.zip")
+	if err == nil {
+		t.Fatal("expected error on 404, got nil (would silently publish empty bytes)")
+	}
+	if body != nil {
+		t.Errorf("expected nil body on error, got %q", body)
+	}
+}
+
 func TestDeleteSignsAndSends(t *testing.T) {
 	f := &fakeDoer{status: 204}
 	c := New("acct", "downloads", "AKID", "SECRET", f)
