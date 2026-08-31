@@ -23,15 +23,18 @@ migrate() {
     local src="${STAGE}/${comp}"
     mkdir -p "${src}"
 
-    # Pull the old-layout objects down through the gated console endpoint, which
-    # is the only reader with credentials for a private beta.
-    echo "→ fetching ${comp}/${stamp}/ …"
-    "${REGISTER}" fetch-dir --comp "${comp}" --stamp "${stamp}" --to-dir "${src}"
-
     if [ "${EXECUTE}" = 1 ]; then
+        # Pull the old-layout objects down through the gated console endpoint,
+        # which is the only reader with credentials for a private beta.
+        echo "→ fetching ${comp}/${stamp}/ …"
+        "${REGISTER}" fetch-dir --comp "${comp}" --stamp "${stamp}" --to-dir "${src}"
+
         "${REGISTER}" publish-dir --comp "${comp}" --channel beta \
             --stamp "${stamp}" --from-dir "${src}"
     else
+        # Dry-run means "contacts nothing" — fetch is gated the same as
+        # publish-dir, not just echoed after a real network call already ran.
+        echo "→ would fetch ${comp}/${stamp}/"
         echo "→ would publish-dir --comp ${comp} --channel beta --stamp ${stamp}"
     fi
 }
