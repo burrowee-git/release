@@ -1896,12 +1896,18 @@ do_release_relay() {
         --stamp "${stamp}" \
         --from-dir "${latest_stage}"
 
-    # (4b) retention (dry-run): report relay R2 prefixes now over keep=3 stable
-    # / 1 beta (beta is disposable — the newest cut is the only one kept). The
-    # destructive drain (prune --comp relay --execute) is a deploy-phase step.
+    # (4b) retention: drain relay R2 prefixes now over keep=3 stable / 1 beta
+    # (beta is disposable — the newest cut is the only one kept). Runs right
+    # here, after the R2 upload just above succeeded — never before, and
+    # never on the dry-run path (this line is only reachable past the
+    # `return 0` in the DRY_RUN branch above, which prints "would: upload"
+    # and returns before ever touching R2). `|| true`: a retention failure
+    # must not fail a relay cut whose artifacts are already up — the nightly
+    # com.jc.r2-cleanup agent is the net for whatever a failure here leaves
+    # behind. Relay has no GitHub side to prune, either channel (R2-only).
     echo
-    echo "→ relay R2 retention (dry-run — run prune --comp relay --channel ${CHANNEL} --execute in the deploy phase to apply):"
-    "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" || true
+    echo "→ relay R2 retention (applying):"
+    "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" --execute || true
 
     # marker commit (no gh release / no git tag, either channel — relay has
     # always been R2-only). Beta gets the same " beta" marker-subject suffix
@@ -2202,8 +2208,24 @@ do_release() {
         # here just matches what a beta cut actually has: no GitHub tag.
         register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
 
-        echo "→ beta R2 retention (report only — run prune --comp ${comp} --channel beta --execute in the deploy phase to apply):"
-        "${REGISTER_BIN}" prune --comp "${comp}" --channel beta || true
+        # Retention runs HERE, after the beta publish above succeeded —
+        # never before, and never on the dry-run path (this line is only
+        # reachable past the `return 0` in the DRY_RUN branch above, which
+        # returns before the R2 publish-dir call). Both `|| true`: a
+        # retention failure must not fail a cut whose artifacts are already
+        # up; the nightly com.jc.r2-cleanup agent is the net for whatever a
+        # failure here leaves behind.
+        echo "→ beta retention (applying):"
+        "${REGISTER_BIN}" prune --comp "${comp}" --channel beta --execute || true
+        # GitHub-side beta retention had no caller anywhere in release.sh or
+        # release.command before this — beta git tags (minted only later,
+        # when the console promotes a staged row to public) accumulated
+        # silently past keep=1. tools/prune-releases.sh already defaults
+        # KEEP to 1 on beta and reads CHANNEL itself; scope is this one
+        # component, matching the R2 call above (a beta cut is always
+        # exactly one component — WHAT=all is expanded into a per-component
+        # loop before do_release is ever called, see COMPONENTS above).
+        CHANNEL=beta COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
 
         echo "✓ released ${comp} beta ${stamp} (private, R2 ${comp}/${stamp}/)"
         return 0

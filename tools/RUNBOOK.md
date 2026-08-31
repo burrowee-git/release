@@ -652,58 +652,66 @@ is unchanged. What it does, once built/signed/notarized:
   stable `[RELEASED: <comp>]` one, so a batched beta cut through
   `release.command` still pushes its marker before the next component starts.
 - Registers a `staged`, `channel=beta` row with the console (R2 keys, no
-  `github_release`) and prints an R2 beta-retention **report** (keep 1 — the
-  latest only, since the beta track is disposable, `register prune --comp
-  <comp> --channel beta` with no `--execute`). This report is **not** backed
-  by an automatic drain — see below for what changed on the stable side and
-  what, on beta, still hasn't.
+  `github_release`), then drains retention for real — both surfaces, right
+  here at cut time (see below for why beta's "publish" moment is the cut
+  itself, not a later console step).
 
-**Retention on the stable publish path now drains automatically; nothing
-about a beta cut changed.** Until this change, every retention surface —
-R2 objects and GitHub tags, both channels — only ever *reported*:
-`register prune` and `tools/prune-releases.sh` printed what was over the
-keep limit, and an operator was expected to re-run them with `--execute` as
-a separate deploy-phase step. That step went unrun, on both brands, for
-months — by the time it surfaced, R2 held 27.3 GB and 6.5 GB of artifacts no
-installer could reach. A control nobody executes is not a control.
+**Retention now drains automatically at the end of every successful
+release — every component, every channel, both surfaces.** Until this
+change, every retention surface — R2 objects and GitHub tags, stable and
+beta alike — only ever *reported*: `register prune` and
+`tools/prune-releases.sh` printed what was over the keep limit, and an
+operator was expected to re-run them with `--execute` as a separate
+deploy-phase step. That step went unrun, on both brands, for months — by
+the time it surfaced, R2 held 27.3 GB and 6.5 GB of artifacts no installer
+could reach. A control nobody executes is not a control.
 
-The fix reaches exactly one call site: `tools/release.sh publish <comp>` —
-the **stable** console-promote helper that copies an already-public GitHub
-Release's binaries into R2 (`register publish`, `internal/register/publish.go`;
-see the `publish` branch near the top of `release.sh`). The moment that R2
-push succeeds, it now runs both prunes for real —
-`register prune --comp <comp> --channel <ch> --execute` and
-`tools/prune-releases.sh --execute` — each `|| true`, so a retention failure
-never fails a publish whose artifacts are already safely up. Order is not
-negotiable: the drain runs strictly *after* the push, never before, because
-the push is what establishes the newest stamp is safely uploaded — pruning
-against a count that is about to change is exactly how a retention pass
-deletes something it should have kept. The nightly `com.jc.r2-cleanup`
-launchd agent is the net for a cut that fails, or is interrupted, before its
-own drain completes.
+The fix reaches three call sites, one per place a release's artifacts
+become safely reachable:
 
-**This does not reach the beta channel.** `register publish` only ever
-resolves the *current stable* catalog row — a beta cut uploads straight to
-R2 in its own step (above) and is promoted to `public` by the console
-minting a GitHub prerelease directly; neither path ever calls `publish`. So
-both beta retention gaps this RUNBOOK previously described are unchanged:
-the R2 side above still only *reports* (keep 1, no automatic `--execute`),
-and the **GitHub** side (beta git tags — beta rows that reach `public` do
-get a GitHub prerelease, per the console promote flow above) still has no
-caller anywhere in `release.sh` or `release.command`. `CHANNEL=beta
-tools/prune-releases.sh` exists and is tested for exactly this (spec §5.5:
-keep 1 beta on GitHub — the latest only, same as R2), but until something
-calls it, GitHub beta tags accumulate silently past 1. Both remain
-out-of-band, manual commands:
+- **Stable console-promote** — `tools/release.sh publish <comp>`, the
+  helper that copies an already-public GitHub Release's binaries into R2
+  (`register publish`, `internal/register/publish.go`; the `publish` branch
+  near the top of `release.sh`). The moment that R2 push succeeds, it runs
+  `register prune --comp <comp> --channel <ch> --execute` and
+  `tools/prune-releases.sh --execute` for real. `register publish` only
+  ever resolves the *current stable* catalog row, so this site is
+  stable-only — a beta row never reaches it.
+- **A beta cut** (`do_release`'s `CHANNEL=beta` branch, above) — unlike
+  stable, a beta cut's R2 upload above *is* the moment its artifacts become
+  reachable; there is no separate promote-to-R2 step to wait for. So the
+  drain runs right after it, in the same function: `register prune --comp
+  <comp> --channel beta --execute` (R2, keep 1) followed by `CHANNEL=beta
+  COMPONENTS=<comp> tools/prune-releases.sh --execute` (GitHub, keep 1).
+  The GitHub call closes a gap this RUNBOOK previously documented as having
+  **no caller anywhere** — beta git tags (minted only later, when the
+  console promotes a row to `public`) used to accumulate silently past 1.
+- **A relay cut, either channel** (`do_release_relay`) — relay has no
+  GitHub side (R2-only, always), so one call:
+  `register prune --comp relay --channel <ch> --execute`, right after the
+  `register publish-relay` upload a few lines above it.
+
+All of these are `|| true`: a retention failure must not fail a cut whose
+artifacts are already safely up. Order is not negotiable in any of the
+three: the drain runs strictly *after* the upload that makes the new stamp
+reachable, never before, because pruning against a count that is about to
+change is exactly how a retention pass deletes something it should have
+kept. None of the three reaches a `--dry-run` invocation — each site sits
+past its function's own `if [ "${DRY_RUN}" = 1 ]; then ...; return 0; fi`,
+which reports the would-be plan and returns before any upload happens. The
+nightly `com.jc.r2-cleanup` launchd agent remains the net for a cut that
+fails, or is interrupted, before its own drain completes.
+
+The manual commands below still exist and still work, but are no longer a
+required deploy-phase step — every cut now drains itself. Reach for them
+only for an out-of-band drain (a keep-count change, or cleaning up between
+cuts without cutting a new one):
 
 ```
-register prune --comp <comp> --channel beta --execute    # R2 drain
-CHANNEL=beta tools/prune-releases.sh              # GitHub report (default)
-CHANNEL=beta tools/prune-releases.sh --execute    # GitHub drain
+register prune --comp <comp> --channel <stable|beta> --execute   # R2 drain
+CHANNEL=<stable|beta> tools/prune-releases.sh              # GitHub report (default)
+CHANNEL=<stable|beta> tools/prune-releases.sh --execute    # GitHub drain
 ```
-
-Run them as a deploy-phase step, on whatever cadence an operator decides a
-beta cycle warrants.
 
 Every cut of a **public** component — a stable full cut, `--distribute-only`,
 or a beta cut — always re-runs `gen-bootstraps.sh` (it renders every
