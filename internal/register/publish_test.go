@@ -479,6 +479,58 @@ func TestPublishFromDirBetaUsesBetaPrefix(t *testing.T) {
 	}
 }
 
+// TestPublishFromDirRelayBetaUsesBetaPrefix is the relay twin of
+// TestPublishFromDirBetaUsesBetaPrefix. It exists because relay reaches
+// PublishFromDir through its OWN verb (publish-relay), which used to hardcode
+// channel "stable" — so a relay beta cut published stable keys with no test
+// anywhere to notice. The two assertions below are the two halves of that
+// defect: the artifacts must land under relay/beta/, and relay/latest.json —
+// the STABLE pointer — must not be touched by a beta cut.
+func TestPublishFromDirRelayBetaUsesBetaPrefix(t *testing.T) {
+	dir := t.TempDir()
+	writeRelayStageFixture(t, dir)
+
+	p := &fakePutter{}
+	err := PublishFromDir(context.Background(), p, "relay", "beta", dir,
+		"v0.2.21.beta.2026.08.28.716c7ede", io.Discard)
+	if err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+	for key := range p.put {
+		if !strings.HasPrefix(key, "relay/beta/") {
+			t.Errorf("relay beta publish wrote outside the beta prefix: %s", key)
+		}
+	}
+	if _, ok := p.put["relay/beta/latest.json"]; !ok {
+		t.Errorf("relay beta publish did not write relay/beta/latest.json; got keys %v", keysOf(p))
+	}
+	if _, ok := p.put["relay/latest.json"]; ok {
+		t.Error("relay beta publish overwrote relay/latest.json — the STABLE pointer")
+	}
+}
+
+// writeRelayStageFixture mirrors writeStageFixture for relay's own artifact
+// naming: relay ships latest.<plat>.zip, not burrowee-relay-<plat>.zip.
+func writeRelayStageFixture(t *testing.T, dir string) {
+	t.Helper()
+	var sums strings.Builder
+	for _, plat := range basePlatforms {
+		name := "latest." + plat + ".zip"
+		body := "ZIP-" + plat
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256([]byte(body))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt.minisig"), []byte("SIG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublishFromDirStablePrefixUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	writeStageFixture(t, dir, "edge")

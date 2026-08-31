@@ -8,7 +8,7 @@
 //	burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
 //	burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
 //	burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> [--channel stable|beta] --stamp <stamp> --from-dir <dir> [--dir <d>]
-//	burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
+//	burrowee-release-register publish-relay [--channel stable|beta] --stamp <stamp> --from-dir <dir> [--dir <d>]
 //	burrowee-release-register fetch-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --to-dir <dir> [--dir <d>]
 //	burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
 //	burrowee-release-register key-prefix --comp <cli|gateway|edge|agent|relay> [--channel stable|beta]
@@ -75,7 +75,7 @@ func usage() {
   burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
   burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
   burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
-  burrowee-release-register publish-relay --stamp <stamp> --from-dir <dir> [--dir <d>]
+  burrowee-release-register publish-relay [--channel stable|beta] --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register fetch-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --to-dir <dir> [--dir <d>]
   burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
   burrowee-release-register key-prefix --comp <cli|gateway|edge|agent|relay> [--channel stable|beta]`)
@@ -197,16 +197,25 @@ func runPublishDir(args []string) {
 }
 
 // runPublishRelay uploads relay artifacts from a local directory to R2 under
-// relay/<stamp>/ — the old relay-only verb, kept with its original flag names
-// (no --comp) and now a thin wrapper over runPublishDir's underlying call
+// relay/[beta/]<stamp>/ — the old relay-only verb, kept with its original flag
+// names (no --comp) and now a thin wrapper over runPublishDir's underlying call
 // with comp = "relay".
 //
 // This is called by do_release_relay in release.sh after the signing step, in
 // place of the former scp block.
+//
+// --channel is NOT cosmetic here. do_release_relay supports `--channel beta`
+// end to end, so a relay beta cut reaches this verb; hardcoding "stable" made
+// it overwrite relay/latest.json (the STABLE pointer) with a beta stamp and
+// land the artifacts at relay/<stamp>/, where the stable prune skips them
+// (chOf reads "beta" out of the stamp) and the beta prune never lists them
+// (it lists relay/beta/) — permanently unprunable. The default stays "stable"
+// so distribute_relay and any hand invocation behave exactly as before.
 func runPublishRelay(args []string) {
 	fs := flag.NewFlagSet("publish-relay", flag.ExitOnError)
 	dir := fs.String("dir", defaultDir(), "directory holding config.toml and r2.key")
-	stamp := fs.String("stamp", "", "release stamp (e.g. v0.1.3.2026.06.21.abc12345) — becomes the R2 prefix relay/<stamp>/")
+	channel := fs.String("channel", "stable", "channel: stable|beta (default stable)")
+	stamp := fs.String("stamp", "", "release stamp (e.g. v0.1.3.2026.06.21.abc12345) — becomes the R2 prefix relay/[beta/]<stamp>/")
 	fromDir := fs.String("from-dir", "", "local directory containing the relay artifacts (required)")
 	fs.Parse(args) //nolint:errcheck
 
@@ -215,6 +224,12 @@ func runPublishRelay(args []string) {
 		fs.Usage()
 		os.Exit(1)
 	}
+	switch *channel {
+	case "stable", "beta":
+	default:
+		fmt.Fprintf(os.Stderr, "publish-relay: --channel must be stable or beta (got %q)\n", *channel)
+		os.Exit(2)
+	}
 
 	_, r2cfg, err := register.LoadPublishConfig(*dir)
 	if err != nil {
@@ -222,7 +237,7 @@ func runPublishRelay(args []string) {
 	}
 	client := r2.New(r2cfg.AccountID, r2cfg.Bucket, r2cfg.AccessKeyID, r2cfg.Secret, nil)
 
-	if err := register.PublishFromDir(context.Background(), client, "relay", "stable", *fromDir, *stamp, os.Stdout); err != nil {
+	if err := register.PublishFromDir(context.Background(), client, "relay", *channel, *fromDir, *stamp, os.Stdout); err != nil {
 		log.Fatalf("publish-relay: %v", err)
 	}
 }

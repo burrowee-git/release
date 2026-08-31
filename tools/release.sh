@@ -859,8 +859,13 @@ register_staged() {
 
         local zip_name url_or_key zip_path
         if [ "${comp}" = relay ]; then
+            # ${key_prefix}, not a hardcoded "relay/": relay has a beta channel
+            # too (do_release_relay --channel beta), and its bytes land under
+            # relay/beta/<stamp>/ exactly like every other component's. A
+            # hardcoded prefix here made a relay beta row point at keys the
+            # publish never wrote.
             zip_name="latest.${plat}.zip"
-            url_or_key="relay/${stamp}/${zip_name}"
+            url_or_key="${key_prefix}${stamp}/${zip_name}"
         elif [ "${channel}" = beta ]; then
             # Beta: same R2 key layout as relay's private publish
             # (register publish-dir → internal/r2), just under the
@@ -928,8 +933,10 @@ register_staged() {
     # sums_ref and minisig_ref: public = GitHub asset URLs; relay/beta = R2 keys.
     local sums_ref minisig_ref
     if [ "${comp}" = relay ]; then
-        sums_ref="relay/${stamp}/SHA256SUMS.txt"
-        minisig_ref="relay/${stamp}/SHA256SUMS.txt.minisig"
+        # ${key_prefix} for the same reason as the artifacts loop above — a
+        # relay beta cut's sums/minisig live under relay/beta/<stamp>/.
+        sums_ref="${key_prefix}${stamp}/SHA256SUMS.txt"
+        minisig_ref="${key_prefix}${stamp}/SHA256SUMS.txt.minisig"
     elif [ "${channel}" = beta ]; then
         sums_ref="${key_prefix}${stamp}/SHA256SUMS.txt"
         minisig_ref="${key_prefix}${stamp}/SHA256SUMS.txt.minisig"
@@ -1180,7 +1187,11 @@ distribute_relay() {
     command -v jq >/dev/null 2>&1 || { echo "✗ required tool not found: jq" >&2; exit 1; }
     build_register_helper
     # (3) upload latest.* + SHA256SUMS + minisig to R2 under relay/<stamp>/.
-    "${REGISTER_BIN}" publish-relay --stamp "${stamp}" --from-dir "${latest_stage}"
+    # --channel stable spelled out, same reasoning as the prune call just
+    # below: --distribute-only refuses --channel beta at arg-parse, so stable
+    # is the only value this path can have — say it rather than lean on the
+    # verb's default, so the call names what is actually true here.
+    "${REGISTER_BIN}" publish-relay --channel stable --stamp "${stamp}" --from-dir "${latest_stage}"
     # Retention runs HERE, after the R2 upload just above succeeded — never
     # before, and never on the dry-run path (this line is only reachable
     # past the `return 0` in the DRY_RUN branch above, which prints
@@ -1893,18 +1904,26 @@ do_release_relay() {
     # shellcheck disable=SC2012
     ( cd "${latest_stage}" && ls -1 latest.*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
 
+    # Ask the register binary for the layout rather than rebuilding it here —
+    # internal/register/KeyPrefix is the single expression of it. Relay has a
+    # beta channel like every other component, so this is "relay/" on stable
+    # and "relay/beta/" on beta; the previewed keys below and the success line
+    # at the end of this function must both name where the bytes actually go.
+    local relay_key_prefix
+    relay_key_prefix="$("${REGISTER_BIN}" key-prefix --comp "${comp}" --channel "${CHANNEL}")"
+
     if [ "${DRY_RUN}" = 1 ]; then
         # Print the would-upload plan (R2 keys, no scp).
         echo ""
-        echo "✓ dry-run relay: would upload to R2 under relay/${stamp}/"
+        echo "✓ dry-run relay: would upload to R2 under ${relay_key_prefix}${stamp}/"
         echo "  R2 keys:"
         for triple in "${TARGETS[@]}"; do
             read -r os arch variant <<<"${triple}"
             ships_target "${comp}" "${variant}" || continue
-            echo "    relay/${stamp}/latest.$(plat_of "${os}" "${arch}" "${variant}").zip"
+            echo "    ${relay_key_prefix}${stamp}/latest.$(plat_of "${os}" "${arch}" "${variant}").zip"
         done
-        echo "    relay/${stamp}/SHA256SUMS.txt"
-        echo "    relay/${stamp}/SHA256SUMS.txt.minisig"
+        echo "    ${relay_key_prefix}${stamp}/SHA256SUMS.txt"
+        echo "    ${relay_key_prefix}${stamp}/SHA256SUMS.txt.minisig"
         echo "(artifacts under ${latest_stage}/; version bump reverted; no scp)"
         # (9) dry-run registration preview.
         register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
@@ -1913,11 +1932,19 @@ do_release_relay() {
         return 0
     fi
 
-    # (4) non-dry-run: upload relay artifacts to R2 under relay/<stamp>/.
+    # (4) non-dry-run: upload relay artifacts to R2 under relay/[beta/]<stamp>/.
     # Uses the register tool's publish-relay subcommand which reads R2 creds from
     # ~/.burrowee/release/config.toml + r2.key and verifies sha256 before upload.
     # No scp, no ssh to the release host.
+    #
+    # --channel is passed, never defaulted: this function fully supports
+    # `--channel beta`, and publish-relay's own default is stable. Without it a
+    # relay beta cut published to the STABLE prefix — overwriting
+    # relay/latest.json with a beta stamp and leaving the artifacts at
+    # relay/<stamp>/, which the stable prune skips (the stamp reads "beta") and
+    # the beta prune never lists (it lists relay/beta/): unprunable forever.
     "${REGISTER_BIN}" publish-relay \
+        --channel "${CHANNEL}" \
         --stamp "${stamp}" \
         --from-dir "${latest_stage}"
 
@@ -1949,7 +1976,7 @@ do_release_relay() {
     # (9) register staged row in the console catalog.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
 
-    echo "✓ released relay ${stamp} (private, R2 relay/${stamp}/)"
+    echo "✓ released relay ${stamp} (private, R2 ${relay_key_prefix}${stamp}/)"
     trap shred_key ERR INT TERM
 }
 
