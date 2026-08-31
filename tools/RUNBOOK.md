@@ -755,17 +755,38 @@ to copy. Count invocations, not matches.)
 **The drain is conditional, not merely last.** For relay (gated on every
 channel) and for any component's beta, the console ROW — not the R2 object
 — is what makes the bytes installable: an artifact in the bucket with no
-catalog row is unreachable. `register_staged` used to warn and return 0
-when its console POST failed, so the drains ran regardless. With beta at
-keep=1 that meant a cut could upload, fail to register, and then delete the
+catalog row is unreachable. `register_staged` warned and carried on when
+its console POST failed, so the drains ran regardless. With beta at keep=1
+that meant a cut could upload, fail to register, and then delete the
 PREVIOUS beta — leaving the component with no installable beta at all and
-no artifact-level rollback (see `keepFor`'s own doc). `register_staged` now
-returns non-zero on a failed POST — still non-fatal, every caller swallows
-the status — and the four drain sites gate on it. When the gate refuses,
-the skip is loud on stderr and prints the exact commands to run after
-registering by hand.
+no artifact-level rollback (see `keepFor`'s own doc). The four drain sites
+now gate on that outcome, and when the gate refuses, the skip is loud on
+stderr and prints the exact commands to run after registering by hand.
 
-Two `register_staged` paths still return 0 without creating a row (the
+**How that outcome is reported matters, and is not the return status.**
+`register_staged` sets the script-scope flag `REG_STAGED_FAILED` and always
+returns 0; every one of its eight call sites calls it **unguarded** — no
+`|| rc=$?`, no `|| true`, and no `if register_staged …; then`.
+
+Bash disables `errexit` for the whole left-hand side of an AND-OR list, and
+that suppression reaches **inside the called function's body**, not merely
+its exit status. Several assignments in `register_staged` are deliberately
+fail-closed — `updater_ver="$(updater_pin …)"` above all, which exits 1 on
+a pseudo-version or an unresolvable pin — and a command substitution's
+failure only kills its own subshell. `errexit` in the caller is what turns
+that into an aborted cut. Guard the call and those assignments silently
+yield `""`, and the cut POSTs `"updater_version":""` to the console catalog
+and the fleet: exactly what `updater_pin`'s header and
+`tools/test-register-staged.sh` TEST 8 exist to prevent. The same class
+applies to `key-prefix`, `json_escape`'s `jq`, and `wc -c`. A flag keeps
+the drain gate and `errexit` at the same time; a return status can only buy
+one at the cost of the other.
+
+A failed POST is still **non-fatal**: the function returns 0, so a release
+whose artifacts are already up finishes exactly as before. Only the drain
+is skipped.
+
+Two `register_staged` paths leave the flag at 0 without creating a row (the
 release identity dir unconfigured; no artifact zips found under the stage
 dir). Both are unreachable on the gated paths: a beta or relay cut passes
 its own `publish-dir`/`publish-relay` first, which reads `config.toml` from
