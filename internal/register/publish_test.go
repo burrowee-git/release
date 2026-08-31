@@ -26,9 +26,9 @@ func (f *fakeGetter) Get(url string) (*http.Response, error) {
 	return &http.Response{StatusCode: st, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
-type fakePutter struct{ puts map[string]string }
+type fakeStringPutter struct{ puts map[string]string }
 
-func (f *fakePutter) Put(_ context.Context, key string, body []byte, _ string) error {
+func (f *fakeStringPutter) Put(_ context.Context, key string, body []byte, _ string) error {
 	if f.puts == nil {
 		f.puts = map[string]string{}
 	}
@@ -51,7 +51,7 @@ func TestPublishHappyPath(t *testing.T) {
 		ghBase + "/SHA256SUMS.txt":                      "SUMS",
 		ghBase + "/SHA256SUMS.txt.minisig":              "SIG",
 	}}
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: p, Out: io.Discard}, "cli", "")
 	if err != nil {
 		t.Fatalf("Publish: %v", err)
@@ -69,7 +69,7 @@ func TestPublishSha256MismatchAborts(t *testing.T) {
 		"https://c.example/api/v1/releases/cli/current": cliCatalog("deadbeef"), // wrong hash
 		ghBase + "/burrowee-cli-darwin-arm64.zip":       "ZIP",
 	}}
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: p, Out: io.Discard}, "cli", "")
 	if err == nil || !strings.Contains(err.Error(), "sha256") {
 		t.Fatalf("want sha256 error, got %v", err)
@@ -85,7 +85,7 @@ func TestPublishRelayAllowed(t *testing.T) {
 	// fakeGetter returns 404 for the relay catalog; Publish should get a catalog
 	// error (not a relay-refused error).
 	g := &fakeGetter{resp: map[string]string{}} // all 404s
-	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: &fakePutter{}, Out: io.Discard}, "relay", "")
+	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: &fakeStringPutter{}, Out: io.Discard}, "relay", "")
 	if err == nil {
 		t.Fatal("want error from catalog fetch, got nil")
 	}
@@ -128,14 +128,14 @@ func TestPublishFromDirHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
-	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
+	p := &fakeStringPutter{}
+	if err := PublishFromDir(context.Background(), p, "relay", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
 
-	// Expect 4 zips + SHA256SUMS.txt + SHA256SUMS.txt.minisig = 6 keys.
-	if len(p.puts) != 6 {
-		t.Fatalf("want 6 R2 puts, got %d: %v", len(p.puts), p.puts)
+	// Expect 4 zips + SHA256SUMS.txt + SHA256SUMS.txt.minisig + latest.json = 7 keys.
+	if len(p.puts) != 7 {
+		t.Fatalf("want 7 R2 puts, got %d: %v", len(p.puts), p.puts)
 	}
 	for _, plat := range platforms {
 		key := "relay/" + stamp + "/latest." + plat + ".zip"
@@ -180,8 +180,8 @@ func TestPublishFromDirSha256Mismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
-	err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard)
+	p := &fakeStringPutter{}
+	err := PublishFromDir(context.Background(), p, "relay", "stable", dir, stamp, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("want sha256 mismatch error, got %v", err)
 	}
@@ -223,13 +223,13 @@ func TestPublishFromDirCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
-	if err := PublishFromDir(context.Background(), p, "cli", dir, stamp, io.Discard); err != nil {
+	p := &fakeStringPutter{}
+	if err := PublishFromDir(context.Background(), p, "cli", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
 
-	if len(p.puts) != 6 {
-		t.Fatalf("want 6 R2 puts, got %d: %v", len(p.puts), p.puts)
+	if len(p.puts) != 7 {
+		t.Fatalf("want 7 R2 puts, got %d: %v", len(p.puts), p.puts)
 	}
 	for _, plat := range platforms {
 		key := "cli/" + stamp + "/burrowee-cli-" + plat + ".zip"
@@ -260,7 +260,7 @@ func TestPublishSizeMismatchAborts(t *testing.T) {
 		"https://c.example/api/v1/releases/cli/current": cliCatalogSize(99),
 		ghBase + "/burrowee-cli-darwin-arm64.zip":       "ZIP",
 	}}
-	p := &fakePutter{}
+	p := &fakeStringPutter{}
 	err := Publish(context.Background(), PublishDeps{ConsoleURL: "https://c.example", HTTP: g, R2: p, Out: io.Discard}, "cli", "")
 	if err == nil || !strings.Contains(err.Error(), "size mismatch") {
 		t.Fatalf("want size mismatch error, got %v", err)
@@ -304,14 +304,14 @@ func TestPublishFromDirUploadsTheFifthPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
-	if err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard); err != nil {
+	p := &fakeStringPutter{}
+	if err := PublishFromDir(context.Background(), p, "gateway", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
 
-	// 5 zips + SHA256SUMS.txt + .minisig = 7.
-	if len(p.puts) != 7 {
-		t.Fatalf("want 7 R2 puts, got %d: %v", len(p.puts), p.puts)
+	// 5 zips + SHA256SUMS.txt + .minisig + latest.json = 8.
+	if len(p.puts) != 8 {
+		t.Fatalf("want 8 R2 puts, got %d: %v", len(p.puts), p.puts)
 	}
 	legacy := "gateway/" + stamp + "/burrowee-gateway-darwin-amd64-legacy.zip"
 	if _, ok := p.puts[legacy]; !ok {
@@ -346,12 +346,12 @@ func TestPublishFromDirRelayNeedsNoLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
-	if err := PublishFromDir(context.Background(), p, "relay", dir, stamp, io.Discard); err != nil {
+	p := &fakeStringPutter{}
+	if err := PublishFromDir(context.Background(), p, "relay", "stable", dir, stamp, io.Discard); err != nil {
 		t.Fatalf("PublishFromDir: %v", err)
 	}
-	if len(p.puts) != 6 {
-		t.Fatalf("want 6 R2 puts for a legacy-free relay, got %d: %v", len(p.puts), p.puts)
+	if len(p.puts) != 7 {
+		t.Fatalf("want 7 R2 puts for a legacy-free relay, got %d: %v", len(p.puts), p.puts)
 	}
 }
 
@@ -379,8 +379,8 @@ func TestPublishFromDirRefusesAShortBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &fakePutter{}
-	err := PublishFromDir(context.Background(), p, "gateway", dir, stamp, io.Discard)
+	p := &fakeStringPutter{}
+	err := PublishFromDir(context.Background(), p, "gateway", "stable", dir, stamp, io.Discard)
 	if err == nil {
 		t.Fatal("want a refusal for a stage missing linux-arm64, got nil")
 	}
@@ -432,5 +432,121 @@ func TestZipsFromSumsAcceptsRealPlatforms(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Fatalf("want %d zips, got %d: %v", len(want), len(got), got)
+	}
+}
+
+// writeStageFixture writes a minimal stage directory for comp: the four base
+// platform zips (burrowee-<comp>-<plat>.zip), a SHA256SUMS.txt listing each
+// zip's real sha256, and a placeholder SHA256SUMS.txt.minisig — the trio
+// PublishFromDir needs to run zipsFromSums and the upload loops end to end.
+func writeStageFixture(t *testing.T, dir, comp string) {
+	t.Helper()
+	var sums strings.Builder
+	for _, plat := range basePlatforms {
+		name := "burrowee-" + comp + "-" + plat + ".zip"
+		body := "ZIP-" + plat
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256([]byte(body))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt.minisig"), []byte("SIG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishFromDirBetaUsesBetaPrefix(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFixture(t, dir, "edge") // helper already used by this file's tests
+
+	p := &fakePutter{}
+	err := PublishFromDir(context.Background(), p, "edge", "beta", dir,
+		"v0.2.21.beta.2026.08.28.716c7ede", io.Discard)
+	if err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+	for key := range p.put {
+		if !strings.HasPrefix(key, "edge/beta/") {
+			t.Errorf("beta publish wrote outside the beta prefix: %s", key)
+		}
+	}
+	if _, ok := p.put["edge/beta/latest.json"]; !ok {
+		t.Error("beta publish did not write edge/beta/latest.json")
+	}
+}
+
+// TestPublishFromDirRelayBetaUsesBetaPrefix is the relay twin of
+// TestPublishFromDirBetaUsesBetaPrefix. It exists because relay reaches
+// PublishFromDir through its OWN verb (publish-relay), which used to hardcode
+// channel "stable" — so a relay beta cut published stable keys with no test
+// anywhere to notice. The two assertions below are the two halves of that
+// defect: the artifacts must land under relay/beta/, and relay/latest.json —
+// the STABLE pointer — must not be touched by a beta cut.
+func TestPublishFromDirRelayBetaUsesBetaPrefix(t *testing.T) {
+	dir := t.TempDir()
+	writeRelayStageFixture(t, dir)
+
+	p := &fakePutter{}
+	err := PublishFromDir(context.Background(), p, "relay", "beta", dir,
+		"v0.2.21.beta.2026.08.28.716c7ede", io.Discard)
+	if err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+	for key := range p.put {
+		if !strings.HasPrefix(key, "relay/beta/") {
+			t.Errorf("relay beta publish wrote outside the beta prefix: %s", key)
+		}
+	}
+	if _, ok := p.put["relay/beta/latest.json"]; !ok {
+		t.Errorf("relay beta publish did not write relay/beta/latest.json; got keys %v", keysOf(p))
+	}
+	if _, ok := p.put["relay/latest.json"]; ok {
+		t.Error("relay beta publish overwrote relay/latest.json — the STABLE pointer")
+	}
+}
+
+// writeRelayStageFixture mirrors writeStageFixture for relay's own artifact
+// naming: relay ships latest.<plat>.zip, not burrowee-relay-<plat>.zip.
+func writeRelayStageFixture(t *testing.T, dir string) {
+	t.Helper()
+	var sums strings.Builder
+	for _, plat := range basePlatforms {
+		name := "latest." + plat + ".zip"
+		body := "ZIP-" + plat
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256([]byte(body))
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(h[:]), name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt"), []byte(sums.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS.txt.minisig"), []byte("SIG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishFromDirStablePrefixUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFixture(t, dir, "edge")
+
+	p := &fakePutter{}
+	err := PublishFromDir(context.Background(), p, "edge", "stable", dir,
+		"v0.2.19.2026.08.27.716c7ede", io.Discard)
+	if err != nil {
+		t.Fatalf("PublishFromDir: %v", err)
+	}
+	for key := range p.put {
+		if strings.Contains(key, "/beta/") {
+			t.Errorf("stable publish wrote under a beta prefix: %s", key)
+		}
+	}
+	if _, ok := p.put["edge/latest.json"]; !ok {
+		t.Error("stable publish did not write edge/latest.json")
 	}
 }

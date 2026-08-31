@@ -93,7 +93,11 @@ func Prune(ctx context.Context, store PruneStore, comp, channel string, execute 
 		out = io.Discard
 	}
 	keep := keepFor(comp, channel)
-	prefix := comp + "/"
+	// The channel's own prefix — stable objects live under <comp>/, beta under
+	// <comp>/beta/. Listing the channel's prefix is what keeps the two passes
+	// disjoint by construction; the stamp-shape check below is the second line
+	// of defence, for legacy keys and anything hand-uploaded.
+	prefix := KeyPrefix(comp, channel)
 
 	keys, err := store.List(ctx, prefix)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Putter uploads an object to R2. Satisfied by *r2.Client.
@@ -166,9 +167,10 @@ func zipsFromSums(comp string, hashByFile map[string]string) ([]string, error) {
 }
 
 // PublishFromDir uploads a component's artifacts from a local directory to R2
-// under <comp>/<stamp>/. It uploads every platform zip SHA256SUMS.txt lists
-// (see zipsFromSums), SHA256SUMS.txt, and SHA256SUMS.txt.minisig found in dir.
-// Size+sha256 are verified against SHA256SUMS.txt before upload.
+// under <comp>/[beta/]<stamp>/ (see KeyPrefix). It uploads every platform zip
+// SHA256SUMS.txt lists (see zipsFromSums), SHA256SUMS.txt, and
+// SHA256SUMS.txt.minisig found in dir, then writes <comp>/[beta/]latest.json
+// last, once every artifact is up (see WriteLatest).
 //
 // relay was the first (and, before beta, only) private component, so this was
 // written for it and driven by the relay cut flow (do_release_relay in
@@ -176,12 +178,12 @@ func zipsFromSums(comp string, hashByFile map[string]string) ([]string, error) {
 // Release. A beta cut of any component is private the same way until
 // promoted (spec §5.3), so this now takes comp and is used by all five. The
 // catalog/console-side row's url_or_key/sums_ref/minisig_ref already point at
-// the matching R2 keys <comp>/<stamp>/... before this function runs.
+// the matching R2 keys <comp>/[beta/]<stamp>/... before this function runs.
 //
 // Integrity is gated by sha256 of each file against the minisign-signed
 // SHA256SUMS.txt; there is no catalog size reference on the local-upload path,
 // so size-from-catalog verification (as in Publish) does not apply here.
-func PublishFromDir(ctx context.Context, r2 Putter, comp, dir, stamp string, out io.Writer) error {
+func PublishFromDir(ctx context.Context, r2 Putter, comp, channel, dir, stamp string, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
 	}
@@ -232,7 +234,7 @@ func PublishFromDir(ctx context.Context, r2 Putter, comp, dir, stamp string, out
 		verified[i] = body
 	}
 	for i, filename := range filenames {
-		key := comp + "/" + stamp + "/" + filename
+		key := KeyPrefix(comp, channel) + stamp + "/" + filename
 		if err := r2.Put(ctx, key, verified[i], "application/zip"); err != nil {
 			return err
 		}
@@ -251,11 +253,26 @@ func PublishFromDir(ctx context.Context, r2 Putter, comp, dir, stamp string, out
 		if err != nil {
 			return fmt.Errorf("publish-dir: read %s: %w", entry.filename, err)
 		}
-		key := comp + "/" + stamp + "/" + entry.filename
+		key := KeyPrefix(comp, channel) + stamp + "/" + entry.filename
 		if err := r2.Put(ctx, key, body, entry.contentType); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "✓ %s\n", key)
+	}
+
+	// The manifest goes last, on purpose: it is the pointer that makes a stamp
+	// discoverable, so it must never name artifacts that are not uploaded yet.
+	// The semver is the first three dot-fields of the stamp, on either channel:
+	//   v0.2.19.2026.08.27.716c7ede      -> 0.2.19
+	//   v0.2.21.beta.2026.08.28.716c7ede -> 0.2.21
+	parts := strings.Split(strings.TrimPrefix(stamp, "v"), ".")
+	if len(parts) < 3 {
+		return fmt.Errorf("publish %s: malformed stamp %q — expected at least vX.Y.Z", comp, stamp)
+	}
+	semver := strings.Join(parts[:3], ".")
+
+	if err := WriteLatest(ctx, r2, comp, channel, stamp, semver, filenames, time.Now().UTC()); err != nil {
+		return err
 	}
 	return nil
 }

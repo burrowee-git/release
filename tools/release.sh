@@ -268,10 +268,17 @@ build_register_helper() {
 # path never reads cli/gateway/edge/agent/relay source) — only the dispatcher
 # and the release repo itself, via assert_release_origins' unconditional tail.
 #
-# After the R2 push, retention is reported (NOT applied): the R2 prune-to-10 and
-# the GitHub prune-to-10 both run DRY-RUN so the cut surfaces what is now over
-# the retention limit. The destructive drain (--execute) is a deploy-phase step,
-# never run automatically from a publish.
+# Retention runs HERE, after the publish succeeded — never before. The
+# publish (just above) is what establishes that the newest stamp is safely
+# uploaded, and pruning to "newest 10" against a count that is about to
+# change is exactly how a retention pass deletes something it should have
+# kept.
+#
+# This replaces the report-then-drain contract this RUNBOOK used to
+# document. That contract was sound in principle and empty in practice:
+# nothing ran the drain, on either brand, for months, and the buckets
+# reached 27.3 GB and 6.5 GB of unreachable artifacts. A control nobody
+# executes is not a control.
 if [ "${1:-}" = "publish" ]; then
     shift
     comp="${1:-}"
@@ -281,13 +288,37 @@ if [ "${1:-}" = "publish" ]; then
     build_register_helper
     "${REGISTER_BIN}" publish --comp "${comp}" "$@"
     echo
-    echo "→ retention (dry-run — run prune with --execute in the deploy phase to apply):"
-    "${REGISTER_BIN}" prune --comp "${comp}" || true
+    echo "→ retention (applying):"
+    # Scope, BOTH surfaces: `publish --comp all` expands to cli/gateway/edge/
+    # agent (runPublish's own list) — relay is never console-promoted, it has
+    # no `publish` step at all. But `prune --comp all` DOES include relay, so
+    # passing "all" straight through drained relay's R2 to keep=3 on behalf of
+    # a publish that had not touched a single relay object. Expand to the same
+    # PUBLIC_COMPONENTS list (tools/public_components.sh), not a second copy,
+    # and loop — `prune --comp` takes exactly one component.
+    prune_comps="${comp}"
+    [ "${comp}" = all ] && prune_comps="${PUBLIC_COMPONENTS}"
+    # Channel: the literal `stable`, NOT "${CHANNEL:-stable}". register publish
+    # (above) is stable-only — Publish() takes no --channel flag at all — and a
+    # `:-` fallback on this name is exactly what the CHANNEL="stable" comment
+    # below forbids: CHANNEL is generic enough that a stray `export
+    # CHANNEL=beta` in an operator's shell would silently skip stable retention
+    # here and run a keep-1 BETA sweep in its place. A bare "${CHANNEL}" is not
+    # the alternative either (`set -u`, and CHANNEL is not assigned until past
+    # this branch's `exit 0`) — a literal is, as at the other two sites.
+    for prune_comp in ${prune_comps}; do
+        "${REGISTER_BIN}" prune --comp "${prune_comp}" --channel stable --execute || true
+    done
     # GitHub prune scope is cli/gateway/edge/agent (relay has no GitHub release)
-    # — PUBLIC_COMPONENTS (tools/public_components.sh), not a second copy.
-    gh_comps="${comp}"
-    [ "${comp}" = all ] && gh_comps="${PUBLIC_COMPONENTS}"
-    COMPONENTS="${gh_comps}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
+    # — the same PUBLIC_COMPONENTS expansion as the R2 half above.
+    # `env -u KEEP`: prune-releases.sh reads KEEP from the environment
+    # (KEEP="${KEEP:-10}"), which was fine while a human typed the command and
+    # is not fine now that a cut fires it automatically — an operator's leftover
+    # `export KEEP=1` would silently turn this drain into a keep-1 sweep of the
+    # component that was just promoted. Strip it so the script's own defaults
+    # govern; this file carries no retention counts.
+    env -u KEEP COMPONENTS="${prune_comps}" CHANNEL=stable \
+        bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
     exit 0
 fi
 
@@ -774,14 +805,83 @@ GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/bin/ghp")"
 # warning and returns 0 (never fails the release).
 # Dry-run-safe: when DRY_RUN=1, prints the would-register body and returns 0
 # without touching config or keys.
-# Post-failure non-fatal: if the helper fails, warns loudly but does not exit.
+#
+# HOW A FAILED CONSOLE POST IS REPORTED: REG_STAGED_FAILED, never the return
+# status. A correctness requirement, not a style choice.
+#
+# (Deliberately not spelled with a `# ----` rule: that prefix is the section
+# sentinel tools/test-register-staged.sh's extract_register_staged stops at,
+# so a rule inside this header truncates the extraction and every test in
+# that file dies with "register_staged: command not found".)
+#
+# This function ALWAYS returns 0, and every call site calls it UNGUARDED —
+# no `|| rc=$?`, no `|| true`, no `if register_staged ...; then`.
+#
+# Bash disables `errexit` for the whole left-hand side of an AND-OR list, and
+# that suppression reaches INSIDE the called function's body — not merely its
+# exit status. So `register_staged ... || rc=$?` silently turns off `set -e`
+# for everything this function does:
+#
+#   inner(){ exit 1; }; f(){ local v=""; v="$(inner)"; echo "v='$v'"; return 0; }
+#   f            -> script aborts (rc=1)
+#   f || rc=$?   -> "v=''"  rc=0      <- errexit suppressed inside f
+#
+# That matters because several assignments in here are deliberately
+# FAIL-CLOSED, and a command substitution's failure only kills its subshell —
+# `errexit` in the parent is what turns it into an aborted cut:
+#
+#   updater_ver="$(updater_pin ...)"   exits 1 on a pseudo-version, a missing
+#                                      .info, a missing Time/Origin.Hash, or a
+#                                      bare `go list -m` failure. Swallowed, it
+#                                      yields "" and POSTs "updater_version":""
+#                                      to the console catalog and the fleet —
+#                                      exactly what updater_pin's own header and
+#                                      tools/test-register-staged.sh TEST 8 exist
+#                                      to prevent.
+#   key_prefix="$(... key-prefix ...)" swallowed, it yields "" and every beta /
+#                                      relay key loses its "<comp>/" prefix.
+#   json_escape's `jq`, size="$(wc -c ...)" — same class.
+#
+# `if register_staged ...; then` is NOT an alternative: it suppresses errexit
+# identically.
+#
+# So the POST outcome travels through a variable instead. REG_STAGED_FAILED is
+# reset to 0 on entry and set to 1 only when the register helper's POST fails
+# (loud warn either way). Callers read it immediately after an unguarded call:
+#
+#   register_staged ...                      # errexit stays live
+#   if [ "${REG_STAGED_FAILED}" = 0 ]; then <drain>; else <skip>; fi
+#
+# Post-failure stays NON-FATAL — a failed POST must never fail a release whose
+# artifacts are already up. What the flag is for is the retention drains: a
+# drain must not run when no console row was created. See the
+# REG_STAGED_FAILED=1 comment at the bottom of this function.
+#
+# The two SKIP branches below (~/.burrowee/release unconfigured, and no
+# artifact zips found under stage_dir) leave REG_STAGED_FAILED at 0. They are
+# the same "no row exists" state, and they are left alone deliberately: both
+# are unreachable on the gated paths where the drain is dangerous — a beta or
+# relay cut reaches this function only past its own `register publish-dir` /
+# `publish-relay`, which reads config.toml from the SAME path this skip
+# tests, under `set -e`; and both build every TARGETS zip themselves before
+# calling here, so a zero-zip stage_dir cannot exist by then. They stay
+# reachable from --distribute-only over an externally staged dir, where the
+# drain is stable-only (keep 3/10, not 1) and the previous version survives.
 #
 # For public comps: url_or_key is the GitHub asset download URL.
 # For relay: url_or_key is the R2 key under relay/<stamp>/.
 # gated=true iff comp==relay. github_release=<comp>/<stamp> for public, ""
 # for relay. prerelease=true always.
 warn() { echo "⚠ $*" >&2; }
+
+# Set by register_staged (see its header): 0 = a console row was created, or
+# the call was a dry run; 1 = the POST was attempted and failed. Declared at
+# script scope so `set -u` cannot bite a reader that runs before any call.
+REG_STAGED_FAILED=0
 register_staged() {
+    # NOT `local` — this is how the outcome reaches the caller, because the
+    # return status cannot be read without disabling errexit inside this body.
+    REG_STAGED_FAILED=0
     local comp="$1" stamp="$2" semver="$3" stage_dir="$4" src_dir="$5"
     local gh_tag="${6:-}"
     # Read from the caller's environment, defaulting stable — the callers this
@@ -821,6 +921,12 @@ register_staged() {
     # shellcheck disable=SC2086
     sha256_bundle="$(${SHA256} "${stage_dir}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}')" || sha256_bundle=""
 
+    # Ask the register binary for the layout rather than rebuilding it here —
+    # internal/register/KeyPrefix is the single expression of it, and a shell
+    # copy is a copy that drifts.
+    local key_prefix
+    key_prefix="$("${REGISTER_BIN}" key-prefix --comp "${comp}" --channel "${channel}")"
+
     # Build artifacts JSON.
     # For each platform zip, extract sha256 + size, derive url_or_key.
     # Public comps: zips are named burrowee-<comp>-<plat>.zip in stage_dir.
@@ -836,15 +942,20 @@ register_staged() {
 
         local zip_name url_or_key zip_path
         if [ "${comp}" = relay ]; then
+            # ${key_prefix}, not a hardcoded "relay/": relay has a beta channel
+            # too (do_release_relay --channel beta), and its bytes land under
+            # relay/beta/<stamp>/ exactly like every other component's. A
+            # hardcoded prefix here made a relay beta row point at keys the
+            # publish never wrote.
             zip_name="latest.${plat}.zip"
-            url_or_key="relay/${stamp}/${zip_name}"
+            url_or_key="${key_prefix}${stamp}/${zip_name}"
         elif [ "${channel}" = beta ]; then
             # Beta: same R2 key layout as relay's private publish
             # (register publish-dir → internal/r2), just under the
             # component's own prefix instead of relay/ — no GitHub asset to
             # link, since a beta cut never creates a Release.
             zip_name="burrowee-${comp}-${plat}.zip"
-            url_or_key="${comp}/${stamp}/${zip_name}"
+            url_or_key="${key_prefix}${stamp}/${zip_name}"
         else
             zip_name="burrowee-${comp}-${plat}.zip"
             url_or_key="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/${zip_name}"
@@ -905,11 +1016,13 @@ register_staged() {
     # sums_ref and minisig_ref: public = GitHub asset URLs; relay/beta = R2 keys.
     local sums_ref minisig_ref
     if [ "${comp}" = relay ]; then
-        sums_ref="relay/${stamp}/SHA256SUMS.txt"
-        minisig_ref="relay/${stamp}/SHA256SUMS.txt.minisig"
+        # ${key_prefix} for the same reason as the artifacts loop above — a
+        # relay beta cut's sums/minisig live under relay/beta/<stamp>/.
+        sums_ref="${key_prefix}${stamp}/SHA256SUMS.txt"
+        minisig_ref="${key_prefix}${stamp}/SHA256SUMS.txt.minisig"
     elif [ "${channel}" = beta ]; then
-        sums_ref="${comp}/${stamp}/SHA256SUMS.txt"
-        minisig_ref="${comp}/${stamp}/SHA256SUMS.txt.minisig"
+        sums_ref="${key_prefix}${stamp}/SHA256SUMS.txt"
+        minisig_ref="${key_prefix}${stamp}/SHA256SUMS.txt.minisig"
     else
         sums_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt"
         minisig_ref="https://github.com/${RELEASE_REPO}/releases/download/${gh_tag}/SHA256SUMS.txt.minisig"
@@ -969,6 +1082,21 @@ register_staged() {
     printf '%s' "${body}" > "${stage_dir}/.register-payload.json"
     if ! "${REGISTER_BIN}" register --payload-file "${stage_dir}/.register-payload.json"; then
         warn "console registration failed for ${comp} ${stamp}; register manually later"
+        # The flag, and the warn stays. For a GATED artifact — relay on either
+        # channel, and any component's beta — the console ROW, not the R2
+        # object, is what makes the bytes reachable: without it the cut has
+        # published something nothing can install. The retention drains that
+        # follow this call gate on this flag for that reason. A beta drain is
+        # keep=1, so ungated it would delete the PREVIOUS beta while the new
+        # one has no row — leaving the component with no installable beta at
+        # all and, per keepFor's own doc, no artifact-level rollback.
+        #
+        # A flag rather than `return 1` because reading a return status costs
+        # `errexit` inside this whole function body — see the function header.
+        # This still does not make a failed POST fatal: the function returns 0,
+        # so a release whose artifacts are already up finishes exactly as
+        # before; only the drain is skipped.
+        REG_STAGED_FAILED=1
     fi
     return 0
 }
@@ -1157,9 +1285,11 @@ distribute_relay() {
     command -v jq >/dev/null 2>&1 || { echo "✗ required tool not found: jq" >&2; exit 1; }
     build_register_helper
     # (3) upload latest.* + SHA256SUMS + minisig to R2 under relay/<stamp>/.
-    "${REGISTER_BIN}" publish-relay --stamp "${stamp}" --from-dir "${latest_stage}"
-    echo "→ relay R2 retention (report only — run prune --comp relay --execute to apply):"
-    "${REGISTER_BIN}" prune --comp relay || true
+    # --channel stable spelled out, same reasoning as the prune call just
+    # below: --distribute-only refuses --channel beta at arg-parse, so stable
+    # is the only value this path can have — say it rather than lean on the
+    # verb's default, so the call names what is actually true here.
+    "${REGISTER_BIN}" publish-relay --channel stable --stamp "${stamp}" --from-dir "${latest_stage}"
     # (4) marker commit (private — no gh release / no git tag).
     git add "versions/${comp}"
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
@@ -1167,7 +1297,38 @@ distribute_relay() {
     # register_staged records the dispatcher stamp bundled into the zip; resolve
     # it here (the public distribute_only sets DISP_STAMP the same way).
     DISP_STAMP="$(resolve_disp_stamp)"
+    # Unguarded, and the outcome read from REG_STAGED_FAILED: `|| rc=$?` here
+    # would disable errexit inside register_staged's whole body, where several
+    # assignments (updater_pin, key-prefix, jq) are deliberately fail-closed.
+    # See register_staged's header.
     register_staged "${comp}" "${stamp}" "${semver}" "${latest_stage}" "${src}"
+
+    # (6) Retention runs HERE, LAST — after the R2 upload, the marker commit
+    # and the console registration above have all succeeded, never before, and
+    # never on the dry-run path (this line is only reachable past the
+    # `return 0` in the DRY_RUN branch above, which prints "would:
+    # publish-relay" and returns before any upload). It used to sit directly
+    # after the upload, ahead of registration: relay is GATED on every
+    # channel, so the console ROW — not the R2 object — is what makes these
+    # bytes installable, and draining before that row exists is draining on
+    # the strength of a publish that may not have completed in the sense that
+    # matters. Hence the gate on ${REG_STAGED_FAILED}, not just the reordering.
+    #
+    # --distribute-only refuses --channel beta (see the DISTRIBUTE_ONLY/CHANNEL
+    # guard near the top of this file), so this path is provably always stable
+    # — passed explicitly rather than left to prune's own default, so the call
+    # names what is actually true here. `|| true`: a retention failure must not
+    # fail a distribution whose artifacts are already up; the nightly
+    # com.jc.r2-cleanup agent is the net for whatever a failure here leaves
+    # behind, and for the skipped-drain case just below.
+    if [ "${REG_STAGED_FAILED}" = 0 ]; then
+        echo "→ relay R2 retention (applying):"
+        "${REGISTER_BIN}" prune --comp relay --channel stable --execute || true
+    else
+        echo "⚠ relay R2 retention SKIPPED: console registration did not succeed" >&2
+        echo "  The artifacts are up but not yet reachable. Register manually, then run:" >&2
+        echo "    ${REGISTER_BIN} prune --comp relay --channel stable --execute" >&2
+    fi
     echo "✓ distributed relay ${stamp} (private, R2 relay/${stamp}/)"
 }
 
@@ -1360,11 +1521,41 @@ distribute_only() {
     # (4) register staged row in the console catalog — LAST, only after the
     # GitHub Release + self-hosting upload + marker commit all succeeded, so
     # the catalog never advertises artifacts that aren't actually live.
+    # Unguarded — see register_staged's header on why the outcome travels
+    # through REG_STAGED_FAILED and not the return status.
     register_staged "${comp}" "${stamp}" "${semver}" "${stage}" "${src}" "${comp}/${stamp}"
 
+    # Retention runs HERE, after the GitHub Release + self-hosting upload +
+    # marker commit + catalog registration above have all succeeded — never
+    # before, and never on the dry-run path (this line is only reachable
+    # past the `return 0` in the DRY_RUN branch above, which returns before
+    # gh_release_publish ever runs). "have all succeeded" is now a fact the
+    # code checks rather than a sentence: register_staged used to warn and
+    # return 0 on a failed console POST, so this drain ran regardless of it.
+    # --distribute-only refuses --channel beta (see the DISTRIBUTE_ONLY/CHANNEL
+    # guard near the top of this file), so this path is provably always stable
+    # — passed explicitly rather than left to the tool's own default.
+    # `|| true`: a retention failure must not fail a distribution whose
+    # artifacts are already public; the nightly com.jc.r2-cleanup agent is the
+    # net for whatever a failure here leaves behind, and for the skipped-drain
+    # case below. No R2 side here — distribute_only never uploads to R2 for a
+    # public component; that only happens later, via the stable
+    # console-promote helper (the `publish` branch near the top of this file),
+    # which drains R2 retention itself.
     echo
-    echo "→ GitHub release retention (dry-run — run prune-releases.sh --execute in the deploy phase to apply):"
-    COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" || true
+    if [ "${REG_STAGED_FAILED}" = 0 ]; then
+        echo "→ GitHub release retention (applying):"
+        # `env -u KEEP`: prune-releases.sh takes KEEP from the environment, and
+        # this call is automatic now — a leftover `export KEEP=1` in the
+        # operator's shell must not steer a destructive drain the cut fires on
+        # its own. Same strip at every automatic --execute site; no retention
+        # count is written here.
+        env -u KEEP CHANNEL=stable COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+    else
+        echo "⚠ GitHub release retention SKIPPED: console registration did not succeed" >&2
+        echo "  Register manually, then run:" >&2
+        echo "    CHANNEL=stable COMPONENTS=${comp} bash tools/prune-releases.sh --execute" >&2
+    fi
 
     echo "✓ distributed ${comp}/${stamp}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${comp}/${stamp}"
@@ -1845,40 +2036,53 @@ do_release_relay() {
     # shellcheck disable=SC2012
     ( cd "${latest_stage}" && ls -1 latest.*.zip SHA256SUMS.txt SHA256SUMS.txt.minisig | sed 's/^/    /' )
 
+    # Ask the register binary for the layout rather than rebuilding it here —
+    # internal/register/KeyPrefix is the single expression of it. Relay has a
+    # beta channel like every other component, so this is "relay/" on stable
+    # and "relay/beta/" on beta; the previewed keys below and the success line
+    # at the end of this function must both name where the bytes actually go.
+    local relay_key_prefix
+    relay_key_prefix="$("${REGISTER_BIN}" key-prefix --comp "${comp}" --channel "${CHANNEL}")"
+
     if [ "${DRY_RUN}" = 1 ]; then
         # Print the would-upload plan (R2 keys, no scp).
         echo ""
-        echo "✓ dry-run relay: would upload to R2 under relay/${stamp}/"
+        echo "✓ dry-run relay: would upload to R2 under ${relay_key_prefix}${stamp}/"
         echo "  R2 keys:"
         for triple in "${TARGETS[@]}"; do
             read -r os arch variant <<<"${triple}"
             ships_target "${comp}" "${variant}" || continue
-            echo "    relay/${stamp}/latest.$(plat_of "${os}" "${arch}" "${variant}").zip"
+            echo "    ${relay_key_prefix}${stamp}/latest.$(plat_of "${os}" "${arch}" "${variant}").zip"
         done
-        echo "    relay/${stamp}/SHA256SUMS.txt"
-        echo "    relay/${stamp}/SHA256SUMS.txt.minisig"
+        echo "    ${relay_key_prefix}${stamp}/SHA256SUMS.txt"
+        echo "    ${relay_key_prefix}${stamp}/SHA256SUMS.txt.minisig"
         echo "(artifacts under ${latest_stage}/; version bump reverted; no scp)"
-        # (9) dry-run registration preview.
+        # (9) dry-run registration preview. Unguarded like every other call
+        # site: register_staged always returns 0, and a `|| true` here would
+        # disable errexit inside its body — so a dry run would stop catching
+        # the fail-closed resolution errors (updater_pin above all) that it
+        # exists to surface BEFORE a real cut.
         register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
         revert_relay_version
         trap shred_key ERR INT TERM
         return 0
     fi
 
-    # (4) non-dry-run: upload relay artifacts to R2 under relay/<stamp>/.
+    # (4) non-dry-run: upload relay artifacts to R2 under relay/[beta/]<stamp>/.
     # Uses the register tool's publish-relay subcommand which reads R2 creds from
     # ~/.burrowee/release/config.toml + r2.key and verifies sha256 before upload.
     # No scp, no ssh to the release host.
+    #
+    # --channel is passed, never defaulted: this function fully supports
+    # `--channel beta`, and publish-relay's own default is stable. Without it a
+    # relay beta cut published to the STABLE prefix — overwriting
+    # relay/latest.json with a beta stamp and leaving the artifacts at
+    # relay/<stamp>/, which the stable prune skips (the stamp reads "beta") and
+    # the beta prune never lists (it lists relay/beta/): unprunable forever.
     "${REGISTER_BIN}" publish-relay \
+        --channel "${CHANNEL}" \
         --stamp "${stamp}" \
         --from-dir "${latest_stage}"
-
-    # (4b) retention (dry-run): report relay R2 prefixes now over keep=3 stable
-    # / 1 beta (beta is disposable — the newest cut is the only one kept). The
-    # destructive drain (prune --comp relay --execute) is a deploy-phase step.
-    echo
-    echo "→ relay R2 retention (dry-run — run prune --comp relay --channel ${CHANNEL} --execute in the deploy phase to apply):"
-    "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" || true
 
     # marker commit (no gh release / no git tag, either channel — relay has
     # always been R2-only). Beta gets the same " beta" marker-subject suffix
@@ -1892,10 +2096,39 @@ do_release_relay() {
         marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
     fi
 
-    # (9) register staged row in the console catalog.
+    # (9) register staged row in the console catalog. Unguarded — see
+    # register_staged's header on REG_STAGED_FAILED vs. the return status.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
 
-    echo "✓ released relay ${stamp} (private, R2 relay/${stamp}/)"
+    # (10) retention: drain relay R2 prefixes now over keep=3 stable / 1 beta
+    # (beta is disposable — the newest cut is the only one kept). Runs HERE,
+    # last, and never on the dry-run path (this line is only reachable past
+    # the `return 0` in the DRY_RUN branch above, which prints "would: upload"
+    # and returns before ever touching R2).
+    #
+    # It used to run immediately after the publish-relay upload, ahead of the
+    # marker commit and this registration. That was the wrong anchor: relay is
+    # GATED on every channel, so the console ROW — not the R2 object — is what
+    # makes these bytes installable. Draining keep=1 on beta with no row for
+    # the new stamp deletes the previous beta and leaves the component with no
+    # installable beta at all, and no artifact-level rollback (see keepFor's
+    # own doc). Hence both the move and the ${REG_STAGED_FAILED} gate.
+    #
+    # `|| true` on the drain itself: a retention failure must not fail a relay
+    # cut whose artifacts are already up — the nightly com.jc.r2-cleanup agent
+    # is the net for that, and for the skipped-drain case below. Relay has no
+    # GitHub side to prune, either channel (R2-only).
+    echo
+    if [ "${REG_STAGED_FAILED}" = 0 ]; then
+        echo "→ relay R2 retention (applying):"
+        "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" --execute || true
+    else
+        echo "⚠ relay R2 retention SKIPPED: console registration did not succeed" >&2
+        echo "  The artifacts are up but not yet reachable. Register manually, then run:" >&2
+        echo "    ${REGISTER_BIN} prune --comp relay --channel ${CHANNEL} --execute" >&2
+    fi
+
+    echo "✓ released relay ${stamp} (private, R2 ${relay_key_prefix}${stamp}/)"
     trap shred_key ERR INT TERM
 }
 
@@ -2089,8 +2322,13 @@ do_release() {
     # point (tag, GitHub Release, the stable-only scp block, its marker text,
     # its register_staged gh_tag) is stable-channel-specific.
     if [ "${CHANNEL}" = beta ]; then
+        # Ask the register binary for the layout rather than rebuilding it
+        # here — internal/register/KeyPrefix is the single expression of it.
+        local key_prefix
+        key_prefix="$("${REGISTER_BIN}" key-prefix --comp "${comp}" --channel "${CHANNEL}")"
+
         if [ "${DRY_RUN}" = 1 ]; then
-            echo "→ would: publish-dir to R2 under ${comp}/${stamp}/ (beta: private until promoted)"
+            echo "→ would: publish-dir to R2 under ${key_prefix}${stamp}/ (beta: private until promoted)"
             echo "→ would: gen-bootstraps.sh + scp ${comp}/beta.*.sh (idempotent)"
             echo "→ would: marker commit [RELEASED: ${comp} beta] ${stamp} (private)"
             # (9) dry-run registration preview — the SAME register_staged call
@@ -2105,6 +2343,10 @@ do_release() {
             # it. gh_tag ("") matches the real (non-dry-run) beta call a few
             # lines down: register_staged forces github_release="" for
             # channel=beta regardless of what's passed.
+            # Unguarded like every other call site: register_staged always
+            # returns 0, and a `|| true` here would disable errexit inside its
+            # body — so a dry run would stop catching the fail-closed
+            # resolution errors it exists to surface before a real cut.
             register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
             revert_version
             trap shred_key ERR INT TERM
@@ -2112,7 +2354,7 @@ do_release() {
             return 0
         fi
 
-        "${REGISTER_BIN}" publish-dir --comp "${comp}" --stamp "${stamp}" --from-dir "${stage}"
+        "${REGISTER_BIN}" publish-dir --comp "${comp}" --channel "${CHANNEL}" --stamp "${stamp}" --from-dir "${stage}"
 
         # Past the R2 publish — clear the version-revert trap, same reasoning
         # as the stable tail clearing it immediately past gh_release_publish:
@@ -2172,12 +2414,53 @@ do_release() {
         # register_staged with no gh_tag ($6 empty) — channel=beta forces
         # github_release="" regardless (see register_staged), the empty arg
         # here just matches what a beta cut actually has: no GitHub tag.
+        # Unguarded — see register_staged's header on why the outcome travels
+        # through REG_STAGED_FAILED and not the return status.
         register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
 
-        echo "→ beta R2 retention (report only — run prune --comp ${comp} --channel beta --execute in the deploy phase to apply):"
-        "${REGISTER_BIN}" prune --comp "${comp}" --channel beta || true
+        # Retention runs HERE, after the beta publish AND the console
+        # registration above both succeeded — never before, and never on the
+        # dry-run path (this line is only reachable past the `return 0` in the
+        # DRY_RUN branch above, which returns before the R2 publish-dir call).
+        #
+        # The ${REG_STAGED_FAILED} gate is the point. A beta artifact is GATED: the
+        # console row, not the R2 object, is what makes it installable. Beta
+        # retention is keep=1. So an ungated drain after a failed registration
+        # deleted the PREVIOUS beta — the only installable one, since the new
+        # stamp has no row — leaving the component with no beta at all and no
+        # artifact-level rollback (see keepFor's own doc). register_staged
+        # warns and returns non-zero on a failed POST precisely so this gate
+        # can exist; the cut itself still finishes.
+        #
+        # Both drains `|| true`: a retention failure must not fail a cut whose
+        # artifacts are already up; the nightly com.jc.r2-cleanup agent is the
+        # net for that, and for the skipped-drain case below.
+        echo
+        if [ "${REG_STAGED_FAILED}" = 0 ]; then
+            echo "→ beta retention (applying):"
+            "${REGISTER_BIN}" prune --comp "${comp}" --channel beta --execute || true
+            # GitHub-side beta retention had no caller anywhere in release.sh
+            # or release.command before this — beta git tags (minted only
+            # later, when the console promotes a staged row to public)
+            # accumulated silently past keep=1. tools/prune-releases.sh
+            # already defaults KEEP to 1 on beta and reads CHANNEL itself;
+            # scope is this one component, matching the R2 call above (a beta
+            # cut is always exactly one component — WHAT=all is expanded into
+            # a per-component loop before do_release is ever called, see
+            # COMPONENTS above). `env -u KEEP`: the script's KEEP default is
+            # what must govern an automatic drain, never an operator's ambient
+            # export — same strip at every automatic --execute site.
+            env -u KEEP CHANNEL=beta COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+        else
+            echo "⚠ beta retention SKIPPED (both surfaces): console registration did not succeed" >&2
+            echo "  ${comp} beta ${stamp} is in R2 but has no console row, so nothing can install it." >&2
+            echo "  Draining keep=1 now would delete the previous beta, the only installable one." >&2
+            echo "  Register manually, then run:" >&2
+            echo "    ${REGISTER_BIN} prune --comp ${comp} --channel beta --execute" >&2
+            echo "    CHANNEL=beta COMPONENTS=${comp} bash tools/prune-releases.sh --execute" >&2
+        fi
 
-        echo "✓ released ${comp} beta ${stamp} (private, R2 ${comp}/${stamp}/)"
+        echo "✓ released ${comp} beta ${stamp} (private, R2 ${key_prefix}${stamp}/)"
         return 0
     fi
     # ---- stable channel: unchanged from here -----------------------------
@@ -2186,6 +2469,7 @@ do_release() {
         echo "✓ dry-run ${comp}: artifacts under ${stage}/ (version bump reverted; no tag/release/scp)"
         # (9) dry-run registration preview (uses the dry-run stamp for URLs).
         local dry_tag="${comp}/${stamp}"
+        # Unguarded — same reason as the beta dry-run preview above.
         register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${dry_tag}"
         revert_version
         trap shred_key ERR INT TERM
@@ -2310,7 +2594,14 @@ do_release() {
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
-    # (9) register staged row in the console catalog.
+    # (9) register staged row in the console catalog. Unguarded, like every
+    # other call site — a failed POST is reported through REG_STAGED_FAILED,
+    # so no `|| true` is needed and none may be added: it would disable
+    # errexit inside register_staged's body and let a fail-closed
+    # updater_pin/key-prefix/jq error POST a malformed row instead of aborting
+    # this cut. No gate needed here either: (10) below is a report, not a
+    # drain, and a stable artifact is reachable from its GitHub Release
+    # whether or not the console row landed.
     register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}"
 
     # (10) GitHub-release retention (dry-run): report tags now over keep=10. The

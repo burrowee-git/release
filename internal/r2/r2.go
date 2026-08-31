@@ -123,6 +123,31 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+// Get fetches one object's bytes. The counterpart of Put, added for the beta
+// layout migration: reading an artifact back out is the only way to re-publish
+// it under a different key without rebuilding it from source.
+func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
+	reqURL := fmt.Sprintf("%s/%s/%s", c.endpoint, c.bucket, key)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("r2: get %s: new request: %w", key, err)
+	}
+	signV4(req, c.accessKeyID, c.secret, "auto", "s3", nil, time.Now())
+	resp, err := c.doer.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("r2: get %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("r2: get %s: read response: %w", key, err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("r2: get %s: status %d: %s", key, resp.StatusCode, body)
+	}
+	return body, nil
+}
+
 // Delete removes the object at key. A 404/NoSuchKey is treated as success
 // (deleting an absent key is a no-op, which keeps prune idempotent).
 func (c *Client) Delete(ctx context.Context, key string) error {
