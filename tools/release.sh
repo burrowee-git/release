@@ -805,7 +805,23 @@ GHP="$(command -v ghp 2>/dev/null || echo "${HOME}/bin/ghp")"
 # warning and returns 0 (never fails the release).
 # Dry-run-safe: when DRY_RUN=1, prints the would-register body and returns 0
 # without touching config or keys.
-# Post-failure non-fatal: if the helper fails, warns loudly but does not exit.
+# Post-failure non-fatal, but NOT silent: if the helper fails, warns loudly and
+# returns 1. Non-fatal is the caller's job — every call site swallows the
+# status, exactly as `|| true` used to, so a failed POST still never fails a
+# release whose artifacts are already up. What the status IS for is the
+# retention drains: a drain must not run when no console row was created. See
+# the return-1 comment at the bottom of this function.
+#
+# The two SKIP branches below (~/.burrowee/release unconfigured, and no
+# artifact zips found under stage_dir) still return 0. They are the same
+# "no row exists" state, and they are left alone deliberately: both are
+# unreachable on the gated paths where the drain is dangerous — a beta or
+# relay cut reaches this function only past its own `register publish-dir` /
+# `publish-relay`, which reads config.toml from the SAME path this skip
+# tests, under `set -e`; and both build every TARGETS zip themselves before
+# calling here, so a zero-zip stage_dir cannot exist by then. They stay
+# reachable from --distribute-only over an externally staged dir, where the
+# drain is stable-only (keep 3/10, not 1) and the previous version survives.
 #
 # For public comps: url_or_key is the GitHub asset download URL.
 # For relay: url_or_key is the R2 key under relay/<stamp>/.
@@ -1013,6 +1029,19 @@ register_staged() {
     printf '%s' "${body}" > "${stage_dir}/.register-payload.json"
     if ! "${REGISTER_BIN}" register --payload-file "${stage_dir}/.register-payload.json"; then
         warn "console registration failed for ${comp} ${stamp}; register manually later"
+        # Non-zero, and the warn stays. For a GATED artifact — relay on either
+        # channel, and any component's beta — the console ROW, not the R2
+        # object, is what makes the bytes reachable: without it the cut has
+        # published something nothing can install. The retention drains that
+        # follow this call are gated on this status for that reason. A beta
+        # drain is keep=1, so ungated it would delete the PREVIOUS beta while
+        # the new one has no row — leaving the component with no installable
+        # beta at all and, per keepFor's own doc, no artifact-level rollback.
+        #
+        # This does not make a failed POST fatal: every caller swallows the
+        # status into a local, so a release whose artifacts are already up
+        # still finishes, exactly as when this returned 0 unconditionally.
+        return 1
     fi
     return 0
 }
@@ -1206,19 +1235,6 @@ distribute_relay() {
     # is the only value this path can have — say it rather than lean on the
     # verb's default, so the call names what is actually true here.
     "${REGISTER_BIN}" publish-relay --channel stable --stamp "${stamp}" --from-dir "${latest_stage}"
-    # Retention runs HERE, after the R2 upload just above succeeded — never
-    # before, and never on the dry-run path (this line is only reachable
-    # past the `return 0` in the DRY_RUN branch above, which prints
-    # "would: publish-relay" and returns before any upload). --distribute-only
-    # refuses --channel beta (see the DISTRIBUTE_ONLY/CHANNEL guard near the
-    # top of this file), so this path is provably always stable — passed
-    # explicitly rather than left to prune's own default, so the call names
-    # what is actually true here. `|| true`: a retention failure must not
-    # fail a distribution whose artifacts are already up; the nightly
-    # com.jc.r2-cleanup agent is the net for whatever a failure here leaves
-    # behind.
-    echo "→ relay R2 retention (applying):"
-    "${REGISTER_BIN}" prune --comp relay --channel stable --execute || true
     # (4) marker commit (private — no gh release / no git tag).
     git add "versions/${comp}"
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp} (private)"
@@ -1226,7 +1242,35 @@ distribute_relay() {
     # register_staged records the dispatcher stamp bundled into the zip; resolve
     # it here (the public distribute_only sets DISP_STAMP the same way).
     DISP_STAMP="$(resolve_disp_stamp)"
-    register_staged "${comp}" "${stamp}" "${semver}" "${latest_stage}" "${src}"
+    local reg_rc=0
+    register_staged "${comp}" "${stamp}" "${semver}" "${latest_stage}" "${src}" || reg_rc=$?
+
+    # (6) Retention runs HERE, LAST — after the R2 upload, the marker commit
+    # and the console registration above have all succeeded, never before, and
+    # never on the dry-run path (this line is only reachable past the
+    # `return 0` in the DRY_RUN branch above, which prints "would:
+    # publish-relay" and returns before any upload). It used to sit directly
+    # after the upload, ahead of registration: relay is GATED on every
+    # channel, so the console ROW — not the R2 object — is what makes these
+    # bytes installable, and draining before that row exists is draining on
+    # the strength of a publish that may not have completed in the sense that
+    # matters. Hence the gate on ${reg_rc}, not just the reordering.
+    #
+    # --distribute-only refuses --channel beta (see the DISTRIBUTE_ONLY/CHANNEL
+    # guard near the top of this file), so this path is provably always stable
+    # — passed explicitly rather than left to prune's own default, so the call
+    # names what is actually true here. `|| true`: a retention failure must not
+    # fail a distribution whose artifacts are already up; the nightly
+    # com.jc.r2-cleanup agent is the net for whatever a failure here leaves
+    # behind, and for the skipped-drain case just below.
+    if [ "${reg_rc}" = 0 ]; then
+        echo "→ relay R2 retention (applying):"
+        "${REGISTER_BIN}" prune --comp relay --channel stable --execute || true
+    else
+        echo "⚠ relay R2 retention SKIPPED: console registration did not succeed" >&2
+        echo "  The artifacts are up but not yet reachable. Register manually, then run:" >&2
+        echo "    ${REGISTER_BIN} prune --comp relay --channel stable --execute" >&2
+    fi
     echo "✓ distributed relay ${stamp} (private, R2 relay/${stamp}/)"
 }
 
@@ -1419,29 +1463,40 @@ distribute_only() {
     # (4) register staged row in the console catalog — LAST, only after the
     # GitHub Release + self-hosting upload + marker commit all succeeded, so
     # the catalog never advertises artifacts that aren't actually live.
-    register_staged "${comp}" "${stamp}" "${semver}" "${stage}" "${src}" "${comp}/${stamp}"
+    local reg_rc=0
+    register_staged "${comp}" "${stamp}" "${semver}" "${stage}" "${src}" "${comp}/${stamp}" || reg_rc=$?
 
     # Retention runs HERE, after the GitHub Release + self-hosting upload +
-    # marker commit + catalog registration above all succeeded — never
+    # marker commit + catalog registration above have all succeeded — never
     # before, and never on the dry-run path (this line is only reachable
     # past the `return 0` in the DRY_RUN branch above, which returns before
-    # gh_release_publish ever runs). --distribute-only refuses --channel
-    # beta (see the DISTRIBUTE_ONLY/CHANNEL guard near the top of this
-    # file), so this path is provably always stable — passed explicitly
-    # rather than left to the tool's own default. `|| true`: a retention
-    # failure must not fail a distribution whose artifacts are already
-    # public; the nightly com.jc.r2-cleanup agent is the net for whatever a
-    # failure here leaves behind. No R2 side here — distribute_only never
-    # uploads to R2 for a public component; that only happens later, via
-    # the stable console-promote helper (the `publish` branch near the top
-    # of this file), which drains R2 retention itself.
+    # gh_release_publish ever runs). "have all succeeded" is now a fact the
+    # code checks rather than a sentence: register_staged used to warn and
+    # return 0 on a failed console POST, so this drain ran regardless of it.
+    # --distribute-only refuses --channel beta (see the DISTRIBUTE_ONLY/CHANNEL
+    # guard near the top of this file), so this path is provably always stable
+    # — passed explicitly rather than left to the tool's own default.
+    # `|| true`: a retention failure must not fail a distribution whose
+    # artifacts are already public; the nightly com.jc.r2-cleanup agent is the
+    # net for whatever a failure here leaves behind, and for the skipped-drain
+    # case below. No R2 side here — distribute_only never uploads to R2 for a
+    # public component; that only happens later, via the stable
+    # console-promote helper (the `publish` branch near the top of this file),
+    # which drains R2 retention itself.
     echo
-    echo "→ GitHub release retention (applying):"
-    # `env -u KEEP`: prune-releases.sh takes KEEP from the environment, and this
-    # call is automatic now — a leftover `export KEEP=1` in the operator's shell
-    # must not steer a destructive drain the cut fires on its own. Same strip at
-    # every automatic --execute site; no retention count is written here.
-    env -u KEEP CHANNEL=stable COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+    if [ "${reg_rc}" = 0 ]; then
+        echo "→ GitHub release retention (applying):"
+        # `env -u KEEP`: prune-releases.sh takes KEEP from the environment, and
+        # this call is automatic now — a leftover `export KEEP=1` in the
+        # operator's shell must not steer a destructive drain the cut fires on
+        # its own. Same strip at every automatic --execute site; no retention
+        # count is written here.
+        env -u KEEP CHANNEL=stable COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+    else
+        echo "⚠ GitHub release retention SKIPPED: console registration did not succeed" >&2
+        echo "  Register manually, then run:" >&2
+        echo "    CHANNEL=stable COMPONENTS=${comp} bash tools/prune-releases.sh --execute" >&2
+    fi
 
     echo "✓ distributed ${comp}/${stamp}"
     echo "  Release: https://github.com/${RELEASE_REPO}/releases/tag/${comp}/${stamp}"
@@ -1943,8 +1998,11 @@ do_release_relay() {
         echo "    ${relay_key_prefix}${stamp}/SHA256SUMS.txt"
         echo "    ${relay_key_prefix}${stamp}/SHA256SUMS.txt.minisig"
         echo "(artifacts under ${latest_stage}/; version bump reverted; no scp)"
-        # (9) dry-run registration preview.
-        register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
+        # (9) dry-run registration preview. `|| true`: register_staged's
+        # DRY_RUN branch returns 0, but it can now return non-zero, and this
+        # function runs under `set -e` — an un-swallowed status here would
+        # turn a preview into an aborted dry run.
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}" || true
         revert_relay_version
         trap shred_key ERR INT TERM
         return 0
@@ -1966,19 +2024,6 @@ do_release_relay() {
         --stamp "${stamp}" \
         --from-dir "${latest_stage}"
 
-    # (4b) retention: drain relay R2 prefixes now over keep=3 stable / 1 beta
-    # (beta is disposable — the newest cut is the only one kept). Runs right
-    # here, after the R2 upload just above succeeded — never before, and
-    # never on the dry-run path (this line is only reachable past the
-    # `return 0` in the DRY_RUN branch above, which prints "would: upload"
-    # and returns before ever touching R2). `|| true`: a retention failure
-    # must not fail a relay cut whose artifacts are already up — the nightly
-    # com.jc.r2-cleanup agent is the net for whatever a failure here leaves
-    # behind. Relay has no GitHub side to prune, either channel (R2-only).
-    echo
-    echo "→ relay R2 retention (applying):"
-    "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" --execute || true
-
     # marker commit (no gh release / no git tag, either channel — relay has
     # always been R2-only). Beta gets the same " beta" marker-subject suffix
     # release.command's push loop matches for the public components.
@@ -1992,7 +2037,36 @@ do_release_relay() {
     fi
 
     # (9) register staged row in the console catalog.
-    register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}"
+    local reg_rc=0
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${latest_stage}" "${src}" || reg_rc=$?
+
+    # (10) retention: drain relay R2 prefixes now over keep=3 stable / 1 beta
+    # (beta is disposable — the newest cut is the only one kept). Runs HERE,
+    # last, and never on the dry-run path (this line is only reachable past
+    # the `return 0` in the DRY_RUN branch above, which prints "would: upload"
+    # and returns before ever touching R2).
+    #
+    # It used to run immediately after the publish-relay upload, ahead of the
+    # marker commit and this registration. That was the wrong anchor: relay is
+    # GATED on every channel, so the console ROW — not the R2 object — is what
+    # makes these bytes installable. Draining keep=1 on beta with no row for
+    # the new stamp deletes the previous beta and leaves the component with no
+    # installable beta at all, and no artifact-level rollback (see keepFor's
+    # own doc). Hence both the move and the ${reg_rc} gate.
+    #
+    # `|| true` on the drain itself: a retention failure must not fail a relay
+    # cut whose artifacts are already up — the nightly com.jc.r2-cleanup agent
+    # is the net for that, and for the skipped-drain case below. Relay has no
+    # GitHub side to prune, either channel (R2-only).
+    echo
+    if [ "${reg_rc}" = 0 ]; then
+        echo "→ relay R2 retention (applying):"
+        "${REGISTER_BIN}" prune --comp relay --channel "${CHANNEL}" --execute || true
+    else
+        echo "⚠ relay R2 retention SKIPPED: console registration did not succeed" >&2
+        echo "  The artifacts are up but not yet reachable. Register manually, then run:" >&2
+        echo "    ${REGISTER_BIN} prune --comp relay --channel ${CHANNEL} --execute" >&2
+    fi
 
     echo "✓ released relay ${stamp} (private, R2 ${relay_key_prefix}${stamp}/)"
     trap shred_key ERR INT TERM
@@ -2209,7 +2283,10 @@ do_release() {
             # it. gh_tag ("") matches the real (non-dry-run) beta call a few
             # lines down: register_staged forces github_release="" for
             # channel=beta regardless of what's passed.
-            register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
+            # `|| true`: register_staged's DRY_RUN branch returns 0, but it can
+            # now return non-zero, and do_release runs under `set -e` — an
+            # un-swallowed status would turn a preview into an aborted dry run.
+            register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "" || true
             revert_version
             trap shred_key ERR INT TERM
             echo "✓ dry-run ${comp} beta: artifacts under ${stage}/ (version bump reverted; no R2/scp/commit)"
@@ -2276,31 +2353,52 @@ do_release() {
         # register_staged with no gh_tag ($6 empty) — channel=beta forces
         # github_release="" regardless (see register_staged), the empty arg
         # here just matches what a beta cut actually has: no GitHub tag.
-        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" ""
+        local reg_rc=0
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "" || reg_rc=$?
 
-        # Retention runs HERE, after the beta publish above succeeded —
-        # never before, and never on the dry-run path (this line is only
-        # reachable past the `return 0` in the DRY_RUN branch above, which
-        # returns before the R2 publish-dir call). Both `|| true`: a
-        # retention failure must not fail a cut whose artifacts are already
-        # up; the nightly com.jc.r2-cleanup agent is the net for whatever a
-        # failure here leaves behind.
-        echo "→ beta retention (applying):"
-        "${REGISTER_BIN}" prune --comp "${comp}" --channel beta --execute || true
-        # GitHub-side beta retention had no caller anywhere in release.sh or
-        # release.command before this — beta git tags (minted only later,
-        # when the console promotes a staged row to public) accumulated
-        # silently past keep=1. tools/prune-releases.sh already defaults
-        # KEEP to 1 on beta and reads CHANNEL itself; scope is this one
-        # component, matching the R2 call above (a beta cut is always
-        # exactly one component — WHAT=all is expanded into a per-component
-        # loop before do_release is ever called, see COMPONENTS above).
-        # `env -u KEEP`: the script's KEEP default is what must govern an
-        # automatic drain, never an operator's ambient export — same strip at
-        # every automatic --execute site.
-        env -u KEEP CHANNEL=beta COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+        # Retention runs HERE, after the beta publish AND the console
+        # registration above both succeeded — never before, and never on the
+        # dry-run path (this line is only reachable past the `return 0` in the
+        # DRY_RUN branch above, which returns before the R2 publish-dir call).
+        #
+        # The ${reg_rc} gate is the point. A beta artifact is GATED: the
+        # console row, not the R2 object, is what makes it installable. Beta
+        # retention is keep=1. So an ungated drain after a failed registration
+        # deleted the PREVIOUS beta — the only installable one, since the new
+        # stamp has no row — leaving the component with no beta at all and no
+        # artifact-level rollback (see keepFor's own doc). register_staged
+        # warns and returns non-zero on a failed POST precisely so this gate
+        # can exist; the cut itself still finishes.
+        #
+        # Both drains `|| true`: a retention failure must not fail a cut whose
+        # artifacts are already up; the nightly com.jc.r2-cleanup agent is the
+        # net for that, and for the skipped-drain case below.
+        echo
+        if [ "${reg_rc}" = 0 ]; then
+            echo "→ beta retention (applying):"
+            "${REGISTER_BIN}" prune --comp "${comp}" --channel beta --execute || true
+            # GitHub-side beta retention had no caller anywhere in release.sh
+            # or release.command before this — beta git tags (minted only
+            # later, when the console promotes a staged row to public)
+            # accumulated silently past keep=1. tools/prune-releases.sh
+            # already defaults KEEP to 1 on beta and reads CHANNEL itself;
+            # scope is this one component, matching the R2 call above (a beta
+            # cut is always exactly one component — WHAT=all is expanded into
+            # a per-component loop before do_release is ever called, see
+            # COMPONENTS above). `env -u KEEP`: the script's KEEP default is
+            # what must govern an automatic drain, never an operator's ambient
+            # export — same strip at every automatic --execute site.
+            env -u KEEP CHANNEL=beta COMPONENTS="${comp}" bash "${REPO_ROOT}/tools/prune-releases.sh" --execute || true
+        else
+            echo "⚠ beta retention SKIPPED (both surfaces): console registration did not succeed" >&2
+            echo "  ${comp} beta ${stamp} is in R2 but has no console row, so nothing can install it." >&2
+            echo "  Draining keep=1 now would delete the previous beta, the only installable one." >&2
+            echo "  Register manually, then run:" >&2
+            echo "    ${REGISTER_BIN} prune --comp ${comp} --channel beta --execute" >&2
+            echo "    CHANNEL=beta COMPONENTS=${comp} bash tools/prune-releases.sh --execute" >&2
+        fi
 
-        echo "✓ released ${comp} beta ${stamp} (private, R2 ${comp}/${stamp}/)"
+        echo "✓ released ${comp} beta ${stamp} (private, R2 ${key_prefix}${stamp}/)"
         return 0
     fi
     # ---- stable channel: unchanged from here -----------------------------
@@ -2309,7 +2407,8 @@ do_release() {
         echo "✓ dry-run ${comp}: artifacts under ${stage}/ (version bump reverted; no tag/release/scp)"
         # (9) dry-run registration preview (uses the dry-run stamp for URLs).
         local dry_tag="${comp}/${stamp}"
-        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${dry_tag}"
+        # `|| true` — same reason as the beta dry-run preview above.
+        register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${dry_tag}" || true
         revert_version
         trap shred_key ERR INT TERM
         return 0
@@ -2433,8 +2532,13 @@ do_release() {
     [ -d "${REPO_ROOT}/skills" ] && git add skills 2>/dev/null || true
     marker_commit "${REPO_ROOT}" "[RELEASED: ${comp}] $(date -u +%Y-%m-%d) ${stamp}"
 
-    # (9) register staged row in the console catalog.
-    register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}"
+    # (9) register staged row in the console catalog. `|| true`: a failed POST
+    # now returns non-zero (so the DESTRUCTIVE drains at the other sites can
+    # gate on it), and this cut must keep behaving exactly as before — its
+    # artifacts are already tagged, released and scp'd. No gate here: (10)
+    # below is a report, not a drain, and a stable artifact is reachable from
+    # its GitHub Release whether or not the console row landed.
+    register_staged "${comp}" "${stamp}" "${new_semver}" "${stage}" "${src}" "${tag}" || true
 
     # (10) GitHub-release retention (dry-run): report tags now over keep=10. The
     # destructive drain (prune-releases.sh --execute) is a deploy-phase step.
