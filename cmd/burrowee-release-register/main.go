@@ -74,7 +74,7 @@ func usage() {
   burrowee-release-register keygen [--dir <d>]
   burrowee-release-register register --dir <d> --payload-file <f> [--dry-run]
   burrowee-release-register publish --comp <cli|gateway|edge|agent|all> [--dir <d>] [--version <v>]
-  burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --from-dir <dir> [--dir <d>]
+  burrowee-release-register publish-dir --comp <cli|gateway|edge|agent|relay> [--channel stable|beta] --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register publish-relay [--channel stable|beta] --stamp <stamp> --from-dir <dir> [--dir <d>]
   burrowee-release-register fetch-dir --comp <cli|gateway|edge|agent|relay> --stamp <stamp> --to-dir <dir> [--dir <d>]
   burrowee-release-register prune --comp <cli|gateway|edge|agent|relay|all> [--channel stable|beta] [--dir <d>] [--execute]
