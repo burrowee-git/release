@@ -1523,13 +1523,23 @@ load_units() {
             run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
             echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
         else
-            run_root launchctl bootout "system/com.burrowee.gateway" 2>/dev/null || true
+            # NO BOOTOUT. `bootout` unloads the job, and an unloaded job is not
+            # supervised by anything — so a shell that dies between the bootout
+            # and the bootstrap below leaves the daemon stopped with nothing
+            # that will restart it. On a gateway that shell death is CAUSED by
+            # the bootout: the operator's session reaches this host through the
+            # daemon being unloaded. Observed on a live host 2026-08-31; the
+            # install stopped mid-sequence and doctor then reported "service
+            # not installed (launchd)" about a host that had been serving.
+            #
+            # start_unit_darwin's `kickstart -k` is the whole restart. It
+            # advances a LOADED job to the freshly placed binary without ever
+            # passing through an unloaded state, so no window exists in which a
+            # dying shell can strand the host. The bootstrap it runs first is
+            # what loads the job on a host that has none, and exits 5
+            # ("already loaded") harmlessly on one that does — which is exactly
+            # the case the deleted bootout was manufacturing.
             start_unit_darwin "com.burrowee.gateway" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
-            # Reached only when the serve unit verified up: start_unit_darwin
-            # returns non-zero otherwise, and under `set -e` that ends this
-            # script. The flag is the only thing that arms the post-start wait at
-            # the tail — the BURROWEE_NO_RESTART branch above never sets it, and
-            # neither does the updater's own start.
             SERVE_UNIT_STARTED=1
             if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
                 echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
