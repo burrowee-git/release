@@ -494,10 +494,13 @@ t_guard_ok_exits_zero() {
 # foreground. snapshot_restore only COPIES FILES; `rolled-back` is terminal, so
 # the guard's watch loop took its "already terminal" arm and exited without
 # doing anything. On a MIGRATING host that is the reported stranding through a
-# different door: migrate_from_legacy runs ~150 lines before the consent
-# prompt, and adopt_user_tree.sh boots the serve label out of both domains to
-# copy state at rest, so from there until the guard's restart the gateway is
-# DOWN and, on Darwin, UNLOADED.
+# different door: migrate_from_legacy runs ~150 lines before the Phase 3
+# consent prompt, and gateway's own migrations/run.sh boots the serve label out
+# of both domains to copy state at rest, so from there until the guard's
+# restart the gateway is DOWN and, on Darwin, UNLOADED. (The migration now has
+# a consent prompt of its own, in front of that stop — see
+# should_ask_before_migration; this fixture is the host where it was declined,
+# or never asked because there was no tty.)
 #
 # The fixture below is that host: the daemon is stopped (running.json is the
 # STALE file the dead daemon left behind — it is never removed on stop, which

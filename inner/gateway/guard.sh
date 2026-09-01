@@ -10,9 +10,9 @@
 # session, and anything still running in that session dies with it.
 #
 # It owns the outcome of the whole install, not just the restart, because the
-# restart is not the only thing that stops the daemon: the migration ladder's
-# adopt_user_tree.sh stops it too, seventeen lines earlier, to copy state at
-# rest. A guard armed only for the restart would watch the wrong line.
+# restart is not the only thing that stops the daemon: gateway's own migration
+# ladder (migrations/run.sh, stop_gateway) stops it too, earlier, to copy state
+# at rest. A guard armed only for the restart would watch the wrong line.
 #
 # AND IT OWNS EVERY ABORT, not just the ones that reach the handoff. The
 # installer's own foreground abort paths — a declined consent prompt, a failed

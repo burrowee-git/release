@@ -3,9 +3,10 @@
 # first write, not before the restart.
 #
 # WHY THE ORDER IS THE WHOLE TEST. There are two places an install stops the
-# gateway, and only one of them is the restart. inner/_shared/migrations/
-# adopt_user_tree.sh boots the daemon out to copy state at rest, and it runs
-# from migrate_from_legacy — seventeen lines before load_units. On a gateway
+# gateway, and only one of them is the restart. Gateway's own migration runner
+# (migrations/run.sh, from the gateway repo — NOT the shared ladder, which
+# gateway does not use) boots the daemon out to copy state at rest, and it runs
+# from migrate_from_legacy, before load_units. On a gateway
 # the operator's session is tunnelled through that daemon, so that migration
 # severs the session too. A guard armed after the migration cannot see it.
 set -eu

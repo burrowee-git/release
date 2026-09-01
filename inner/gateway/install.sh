@@ -1161,6 +1161,68 @@ record_installed_version() {
 }
 
 # ---------------------------------------------------------------------------
+# should_ask_before_migration — whether migrate_from_legacy is about to stop the
+# daemon on a run where there is somebody to warn.
+#
+# THE SECOND SEVER POINT. There are two places an install stops the gateway, and
+# only one of them is the restart: the migration ladder stops it to copy state at
+# rest (gateway's own migrations/run.sh, stop_gateway), a long way before
+# load_units ever restarts it. On a host administered THROUGH that gateway the
+# migration takes the operator's session with it, and a consent prompt reached
+# afterwards is asked of a terminal that is already gone.
+#
+# THE RUNNER IS THE ONLY AUTHORITY ON "IS ANYTHING PENDING", and this function
+# does not become a second one. It asks — `run.sh --probe-pending` — and the
+# runner answers by walking the identical ladder a real run walks: the same
+# version gate, the same receipt states, the same per-rung --applies. A copy of
+# that decision here could disagree with the run that follows it seconds later,
+# and a warning that does not match what happens is worse than no warning.
+# Probe codes: 10 pending · 11 nothing pending · 12 could not evaluate.
+#
+# CANNOT TELL MEANS PROCEED AS TODAY, never refuse and never prompt. Three
+# distinct answers land there — a runner that predates the mode, a payload
+# assembled before it, and a ladder that refused to evaluate — and on every one
+# of them today's install already proceeds without a warning. Refusing would
+# break every install driven from a kept installer; prompting on a guess would
+# teach operators that the warning means nothing. The host is not at risk either
+# way: guard_arm runs BEFORE this, so a session severed unannounced leaves the
+# installer dead at phase `replacing` and the guard rolls the host back unaided.
+# What "cannot tell" costs is the warning, which is exactly what it costs today.
+#
+# THE RUNNER IS READ BEFORE IT IS INVOKED, and that grep is not belt-and-braces.
+# The first shipped runner (gateway #246) parsed no arguments at all: handed
+# --probe-pending it would ignore it and RUN THE LADDER, stopping the daemon at
+# the precise moment this function exists to warn about. `keep_installer_copy`
+# leaves a runner under $GW_HOME for later `service install` runs, so a runner
+# that old is reachable from a real host rather than only from history. A file
+# that does not carry the mode is never handed it.
+#
+# NOBODY TO WARN, NO PROBE. consent_to_sever returns immediately without a tty
+# and under BURROWEE_ASSUME_YES, so on a console push, in CI and under
+# `curl … | sh` the answer would be discarded — and this is what keeps the new
+# call site incapable of blocking a non-interactive install: it never even forks
+# the probe there.
+# ---------------------------------------------------------------------------
+should_ask_before_migration() {
+    if [ -n "${BURROWEE_ASSUME_YES:-}" ] || ! has_tty; then return 1; fi
+    _probe_runner="$(migration_runner)"
+    if [ -z "$_probe_runner" ]; then return 1; fi
+    grep -q -- '--probe-pending' "$_probe_runner" 2>/dev/null || return 1
+    set +e
+    # The SAME environment migrate_from_legacy hands the runner. A probe that
+    # resolved a different $GW_HOME, a different config root or a different
+    # $BIN_DIR would be answering about a different host than the run it speaks
+    # for — see that function's header for what each of these values is.
+    GW_HOME="$GW_HOME"         PREFIX="$(dirname "$BIN_DIR")"         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR"         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR"         SUDO="$(migration_sudo)"         sh "$_probe_runner" --probe-pending >/dev/null 2>&1
+    _probe_rc=$?
+    set -e
+    # 10 and nothing else. Every other code — 11, 12, an old runner's 64, or
+    # anything a future runner invents — is "do not warn", which is what this
+    # host does today.
+    [ "$_probe_rc" = 10 ]
+}
+
+# ---------------------------------------------------------------------------
 # migrate_from_legacy — run the release's migrations/run.sh, which walks every
 # migration in its ledger and runs the ones this host has not reached yet.
 #
@@ -2739,17 +2801,21 @@ verify_units() {
 #
 # ASKED BEFORE THE STEP THAT SEVERS, and which step that is depends on the
 # run: a run with a pending migration loses the session inside
-# migrate_from_legacy, not at the restart — _shared/migrations/adopt_user_tree.sh
-# stops the daemon to copy state at rest, seventeen lines before render_units
-# even runs. A gate asked after the connection is already gone is not a gate.
+# migrate_from_legacy, not at the restart — gateway's own migrations/run.sh
+# stops the daemon to copy state at rest, a long way before render_units even
+# runs. A gate asked after the connection is already gone is not a gate.
 #
-# ONLY THE RESTART CALL SITE IS WIRED (below, Phase 3). The migration one is
-# not: gateway's own migrations/run.sh — the runner migrate_from_legacy
-# invokes — ships from the gateway repo, not this one (see that function's own
-# header), so there is no file in THIS repo that could announce "about to
-# stop" early enough for install.sh to act on before the fact. This function
-# stays written to cover it — its `case` already branches on "migration" —
-# should that hook ever become reachable from here.
+# BOTH CALL SITES ARE NOW WIRED. The migration one was not, and the reason
+# recorded here was wrong twice over: it named the SHARED ladder's
+# _shared/migrations/adopt_user_tree.sh, which gateway does not use at all
+# (tools/payload.sh's takes_shared_ladder covers edge, cli and relay only —
+# gateway's migrations/ is copied verbatim from the gateway repo), and it
+# concluded that nothing could announce the stop early enough. Something can:
+# the runner itself, asked. gateway's run.sh carries a read-only
+# --probe-pending mode that walks the ladder and reports whether a rung is
+# pending without touching anything, and should_ask_before_migration puts that
+# question in front of migrate_from_legacy. Cross-repo, which is why it took a
+# change on both sides rather than a hook this repo could add alone.
 #
 # NON-INTERACTIVE RUNS DO NOT PROMPT. Console pushes, CI and `curl … | sh`
 # have no tty and today restart unconditionally; a blocking prompt would turn
@@ -2766,9 +2832,9 @@ verify_units() {
 # undisturbed" is true of a daemon that was never touched.
 #
 # THE SECOND HALF IS FALSE ON EXACTLY THE RUN THIS DESIGN EXISTS FOR.
-# migrate_from_legacy runs ~150 lines before this prompt, and
-# _shared/migrations/adopt_user_tree.sh boots the serve label out of both
-# domains to copy state at rest. From there until the guard's own restart the
+# migrate_from_legacy runs ~150 lines before this prompt, and gateway's own
+# migrations/run.sh boots the serve label out of both domains to copy state at
+# rest. From there until the guard's own restart the
 # gateway is DOWN and, on Darwin, UNLOADED. snapshot_restore only copies files
 # — it never restarts anything — so on a migrating host "declined, restored"
 # left the daemon stopped, and `txn_phase rolled-back` then told the guard the
@@ -3321,9 +3387,9 @@ else
 fi
 
 # Arm the guard BEFORE the first write, and before migrate_from_legacy — which
-# stops the daemon itself (adopt_user_tree.sh) seventeen lines before load_units
-# ever restarts it, severing a tunnelled operator's session at the migration,
-# not the restart. snapshot_take runs first so the guard has a working point to
+# stops the daemon itself (gateway's own migrations/run.sh) well before
+# load_units ever restarts it, severing a tunnelled operator's session at the
+# migration, not the restart. snapshot_take runs first so the guard has a working point to
 # roll back to the moment it exists.
 txn_begin
 snapshot_take
@@ -3352,6 +3418,15 @@ esac
 # launchd at the next reboot regardless of what this run reported.
 check_service_override
 remove_legacy_user_units
+# The migration's own consent gate, asked BEFORE the stop rather than at the
+# restart below — on a host with a pending rung the runner stops the daemon and
+# the operator's tunnelled session goes with it, and the Phase 3 prompt would
+# then be read from a terminal that no longer exists. Silent when nothing is
+# pending, and never asked at all on a run with no tty: see
+# should_ask_before_migration.
+if should_ask_before_migration; then
+    consent_to_sever migration
+fi
 migrate_from_legacy
 
 # Keep this installer + its migrations at $GW_HOME so subsequent `service install`
