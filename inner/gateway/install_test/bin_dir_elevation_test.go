@@ -76,12 +76,25 @@ func installFakeRootSudo(t *testing.T, stubDir, logPath, binDir string) {
 	}
 }
 
-// installFailingSudo overwrites stubDir's `sudo` with one that always
-// refuses — no tty, no cached credentials, the console-push / CI shape
-// where elevation is not available at all.
-func installFailingSudo(t *testing.T, stubDir string) {
+// installFailingSudoFor overwrites stubDir's `sudo` with one that refuses
+// only a call whose argv names refuseIfContains, passing every other call
+// straight through (no tty, no cached credentials, but only FOR that one
+// destination).
+//
+// Not a blanket refusal: the install transaction (txn_begin) and the guard
+// (guard_arm) need real elevation for their own destinations — sandboxed
+// paths under $SYS_DATA_DIR and the libexec seam, both unrelated to $BIN_DIR
+// — before place_all_bins ever runs. A sudo that refused everything would
+// fail the run at the transaction, before place_all_bins is reached at all,
+// pinning nothing about $BIN_DIR's own elevation decision — which is the
+// entire subject of the two tests below.
+func installFailingSudoFor(t *testing.T, stubDir, refuseIfContains string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(stubDir, "sudo"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in *" + refuseIfContains + "*) exit 1 ;; esac\n" +
+		"[ \"$1\" = \"-n\" ] && shift\n" +
+		"exec \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "sudo"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write failing sudo: %v", err)
 	}
 }
@@ -162,7 +175,7 @@ func TestInstallShDoesNotElevateAWritableBinDir(t *testing.T) {
 	seedDummyBins(t, staging)
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	installFailingSudo(t, stub)
+	installFailingSudoFor(t, stub, binDir(home))
 
 	out, err := runStaged(t, installShPath(t), staging, home, stub)
 	if err == nil {
@@ -185,7 +198,7 @@ func TestInstallShPlacesNothingWhenBinDirCannotBeWrittenAtAll(t *testing.T) {
 	seedDummyBins(t, staging)
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	installFailingSudo(t, stub)
+	installFailingSudoFor(t, stub, binDir)
 
 	out, err := runStaged(t, installShPath(t), staging, home, stub, "BURROWEE_BIN_DIR="+binDir)
 	if err == nil {

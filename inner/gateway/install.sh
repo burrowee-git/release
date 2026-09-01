@@ -1185,6 +1185,17 @@ keep_installer_copy() {
             echo "note: 'burrowee gateway service install' will not be able to migrate." >&2
         fi
     fi
+    # guard.sh too, off the same resolution guard_arm itself uses
+    # ("$(dirname "$0")/guard.sh"): a units-only re-run's $0 IS the kept
+    # $GW_HOME/install.sh, so without this copy that later run would find no
+    # guard beside it and refuse to arm at all.
+    _src_guard="$(dirname "$0")/guard.sh"
+    if [ -f "$_src_guard" ]; then
+        if ! cp "$_src_guard" "$GW_HOME/guard.sh" 2>/dev/null; then
+            echo "note: could not keep a copy of guard.sh at $GW_HOME — a later" >&2
+            echo "note: 'burrowee gateway service install' will not be able to arm the guard." >&2
+        fi
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1836,6 +1847,84 @@ snapshot_restore() {
 }
 
 # ---------------------------------------------------------------------------
+# guard_arm — hand the guard to the SUPERVISOR, not to this shell.
+#
+# `nohup … &` would make the guard a descendant of sshd's session. That
+# survives SIGHUP and nothing else: when the session's process group or cgroup
+# is torn down — which is what a dropped tunnel does — the guard goes with it,
+# at exactly the moment it is needed. launchd and systemd are the two processes
+# on this host guaranteed to outlive the session, so the guard runs under one
+# of them or it is not armed at all.
+#
+# Root is taken HERE, in the foreground, where run_root can still prompt on the
+# operator's tty. The guard itself can never prompt for anything.
+#
+# _guard is resolved beside THIS installer ("$(dirname "$0")/guard.sh"), the
+# same way ensure_root_exec_surface resolves migrations/ — never
+# "$GW_HOME/guard.sh". keep_installer_copy has not run yet when this is called
+# (it runs after the migration, still ahead of us in the fresh-install flow),
+# so $GW_HOME holds no guard.sh on a fresh host's first run; the copy it keeps
+# is what a LATER `service install` re-run finds instead, off the very same
+# expression.
+#
+# _libexec_dir has a BURROWEE_LIBEXEC_DIR test seam for the same reason
+# BURROWEE_BIN_DIR exists: this suite must never write into the real
+# /usr/local, and unlike $BIN_DIR/$LAUNCHD_DIR/$SYSTEMD_DIR this destination
+# had no seam of its own to reuse. The production default is unchanged.
+guard_arm() {
+    _guard="$(dirname "$0")/guard.sh"
+    if [ ! -f "$_guard" ]; then
+        echo "error: guard.sh is not beside this installer — refusing to run an unguarded" >&2
+        echo "error: install on a host that is currently serving as a gateway." >&2
+        return 1
+    fi
+    _libexec_dir="${BURROWEE_LIBEXEC_DIR:-/usr/local/libexec/burrowee}"
+    # mkdir -p first: neither GNU nor BSD `install` creates a missing parent
+    # (GNU's -D does, but this file never assumes GNU), and a fresh host has no
+    # reason to already carry this directory — the pre-collapse libexec tree
+    # this sits beside is retired and never recreated (see this file's header).
+    run_root mkdir -p "$_libexec_dir" || return 1
+    run_root install -m 0755 "$_guard" "$_libexec_dir/gateway-guard" || return 1
+
+    case "$(uname -s)" in
+    Darwin)
+        _gp="$LAUNCHD_DIR/com.burrowee.gateway.guard.plist"
+        _tmp="$(mktemp)"
+        cat > "$_tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.burrowee.gateway.guard</string>
+  <key>ProgramArguments</key><array><string>$_libexec_dir/gateway-guard</string><string>$TXN_DIR</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>WorkingDirectory</key><string>/tmp</string>
+  <key>RunAtLoad</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>$TXN_DIR/guard.out</string>
+  <key>StandardErrorPath</key><string>$TXN_DIR/guard.err</string>
+</dict></plist>
+EOF
+        place_unit "$_tmp" "$_gp"
+        # No KeepAlive: the guard runs once and is done. bootout FIRST, because
+        # unlike the serve label this one is safe to unload — nothing routes
+        # through it — and a stale guard job from a previous install would
+        # otherwise refuse the bootstrap.
+        run_root launchctl bootout "system/com.burrowee.gateway.guard" 2>/dev/null || true
+        run_root launchctl bootstrap system "$_gp" || return 1
+        ;;
+    Linux)
+        run_root systemd-run --unit=burrowee-gateway-guard --collect \
+            "$_libexec_dir/gateway-guard" "$TXN_DIR" || return 1
+        ;;
+    *)
+        echo "warning: no supervisor on $(uname -s) — the install is NOT guarded" >&2
+        return 1
+        ;;
+    esac
+    echo "guard armed — transaction $TXN_DIR"
+}
+
+# ---------------------------------------------------------------------------
 # $BIN_DIR placement: one elevation decision, all-or-nothing.
 #
 # Mirrors gateway/update.sh's PLACE_ELEVATED (see that script's header for the
@@ -2269,6 +2358,15 @@ if prior_install_present; then
 else
     echo "no gateway installed on this host — nothing to migrate, skipping the migration pre-flight"
 fi
+
+# Arm the guard BEFORE the first write, and before migrate_from_legacy — which
+# stops the daemon itself (adopt_user_tree.sh) seventeen lines before load_units
+# ever restarts it, severing a tunnelled operator's session at the migration,
+# not the restart. snapshot_take runs first so the guard has a working point to
+# roll back to the moment it exists.
+txn_begin
+snapshot_take
+guard_arm
 
 place_all_bins
 

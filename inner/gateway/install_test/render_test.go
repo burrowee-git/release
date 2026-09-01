@@ -1,9 +1,9 @@
 // Package install_test is a Go test harness that runs install.sh in a sandbox
-// HOME with stubbed sudo/launchctl/systemctl (and sandboxed system-unit dirs
-// via the BURROWEE_LAUNCHD_DIR / BURROWEE_SYSTEMD_DIR test seams) to verify
-// unit rendering, fresh install, uninstall, legacy migration, and the
-// cross-user override guard (D3a). UPDATE mode tests live in D3b
-// (update_test.go).
+// HOME with stubbed sudo/launchctl/systemctl/systemd-run (and sandboxed
+// system-unit dirs via the BURROWEE_LAUNCHD_DIR / BURROWEE_SYSTEMD_DIR /
+// BURROWEE_LIBEXEC_DIR test seams) to verify unit rendering, fresh install,
+// uninstall, legacy migration, and the cross-user override guard (D3a). UPDATE
+// mode tests live in D3b (update_test.go).
 package install_test
 
 import (
@@ -32,6 +32,22 @@ func installShPath(t *testing.T) string {
 	return dir
 }
 
+// guardShPath resolves guard.sh the same way installShPath resolves
+// install.sh — both ship side by side in the real payload (payload.test.sh
+// pins the manifest), and guard_arm resolves guard.sh relative to $0 the same
+// way ensure_root_exec_surface resolves migrations/.
+func guardShPath(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(filepath.Join("..", "guard.sh"))
+	if err != nil {
+		t.Fatalf("resolve guard.sh: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("guard.sh not found at %s: %v", dir, err)
+	}
+	return dir
+}
+
 // launchdDir/systemdDir are the sandboxed system-unit locations a test HOME
 // maps to (via the BURROWEE_*_DIR seams).
 func launchdDir(home string) string { return filepath.Join(home, "LaunchDaemons") }
@@ -44,6 +60,14 @@ func sysConfigDir(home string) string {
 	return filepath.Join(home, "system-etc", "burrowee", "gateway")
 }
 func sysDataDir(home string) string { return filepath.Join(home, "system-var", "burrowee", "gateway") }
+
+// libexecDir is the sandboxed stand-in for guard_arm's real destination
+// (/usr/local/libexec/burrowee), via the BURROWEE_LIBEXEC_DIR seam — the one
+// directory install.sh writes into that had no seam of its own before the
+// guard: without this redirect, arming the guard under test would install a
+// real file at that real, root-owned path, which is exactly what every other
+// BURROWEE_*_DIR seam in this harness exists to prevent.
+func libexecDir(home string) string { return filepath.Join(home, "libexec", "burrowee") }
 
 // binDir is $BIN_DIR as this suite's sandbox (installShEnv's
 // "BURROWEE_BIN_DIR="+binDir(home)) resolves it — the ONE location,
@@ -116,6 +140,17 @@ func stubInitSystem(t *testing.T) string {
 		"exit 0\n"
 	if err := os.WriteFile(filepath.Join(stub, "systemctl"), []byte(systemctl), 0o755); err != nil {
 		t.Fatalf("write stub systemctl: %v", err)
+	}
+	// guard_arm's Linux branch calls this bare, via $PATH, to arm the guard
+	// under the real init system's supervision — and this suite's own host is
+	// frequently Linux (the shared CI machine), so a fresh-install test with no
+	// forced platform reaches this branch for real unless it is stubbed here
+	// too. Recording and exiting 0, never actually spawning the guard: a real
+	// systemd-run would hand a live transient unit to the HOST's own systemd,
+	// which is exactly the shared-machine side effect every other stub here
+	// (launchctl, systemctl, sudo) exists to prevent.
+	if err := os.WriteFile(filepath.Join(stub, "systemd-run"), []byte("#!/bin/sh\necho \"systemd-run $*\" >> \"$STUB_LOG\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub systemd-run: %v", err)
 	}
 	writeSudoStub(t, stub)
 	return stub
@@ -206,6 +241,7 @@ func installShEnv(home, stubDir string, extraEnv ...string) []string {
 		"BURROWEE_SYSTEMD_DIR=" + systemdDir(home),
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
+		"BURROWEE_LIBEXEC_DIR=" + libexecDir(home),
 	}
 	return append(env, extraEnv...)
 }
@@ -820,10 +856,12 @@ func TestInstallShMigratesLegacyUserUnits(t *testing.T) {
 	}
 }
 
-// stageInstaller copies the real install.sh into dir, so a test can plant a
-// fake migrations/ beside it. install.sh resolves the migration relative to its
-// OWN path (not cwd — `service install` re-runs the kept copy from an arbitrary
-// working directory), so the two files have to sit together.
+// stageInstaller copies the real install.sh (and the real guard.sh beside
+// it — the same real release payload shape payload.test.sh pins) into dir,
+// so a test can plant a fake migrations/ beside both. install.sh resolves
+// the migration, and guard_arm resolves the guard, relative to install.sh's
+// OWN path (not cwd — `service install` re-runs the kept copy from an
+// arbitrary working directory), so all of these have to sit together.
 func stageInstaller(t *testing.T, dir string) string {
 	t.Helper()
 	body, err := os.ReadFile(installShPath(t))
@@ -833,6 +871,13 @@ func stageInstaller(t *testing.T, dir string) string {
 	staged := filepath.Join(dir, "install.sh")
 	if err := os.WriteFile(staged, body, 0o755); err != nil {
 		t.Fatalf("stage install.sh: %v", err)
+	}
+	guardBody, err := os.ReadFile(guardShPath(t))
+	if err != nil {
+		t.Fatalf("read guard.sh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "guard.sh"), guardBody, 0o755); err != nil {
+		t.Fatalf("stage guard.sh: %v", err)
 	}
 	return staged
 }
