@@ -67,25 +67,24 @@ func TestLinuxInstallRestartsTheGatewayDaemon(t *testing.T) {
 	}
 }
 
-// TestLinuxFreshInstallRestartsTheGatewayDaemon is the same guarantee from the
-// other entry point that reaches load_units. Fresh mode re-places every binary
-// unconditionally, so a fresh install that does not restart leaves the largest
-// possible gap between what is on disk and what is running.
-func TestLinuxFreshInstallRestartsTheGatewayDaemon(t *testing.T) {
-	home := t.TempDir()
-	stub := stubInitSystemFor(t, "linux")
-	staging := t.TempDir()
-	seedDummyBins(t, staging)
-
-	if out, err := runStaged(t, installShPath(t), staging, home, stub); err != nil {
-		t.Fatalf("fresh install failed: %v\n%s", err, out)
-	}
-
-	calls := systemctlCalls(t, home)
-	if countCall(calls, "systemctl restart burrowee-gateway.service") == 0 {
-		t.Errorf("fresh install did not restart the gateway; systemctl calls:\n%s", strings.Join(calls, "\n"))
-	}
-}
+// TestLinuxFreshInstallRestartsTheGatewayDaemon USED to cover the same
+// guarantee as TestLinuxInstallRestartsTheGatewayDaemon from the OTHER entry
+// point that reached load_units: a plain default (fresh) install with no
+// mode flag.
+//
+// That entry point no longer reaches load_units at all, by design. A fresh
+// install is exactly the case an operator runs from an SSH session tunnelled
+// THROUGH the gateway it is installing — load_units restarting the daemon in
+// this script's own foreground severed that session mid-install, silently
+// skipping everything after it, the version anchor included. The restart is
+// now the guard's job (guard_arm, armed before the first write), running in a
+// detached child that outlives this shell and this connection. A synchronous
+// check of stub-calls.log right after runStaged returns cannot observe that
+// restart — the guard may not have gotten to it yet — so this test cannot be
+// repaired in place; it would either race the guard or assert a promise this
+// script no longer makes. The units-only entry point (the test above) still
+// makes it, unchanged, and the guard's own restart-and-verify path is covered
+// by tools/guard-rollback.test.sh once the handoff lands (Task 9).
 
 // TestLinuxConvergedReinstallStillRestartsTheGatewayDaemon pins the restart
 // CONDITION, which is the design decision this change turns on: the restart is

@@ -2368,6 +2368,13 @@ txn_begin
 snapshot_take
 guard_arm
 
+# ---- Phase 1: replace ------------------------------------------------------
+# armed -> replacing. Everything from here on is a write the snapshot above
+# can undo, and Phase 2 (verification, Task 8) checks before anything is
+# restarted. This script advances the phase file itself up to here; past the
+# handoff (Task 9) the guard owns every further transition.
+txn_phase replacing
+
 place_all_bins
 
 case ":$PATH:" in
@@ -2377,9 +2384,9 @@ esac
 
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
-# Write and load both SYSTEM service units (single-slot consent first, then
-# migrate any legacy per-user units out of the way). The state migration runs
-# before render_units, not between it and load_units: a failed migration exits
+# Write both SYSTEM service units (single-slot consent first, then migrate any
+# legacy per-user units out of the way). The state migration runs before
+# render_units, not between it and loading them: a failed migration exits
 # here, and a root-scheme unit left behind by an aborted run is bootstrapped by
 # launchd at the next reboot regardless of what this run reported.
 check_service_override
@@ -2401,13 +2408,30 @@ migrate_from_legacy
 keep_installer_copy
 
 render_units
-load_units
-# Only now, and never in BURROWEE_UPDATE mode: that mode renders the units but
-# deliberately never loads them (the updater restarts the kernel out-of-band),
-# so the daemon still running there may still be executing the per-user
-# ExecStart its LOADED unit names — which is exactly the state this sweep must
-# not delete out from under. See sweep_stale_user_bins' header.
-sweep_stale_user_bins
+
+# load_units USED TO run right here, restarting the daemon in the foreground —
+# on the very connection an operator tunnelled through that gateway is reading
+# this output over. That restart now belongs to the guard armed above: it
+# already holds the snapshot and the transaction, and it can roll back if the
+# new build never comes back up, which this shell cannot do once its own
+# session is the thing that just dropped. Task 9 adds the handoff that starts
+# it; this script's job stops at leaving the units rendered and every step
+# below — the ones a severed session used to skip — already done first.
+#
+# sweep_stale_user_bins does NOT move earlier to sit beside this comment: it
+# deletes per-user binaries, and until the daemon has actually restarted onto
+# the loaded units, a still-running per-user process may still name one.
+# Task 10 runs it inside the guard, after a verified restart, never here.
+
+# report_unrecorded_migration and record_installed_version used to run AFTER
+# load_units — exactly the code a severed session never reached. A host cut
+# off at the restart kept its new binaries and its migrated state, but its
+# version anchor still named the OLD release, because the write that records
+# it sat on the far side of the sever point. record_installed_version is what
+# the NEXT run's migration gate reads, so a stale anchor there doesn't just
+# mis-report this run — it feeds the wrong floor into every run after it.
+# Both now run here, before the restart is even handed off, so a severed
+# session has already banked them.
 report_unrecorded_migration
 
 # Record the ladder's version anchor here too. Fresh mode never did, which left

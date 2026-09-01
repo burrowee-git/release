@@ -127,9 +127,20 @@ func TestInstallShRefusesAMisdirectingPrefix(t *testing.T) {
 // exited 0, and left a host with binaries in a directory its root consumers
 // cannot see and no service units at all.
 //
-// So this asserts the three separable products of that surface together —
-// units written, units handed to the init system, version anchor recorded in
-// $BIN_DIR — from an ordinary default install with no PREFIX in sight.
+// So this asserts two of the three separable products of that surface —
+// units written, version anchor recorded in $BIN_DIR — from an ordinary
+// default install with no PREFIX in sight.
+//
+// The third product, "units handed to the init system", USED to be asserted
+// here too, synchronously, because load_units ran in this script's own
+// foreground process. It no longer does: the guard armed earlier in the flow
+// (guard_arm) now owns the restart, off this session, specifically so a
+// severed tunnelled operator does not take the daemon down with them. This
+// test's synchronous stub-calls.log check cannot see that restart — it may
+// not have happened yet by the time runStaged returns — so the assertion
+// moved rather than being weakened in place; the guard's own restart is
+// covered by tools/guard-rollback.test.sh and friends, and the renders here
+// still prove render_units ran on the plain default path.
 func TestDefaultInstallEngagesThePrivilegedSurface(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -150,9 +161,6 @@ func TestDefaultInstallEngagesThePrivilegedSurface(t *testing.T) {
 
 	if _, statErr := os.Stat(coreUnitPath(home)); statErr != nil {
 		t.Errorf("no service unit at %s — render_units did not run on a default install: %v", coreUnitPath(home), statErr)
-	}
-	if calls := readFile(t, filepath.Join(home, "stub-calls.log")); !strings.Contains(calls, serviceStartCall()) {
-		t.Errorf("the init system was never asked to run the unit — load_units did not run:\n%s", calls)
 	}
 	anchor := filepath.Join(binDir(home), ".installed-version")
 	if got, statErr := os.ReadFile(anchor); statErr != nil {
