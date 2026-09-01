@@ -53,6 +53,23 @@ updater_install_src() {
     return 0
 }
 
+# guard_install_src <comp> — inner/<comp>/guard.sh if it exists, nothing
+# otherwise.
+#
+# Present for gateway only today: gateway is the first component whose
+# install can stop the very daemon carrying the operator's own session (a
+# migration rung, then the restart itself), so it is the first that needs a
+# process handed to launchd/systemd — outliving that session — to finish or
+# undo the install. Same shape as updater_install_src right above: FILE
+# PRESENCE under INNER_DIR is the guard, not a hardcoded component allowlist,
+# so a future component that grows its own guard.sh is picked up with no
+# edit here. Mirrors guardInstallPayload in cmd/rkit/assemble.go.
+guard_install_src() {
+    local p="${INNER_DIR}/$1/guard.sh"
+    [ -f "${p}" ] && printf '%s\n' "${p}"
+    return 0
+}
+
 # stage_payload_extras <comp> <src-dir> <assemble-dir> — copy the component's
 # flat payload extras into the staged bundle, executable.
 #
@@ -77,9 +94,10 @@ updater_install_src() {
 # "cannot open ./update.sh" is the same class of defect as a gateway shipped
 # without migrations/.
 #
-# updater.install.sh is the ONE exception: like install.sh, it comes from THIS
-# repo's own inner/<comp>/ rather than <src-dir>, so it is staged separately,
-# right below, and its absence is never an error — see updater_install_src.
+# updater.install.sh and guard.sh are the exceptions: like install.sh, they
+# come from THIS repo's own inner/<comp>/ rather than <src-dir>, so each is
+# staged separately, right below, and its absence is never an error — see
+# updater_install_src and guard_install_src.
 stage_payload_extras() {
     local comp="$1" src="$2" dest="$3" s
     for s in $(payload_file_extras "${comp}"); do
@@ -95,6 +113,12 @@ stage_payload_extras() {
     if [ -n "${ui}" ]; then
         cp "${ui}" "${dest}/updater.install.sh"
         chmod 0755 "${dest}/updater.install.sh"
+    fi
+    local gi
+    gi="$(guard_install_src "${comp}")"
+    if [ -n "${gi}" ]; then
+        cp "${gi}" "${dest}/guard.sh"
+        chmod 0755 "${dest}/guard.sh"
     fi
     # The SHARED ladder is staged HERE, from the one function both of release.sh's
     # assembly sites already call, rather than as a third open-coded copy beside
@@ -207,7 +231,7 @@ takes_shared_ladder() {
 # gateway-repo change. edge's covers come from the separate edge.web tree and
 # are emitted by name (their content, not their names, depends on that tree).
 payload_manifest() {
-    local comp="$1" src="$2" s p ui
+    local comp="$1" src="$2" s p ui gi
     for s in $(payload_file_extras "${comp}"); do
         printf '%s\n' "${s}"
     done
@@ -219,6 +243,14 @@ payload_manifest() {
     ui="$(updater_install_src "${comp}")"
     if [ -n "${ui}" ]; then
         printf 'updater.install.sh\n'
+    fi
+    # guard.sh: same provenance and same presence guard as updater.install.sh
+    # right above, just a second file out of THIS repo's own inner/<comp>/ —
+    # see guard_install_src. Emitted right after updater.install.sh so the
+    # assembly order matches stage_payload_extras.
+    gi="$(guard_install_src "${comp}")"
+    if [ -n "${gi}" ]; then
+        printf 'guard.sh\n'
     fi
     case "${comp}" in
         gateway)

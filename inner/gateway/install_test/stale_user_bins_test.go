@@ -25,6 +25,22 @@
 // EVERY PATH HERE IS A FIXTURE TREE under t.TempDir(). Nothing in this file may
 // resolve to a real $HOME/.local/bin — the machines this suite runs on have
 // live burrowee installs in exactly that directory.
+//
+// WHY THESE RUN UNDER BURROWEE_UNITS_ONLY NOW, NOT THE PLAIN DEFAULT INSTALL.
+// The seam above used to be reachable from a plain fresh install: render
+// units, load them, THEN sweep. Fresh install no longer calls load_units (or
+// anything after it) in its own foreground at all — that restart is now the
+// guard's job, armed before the first write, specifically so a tunnelled
+// operator's severed session cannot skip it. sweep_stale_user_bins moves with
+// it in principle, but not in this change: it is deleted from the fresh
+// flow outright rather than relocated, because until the guard has verified
+// the daemon actually came up on the new units, a still-running per-user
+// process may still name one of the binaries the sweep deletes — that
+// relocation is Task 10's, inside the guard, after a verified restart.
+// BURROWEE_UNITS_ONLY is the one foreground entry point that still does
+// exactly what this file tests — load, then sweep, in one synchronous
+// process — so the seam stays covered here without inventing Task 10's
+// guard-side call.
 package install_test
 
 import (
@@ -77,11 +93,11 @@ func TestInstallShLoadsTheSweepFromTheBundleAndCallsIt(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	staging := t.TempDir()
-	seedDummyBins(t, staging)
+	seedMigrateCapableCLI(t, home)
 	record := filepath.Join(t.TempDir(), "sweep-env")
 	stageSweepLib(t, staging, record, shippedSweepList)
 
-	out, err := runStaged(t, stageInstaller(t, staging), staging, home, stub)
+	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
 	if err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
@@ -121,10 +137,10 @@ func TestInstallShSweepsAfterTheUnitsAreLoaded(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystemFor(t, "linux")
 	staging := t.TempDir()
-	seedDummyBins(t, staging)
+	seedMigrateCapableCLI(t, home)
 	stageSweepLib(t, staging, filepath.Join(t.TempDir(), "sweep-env"), shippedSweepList)
 
-	out, err := runStaged(t, stageInstaller(t, staging), staging, home, stub)
+	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
 	if err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
@@ -154,21 +170,23 @@ func TestInstallShIsLoudWhenTheBundleCarriesNoSweepLibrary(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	staging := t.TempDir()
-	seedDummyBins(t, staging)
+	seedMigrateCapableCLI(t, home)
 	// migrations/ exists (so this is a CURRENT bundle) but the library does not.
 	if err := os.MkdirAll(filepath.Join(staging, "migrations"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	out, err := runStaged(t, stageInstaller(t, staging), staging, home, stub)
+	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
 	if err != nil {
 		t.Fatalf("a missing cleanup library must not fail the install: %v\n%s", err, out)
 	}
 	assertContains(t, out, "THIS RELEASE IS INCOMPLETE", "lib_stale_user_bins.sh")
-	// The binaries this run installed are still there — the refusal is about
-	// the sweep, not about the install.
+	// BURROWEE_UNITS_ONLY places no binaries of its own — seedMigrateCapableCLI
+	// put these there before the run. The claim is the same as ever (a missing
+	// cleanup library must not cost the binaries already on disk), just checked
+	// against binaries this run never touched instead of ones it placed.
 	for _, b := range allBins {
-		assertPresent(t, filepath.Join(binDir(home), b), "the install was abandoned over a missing cleanup library")
+		assertPresent(t, filepath.Join(binDir(home), b), "a missing cleanup library must not disturb the binaries already on disk")
 	}
 }
 
@@ -205,12 +223,12 @@ func TestInstallShReportsASweepListThatDisagreesWithWhatItInstalls(t *testing.T)
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	staging := t.TempDir()
-	seedDummyBins(t, staging)
+	seedMigrateCapableCLI(t, home)
 	// A library that has fallen a binary behind this installer.
 	stageSweepLib(t, staging, filepath.Join(t.TempDir(), "sweep-env"),
 		"burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register")
 
-	out, err := runStaged(t, stageInstaller(t, staging), staging, home, stub)
+	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
 	if err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}

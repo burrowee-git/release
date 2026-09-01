@@ -67,23 +67,65 @@ func TestLinuxInstallRestartsTheGatewayDaemon(t *testing.T) {
 	}
 }
 
-// TestLinuxFreshInstallRestartsTheGatewayDaemon is the same guarantee from the
-// other entry point that reaches load_units. Fresh mode re-places every binary
-// unconditionally, so a fresh install that does not restart leaves the largest
-// possible gap between what is on disk and what is running.
-func TestLinuxFreshInstallRestartsTheGatewayDaemon(t *testing.T) {
-	home := t.TempDir()
-	stub := stubInitSystemFor(t, "linux")
-	staging := t.TempDir()
-	seedDummyBins(t, staging)
+// TestFreshInstallHandsTheRestartToTheGuard restores, in the shape the
+// guarded-restart architecture actually offers, the guarantee
+// TestLinuxFreshInstallRestartsTheGatewayDaemon used to cover from the OTHER
+// entry point that reached load_units: a plain default (fresh) install with
+// no mode flag. Run on both platform shapes (forcedOSes), the same discipline
+// TestBothPlatformsAdvanceTheDaemon below already applies to the units-only
+// entry point — a Linux-only version of this would have missed exactly the
+// kind of platform-specific gap this whole file exists to catch.
+//
+// THAT ENTRY POINT NO LONGER REACHES load_units AT ALL, BY DESIGN. A fresh
+// install is exactly the case an operator runs from an SSH session tunnelled
+// THROUGH the gateway it is installing — load_units restarting the daemon in
+// this script's own foreground severed that session mid-install, silently
+// skipping everything after it, the version anchor included. The restart is
+// now the guard's job (guard_arm, armed before the first write), running in a
+// detached child that outlives this shell and this connection.
+//
+// WHY THE ORIGINAL COULD NOT SIMPLY BE REPAIRED, and still cannot: a
+// synchronous check of stub-calls.log right after runStaged returns cannot
+// observe the guard's OWN restart of the serve unit — the guard is a process
+// glued to launchd/systemd, and this suite's own stubs for those only RECORD
+// a call rather than actually spawning the guard process behind it
+// (stubInitSystem's header explains why: a real systemd-run would hand a live
+// transient unit to the HOST's own systemd). Asserting the guard's restart
+// from here would either race a process that never runs, or assert a promise
+// this script's foreground no longer makes at all.
+//
+// WHAT THIS TEST ASSERTS INSTEAD, now that Task 9 has written the handoff:
+// the two facts that ARE true synchronously, by the time this script's
+// foreground returns — the guard itself was handed off to the init system
+// (guardArmCallFor), and the transaction reached the "handoff" phase, the
+// token that means the restart is now the guard's problem, not this script's.
+// The guard's own restart-and-verify path (that it actually issues
+// `systemctl restart burrowee-gateway.service` / `launchctl kickstart -k`
+// once handed off) is covered end-to-end against the real guard.sh by
+// tools/guard-rollback.test.sh's t_guard_ok / t_guard_rolls_back, on both
+// platform shapes — this test's job is only that install.sh gets the handoff
+// there.
+func TestFreshInstallHandsTheRestartToTheGuard(t *testing.T) {
+	for _, goos := range forcedOSes {
+		t.Run(goos, func(t *testing.T) {
+			home := t.TempDir()
+			stub := stubInitSystemFor(t, goos)
+			staging := t.TempDir()
+			seedDummyBins(t, staging)
 
-	if out, err := runStaged(t, installShPath(t), staging, home, stub); err != nil {
-		t.Fatalf("fresh install failed: %v\n%s", err, out)
-	}
+			if out, err := runStaged(t, installShPath(t), staging, home, stub); err != nil {
+				t.Fatalf("fresh install failed: %v\n%s", err, out)
+			}
 
-	calls := systemctlCalls(t, home)
-	if countCall(calls, "systemctl restart burrowee-gateway.service") == 0 {
-		t.Errorf("fresh install did not restart the gateway; systemctl calls:\n%s", strings.Join(calls, "\n"))
+			calls := readFile(t, filepath.Join(home, "stub-calls.log"))
+			if !strings.Contains(calls, guardArmCallFor(goos)) {
+				t.Errorf("%s: fresh install never handed the guard to the init system (want %q); init calls:\n%s",
+					goos, guardArmCallFor(goos), calls)
+			}
+			if got := latestTxnPhase(t, home); got != "handoff" {
+				t.Errorf("%s: transaction phase = %q, want %q — the foreground flow did not hand the restart to the guard", goos, got, "handoff")
+			}
+		})
 	}
 }
 
@@ -202,15 +244,24 @@ func TestLinuxReportsAFailedGatewayRestart(t *testing.T) {
 // no assertion could provide: the two branches must offer the SAME guarantee,
 // checked side by side in one run, on one host.
 //
-// Darwin advances the daemon by booting the label out and bootstrapping it
-// again; Linux by restarting the unit. Different verbs, one contract — the
-// supervisor ends up executing the file this install placed. Written as a table
-// so that a future branch (or a branch that quietly loses its step, which is
-// exactly what happened) fails here rather than in the field.
+// Darwin advances the daemon with `kickstart -k`, Linux by restarting the unit.
+// Different verbs, one contract — the supervisor ends up executing the file this
+// install placed. Written as a table so that a future branch (or a branch that
+// quietly loses its step, which is exactly what happened) fails here rather
+// than in the field.
+//
+// THE DARWIN ROW USED TO NAME `launchctl bootout system/com.burrowee.gateway`,
+// and it was a SUBSTRING match — so once the serve label's bootout was removed
+// it went on passing, satisfied by the UPDATER's own bootout line
+// (`…gateway.updater`) that load_units still emits. A test whose header says it
+// exists so "a branch that quietly loses its step fails here rather than in the
+// field" was passing with the step gone. The row now names the verb that
+// actually advances the serve label, and it is the FULL line: the trailing
+// label is what stops `…gateway` from matching `…gateway.updater` again.
 func TestBothPlatformsAdvanceTheDaemon(t *testing.T) {
 	advance := map[string]string{
-		"darwin": "launchctl bootout system/com.burrowee.gateway",
-		"linux":  "systemctl restart burrowee-gateway.service",
+		"darwin": "launchctl kickstart -k system/com.burrowee.gateway\n",
+		"linux":  "systemctl restart burrowee-gateway.service\n",
 	}
 
 	for _, goos := range forcedOSes {

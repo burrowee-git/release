@@ -1,9 +1,9 @@
 // Package install_test is a Go test harness that runs install.sh in a sandbox
-// HOME with stubbed sudo/launchctl/systemctl (and sandboxed system-unit dirs
-// via the BURROWEE_LAUNCHD_DIR / BURROWEE_SYSTEMD_DIR test seams) to verify
-// unit rendering, fresh install, uninstall, legacy migration, and the
-// cross-user override guard (D3a). UPDATE mode tests live in D3b
-// (update_test.go).
+// HOME with stubbed sudo/launchctl/systemctl/systemd-run (and sandboxed
+// system-unit dirs via the BURROWEE_LAUNCHD_DIR / BURROWEE_SYSTEMD_DIR /
+// BURROWEE_LIBEXEC_DIR test seams) to verify unit rendering, fresh install,
+// uninstall, legacy migration, and the cross-user override guard (D3a). UPDATE
+// mode tests live in D3b (update_test.go).
 package install_test
 
 import (
@@ -32,6 +32,22 @@ func installShPath(t *testing.T) string {
 	return dir
 }
 
+// guardShPath resolves guard.sh the same way installShPath resolves
+// install.sh — both ship side by side in the real payload (payload.test.sh
+// pins the manifest), and guard_arm resolves guard.sh relative to $0 the same
+// way ensure_root_exec_surface resolves migrations/.
+func guardShPath(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(filepath.Join("..", "guard.sh"))
+	if err != nil {
+		t.Fatalf("resolve guard.sh: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("guard.sh not found at %s: %v", dir, err)
+	}
+	return dir
+}
+
 // launchdDir/systemdDir are the sandboxed system-unit locations a test HOME
 // maps to (via the BURROWEE_*_DIR seams).
 func launchdDir(home string) string { return filepath.Join(home, "LaunchDaemons") }
@@ -44,6 +60,14 @@ func sysConfigDir(home string) string {
 	return filepath.Join(home, "system-etc", "burrowee", "gateway")
 }
 func sysDataDir(home string) string { return filepath.Join(home, "system-var", "burrowee", "gateway") }
+
+// libexecDir is the sandboxed stand-in for guard_arm's real destination
+// (/usr/local/libexec/burrowee), via the BURROWEE_LIBEXEC_DIR seam — the one
+// directory install.sh writes into that had no seam of its own before the
+// guard: without this redirect, arming the guard under test would install a
+// real file at that real, root-owned path, which is exactly what every other
+// BURROWEE_*_DIR seam in this harness exists to prevent.
+func libexecDir(home string) string { return filepath.Join(home, "libexec", "burrowee") }
 
 // binDir is $BIN_DIR as this suite's sandbox (installShEnv's
 // "BURROWEE_BIN_DIR="+binDir(home)) resolves it — the ONE location,
@@ -99,10 +123,36 @@ func stubInitSystem(t *testing.T) string {
 	t.Helper()
 	stub := t.TempDir()
 
+	// launchctl records and exits 0 — with ONE simulated side effect. guard_arm
+	// now polls for proof the guard actually STARTED ($TXN_DIR/guard.pid, or a
+	// "guard armed" line in guard.log) before letting the install proceed,
+	// because `launchctl bootstrap` exiting 0 means the job was LOADED, not
+	// that it ran: a guard that dies on exec used to give a green install that
+	// restarted nothing. A stub that only records IS that dead guard, so
+	// bootstrapping the guard's own plist writes the two artefacts a live guard
+	// writes as its first two statements. It still never spawns anything —
+	// guardStartSideEffect below reads the transaction directory back out of
+	// the plist rather than re-deriving it, so a plist naming the wrong
+	// directory still fails the poll.
 	p := filepath.Join(stub, "launchctl")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\necho \"launchctl $*\" >> \"$STUB_LOG\"\nexit 0\n"), 0o755); err != nil {
+	launchctl := "#!/bin/sh\n" +
+		"echo \"launchctl $*\" >> \"$STUB_LOG\"\n" +
+		"if [ \"$1\" = bootstrap ]; then\n" +
+		"    case \"$3\" in\n" +
+		"    *com.burrowee.gateway.guard.plist)\n" +
+		"        _txn=\"$(sed -n 's|.*<string>\\(.*/install/[^<]*\\)</string>.*|\\1|p' \"$3\" | head -1)\"\n" +
+		"        if [ -n \"$_txn\" ] && [ -d \"$_txn\" ]; then\n" +
+		"            echo 4242 > \"$_txn/guard.pid\"\n" +
+		"            echo '00:00:00 guard armed for '\"$_txn\" >> \"$_txn/guard.log\"\n" +
+		"        fi\n" +
+		"        ;;\n" +
+		"    esac\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(p, []byte(launchctl), 0o755); err != nil {
 		t.Fatalf("write stub launchctl: %v", err)
 	}
+
 	// systemctl records like launchctl, but also models a host where one
 	// specific call FAILS: STUB_SYSTEMCTL_FAIL=<substring> makes any matching
 	// invocation exit non-zero. A supervisor that refuses is the interesting
@@ -117,6 +167,35 @@ func stubInitSystem(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(stub, "systemctl"), []byte(systemctl), 0o755); err != nil {
 		t.Fatalf("write stub systemctl: %v", err)
 	}
+	// guard_arm's Linux branch calls this bare, via $PATH, to arm the guard
+	// under the real init system's supervision — and this suite's own host is
+	// frequently Linux (the shared CI machine), so a fresh-install test with no
+	// forced platform reaches this branch for real unless it is stubbed here
+	// too. Recording and exiting 0, never actually spawning the guard: a real
+	// systemd-run would hand a live transient unit to the HOST's own systemd,
+	// which is exactly the shared-machine side effect every other stub here
+	// (launchctl, systemctl, sudo) exists to prevent.
+	//
+	// It DOES write the guard's first two artefacts, for the same reason the
+	// launchctl stub above does: guard_arm refuses to proceed on a guard that
+	// was accepted but never ran. The transaction directory is systemd-run's
+	// last argument.
+	systemdRun := "#!/bin/sh\n" +
+		"echo \"systemd-run $*\" >> \"$STUB_LOG\"\n" +
+		"for _a in \"$@\"; do _txn=\"$_a\"; done\n" +
+		"case \"$_txn\" in\n" +
+		"*/install/*)\n" +
+		"    if [ -d \"$_txn\" ]; then\n" +
+		"        echo 4242 > \"$_txn/guard.pid\"\n" +
+		"        echo '00:00:00 guard armed for '\"$_txn\" >> \"$_txn/guard.log\"\n" +
+		"    fi\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(stub, "systemd-run"), []byte(systemdRun), 0o755); err != nil {
+		t.Fatalf("write stub systemd-run: %v", err)
+	}
+
 	writeSudoStub(t, stub)
 	return stub
 }
@@ -206,6 +285,22 @@ func installShEnv(home, stubDir string, extraEnv ...string) []string {
 		"BURROWEE_SYSTEMD_DIR=" + systemdDir(home),
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
+		"BURROWEE_LIBEXEC_DIR=" + libexecDir(home),
+		// REATTACH_CEILING=0 (Task 9): the fresh-install path now ends by
+		// polling the transaction's phase file for the guard's verdict
+		// (install.sh's reattach). This suite's systemd-run/launchctl stubs
+		// only RECORD the arm call (stubInitSystem's own header explains why:
+		// a real systemd-run would hand a live transient unit to the HOST's
+		// own systemd, which every other stub here exists to prevent) — no
+		// guard process ever actually runs here, so the phase file never
+		// reaches a terminal state on its own. Left at its production
+		// default (180s, polled every 2s) every fresh-install test in this
+		// package would block for up to three minutes apiece; ceiling 0 skips
+		// the wait loop outright (reattach's own `_waited -lt 0` is false on
+		// the first check) and takes the "guard has not reported yet" branch
+		// immediately, which is the correct, honest outcome for a harness
+		// that never arms a real guard.
+		"REATTACH_CEILING=0",
 	}
 	return append(env, extraEnv...)
 }
@@ -248,6 +343,41 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// latestTxnPhase reads the phase file of the transaction install.sh most
+// recently created under sysDataDir(home)/install/ — txn_begin's own
+// destination — and returns its content, trimmed.
+//
+// Transaction directories are named by a UTC timestamp (txn_begin's
+// TXN_STAMP), which sorts lexically, so the LAST entry is the most recent —
+// there is at most one per runInstallSh/runStaged call in this suite, but
+// "most recent" is still the honest selection rather than "the only one",
+// since a test may legitimately run install.sh more than once against the
+// same home.
+// latestTxnDir is the newest install transaction directory under home's system
+// data root. Stamps are UTC and fixed-width, and os.ReadDir returns entries
+// sorted by filename, so the last entry is the newest.
+func latestTxnDir(t *testing.T, home string) string {
+	t.Helper()
+	root := filepath.Join(sysDataDir(home), "install")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read transaction root %s: %v", root, err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("no transaction directory under %s — txn_begin never ran", root)
+	}
+	return filepath.Join(root, entries[len(entries)-1].Name())
+}
+
+func latestTxnPhase(t *testing.T, home string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(latestTxnDir(t, home), "phase"))
+	if err != nil {
+		t.Fatalf("read phase file for the newest transaction: %v", err)
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // assertContains asserts that s contains every substring in want.
@@ -557,7 +687,24 @@ func testInstallShNoRestartStagesWithoutKicking(t *testing.T, goos string) {
 // unconditionally and THEN the bootout+bootstrap pair, which on a fresh Darwin
 // install started the service, stopped it, and started it again — a visible
 // flap on every install and reinstall. Each label must be bootstrapped exactly
-// once, after its bootout.
+// once.
+//
+// THE TWO LABELS NO LONGER ADVANCE THE SAME WAY, and this test is the only
+// place that says so. The serve label is never booted out by the installer —
+// `bootout` unloads a job, an unloaded job is supervised by nothing, and on a
+// gateway the operator's session runs THROUGH the daemon being unloaded, so
+// the bootout causes the shell death that then strands the host. It advances
+// with `kickstart -k`, which restarts a loaded job in place with no unloaded
+// window. The UPDATER label still boots out: nothing routes through it, so
+// unloading it strands nothing.
+//
+// This test asserted a bootout for BOTH labels, by exact whole-line match, and
+// so failed on macOS from the moment that call was removed — a failure nobody
+// saw, because it skips on Linux and Linux is where CI runs. Adapted here to
+// the two contracts that actually hold, without dropping either the flap guard
+// (bootstrap exactly once per label) or the advance guard (each label is
+// genuinely advanced, by its own verb). tools/install-no-bootout.test.sh pins
+// the serve-label half from the shell side; this is the Darwin behavioural half.
 func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("launchctl bootout/bootstrap sequencing is Darwin-only")
@@ -579,33 +726,57 @@ func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
 		}
 	}
 
-	for _, label := range []string{"com.burrowee.gateway", "com.burrowee.gateway.updater"} {
-		bootstrap := "launchctl bootstrap system " + launchdDir(home) + "/" + label + ".plist"
-		bootout := "launchctl bootout system/" + label
-
-		n, firstBootstrap, firstBootout := 0, -1, -1
+	count := func(want string) (n, first int) {
+		first = -1
 		for i, c := range direct {
-			switch c {
-			case bootstrap:
+			if c == want {
 				n++
-				if firstBootstrap < 0 {
-					firstBootstrap = i
-				}
-			case bootout:
-				if firstBootout < 0 {
-					firstBootout = i
+				if first < 0 {
+					first = i
 				}
 			}
 		}
-		if n != 1 {
-			t.Errorf("%s: bootstrap called %d times, want exactly 1 (unit flap):\n%s", label, n, calls)
+		return n, first
+	}
+
+	for _, tc := range []struct {
+		label       string
+		wantBootout bool
+	}{
+		{"com.burrowee.gateway", false},
+		{"com.burrowee.gateway.updater", true},
+	} {
+		bootstrap := "launchctl bootstrap system " + launchdDir(home) + "/" + tc.label + ".plist"
+		bootout := "launchctl bootout system/" + tc.label
+		kickstart := "launchctl kickstart -k system/" + tc.label
+
+		nBootstrap, firstBootstrap := count(bootstrap)
+		nBootout, firstBootout := count(bootout)
+		nKickstart, _ := count(kickstart)
+
+		if nBootstrap != 1 {
+			t.Errorf("%s: bootstrap called %d times, want exactly 1 (unit flap):\n%s", tc.label, nBootstrap, calls)
 		}
-		if firstBootout < 0 {
-			t.Errorf("%s: no bootout on the default path — a running unit would never advance:\n%s", label, calls)
+		// Every label is advanced onto the freshly placed binary. Without
+		// this, a branch that quietly stopped starting the service at all
+		// would satisfy every other assertion here.
+		if nKickstart < 1 {
+			t.Errorf("%s: never kickstarted — the unit is loaded but the running process is still the old one:\n%s", tc.label, calls)
+		}
+		if !tc.wantBootout {
+			if nBootout != 0 {
+				t.Errorf("%s: booted out %d time(s) — the SERVE label must never be unloaded by the installer; "+
+					"an unloaded job is supervised by nothing and the session that would bootstrap it again "+
+					"is the one the bootout kills:\n%s", tc.label, nBootout, calls)
+			}
+			continue
+		}
+		if nBootout < 1 {
+			t.Errorf("%s: no bootout — a running updater would never be replaced:\n%s", tc.label, calls)
 			continue
 		}
 		if firstBootstrap >= 0 && firstBootstrap < firstBootout {
-			t.Errorf("%s: bootstrap precedes bootout — starts the unit before stopping it:\n%s", label, calls)
+			t.Errorf("%s: bootstrap precedes bootout — starts the unit before stopping it:\n%s", tc.label, calls)
 		}
 	}
 }
@@ -654,12 +825,26 @@ func TestInstallShUninstall(t *testing.T) {
 		}
 	}
 
-	// System unit files removed.
+	// The install guard, placed on the root-secure surface beside install.sh
+	// and migrations/ because launchd/systemd exec it AS ROOT. An uninstall
+	// that leaves it hands the next install a root-owned script nothing
+	// re-verified, on a host that no longer has a gateway.
+	if p := filepath.Join(binDir, "guard.sh"); func() bool { _, err := os.Stat(p); return err == nil }() {
+		t.Errorf("the install guard is still present after uninstall: %s", p)
+	}
+
+	// System unit files removed — the GUARD's plist among them. It is
+	// RunAtLoad, so one left behind re-execs the guard against a stale
+	// transaction directory at every boot, on a host with no gateway at all.
+	// guard.sh removes it itself on every exit path; this is the belt to that
+	// braces, for a guard that was SIGKILLed or could not write the directory.
 	if runtime.GOOS == "darwin" {
 		for _, name := range []string{
 			"com.burrowee.gateway.plist",
 			"com.burrowee.gateway.updater.plist",
+			"com.burrowee.gateway.guard.plist",
 		} {
+
 			p := filepath.Join(launchdDir(home), name)
 			if _, err := os.Stat(p); err == nil {
 				t.Errorf("unit file still present after uninstall: %s", p)
@@ -820,10 +1005,12 @@ func TestInstallShMigratesLegacyUserUnits(t *testing.T) {
 	}
 }
 
-// stageInstaller copies the real install.sh into dir, so a test can plant a
-// fake migrations/ beside it. install.sh resolves the migration relative to its
-// OWN path (not cwd — `service install` re-runs the kept copy from an arbitrary
-// working directory), so the two files have to sit together.
+// stageInstaller copies the real install.sh (and the real guard.sh beside
+// it — the same real release payload shape payload.test.sh pins) into dir,
+// so a test can plant a fake migrations/ beside both. install.sh resolves
+// the migration, and guard_arm resolves the guard, relative to install.sh's
+// OWN path (not cwd — `service install` re-runs the kept copy from an
+// arbitrary working directory), so all of these have to sit together.
 func stageInstaller(t *testing.T, dir string) string {
 	t.Helper()
 	body, err := os.ReadFile(installShPath(t))
@@ -833,6 +1020,13 @@ func stageInstaller(t *testing.T, dir string) string {
 	staged := filepath.Join(dir, "install.sh")
 	if err := os.WriteFile(staged, body, 0o755); err != nil {
 		t.Fatalf("stage install.sh: %v", err)
+	}
+	guardBody, err := os.ReadFile(guardShPath(t))
+	if err != nil {
+		t.Fatalf("read guard.sh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "guard.sh"), guardBody, 0o755); err != nil {
+		t.Fatalf("stage guard.sh: %v", err)
 	}
 	return staged
 }

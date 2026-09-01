@@ -121,6 +121,10 @@ func ledgerMigrations(runSh string) ([]string, error) {
 //     inner/<comp>/ (not the component source worktree) if it exists there —
 //     see updaterInstallPayload. cli's updater is a one-shot binary with no
 //     service, and agent has no updater installer, so neither carries one.
+//   - gateway additionally carries guard.sh, copied the same way from THIS
+//     repo's own inner/gateway/ — see guardInstallPayload. Nothing else
+//     carries one today: gateway is the only component whose install can stop
+//     the daemon serving the operator's own tunnelled session.
 //
 // The remaining component (agent) has no extras.
 // takesSharedLadder reports whether this component's migrations/ is assembled
@@ -336,6 +340,38 @@ func updaterInstallPayload(comp, repoDir string) (*pack.Content, error) {
 	return &pack.Content{Src: dst, Name: "updater.install.sh"}, nil
 }
 
+// guardInstallPayload returns the guard.sh member for this component —
+// inner/<comp>/guard.sh, if it exists in the release repo — or nil.
+//
+// Present for gateway only today: gateway is the first component whose
+// install can stop the very daemon carrying the operator's own session (a
+// migration rung, then the restart itself), so it is the first that needs a
+// process handed to launchd/systemd — outliving that session — to finish or
+// undo the install. FILE PRESENCE is the guard, not a hardcoded component
+// allowlist, exactly like updaterInstallPayload right above. Mirrors
+// guard_install_src in tools/payload.sh.
+//
+// THE EXEC BIT IS FORCED, same reasoning as updaterInstallPayload:
+// inner/gateway/guard.sh is committed as 0644 like every other inner/
+// script, and pack.Zip preserves whatever os.Stat reports on Content.Src
+// verbatim — left unforced, `rkit build` would ship a guard an operator's
+// launchd/systemd unit cannot execute.
+func guardInstallPayload(comp, repoDir string) (*pack.Content, error) {
+	p := filepath.Join(repoDir, "inner", comp, "guard.sh")
+	if _, err := os.Stat(p); err != nil {
+		return nil, nil
+	}
+	dir, err := os.MkdirTemp("", "rkit-guard-install-*")
+	if err != nil {
+		return nil, fmt.Errorf("guard.sh temp dir: %w", err)
+	}
+	dst := filepath.Join(dir, "guard.sh")
+	if err := copyExecutable(p, dst); err != nil {
+		return nil, fmt.Errorf("guard.sh: %w", err)
+	}
+	return &pack.Content{Src: dst, Name: "guard.sh"}, nil
+}
+
 func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 	var extras []pack.Content
 	switch comp {
@@ -363,6 +399,14 @@ func extraPayload(comp, srcDir, repoDir string) ([]pack.Content, error) {
 		return nil, err
 	} else if ui != nil {
 		extras = append(extras, *ui)
+	}
+	// guard.sh: same provenance and same presence guard as updater.install.sh
+	// right above — see guardInstallPayload. Appended right after it so the
+	// assembly order matches tools/payload.sh's payload_manifest.
+	if gi, err := guardInstallPayload(comp, repoDir); err != nil {
+		return nil, err
+	} else if gi != nil {
+		extras = append(extras, *gi)
 	}
 	if comp == "gateway" {
 		// The whole migrations/ dir rides along: migrations/run.sh is the runner

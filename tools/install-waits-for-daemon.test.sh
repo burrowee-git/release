@@ -35,6 +35,12 @@ set -eu
 HERE="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 EDGE="$HERE/inner/edge/install.sh"
 GW="$HERE/inner/gateway/install.sh"
+# GUARD — Task 9's guard.sh. Gateway's own foreground wait (below, section 5)
+# moved here: the restart itself moved out of install.sh's foreground and
+# into a detached guard process (guard_arm), so the post-restart running.json
+# check that install.sh used to make synchronously is now guard.sh's own
+# running_version(), not a call to this file's wait_for_running_version.
+GUARD="$HERE/inner/gateway/guard.sh"
 
 FAIL=0
 SKIP=0
@@ -54,6 +60,7 @@ ok_clean() { if [ "$SECTION_FAIL" = "$FAIL" ]; then ok "$1"; fi; }
 
 [ -f "$EDGE" ] || { echo "FAIL: $EDGE not found"; exit 1; }
 [ -f "$GW" ] || { echo "FAIL: $GW not found"; exit 1; }
+[ -f "$GUARD" ] || { echo "FAIL: $GUARD not found"; exit 1; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -322,10 +329,15 @@ grep -q 'wait_for_running_version "\$COMP_DATA"' "$EDGE" \
     || note "edge: the wait is not called with \$COMP_DATA"
 grep -q 'wait_for_running_version "\$COMP_HOME"' "$EDGE" \
     && note "edge: the wait is called with the CONFIG tree — the daemon writes running.json to the DATA tree"
-grep -q 'wait_for_running_version "\$SYS_DATA_DIR"' "$GW" \
-    || note "gateway: the wait is not called with \$SYS_DATA_DIR"
-grep -q 'wait_for_running_version "\$SYS_CONFIG_DIR"' "$GW" \
-    && note "gateway: the wait is called with the CONFIG tree — the daemon writes running.json to the DATA tree"
+# Gateway (Task 9): install.sh no longer waits synchronously at all — the
+# restart is handed to guard.sh, which does its own post-restart check
+# against running.json. The path-agreement property is the same one, just
+# read off guard.sh's own running_version() instead of a wait_for_running_version
+# call site that no longer exists in install.sh.
+grep -q '"\$SYS_DATA_DIR/running.json"' "$GUARD" \
+    || note "gateway: guard.sh's running_version() does not read \$SYS_DATA_DIR/running.json"
+grep -q '"\$SYS_CONFIG_DIR/running.json"' "$GUARD" \
+    && note "gateway: guard.sh reads the CONFIG tree for running.json — the daemon writes it to the DATA tree"
 
 # ── 6. the gate: the wait is armed only by a VERIFIED serve-unit start ───────
 section
@@ -333,8 +345,19 @@ for f in "$EDGE" "$GW"; do
     comp="$(basename "$(dirname "$f")")"
     grep -q '^SERVE_UNIT_STARTED=0' "$f" \
         || note "$comp: SERVE_UNIT_STARTED is not initialised to 0"
-    grep -q 'if \[ "\$SERVE_UNIT_STARTED" = 1 \]; then' "$f" \
-        || note "$comp: the wait is not gated on SERVE_UNIT_STARTED"
+    # Gateway (Task 9) no longer has a wait to gate: install.sh's own foreground
+    # tail does not wait on running.json at all any more (see section 5's
+    # comment) — the guard restarts and verifies unconditionally once handed
+    # off, with no "was it even started" gate of its own to check, because the
+    # handoff itself IS that gate (txn_phase only reaches it past a verified
+    # placement). SERVE_UNIT_STARTED keeps its OTHER job on gateway: the
+    # remaining foreground entry point that still restarts synchronously
+    # (BURROWEE_UNITS_ONLY, via load_units) is unaffected and still sets it,
+    # which is what the count and "which unit arms it" checks below still verify.
+    if [ "$comp" != gateway ]; then
+        grep -q 'if \[ "\$SERVE_UNIT_STARTED" = 1 \]; then' "$f" \
+            || note "$comp: the wait is not gated on SERVE_UNIT_STARTED"
+    fi
     # It is set exactly twice — the darwin serve start and the linux serve start
     # — and never beside an updater start.
     #
@@ -395,15 +418,18 @@ for f in "$EDGE" "$GW"; do
     # The doctor tail is the last thing the script DOES — checked as "nothing
     # but comments, blank lines and the allowed trailing statement follows it",
     # not as `tail -n 1`, because gateway now ends with one more statement:
-    # finish_with_updater_verdict, which prints nothing on a healthy run and
-    # exists so that a failed UPDATER start reports through the exit status
-    # instead of aborting above doctor (and above the version anchor and the
-    # enrollment prompt with it).
+    # `exit "$_verdict"`, reattach's own verdict (Task 9) — doctor's exit
+    # status is a diagnostic's, never the install's, and something has to
+    # supply the real one. This USED to be finish_with_updater_verdict; that
+    # call moved off the full-install tail entirely (section 7b below), because
+    # the guard now performs the restart finish_with_updater_verdict used to
+    # report on, off this session, and its own verdict (reattach's) is what
+    # this tail exits on instead.
     after="$(sed -n '/doctor < \/dev\/null || true/,$p' "$f" | sed '1d' \
         | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
     case "$comp" in
     gateway)
-        [ "$after" = "finish_with_updater_verdict" ] \
+        [ "$after" = 'exit "$_verdict"' ] \
             || note "$comp: unexpected code after the doctor tail: [$after]" ;;
     *)
         [ -z "$after" ] \
@@ -447,19 +473,48 @@ for _start in \
     grep -F "$_start" "$GW" | grep -q 'UPDATER_START_FAILED' \
         && note "gateway: a SERVE start records UPDATER_START_FAILED — the serve start must stay fatal"
 done
-# Both modes that call load_units end on the verdict, so neither can exit 0
-# with a dead updater.
+# ONLY ONE mode that calls load_units still ends on the verdict: BURROWEE_UNITS_ONLY.
+# The full-install tail used to be the other (a fresh install re-places every
+# binary, so a dead updater there matters exactly as much) — Task 9 replaced
+# its ending with the guard handoff + reattach, and reattach reports the whole
+# install's verdict on its own, updater included: guard.sh's do_restart only
+# ever restarts the SERVE unit and never touches the updater unit at all, so a
+# dead updater on that path is not a fact this script's foreground can observe
+# any more (it happens, if it happens, on the far side of the handoff, unwatched
+# by anything finish_with_updater_verdict could report through).
 n_fin="$(grep -c '^ *finish_with_updater_verdict$' "$GW" || true)"
-[ "$n_fin" = 2 ] \
-    || note "gateway: finish_with_updater_verdict is called $n_fin times, expected 2 (units-only mode and the full-install tail)"
-# The verdict must run AFTER the anchor and the enrollment prompt, which is the
-# whole point of deferring it.
-for _after in 'record_installed_version' 'gateway_already_set_up' 'doctor < /dev/null'; do
-    last_use="$(grep -n "$_after" "$GW" | tail -n 1 | cut -d: -f1)"
-    last_fin="$(grep -n '^ *finish_with_updater_verdict$' "$GW" | tail -n 1 | cut -d: -f1)"
-    [ -n "$last_use" ] && [ -n "$last_fin" ] && [ "$last_fin" -gt "$last_use" ] \
-        || note "gateway: finish_with_updater_verdict does not run after $_after"
-done
+[ "$n_fin" = 1 ] \
+    || note "gateway: finish_with_updater_verdict is called $n_fin times, expected 1 (units-only mode only)"
+# The verdict must run AFTER the anchor, which is the whole point of deferring
+# it — checked against record_installed_version's OWN occurrence inside
+# BURROWEE_UNITS_ONLY (the last one BEFORE finish_with_updater_verdict's single
+# remaining call), not the file's last occurrence: that one is now in the
+# full-install tail, a different mode this verdict no longer runs in at all.
+_fin_ln="$(grep -n '^ *finish_with_updater_verdict$' "$GW" | head -n 1 | cut -d: -f1)"
+_rec_before="$(grep -n '^ *record_installed_version ' "$GW" | awk -F: -v fin="$_fin_ln" '$1 < fin { last = $1 } END { print last + 0 }')"
+[ -n "$_fin_ln" ] && [ "$_rec_before" -gt 0 ] \
+    || note "gateway: finish_with_updater_verdict does not run after a record_installed_version call in its own mode"
+# gateway_already_set_up (the first-run enrollment probe) and doctor no
+# longer share a verdict with finish_with_updater_verdict at all — they are
+# in the full-install tail, which that call left entirely (above). What
+# still has to hold is the full-install tail's OWN internal ordering: the
+# enrollment prompt must run before the handoff (the same reasoning that used
+# to defer finish_with_updater_verdict — nothing past the point of no return
+# may still be pending), and doctor must run AFTER it, reporting on
+# reattach's own outcome rather than a build the guard has not yet restarted.
+# Leading whitespace tolerated: `txn_phase handoff` now sits inside the
+# `if [ "$GUARD_ARMED" = 1 ]` block that honours BURROWEE_NO_RESTART (no guard
+# armed means no handoff). It still appears exactly once in the file, and the
+# claims below are about ORDER, not column.
+_handoff_ln="$(grep -n '^[[:space:]]*txn_phase handoff$' "$GW" | head -n 1 | cut -d: -f1)"
+
+[ -n "$_handoff_ln" ] || note "gateway: no txn_phase handoff in the full-install tail"
+last_use="$(grep -n 'gateway_already_set_up' "$GW" | tail -n 1 | cut -d: -f1)"
+[ -n "$last_use" ] && [ -n "$_handoff_ln" ] && [ "$_handoff_ln" -gt "$last_use" ] \
+    || note "gateway: the enrollment prompt (gateway_already_set_up) does not run before the handoff"
+last_use="$(grep -n 'doctor < /dev/null' "$GW" | tail -n 1 | cut -d: -f1)"
+[ -n "$last_use" ] && [ -n "$_handoff_ln" ] && [ "$last_use" -gt "$_handoff_ln" ] \
+    || note "gateway: the doctor tail does not run after the handoff — it would be reporting on the build the guard has not yet restarted onto"
 ok_clean "a failed updater start is recorded, deferred past the state writes, and still exits non-zero"
 ok_clean "doctor runs last, unconditionally, guarded, with a non-terminal stdin"
 
