@@ -636,7 +636,24 @@ func testInstallShNoRestartStagesWithoutKicking(t *testing.T, goos string) {
 // unconditionally and THEN the bootout+bootstrap pair, which on a fresh Darwin
 // install started the service, stopped it, and started it again — a visible
 // flap on every install and reinstall. Each label must be bootstrapped exactly
-// once, after its bootout.
+// once.
+//
+// THE TWO LABELS NO LONGER ADVANCE THE SAME WAY, and this test is the only
+// place that says so. The serve label is never booted out by the installer —
+// `bootout` unloads a job, an unloaded job is supervised by nothing, and on a
+// gateway the operator's session runs THROUGH the daemon being unloaded, so
+// the bootout causes the shell death that then strands the host. It advances
+// with `kickstart -k`, which restarts a loaded job in place with no unloaded
+// window. The UPDATER label still boots out: nothing routes through it, so
+// unloading it strands nothing.
+//
+// This test asserted a bootout for BOTH labels, by exact whole-line match, and
+// so failed on macOS from the moment that call was removed — a failure nobody
+// saw, because it skips on Linux and Linux is where CI runs. Adapted here to
+// the two contracts that actually hold, without dropping either the flap guard
+// (bootstrap exactly once per label) or the advance guard (each label is
+// genuinely advanced, by its own verb). tools/install-no-bootout.test.sh pins
+// the serve-label half from the shell side; this is the Darwin behavioural half.
 func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("launchctl bootout/bootstrap sequencing is Darwin-only")
@@ -658,33 +675,57 @@ func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
 		}
 	}
 
-	for _, label := range []string{"com.burrowee.gateway", "com.burrowee.gateway.updater"} {
-		bootstrap := "launchctl bootstrap system " + launchdDir(home) + "/" + label + ".plist"
-		bootout := "launchctl bootout system/" + label
-
-		n, firstBootstrap, firstBootout := 0, -1, -1
+	count := func(want string) (n, first int) {
+		first = -1
 		for i, c := range direct {
-			switch c {
-			case bootstrap:
+			if c == want {
 				n++
-				if firstBootstrap < 0 {
-					firstBootstrap = i
-				}
-			case bootout:
-				if firstBootout < 0 {
-					firstBootout = i
+				if first < 0 {
+					first = i
 				}
 			}
 		}
-		if n != 1 {
-			t.Errorf("%s: bootstrap called %d times, want exactly 1 (unit flap):\n%s", label, n, calls)
+		return n, first
+	}
+
+	for _, tc := range []struct {
+		label       string
+		wantBootout bool
+	}{
+		{"com.burrowee.gateway", false},
+		{"com.burrowee.gateway.updater", true},
+	} {
+		bootstrap := "launchctl bootstrap system " + launchdDir(home) + "/" + tc.label + ".plist"
+		bootout := "launchctl bootout system/" + tc.label
+		kickstart := "launchctl kickstart -k system/" + tc.label
+
+		nBootstrap, firstBootstrap := count(bootstrap)
+		nBootout, firstBootout := count(bootout)
+		nKickstart, _ := count(kickstart)
+
+		if nBootstrap != 1 {
+			t.Errorf("%s: bootstrap called %d times, want exactly 1 (unit flap):\n%s", tc.label, nBootstrap, calls)
 		}
-		if firstBootout < 0 {
-			t.Errorf("%s: no bootout on the default path — a running unit would never advance:\n%s", label, calls)
+		// Every label is advanced onto the freshly placed binary. Without
+		// this, a branch that quietly stopped starting the service at all
+		// would satisfy every other assertion here.
+		if nKickstart < 1 {
+			t.Errorf("%s: never kickstarted — the unit is loaded but the running process is still the old one:\n%s", tc.label, calls)
+		}
+		if !tc.wantBootout {
+			if nBootout != 0 {
+				t.Errorf("%s: booted out %d time(s) — the SERVE label must never be unloaded by the installer; "+
+					"an unloaded job is supervised by nothing and the session that would bootstrap it again "+
+					"is the one the bootout kills:\n%s", tc.label, nBootout, calls)
+			}
+			continue
+		}
+		if nBootout < 1 {
+			t.Errorf("%s: no bootout — a running updater would never be replaced:\n%s", tc.label, calls)
 			continue
 		}
 		if firstBootstrap >= 0 && firstBootstrap < firstBootout {
-			t.Errorf("%s: bootstrap precedes bootout — starts the unit before stopping it:\n%s", label, calls)
+			t.Errorf("%s: bootstrap precedes bootout — starts the unit before stopping it:\n%s", tc.label, calls)
 		}
 	}
 }

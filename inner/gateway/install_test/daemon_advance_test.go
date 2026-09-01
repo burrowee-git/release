@@ -244,15 +244,24 @@ func TestLinuxReportsAFailedGatewayRestart(t *testing.T) {
 // no assertion could provide: the two branches must offer the SAME guarantee,
 // checked side by side in one run, on one host.
 //
-// Darwin advances the daemon by booting the label out and bootstrapping it
-// again; Linux by restarting the unit. Different verbs, one contract — the
-// supervisor ends up executing the file this install placed. Written as a table
-// so that a future branch (or a branch that quietly loses its step, which is
-// exactly what happened) fails here rather than in the field.
+// Darwin advances the daemon with `kickstart -k`, Linux by restarting the unit.
+// Different verbs, one contract — the supervisor ends up executing the file this
+// install placed. Written as a table so that a future branch (or a branch that
+// quietly loses its step, which is exactly what happened) fails here rather
+// than in the field.
+//
+// THE DARWIN ROW USED TO NAME `launchctl bootout system/com.burrowee.gateway`,
+// and it was a SUBSTRING match — so once the serve label's bootout was removed
+// it went on passing, satisfied by the UPDATER's own bootout line
+// (`…gateway.updater`) that load_units still emits. A test whose header says it
+// exists so "a branch that quietly loses its step fails here rather than in the
+// field" was passing with the step gone. The row now names the verb that
+// actually advances the serve label, and it is the FULL line: the trailing
+// label is what stops `…gateway` from matching `…gateway.updater` again.
 func TestBothPlatformsAdvanceTheDaemon(t *testing.T) {
 	advance := map[string]string{
-		"darwin": "launchctl bootout system/com.burrowee.gateway",
-		"linux":  "systemctl restart burrowee-gateway.service",
+		"darwin": "launchctl kickstart -k system/com.burrowee.gateway\n",
+		"linux":  "systemctl restart burrowee-gateway.service\n",
 	}
 
 	for _, goos := range forcedOSes {
