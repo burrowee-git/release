@@ -88,29 +88,51 @@ func installFakeRootSudo(t *testing.T, stubDir, logPath, binDir string) {
 // fail the run at the transaction, before place_all_bins is reached at all,
 // pinning nothing about $BIN_DIR's own elevation decision — which is the
 // entire subject of the two tests below.
+// The supervisor commands are exempt from the refusal, and have to be: since
+// the guard moved onto the root-secure surface, `systemd-run … $BIN_DIR/guard.sh
+// <txn>` NAMES $BIN_DIR without writing a byte of it, and a substring-matching
+// refusal would fail the arm — pinning "elevation is unavailable for the
+// supervisor" instead of "elevation is unavailable for writes into $BIN_DIR",
+// which is the subject here. Naming a path is not writing to it.
 func installFailingSudoFor(t *testing.T, stubDir, refuseIfContains string) {
 	t.Helper()
+
 	script := "#!/bin/sh\n" +
-		"case \"$*\" in *" + refuseIfContains + "*) exit 1 ;; esac\n" +
 		"[ \"$1\" = \"-n\" ] && shift\n" +
+		"case \"$1\" in systemd-run | launchctl) exec \"$@\" ;; esac\n" +
+		"case \"$*\" in *" + refuseIfContains + "*) exit 1 ;; esac\n" +
 		"exec \"$@\"\n"
+
 	if err := os.WriteFile(filepath.Join(stubDir, "sudo"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write failing sudo: %v", err)
 	}
 }
 
-// assertBinDirEmpty fails the test if binDir contains anything at all.
+// assertBinDirEmpty fails the test if binDir contains anything but the install
+// guard. guard.sh is the ONE permitted entry, and it is not an exemption from
+// the all-or-nothing property this helper guards — it is not one of BINS at all.
+// The install guard is placed and armed at Phase 0, BEFORE place_all_bins,
+// because place_all_bins is itself capable of restarting the daemon on Darwin:
+// the serve plist's KeepAlive is a PathState on $BIN_DIR/burrowee-gateway, so
+// replacing that file can make launchd start the NEW binary on its own. An
+// install that reached the binaries with no guard watching would be exactly
+// the unwatched restart this design removes. So on any run that got as far as
+// arming, a root-owned guard.sh is expected to be there; every BINS name must
+// still be absent.
 func assertBinDirEmpty(t *testing.T, binDir string) {
 	t.Helper()
 	entries, err := os.ReadDir(binDir)
 	if err != nil {
 		t.Fatalf("read %s: %v", binDir, err)
 	}
-	if len(entries) != 0 {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
+	var names []string
+	for _, e := range entries {
+		if e.Name() == "guard.sh" {
+			continue
 		}
+		names = append(names, e.Name())
+	}
+	if len(names) != 0 {
 		t.Errorf("%s is not empty: %v", binDir, names)
 	}
 }
@@ -189,9 +211,20 @@ func TestInstallShDoesNotElevateAWritableBinDir(t *testing.T) {
 }
 
 // TestInstallShPlacesNothingWhenBinDirCannotBeWrittenAtAll is the brief's
-// front-door case: elevation itself unavailable, so the FIRST write of
-// place_all_bins (creating the staging directory) fails, and $BIN_DIR is
-// left exactly as it was found — empty.
+// front-door case: elevation itself unavailable, so the first write into
+// $BIN_DIR fails and the directory is left exactly as it was found — empty.
+//
+// THE REFUSAL NOW COMES FROM guard_arm, one step EARLIER than place_all_bins.
+// The install guard is placed into $BIN_DIR at Phase 0 (root-execed by
+// launchd/systemd, so it belongs on the same root-secure surface as the
+// binaries) and arming precedes placement, because place_all_bins can itself
+// trigger a Darwin restart through the serve plist's KeepAlive PathState. So
+// the first $BIN_DIR write a no-elevation host fails on is the guard's, not
+// the staging directory's. Both refusals say "no binary was placed" and both
+// leave the directory untouched, which is what this test is actually about —
+// the assertion below deliberately does not pin WHICH subsystem refused, only
+// that the run refused, said so, and wrote nothing.
+
 func TestInstallShPlacesNothingWhenBinDirCannotBeWrittenAtAll(t *testing.T) {
 	binDir := stageUnwritableBinDir(t)
 	staging := t.TempDir()

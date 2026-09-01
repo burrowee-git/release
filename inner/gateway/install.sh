@@ -560,7 +560,20 @@ ensure_root_exec_surface() {
     if [ ! -f "$BIN_DIR/install.sh" ] || ! cmp -s "$0" "$BIN_DIR/install.sh"; then
         run_root /usr/bin/install -m 0755 "$0" "$BIN_DIR/install.sh" || return 1
     fi
+    # guard.sh, for exactly the same reason and by exactly the same rule: the
+    # supervisor execs it AS ROOT (guard_arm), so it must sit on a path no
+    # unprivileged user can rewrite. It is placed here so that every mode
+    # converges it, and re-placed and PROVEN in guard_arm itself, which is the
+    # only caller that actually hands the path to launchd/systemd — a host
+    # converging off a bundle that predates the guard has nothing to place, and
+    # must not have `service install` refused over an artefact that run never
+    # arms. See guard_arm's own root-secure refusal.
+    _reb_guard="$(dirname "$0")/guard.sh"
+    if [ -f "$_reb_guard" ] && { [ ! -f "$BIN_DIR/guard.sh" ] || ! cmp -s "$_reb_guard" "$BIN_DIR/guard.sh"; }; then
+        run_root /usr/bin/install -m 0755 "$_reb_guard" "$BIN_DIR/guard.sh" || return 1
+    fi
     _reb_migrations="$(dirname "$0")/migrations"
+
     if [ -d "$_reb_migrations" ] && [ "$_reb_migrations" != "$BIN_DIR/migrations" ]; then
         run_root mkdir -p "$BIN_DIR/migrations" || return 1
         for _reb_m in "$_reb_migrations"/*.sh; do
@@ -629,6 +642,26 @@ verify_root_exec_surface() {
         fi
         return 1
     done
+
+    # guard.sh, checked SEPARATELY and only when it is there.
+    #
+    # It belongs on this surface — the supervisor execs it as root — but it
+    # cannot join the loop above, whose absent case (rc 3) is a refusal. A host
+    # converging off a bundle that predates the guard reaches
+    # `burrowee gateway service install` with an installer copy and no guard.sh
+    # beside it, and refusing there would brick the one verb this script sends
+    # operators to, over an artefact that mode never arms. So: present and
+    # insecure is a refusal, present and secure is fine, absent is left to
+    # guard_arm — the only caller that actually hands the path to root, and the
+    # one that refuses outright rather than arming an unverifiable guard.
+    if [ -f "$BIN_DIR/guard.sh" ] && ! path_is_root_secure "$BIN_DIR/guard.sh"; then
+        echo "error: $BIN_DIR/guard.sh is not root-owned and unwritable all the way to /." >&2
+        echo "error: the install guard is execed AS ROOT by launchd/systemd, so refusing to" >&2
+        echo "error: keep a copy at a path a non-root user could replace." >&2
+        echo "hint: check the ownership and modes of $BIN_DIR and every directory above it;" >&2
+        echo "hint: each must be owned by root and not group- or world-writable." >&2
+        return 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1185,10 +1218,19 @@ keep_installer_copy() {
             echo "note: 'burrowee gateway service install' will not be able to migrate." >&2
         fi
     fi
-    # guard.sh too, off the same resolution guard_arm itself uses
-    # ("$(dirname "$0")/guard.sh"): a units-only re-run's $0 IS the kept
-    # $GW_HOME/install.sh, so without this copy that later run would find no
-    # guard beside it and refuse to arm at all.
+    # guard.sh too, off the same resolution guard_arm's SOURCE uses
+    # ("$(dirname "$0")/guard.sh"), so a later default-mode re-run of this kept
+    # copy has a guard to place onto the root-secure surface.
+    #
+    # NOT for a units-only re-run — the earlier version of this comment said so
+    # and was wrong. BURROWEE_UNITS_ONLY exits inside its own mode block
+    # (finish_with_updater_verdict) and never reaches guard_arm at all; what it
+    # does reach is ensure_root_exec_surface, which places this same copy into
+    # $BIN_DIR. The copy that matters to a guard is the ROOT-OWNED one guard_arm
+    # makes under $BIN_DIR; this one is a source, never an exec target. Root
+    # never runs this file — see ensure_root_exec_surface's note beside the
+    # install.sh copy, and guard.sh's own header.
+
     _src_guard="$(dirname "$0")/guard.sh"
     if [ -f "$_src_guard" ]; then
         if ! cp "$_src_guard" "$GW_HOME/guard.sh" 2>/dev/null; then
@@ -1701,12 +1743,24 @@ sha256_of() {
 #     phase          one token, the state machine's whole shared state
 #     manifest       key=value: what was snapshotted, and how faithfully
 #     guard.log      the guard's own narration
-#     guard.pid      so a second install can refuse to race a live guard
+#     guard.pid      the live-guard marker guard_refuse_concurrent reads, so a
+#                    second install refuses rather than booting out a guard
+#                    that may be mid-rollback
 #     installer.pid  what the guard watches for an early death
+#     heartbeat      UTC epoch, refreshed while this script sits on a blocking
+#                    prompt, so the guard's deadline measures a WEDGE and not
+#                    an operator who stepped away (txn_heartbeat)
+#     units-changed  basenames of unit files this run actually rewrote, so the
+#                    guard knows a kickstart is not enough (place_unit)
 #     snapshot/      bin/ units/ config/ data/
 # ---------------------------------------------------------------------------
 TXN_DIR=""
 TXN_STAMP=""
+# GUARD_ARMED — 1 only once guard_arm has both handed the guard to the
+# supervisor AND proved it started (guard_prove_armed). It is what abort_install
+# branches on: with no guard watching, the foreground restore is the only undo
+# there is; with one, the foreground restore is the WRONG undo.
+GUARD_ARMED=0
 
 txn_begin() {
     TXN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -1717,14 +1771,133 @@ txn_begin() {
     txn_phase armed
 }
 
+# ---------------------------------------------------------------------------
+# Reading back out of the transaction, from a possibly-unprivileged shell.
+#
+# txn_begin creates the transaction ROOT-OWNED AND 0700, and this script is
+# routinely entered by an unprivileged shell that elevates per command
+# (run_root). So a plain `cat`, `ls` or `[ -f ]` inside that tree answers
+# "nothing there" about files that plainly exist — and every caller below turns
+# that into a wrong conclusion: reattach reports "the guard has not reported
+# yet" about a guard that reported minutes ago, guard_prove_armed refuses a
+# guard that started fine, guard_refuse_concurrent cannot see a live guard at
+# all.
+#
+# `sudo -n` and never plain `sudo`: these all sit on paths that must not grow a
+# password prompt (one is polled in a loop). A refused elevation falls back to
+# the same empty answer the unprivileged read already gave, so the degradation
+# is exactly today's behaviour and never a hang.
+# ---------------------------------------------------------------------------
+txn_read_file() {
+    if [ "$(id -u)" = 0 ]; then
+        cat "$1" 2>/dev/null || true
+        return 0
+    fi
+    cat "$1" 2>/dev/null || sudo -n cat "$1" 2>/dev/null || true
+}
+
+txn_list_dir() {
+    if [ "$(id -u)" = 0 ]; then
+        ls -1 "$1" 2>/dev/null || true
+        return 0
+    fi
+    ls -1 "$1" 2>/dev/null || sudo -n ls -1 "$1" 2>/dev/null || true
+}
+
+txn_file_exists() {
+    [ -f "$1" ] && return 0
+    [ "$(id -u)" = 0 ] && return 1
+    sudo -n test -f "$1" 2>/dev/null
+}
+
+txn_read_phase() {
+    [ -n "$TXN_DIR" ] || return 0
+    txn_read_file "$TXN_DIR/phase"
+}
+
 # txn_phase <phase> — the ONLY writer of the phase file, and it writes
 # atomically. The guard polls this file; a partial write read as a phase name
 # would be an unrecognised state, and the guard's default for an unrecognised
 # state is to roll back. Write to a temp name in the same directory, then mv.
+#
+# IT WILL NOT OVERWRITE A TERMINAL PHASE. Once the guard has written ok,
+# rolled-back or failed, the transaction is over and the guard process is gone.
+# A later `txn_phase handoff` from a still-live installer — which is exactly
+# what an operator returning to a prompt after the guard's deadline fired
+# produces — would hand the restart to a process that has exited: nothing
+# restarts, reattach polls a phase file nothing will advance, gives up, and the
+# install exits 0 over a partially undone host. Refusing the write leaves the
+# guard's real verdict in place, which is what reattach then reports.
+#
+# It returns 0 on that refusal, deliberately: every call site is a bare
+# statement under `set -e`, and aborting the script here would skip the doctor
+# tail and reattach's verdict — the two things that tell the operator what
+# actually happened.
 txn_phase() {
     [ -n "$TXN_DIR" ] || return 0
+    case "$(txn_read_phase)" in
+    ok | rolled-back | failed)
+        echo "install: the guard has already finished this transaction (phase" >&2
+        echo "install: $(txn_read_phase)) — not overwriting it with '$1'." >&2
+        return 0
+        ;;
+    esac
     printf '%s\n' "$1" | run_root tee "$TXN_DIR/.phase.tmp" >/dev/null || return 1
     run_root mv -f "$TXN_DIR/.phase.tmp" "$TXN_DIR/phase" || return 1
+}
+
+# ---------------------------------------------------------------------------
+# The prompt heartbeat.
+#
+# The guard's 900s deadline is a WEDGE DETECTOR, and it stopped being one the
+# moment the install grew blocking prompts: the clock starts at Phase 0 and
+# spans both the setup blob/PIN prompt and the consent prompt. An operator who
+# steps away at `blob>` gets the guard rolling back underneath a live
+# installer, which then writes phase=handoff to a guard that has already
+# exited. (txn_phase's terminal-phase refusal above is the second half of that
+# fix; this is the first.)
+#
+# txn_heartbeat writes a UTC epoch the guard measures its deadline from
+# instead. It is BEST-EFFORT AND NEVER PROMPTS — `sudo -n`, all output
+# discarded, `|| true` — because a heartbeat that can block on a password
+# prompt blocks on the very thing it exists to measure. A host where it cannot
+# write simply behaves as it did before: the deadline runs from Phase 0.
+#
+# heartbeat_start / heartbeat_stop bracket a blocking read with a background
+# ticker, because refreshing before and after a `read` says nothing about the
+# hours in between. The ticker is a plain subshell job: it dies with this
+# script's session, which is correct — a severed session is a dead installer,
+# and the guard's installer-died branch owns that case, not the deadline.
+# ---------------------------------------------------------------------------
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-10}"
+[ "$HEARTBEAT_INTERVAL" -gt 0 ] 2>/dev/null || HEARTBEAT_INTERVAL=10
+HEARTBEAT_PID=""
+
+txn_heartbeat() {
+    [ -n "$TXN_DIR" ] || return 0
+    if [ "$(id -u)" = 0 ]; then
+        date -u +%s > "$TXN_DIR/heartbeat" 2>/dev/null || true
+        return 0
+    fi
+    date -u +%s > "$TXN_DIR/heartbeat" 2>/dev/null && return 0
+    date -u +%s | sudo -n tee "$TXN_DIR/heartbeat" >/dev/null 2>&1 || true
+
+}
+
+heartbeat_start() {
+    [ -n "$TXN_DIR" ] || return 0
+    [ -z "$HEARTBEAT_PID" ] || return 0
+    txn_heartbeat
+    ( while :; do sleep "$HEARTBEAT_INTERVAL"; txn_heartbeat; done ) >/dev/null 2>&1 &
+    HEARTBEAT_PID=$!
+}
+
+heartbeat_stop() {
+    [ -n "$HEARTBEAT_PID" ] || return 0
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+    HEARTBEAT_PID=""
+    txn_heartbeat
 }
 
 # snapshot_take — capture the last working point: binaries, units, config tree,
@@ -1859,32 +2032,127 @@ snapshot_restore() {
 # Root is taken HERE, in the foreground, where run_root can still prompt on the
 # operator's tty. The guard itself can never prompt for anything.
 #
-# _guard is resolved beside THIS installer ("$(dirname "$0")/guard.sh"), the
-# same way ensure_root_exec_surface resolves migrations/ — never
-# "$GW_HOME/guard.sh". keep_installer_copy has not run yet when this is called
-# (it runs after the migration, still ahead of us in the fresh-install flow),
-# so $GW_HOME holds no guard.sh on a fresh host's first run; the copy it keeps
-# is what a LATER `service install` re-run finds instead, off the very same
-# expression.
+# THE GUARD IS EXECED AS ROOT, so the path handed to the supervisor is a
+# root-exec surface and gets the same treatment as every other one in this
+# file: placed into $BIN_DIR and PROVEN root-secure before the unit names it.
 #
-# _libexec_dir has a BURROWEE_LIBEXEC_DIR test seam for the same reason
-# BURROWEE_BIN_DIR exists: this suite must never write into the real
-# /usr/local, and unlike $BIN_DIR/$LAUNCHD_DIR/$SYSTEMD_DIR this destination
-# had no seam of its own to reuse. The production default is unchanged.
+# It used to be copied into a freshly created /usr/local/libexec/burrowee and
+# run from there, unchecked at both ends. Neither end was safe. The SOURCE was
+# "$(dirname "$0")/guard.sh", which for a default-mode re-run of the kept
+# $GW_HOME/install.sh is the OPERATOR-WRITABLE copy keep_installer_copy leaves
+# under $HOME — the very path guard.sh's own header argues must never be
+# sourced as root. And the DESTINATION was never walked by path_is_root_secure,
+# so on an Intel macOS host where Homebrew chowns /usr/local it was a
+# user-writable path a root LaunchDaemon execs at every arm.
+#
+# So the libexec destination is GONE, not merely checked. $BIN_DIR is the
+# surface ensure_root_exec_surface already places into and
+# verify_root_exec_surface already walks; recreating the retired libexec tree
+# for one file would be a second root-exec surface with its own placement, its
+# own verification and its own uninstall — three things to keep in step where
+# zero were needed. That is the same collapse this file's header describes for
+# the binaries, applied to the last artefact that had escaped it.
+#
+# The SOURCE is still resolved beside THIS installer, and that is deliberate:
+# it is the unpacked payload the outer bootstrap signature-verified, the same
+# resolution ensure_root_exec_surface uses for migrations/ and $0. The
+# difference is that it is now copied to $BIN_DIR **as root** and the copy is
+# what runs — so an operator-writable source can only ever put content there
+# through an elevated install, never be execed in place.
+#
+# THE REFUSALS ARE THE POINT. No guard.sh beside the installer, a $BIN_DIR copy
+# that does not pass the root-secure walk, an unsupported platform, or a guard
+# that never actually started: each aborts before Phase 1's first write, with
+# the old install untouched and the snapshot already taken.
 guard_arm() {
-    _guard="$(dirname "$0")/guard.sh"
-    if [ ! -f "$_guard" ]; then
+    # ---- BURROWEE_NO_RESTART=1: stage without arming a restart -------------
+    #
+    # It had exactly two readers, both inside load_units, and the default path
+    # stopped calling load_units when Task 7 handed the restart to the guard —
+    # so on the one path an operator is most likely to set it, the flag became
+    # a silent no-op: this function armed anyway, `txn_phase handoff` fired
+    # anyway, and the guard restarted the daemon anyway. This file's own
+    # documentation of the flag (load_units' header, and the design) said the
+    # opposite the whole time.
+    #
+    # Honouring it means not arming here and not handing off later; the caller
+    # reads GUARD_ARMED for the second half. The transaction and the snapshot
+    # are still taken — they cost a copy, they are what `guard-status` reads
+    # afterwards, and they are what abort_install restores from when a Phase 2
+    # check fails with no guard to hand the undo to.
+    #
+    # The units are left RENDERED and not loaded, because loading them is what
+    # STARTS them: a Darwin `bootstrap` on a RunAtLoad plist starts the daemon,
+    # which is the one thing this flag asks not to happen.
+    #
+    # The check lives here rather than at the call site so that the call stays
+    # a bare `guard_arm` at column 0 — the anchor
+    # tools/install-guard-arms-first.test.sh uses to prove the arming still
+    # precedes migrate_from_legacy.
+    if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
+        echo "note: BURROWEE_NO_RESTART set — the install guard is NOT armed and nothing" >&2
+        echo "note: will be restarted; the units are written to disk and left staged." >&2
+        return 0
+    fi
+
+    _guard_src="$(dirname "$0")/guard.sh"
+
+    if [ ! -f "$_guard_src" ]; then
         echo "error: guard.sh is not beside this installer — refusing to run an unguarded" >&2
         echo "error: install on a host that is currently serving as a gateway." >&2
         return 1
     fi
-    _libexec_dir="${BURROWEE_LIBEXEC_DIR:-/usr/local/libexec/burrowee}"
-    # mkdir -p first: neither GNU nor BSD `install` creates a missing parent
-    # (GNU's -D does, but this file never assumes GNU), and a fresh host has no
-    # reason to already carry this directory — the pre-collapse libexec tree
-    # this sits beside is retired and never recreated (see this file's header).
-    run_root mkdir -p "$_libexec_dir" || return 1
-    run_root install -m 0755 "$_guard" "$_libexec_dir/gateway-guard" || return 1
+
+    guard_refuse_concurrent || return 1
+
+    # THROUGH THE SAME ONE ELEVATION DECISION every other $BIN_DIR write uses,
+    # never a bare run_root. This is the first write into $BIN_DIR on a fresh
+    # run, and blanket-elevating it would re-introduce exactly what
+    # decide_bin_place_elevated exists to prevent: a host whose /usr/local this
+    # user already owns (Homebrew on an Intel Mac, a container running as
+    # itself) paying for a sudo call it does not need — and, where sudo is
+    # unavailable, failing an install that would otherwise have completed.
+    decide_bin_place_elevated
+    guard_place_failed() {
+        echo "install: cannot write $BIN_DIR — no binary was placed." >&2
+        echo "install: the install guard is placed there too, because launchd/systemd exec it" >&2
+        echo "install: as root, and an unguarded install on a serving gateway is the failure" >&2
+        echo "install: this installer exists to prevent." >&2
+        echo "install: re-run as root, or grant this user sudo." >&2
+    }
+    # `[ -d ]` first: decide_bin_place_elevated has already tried an
+    # unprivileged mkdir -p, so an existing directory needs no second one — and
+    # elevating a mkdir for a directory that is already there is a sudo call
+    # bought for nothing.
+    if [ ! -d "$BIN_DIR" ] && ! bin_place_run mkdir -p "$BIN_DIR"; then
+        guard_place_failed
+        return 1
+    fi
+    if [ ! -f "$BIN_DIR/guard.sh" ] || ! cmp -s "$_guard_src" "$BIN_DIR/guard.sh"; then
+        bin_place_run /usr/bin/install -m 0755 "$_guard_src" "$BIN_DIR/guard.sh" || {
+            guard_place_failed
+            return 1
+        }
+    fi
+    _guard="$BIN_DIR/guard.sh"
+
+    # Same gate verify_root_exec_surface applies to itself: ownership can only
+    # be asserted where elevation actually yields uid 0, and the sandboxed
+    # harness's pass-through `sudo` stub leaves every "root" file owned by the
+    # test user. Asking the elevation path who it is keeps the production
+    # assertion strict without a second env seam.
+    if have_real_root; then
+        _guard_rc=0
+        path_is_root_secure "$_guard" || _guard_rc=$?
+        if [ "$_guard_rc" != 0 ]; then
+            echo "error: $_guard is not root-owned and unwritable all the way to /." >&2
+            echo "error: launchd/systemd execs the install guard AS ROOT, so refusing to arm" >&2
+            echo "error: it out of a path a non-root user could replace." >&2
+            echo "hint: check the ownership and modes of $BIN_DIR and every directory above" >&2
+            echo "hint: it; each must be owned by root and not group- or world-writable." >&2
+            return 1
+        fi
+    fi
 
     case "$(uname -s)" in
     Darwin)
@@ -1895,7 +2163,7 @@ guard_arm() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.burrowee.gateway.guard</string>
-  <key>ProgramArguments</key><array><string>$_libexec_dir/gateway-guard</string><string>$TXN_DIR</string></array>
+  <key>ProgramArguments</key><array><string>$_guard</string><string>$TXN_DIR</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
@@ -1904,24 +2172,148 @@ guard_arm() {
   <key>StandardErrorPath</key><string>$TXN_DIR/guard.err</string>
 </dict></plist>
 EOF
+        # place_unit, not a bare install: it is what records a changed unit
+        # body into the transaction (see place_unit). The guard filters that
+        # marker by unit NAME, so its own plist appearing there is inert.
         place_unit "$_tmp" "$_gp"
-        # No KeepAlive: the guard runs once and is done. bootout FIRST, because
-        # unlike the serve label this one is safe to unload — nothing routes
-        # through it — and a stale guard job from a previous install would
-        # otherwise refuse the bootstrap.
+        # No KeepAlive, and the guard removes this plist itself on every exit
+        # path (guard.sh's remove_guard_unit) — a RunAtLoad plist left behind
+        # re-runs the guard against a finished transaction at every boot.
+        # bootout FIRST, because unlike the serve label this one is safe to
+        # unload — nothing routes through it — and a stale guard job from a
+        # previous install would otherwise refuse the bootstrap.
+        # guard_refuse_concurrent above has already proved no LIVE guard is
+        # mid-flight, so this can never unload one in the middle of a rollback.
         run_root launchctl bootout "system/com.burrowee.gateway.guard" 2>/dev/null || true
         run_root launchctl bootstrap system "$_gp" || return 1
         ;;
     Linux)
         run_root systemd-run --unit=burrowee-gateway-guard --collect \
-            "$_libexec_dir/gateway-guard" "$TXN_DIR" || return 1
+            "$_guard" "$TXN_DIR" || return 1
         ;;
     *)
-        echo "warning: no supervisor on $(uname -s) — the install is NOT guarded" >&2
+        # A DELIBERATE REFUSAL, not a warning-and-continue.
+        #
+        # The choice is real, so it is stated: this host has neither launchd
+        # nor systemd, so nothing on it can hold the guard outside the
+        # operator's session — and this script's fresh path no longer restarts
+        # anything itself (load_units left the foreground with Task 7). Warning
+        # and continuing would place binaries, write phase=handoff to a guard
+        # that does not exist, time out in reattach, and exit 0 having
+        # restarted nothing: the exact false-green I6 describes, made
+        # unconditional. Refusing costs an unsupported platform its install and
+        # says why; continuing costs it the truth about what happened.
+        echo "error: no launchd and no systemd on $(uname -s) — there is nothing on this host" >&2
+        echo "error: that can supervise the install guard, and an unguarded restart is the" >&2
+        echo "error: failure this installer exists to prevent." >&2
+        echo "hint: nothing has been written yet; the running install is untouched." >&2
         return 1
         ;;
     esac
+
+    guard_prove_armed || return 1
+    GUARD_ARMED=1
     echo "guard armed — transaction $TXN_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# guard_refuse_concurrent — refuse to arm on top of a guard that is still
+# working.
+#
+# guard.pid was written from the first day with the comment "so a second
+# install can refuse to race a live guard", and nothing read it. Worse, the
+# Darwin arm unconditionally boots the guard LABEL out, so a second install
+# starting while the first guard was mid-rollback killed it between restoring
+# files and restarting the daemon — manufacturing the stranding this whole
+# design removes.
+#
+# The check is per TRANSACTION, and a transaction only counts when BOTH its
+# pid is alive AND its phase is non-terminal: a finished guard's pid file
+# outlives it, and a recycled pid must not refuse an install forever. This
+# run's own transaction cannot match — txn_begin has just created it and the
+# guard has not been armed, so it carries no guard.pid at all.
+# ---------------------------------------------------------------------------
+guard_refuse_concurrent() {
+    _grc_base="$SYS_DATA_DIR/install"
+    [ -d "$_grc_base" ] || return 0
+    # txn_list_dir / txn_read_file, never a bare glob and a bare cat: the
+    # transaction tree is root-owned 0700 (see the helpers above), so an
+    # unprivileged installer's glob would find nothing and this check would
+    # silently never refuse anything.
+    for _grc_stamp in $(txn_list_dir "$_grc_base"); do
+        _grc_t="$_grc_base/$_grc_stamp"
+        _grc_pid="$(txn_read_file "$_grc_t/guard.pid")"
+        case "$_grc_pid" in '' | *[!0-9]*) continue ;; esac
+        [ "$_grc_pid" != 0 ] || continue
+        kill -0 "$_grc_pid" 2>/dev/null || continue
+        _grc_phase="$(txn_read_file "$_grc_t/phase")"
+        case "$_grc_phase" in
+            ok | rolled-back | failed) continue ;;
+        esac
+        echo "error: a guard from an earlier install is still running (pid $_grc_pid," >&2
+        echo "error: transaction $_grc_t, phase ${_grc_phase:-unknown})." >&2
+
+        echo "error: arming a second guard would boot that one out — possibly between its" >&2
+        echo "error: restore and the restart that finishes it — so this install refuses." >&2
+        echo "hint: watch it finish with 'burrowee gateway service guard-status', then re-run." >&2
+        return 1
+    done
+    return 0
+}
+
+# guard_armed_marker_present — either of the two artefacts guard.sh writes as
+# its first two statements, read through the elevated-read helpers because the
+# transaction directory is root-owned 0700.
+guard_armed_marker_present() {
+    txn_file_exists "$TXN_DIR/guard.pid" && return 0
+    txn_file_exists "$TXN_DIR/guard.log"
+}
+
+# ---------------------------------------------------------------------------
+# GUARD_ARM_CEILING / GUARD_ARM_INTERVAL — how long guard_arm waits for the
+# guard to prove it is actually RUNNING. Same unpublished test-seam shape as
+# WAIT_CEILING/WAIT_INTERVAL: deliberately not BURROWEE_*, because those are
+# the knobs the outer bootstrap forwards across its sudo boundary and these
+# are not published to anyone.
+# ---------------------------------------------------------------------------
+GUARD_ARM_CEILING="${GUARD_ARM_CEILING:-10}"
+GUARD_ARM_INTERVAL="${GUARD_ARM_INTERVAL:-1}"
+[ "$GUARD_ARM_INTERVAL" -gt 0 ] 2>/dev/null || GUARD_ARM_INTERVAL=1
+
+# ---------------------------------------------------------------------------
+# guard_prove_armed — LOADED IS NOT RUNNING.
+#
+# `launchctl bootstrap` exiting 0 means launchd accepted the job; `systemd-run`
+# exiting 0 means systemd accepted the transient unit. Neither says the process
+# execed, and a guard that dies immediately (a broken interpreter line, a
+# missing $TXN_DIR, an exec-format error) leaves an install that runs Phases
+# 1-4, writes phase=handoff to nobody, times out in reattach printing "it is
+# still running and will finish" — which is false — and exits 0. New binaries
+# on disk, old daemon running, success reported.
+#
+# guard.sh's first two statements are `printf $$ > guard.pid` and
+# `log "guard armed"`, in that order and before anything that can fail, so
+# either artefact appearing is proof it reached its own body. Polled rather
+# than assumed, and a failure here aborts before Phase 1 writes anything.
+# ---------------------------------------------------------------------------
+guard_prove_armed() {
+    _gpa_waited=0
+    while [ "$_gpa_waited" -lt "$GUARD_ARM_CEILING" ]; do
+        if guard_armed_marker_present; then
+            return 0
+        fi
+        sleep "$GUARD_ARM_INTERVAL"
+        _gpa_waited=$((_gpa_waited + GUARD_ARM_INTERVAL))
+    done
+    echo "error: the install guard was handed to the supervisor, which accepted it, but the" >&2
+    echo "error: guard never started: neither $TXN_DIR/guard.pid nor $TXN_DIR/guard.log" >&2
+    echo "error: appeared within ${GUARD_ARM_CEILING}s." >&2
+
+    echo "error: a job that is LOADED but not RUNNING would let this install place binaries," >&2
+    echo "error: hand the restart to nobody, and report success — so it refuses instead." >&2
+    echo "hint: nothing has been written yet; the running install is untouched." >&2
+    echo "hint: see $TXN_DIR/guard.err for what the supervisor captured." >&2
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -2498,8 +2890,14 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         # re-verified.
         [ -e "$BIN_DIR/install.sh" ] && { bin_place_run rm -f "$BIN_DIR/install.sh" || _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }install.sh"; }
         [ -d "$BIN_DIR/migrations" ] && { bin_place_run rm -rf "$BIN_DIR/migrations" || _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }migrations"; }
+        # The install guard, placed here by guard_arm / ensure_root_exec_surface
+        # for the same reason install.sh itself is: launchd and systemd exec it
+        # as ROOT. Leaving it behind hands the next install a root-owned script
+        # nothing re-verified, on a host that no longer has a gateway.
+        [ -e "$BIN_DIR/guard.sh" ] && { bin_place_run rm -f "$BIN_DIR/guard.sh" || _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }guard.sh"; }
         [ -e "$BIN_DIR/.installed-version" ] && bin_place_run rm -f "$BIN_DIR/.installed-version"
     fi
+
     echo "removed from $BIN_DIR: $BINS"
     if [ -n "$_uninstall_failed" ]; then
         echo "note: could not remove from $BIN_DIR (needs root): $_uninstall_failed — remove by hand" >&2
@@ -2508,18 +2906,32 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     # A pre-existing /usr/local/libexec/burrowee/gateway tree, if this host has
     # one, is left in place — this script never wrote to it and does not clean
     # it up; that is an operator's call, by hand.
+    #
+    # STILL TRUE, and deliberately kept that way. The install guard was briefly
+    # placed into a freshly created /usr/local/libexec/burrowee, which would
+    # have made this comment false AND left a root-execed binary no uninstall
+    # removed. It lives on the $BIN_DIR surface instead (guard_arm), and its
+    # removal is the guard.sh line up with install.sh and migrations/ above.
 
     # Remove the system service units (root) plus any legacy per-user units.
     # All best-effort: a missing unit or unavailable sudo must not stop uninstall.
     case "$(uname -s)" in
     Darwin)
-        for _label in com.burrowee.gateway com.burrowee.gateway.updater; do
+        # The guard label is in this list, and it has to be: its plist is
+        # RunAtLoad, so one left behind re-execs the guard against a stale
+        # transaction directory at every boot — on a host that no longer has a
+        # gateway at all. guard.sh removes it itself on every exit path
+        # (remove_guard_unit); this is the belt to that braces, for a guard
+        # that was SIGKILLed or a host whose /Library/LaunchDaemons was not
+        # writable when it tried.
+        for _label in com.burrowee.gateway com.burrowee.gateway.updater com.burrowee.gateway.guard; do
             if [ -f "$LAUNCHD_DIR/$_label.plist" ]; then
                 run_root launchctl bootout "system/$_label" 2>/dev/null || true
                 run_root rm -f "$LAUNCHD_DIR/$_label.plist" || true
             fi
         done
         ;;
+
     Linux)
         _removed=""
         for _unit in burrowee-gateway.service burrowee-gateway-updater.service; do
