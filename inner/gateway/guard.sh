@@ -185,22 +185,6 @@ elif command -v gtimeout >/dev/null 2>&1; then
     VERSION_BOUND="gtimeout 2"
 fi
 
-# binary_version — the version the freshly placed binary reports for ITSELF.
-#
-# DELIBERATELY NOT install.sh's binary_version_stamp, and not a candidate for
-# being merged with it. That helper is byte-identical with edge's (pinned by
-# tools/install-waits-for-daemon.test.sh) and filters tokens through
-# `grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$'`, which REJECTS a
-# pre-release token: against core runtime_version.Report's two-line output the
-# real stamp `v0.3.1.beta.2026.08.31.62a6f215` fails that pattern and the
-# helper falls through to the SECOND line — the RUNNING daemon's version — so
-# on a beta build it answers the question this guard is not asking. The `sed`
-# below takes the first version-shaped token off the FIRST line and keeps the
-# beta segment, which is the string running.json will actually carry.
-#
-# (The shared helper's beta blindness is pre-existing and out of scope here.
-# It is written down at both sites so the next reader who notices the
-# duplication learns that unifying them would silently break this one.)
 # running_pid — the pid the daemon recorded for itself in running.json, or "".
 running_pid() {
     sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
@@ -269,11 +253,44 @@ running_alive() {
     supervisor_holds_serve_job
 }
 
+# binary_version — the version the freshly placed binary reports for ITSELF.
+#
+# DELIBERATELY NOT install.sh's binary_version_stamp, and not a candidate for
+# being merged with it. That helper is byte-identical with edge's (pinned by
+# tools/install-waits-for-daemon.test.sh) and filters tokens through
+# `grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$'`, which REJECTS a
+# pre-release token: against core runtime_version.Report's two-line output the
+# real stamp `v0.3.1.beta.2026.08.31.62a6f215` fails that pattern and the
+# helper falls through to the SECOND line — the RUNNING daemon's version — so
+# on a beta build it answers the question this guard is not asking. The `sed`
+# below takes the first version-shaped token off the FIRST line and keeps the
+# beta segment, which is the string running.json will actually carry.
+#
+# (The shared helper's beta blindness is pre-existing and out of scope here.
+# It is written down at both sites so the next reader who notices the
+# duplication learns that unifying them would silently break this one.)
+#
+# This block sat ABOVE running_pid for two revisions — a header describing a
+# function eighty lines further down, with the function it actually stood over
+# carrying its own one-liner underneath it. Moved to where it belongs; nothing
+# about either function changed.
 binary_version() {
 
     # shellcheck disable=SC2086  # $VERSION_BOUND is a command PREFIX and must word-split; empty means no bound.
     BURROWEE_DISPATCHER_VERSION= $VERSION_BOUND "$BIN_DIR/burrowee-gateway" version 2>/dev/null |
         sed -n 's/.*\(v[0-9][0-9.a-z]*\).*/\1/p' | head -1
+}
+
+# serve_unit_file — the SERVE unit's basename on this platform, resolved once.
+# Both unit_body_changed and snapshot_has_serve_unit ask the same question
+# about the same file, and spelling it twice is how the two would come to
+# disagree about which file they mean.
+serve_unit_file() {
+    case "$UNAME" in
+    Darwin) printf '%s\n' "$LABEL.plist" ;;
+    Linux)  printf '%s\n' "$UNIT" ;;
+    *)      printf '\n' ;;
+    esac
 }
 
 # unit_body_changed — did THIS install rewrite the serve unit's file?
@@ -284,11 +301,19 @@ binary_version() {
 # signal; an absent file means nothing changed.
 unit_body_changed() {
     [ -f "$TXN/units-changed" ] || return 1
-    case "$UNAME" in
-    Darwin) grep -q "^$LABEL.plist\$" "$TXN/units-changed" ;;
-    Linux)  grep -q "^$UNIT\$"        "$TXN/units-changed" ;;
-    *)      return 1 ;;
-    esac
+    _ubc_u="$(serve_unit_file)"
+    [ -n "$_ubc_u" ] || return 1
+    grep -q "^$_ubc_u\$" "$TXN/units-changed"
+}
+
+# snapshot_has_serve_unit <snapshot-dir> — did snapshot_take capture the serve
+# unit's own file? snapshot_take copies only units that were already on disk
+# ([ -f ] per name), so on a host that has never had a gateway this is false
+# and the file now on disk is the one THIS run rendered.
+snapshot_has_serve_unit() {
+    _shsu_u="$(serve_unit_file)"
+    [ -n "$_shsu_u" ] || return 1
+    [ -f "$1/units/$_shsu_u" ]
 }
 
 # restart_service — kickstart -k / systemctl restart. NEVER bootout FROM THE
@@ -339,10 +364,37 @@ restart_service() {
 }
 
 # restart_mode — "reload" when the serve unit's file changed this install,
-# empty otherwise. One place decides it, so do_restart and rollback cannot
-# disagree about whether the plist needs re-reading.
+# empty otherwise. One place decides it, so nothing in do_restart can disagree
+# with itself about whether the plist needs re-reading.
 restart_mode() {
     if unit_body_changed; then printf 'reload\n'; else printf '\n'; fi
+}
+
+# rollback_restart_mode <snapshot-dir> — restart_mode's answer for the UNDO,
+# which is not the same question.
+#
+# do_restart is moving the host FORWARD onto the file this run rendered, so a
+# changed serve unit means launchd is holding a stale job and must re-read the
+# plist. rollback has just done the opposite: it copied the SNAPSHOT's unit
+# back over that file. When the snapshot held one, the content now on disk is
+# the content launchd already loaded before this install began — the in-memory
+# job and the file agree, and there is nothing to re-read.
+#
+# The bootout+bootstrap in that case is not merely redundant, it is the harm
+# this whole design exists to avoid one door further along: rollback's
+# undisturbed-case branch (below) skips the restart entirely when the daemon is
+# still serving the snapshot's build, precisely so that DECLINING the consent
+# prompt does not drop the connection the decline was protecting — and the
+# branch is gated on this mode being empty. A run that merely re-rendered the
+# unit template (a new StandardOutPath, say) therefore dropped the operator's
+# session on a decline, which is the one answer they gave to say "do not".
+#
+# Narrow deliberately: when the snapshot has NO serve unit there is nothing to
+# have restored, the file on disk is this run's, and a reload is still correct.
+rollback_restart_mode() {
+    unit_body_changed || { printf '\n'; return 0; }
+    if snapshot_has_serve_unit "$1"; then printf '\n'; return 0; fi
+    printf 'reload\n'
 }
 
 # verify_serving <want> — the daemon reports <want> within the ceiling.
@@ -512,7 +564,7 @@ rollback() {
         exit 1
     fi
 
-    _mode="$(restart_mode)"
+    _mode="$(rollback_restart_mode "$_snap")"
 
     # THE UNDISTURBED CASE, and the reason the installer's foreground abort
     # paths can safely hand their work here. When the operator declines the
@@ -696,6 +748,23 @@ do_restart() {
     restart_service "$(restart_mode)"
     if verify_serving "$_want"; then
 
+        # WRITTEN HERE AND NOT AFTER THE HOUSEKEEPING BELOW, deliberately, and
+        # the known cost is stated rather than traded away. `ok` means
+        # "verified serving", which is true at this line; moving it past the
+        # sweep would leave a guard killed mid-housekeeping recorded at
+        # `restarting`, and a guard relaunched against that transaction rolls
+        # a HEALTHY host back.
+        #
+        # The cost is a window: guard_refuse_concurrent skips terminal phases,
+        # so a second install started in the seconds below arms its own guard,
+        # and on Darwin boots this label out mid-sweep. Nothing is stranded —
+        # the daemon is up and verified, and the second install's own guard
+        # runs the same three steps on its own success — so the fix is not
+        # worth its price. Every discriminator that would close it (a
+        # completion marker, or refusing on a live pid regardless of phase)
+        # widens the recycled-pid hazard guard_refuse_concurrent's own header
+        # rejects: an install refused forever by a pid that no longer belongs
+        # to any guard is far worse than one skipped sweep.
         phase ok
         log "OK — $_want is serving"
 

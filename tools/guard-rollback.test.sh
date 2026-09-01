@@ -856,6 +856,96 @@ $(diff "$_w/guard" "$_w/install" 2>&1 || true)"
 }
 
 # ---------------------------------------------------------------------------
+# A DECLINE MUST NOT DROP THE CONNECTION IT WAS PROTECTING — including when
+# this run re-rendered the serve unit.
+#
+# t_abort_does_not_bounce_a_live_daemon covers the plain case: the daemon is
+# still serving the snapshot's build, so rollback restores the files and stops.
+# That branch is gated on the restart mode being empty, and the mode came
+# straight from units-changed — so a run that merely re-rendered the unit
+# template (a new StandardOutPath, an added EnvironmentVariables key) took the
+# bootout+bootstrap path instead, and the operator who declined precisely to
+# keep their session lost it anyway.
+#
+# The rollback has just copied the SNAPSHOT's unit back over the rendered one:
+# the file on disk is now the content launchd already holds in memory, so
+# there is nothing to re-read. rollback_restart_mode is what knows that, and
+# it stays narrow — when the snapshot holds no serve unit the file IS this
+# run's and a reload is still correct (the control below).
+# ---------------------------------------------------------------------------
+t_decline_with_a_rerendered_unit_does_not_bounce_a_live_daemon() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    fake_supervisor "$_r" "$_plat" advance
+    # THIS run re-rendered the serve unit — the only difference from
+    # t_abort_does_not_bounce_a_live_daemon.
+    printf '%s\n' "$(serve_unit_name "$_plat")" > "$_t/units-changed"
+
+    sh -c 'sleep 30' &
+    _dpid=$!
+    printf '{"version":"v0.2.13","pid":%s,"started_at":0}\n' "$_dpid" > "$_r/var/gateway/running.json"
+
+    sh -c 'sleep 30' &
+    _ipid=$!
+    printf '%s\n' "$_ipid" > "$_t/installer.pid"
+    printf 'verified\n' > "$_t/phase"
+
+    (sleep 1; kill -9 "$_ipid" 2>/dev/null || true) &
+    run_guard "$_r" "$_t" "$_plat" 30
+    wait "$_ipid" 2>/dev/null || true
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want rolled-back"
+    grep -q '<unit/>' "$_r/units/$(serve_unit_name "$_plat")" \
+        || fail "[$_plat] the rollback did not restore the snapshot's unit file"
+    # The liveness probe (`print` / `is-active`) is recorded too, so this is
+    # anchored to the acts that would drop the session, not to an empty log.
+    ! grep -q "$(restart_verb "$_plat")" "$_calls" \
+        || fail "[$_plat] the guard restarted the daemon after restoring the snapshot's own unit — declining is a request NOT to drop this connection, and the supervisor already holds exactly the content now on disk; calls:
+$(cat "$_calls")"
+    ! grep -q "$(unsupervise_pattern "$_plat" "$(serve_unit_name "$_plat")")" "$_calls" \
+        || fail "[$_plat] the guard unsupervised the serve label to re-read a unit it had just restored to the content already loaded; calls:
+$(cat "$_calls")"
+
+    kill "$_dpid" 2>/dev/null || true
+    wait "$_dpid" 2>/dev/null || true
+    rm -rf "$_r"
+}
+
+# The control: same shape, but the snapshot holds NO serve unit, so the file on
+# disk after the restore is still the one THIS run rendered and launchd's
+# in-memory job is stale. The reload must survive that narrowing. Darwin only
+# — the bootout is a launchd-specific step; Linux's daemon-reload re-reads by
+# construction and t_guard_does_not_reload_an_unchanged_unit_body already pins
+# that the serve label is never unsupervised there.
+t_rollback_still_reloads_when_the_snapshot_holds_no_unit() {
+    _r="$(mktemp -d)"; setup_fake_host "$_r" Darwin
+    _t="$(make_txn "$_r" Darwin)"
+    rm -f "$_t/snapshot/units/$(serve_unit_name Darwin)"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    fake_supervisor "$_r" Darwin advance
+    printf 'v0.2.13\n' > "$_r/newver"
+    printf '%s\n' "$(serve_unit_name Darwin)" > "$_t/units-changed"
+    printf 'handoff\n' > "$_t/phase"
+
+    # newver above is the OLD version, so the restart brings the RESTORED
+    # build back and do_restart's own verify (against v0.3.1) fails first —
+    # which is what routes this run through rollback.
+    run_guard "$_r" "$_t" Darwin
+
+    _calls="$(supervisor_calls "$_r" Darwin)"
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "snapshot-holds-no-unit: phase = $(cat "$_t/phase"), want rolled-back"
+    grep -q 'bootout system/com.burrowee.gateway$' "$_calls" \
+        || fail "the rollback did not re-read a serve plist the snapshot could not restore — launchd is still holding this run's rendered job; calls:
+$(cat "$_calls")"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
 # abort_install's NO-GUARD branch (BURROWEE_NO_RESTART) records the phase the
 # snapshot actually supports.
 #
@@ -1369,6 +1459,56 @@ t_verify_placement_catches_missing_binary() {
     rm -rf "$_r"
 }
 
+# ---------------------------------------------------------------------------
+# "COULD NOT LOOK" AND "NOT SECURE" ARE DIFFERENT REFUSALS.
+#
+# path_is_root_secure returns four codes on purpose, and its own header records
+# what conflating 1 (insecure) with 2 (undecidable) cost the last time: a host
+# whose tree was already root:root 755 was told to go and check its
+# permissions, because this host's `stat` spoke neither dialect and nothing
+# could be read at all. verify_root_exec_surface splits them; verify_placement
+# imitated that function without inheriting the split, and so did the two
+# guard.sh checks added later.
+#
+# Both still REFUSE — a root exec surface must fail closed either way — so
+# these two checks are about the message, which is the whole of the difference
+# to an operator.
+#
+# HAVE_REAL_ROOT is pre-seeded rather than faked at the sudo stub: the harness's
+# pass-through sudo makes have_real_root answer "no" (see setup_install_stubs),
+# which skips this branch entirely and is correct there. STAT_FLAVOR=none is
+# the real shape of the undecidable case — stat_field's own "this host speaks
+# neither dialect" arm — not a stub standing in for it.
+# ---------------------------------------------------------------------------
+t_verify_placement_separates_unreadable_from_insecure() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    write_archive_and_placement "$_r"
+
+    # Undecidable: nothing about the ownership could be read.
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r/archive" \
+        'HAVE_REAL_ROOT=yes; STAT_FLAVOR=none; verify_placement')" || _rc=$?
+    [ "$_rc" -ne 0 ] \
+        || fail "verify_placement passed a placement whose ownership could not be read — a root exec surface must fail closed: $_out"
+    printf '%s\n' "$_out" | grep -q 'could not read the owner and mode' \
+        || fail "verify_placement blamed something other than the unreadable stat: $_out"
+    printf '%s\n' "$_out" | grep -q 'not root-owned' \
+        && fail "verify_placement told the operator the tree is insecure when it could not look at all — that is the day spent re-checking a correct tree: $_out"
+
+    # Insecure for real: the placed files are owned by this test user, and the
+    # host's stat answers fine.
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r/archive" \
+        'HAVE_REAL_ROOT=yes; verify_placement')" || _rc=$?
+    [ "$_rc" -ne 0 ] || fail "verify_placement passed a placement that is not root-owned: $_out"
+    printf '%s\n' "$_out" | grep -q 'not root-owned and unwritable all the way to /' \
+        || fail "verify_placement's insecure refusal does not name the ownership: $_out"
+    printf '%s\n' "$_out" | grep -q 'could not read the owner and mode' \
+        && fail "verify_placement reported an unreadable stat on a host whose stat answered: $_out"
+    rm -rf "$_r"
+}
+
 # serve_unit_names <platform> — both unit files verify_units checks for
 # <platform>: serve + updater.
 serve_unit_names() {
@@ -1537,6 +1677,7 @@ for _plat in Darwin Linux; do
     t_abort_on_a_virgin_host_starts_nothing "$_plat"
     t_virgin_host_whose_new_build_never_comes_up_is_failed "$_plat"
     t_virgin_host_with_an_unreadable_binary_is_aborted "$_plat"
+    t_decline_with_a_rerendered_unit_does_not_bounce_a_live_daemon "$_plat"
     t_guard_does_not_reload_an_unchanged_unit_body "$_plat"
     t_rollback_with_no_recorded_version_is_not_a_failure "$_plat"
 
@@ -1549,6 +1690,7 @@ t_guard_ok_prunes_old_transactions
 t_guard_removes_its_own_plist advance ok
 t_guard_removes_its_own_plist dead rolled-back
 t_guard_reloads_a_changed_unit_body
+t_rollback_still_reloads_when_the_snapshot_holds_no_unit
 t_snapshot_has_binaries_is_pinned_across_both_files
 t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
 t_abort_install_without_a_guard_still_rolls_back_a_real_install
@@ -1563,6 +1705,7 @@ t_verify_failure_aborts_to_the_guard
 t_verify_placement_passes_on_matching_install
 t_verify_placement_catches_corrupted_binary
 t_verify_placement_catches_missing_binary
+t_verify_placement_separates_unreadable_from_insecure
 t_verify_units_darwin_fails_when_plist_invalid
 t_reattach_maps_terminal_phases_to_exit_codes
 t_reattach_times_out_on_an_unrecognised_phase

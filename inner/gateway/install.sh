@@ -676,13 +676,31 @@ verify_root_exec_surface() {
     # insecure is a refusal, present and secure is fine, absent is left to
     # guard_arm — the only caller that actually hands the path to root, and the
     # one that refuses outright rather than arming an unverifiable guard.
-    if [ -f "$BIN_DIR/guard.sh" ] && ! path_is_root_secure "$BIN_DIR/guard.sh"; then
-        echo "error: $BIN_DIR/guard.sh is not root-owned and unwritable all the way to /." >&2
-        echo "error: the install guard is execed AS ROOT by launchd/systemd, so refusing to" >&2
-        echo "error: keep a copy at a path a non-root user could replace." >&2
-        echo "hint: check the ownership and modes of $BIN_DIR and every directory above it;" >&2
-        echo "hint: each must be owned by root and not group- or world-writable." >&2
-        return 1
+    #
+    # rc 1 and rc 2 kept apart here too — see the loop above. This check was
+    # added later than that loop and collapsed them, so a host that could not
+    # be READ was told its guard copy was insecure.
+    if [ -f "$BIN_DIR/guard.sh" ]; then
+        _vre_g_rc=0
+        path_is_root_secure "$BIN_DIR/guard.sh" || _vre_g_rc=$?
+        if [ "$_vre_g_rc" = 2 ]; then
+            echo "error: could not read the owner and mode of $BIN_DIR/guard.sh — this host's" >&2
+            echo "error: 'stat' answered neither the GNU form (stat -c '%u') nor the BSD form" >&2
+            echo "error: (stat -f '%u') with a plain number." >&2
+            echo "error: the install guard is execed AS ROOT by launchd/systemd, so refusing to" >&2
+            echo "error: keep a copy whose ownership could not be established." >&2
+            echo "hint: the permissions of $BIN_DIR are NOT implicated — reading them is." >&2
+            echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
+            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+            return 1
+        elif [ "$_vre_g_rc" != 0 ]; then
+            echo "error: $BIN_DIR/guard.sh is not root-owned and unwritable all the way to /." >&2
+            echo "error: the install guard is execed AS ROOT by launchd/systemd, so refusing to" >&2
+            echo "error: keep a copy at a path a non-root user could replace." >&2
+            echo "hint: check the ownership and modes of $BIN_DIR and every directory above it;" >&2
+            echo "hint: each must be owned by root and not group- or world-writable." >&2
+            return 1
+        fi
     fi
 }
 
@@ -2022,10 +2040,27 @@ snapshot_take() {
 # restoring that is worse than not rolling back, because the guard would
 # "recover" the host onto a store that will not open. Three ways down, best
 # first, and the manifest records which one was used.
+#
+# FOUR VALUES, NOT TWO: exact · best-effort · no-database.
+#
+# The early return below fires on every host that has never run a gateway, and
+# it used to leave this variable at its initial `exact` — so the manifest
+# claimed an exact database copy for a run that captured no database at all,
+# and `guard-status` printed that claim verbatim to the operator. The value is
+# only ever set here now: this function is the sole writer, and every one of
+# its exits says what it actually did.
+#
+# `consistency` is a MANIFEST FIELD, not a phase. guard-status prints it
+# through as free text (gateway's guard_status.go: `if c := txn.Manifest
+# ["consistency"]; c != ""`), with no vocabulary to keep in step — unlike the
+# phase tokens, a new value here needs nothing changed in the gateway repo.
 SNAPSHOT_CONSISTENCY=exact
 snapshot_db() {
     _dst="$1"
-    [ -f "$SYS_DATA_DIR/gateway.db" ] || return 0
+    if [ ! -f "$SYS_DATA_DIR/gateway.db" ]; then
+        SNAPSHOT_CONSISTENCY=no-database
+        return 0
+    fi
 
     if run_root "$BIN_DIR/burrowee-gateway-cli" db snapshot "$_dst" 2>/dev/null; then
         SNAPSHOT_CONSISTENCY=exact
@@ -2197,9 +2232,25 @@ guard_arm() {
     # a bare `guard_arm` at column 0 — the anchor
     # tools/install-guard-arms-first.test.sh uses to prove the arming still
     # precedes migrate_from_legacy.
+    #
+    # AND THE MESSAGE SAYS WHAT THE FLAG ACTUALLY CONTROLS. It used to promise
+    # that "nothing will be restarted", which is a claim about the HOST and not
+    # about this script. On Darwin the serve plist this installer writes carries
+    #   KeepAlive → PathState → $BIN_DIR/burrowee-gateway
+    # (render_units), so on a host where the label is already loaded, replacing
+    # that binary stops the running job the moment the path goes away and
+    # launchd starts it again the moment the new one appears — no restart verb
+    # is involved, and nothing here can suppress it. An operator who set this
+    # flag because a restart was unacceptable had been told the opposite of what
+    # they would observe.
     if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
-        echo "note: BURROWEE_NO_RESTART set — the install guard is NOT armed and nothing" >&2
-        echo "note: will be restarted; the units are written to disk and left staged." >&2
+        echo "note: BURROWEE_NO_RESTART set — the install guard is NOT armed and this" >&2
+        echo "note: installer restarts nothing; the units are written to disk and left" >&2
+        echo "note: staged." >&2
+        echo "note: on macOS that is not the same as 'the daemon will not restart': the serve" >&2
+        echo "note: plist's KeepAlive.PathState watches $BIN_DIR/burrowee-gateway, so a job" >&2
+        echo "note: launchd has already loaded stops when that binary is replaced and is" >&2
+        echo "note: started again as soon as the new one is in place." >&2
         return 0
     fi
 
@@ -2249,10 +2300,38 @@ guard_arm() {
     # harness's pass-through `sudo` stub leaves every "root" file owned by the
     # test user. Asking the elevation path who it is keeps the production
     # assertion strict without a second env seam.
+    #
+    # rc 1 (insecure) and rc 2 (undecidable) are DIFFERENT REFUSALS, exactly as
+    # in verify_root_exec_surface, which this block imitated without inheriting
+    # the split. Both refuse — a path handed to root must fail closed either
+    # way — but "check your permissions" sends an operator to a tree that may
+    # be perfectly correct, when the real fault is that this host's `stat`
+    # answered neither dialect. That conflation is what the stat-dialect bug
+    # actually cost the last time, and it is written down in
+    # path_is_root_secure's own header for that reason.
     if have_real_root; then
         _guard_rc=0
         path_is_root_secure "$_guard" || _guard_rc=$?
-        if [ "$_guard_rc" != 0 ]; then
+        if [ "$_guard_rc" = 2 ]; then
+            echo "error: could not read the owner and mode of $_guard — this host's 'stat'" >&2
+            echo "error: answered neither the GNU form (stat -c '%u') nor the BSD form" >&2
+            echo "error: (stat -f '%u') with a plain number." >&2
+            echo "error: launchd/systemd execs the install guard AS ROOT, so refusing to arm it" >&2
+            echo "error: out of a path whose ownership could not be established." >&2
+            echo "hint: the permissions of $BIN_DIR are NOT implicated — reading them is." >&2
+            echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
+            echo "hint: system one, then re-run." >&2
+            echo "hint: nothing has been written yet; the running install is untouched." >&2
+            return 1
+        elif [ "$_guard_rc" = 3 ]; then
+            echo "error: $_guard does not exist — the copy this run just placed is not there." >&2
+            echo "error: launchd/systemd execs the install guard AS ROOT, so refusing to arm a" >&2
+            echo "error: path with nothing at it." >&2
+            echo "hint: check that $BIN_DIR is writable by this install and not on a" >&2
+            echo "hint: read-only or full filesystem." >&2
+            echo "hint: nothing has been written yet; the running install is untouched." >&2
+            return 1
+        elif [ "$_guard_rc" != 0 ]; then
             echo "error: $_guard is not root-owned and unwritable all the way to /." >&2
             echo "error: launchd/systemd execs the install guard AS ROOT, so refusing to arm" >&2
             echo "error: it out of a path a non-root user could replace." >&2
@@ -2403,6 +2482,23 @@ GUARD_ARM_INTERVAL="${GUARD_ARM_INTERVAL:-1}"
 # `log "guard armed"`, in that order and before anything that can fail, so
 # either artefact appearing is proof it reached its own body. Polled rather
 # than assumed, and a failure here aborts before Phase 1 writes anything.
+#
+# BUT "I SAW NOTHING" IS NOT ALWAYS "THERE IS NOTHING". Both markers are read
+# through txn_file_exists, which degrades to `sudo -n` because the transaction
+# is root-owned 0700 and this script is routinely entered unprivileged. On a
+# host configured with `Defaults timestamp_timeout=0` (or any sudoers that
+# refuses a non-interactive re-auth) that `sudo -n` fails for every read, so a
+# perfectly healthy guard is invisible — and the refusal below then blocks an
+# install that worked on that same host before this check existed.
+#
+# The discriminator is a file that CERTAINLY exists: txn_begin wrote
+# installer.pid into the same directory, with the same owner and the same mode,
+# moments ago. If that cannot be seen either, the reads are blind and the guard
+# has not been proven either way. Warn and continue there rather than refuse —
+# a blind read is not evidence of a dead guard, and turning an unprovable state
+# into a refusal costs the operator the install for a fact nobody established.
+# When installer.pid IS readable and neither guard marker appeared, the reads
+# work and the guard really did not start: that is the refusal, unchanged.
 # ---------------------------------------------------------------------------
 guard_prove_armed() {
     _gpa_waited=0
@@ -2413,6 +2509,21 @@ guard_prove_armed() {
         sleep "$GUARD_ARM_INTERVAL"
         _gpa_waited=$((_gpa_waited + GUARD_ARM_INTERVAL))
     done
+    if ! txn_file_exists "$TXN_DIR/installer.pid"; then
+        echo "warning: neither $TXN_DIR/guard.pid nor $TXN_DIR/guard.log appeared within" >&2
+        echo "warning: ${GUARD_ARM_CEILING}s — and neither did $TXN_DIR/installer.pid, which" >&2
+        echo "warning: this script wrote itself when the transaction opened." >&2
+        echo "warning: so the transaction cannot be READ from this shell, which is not the" >&2
+        echo "warning: same as the guard not having started: the directory is root-owned 0700" >&2
+        echo "warning: and every fallback read here is 'sudo -n', which this host refuses (a" >&2
+        echo "warning: sudoers with timestamp_timeout=0, say)." >&2
+        echo "warning: continuing rather than refusing an install over a fact that could not" >&2
+        echo "warning: be established. The guard, if it started, is still watching." >&2
+        echo "hint: run the install as root (or with a warm sudo timestamp) to get the" >&2
+        echo "hint: arm-proof back; watch the outcome with 'burrowee gateway service" >&2
+        echo "hint: guard-status' either way." >&2
+        return 0
+    fi
     echo "error: the install guard was handed to the supervisor, which accepted it, but the" >&2
     echo "error: guard never started: neither $TXN_DIR/guard.pid nor $TXN_DIR/guard.log" >&2
     echo "error: appeared within ${GUARD_ARM_CEILING}s." >&2
@@ -2558,8 +2669,31 @@ verify_placement() {
         if [ ! -x "$BIN_DIR/$b" ]; then
             echo "verify: $BIN_DIR/$b is not executable" >&2; _rc=1; continue
         fi
-        if have_real_root && ! path_is_root_secure "$BIN_DIR/$b"; then
-            echo "verify: $BIN_DIR/$b is not root-secure" >&2; _rc=1; continue
+        # rc 1 and rc 2 SEPARATED, the same way verify_root_exec_surface
+        # separates them and for the same reason its own comment gives: they
+        # send an operator to completely different places. "not root-secure"
+        # on a host whose tree is already root:root 755 — because this host's
+        # `stat` speaks neither dialect and nothing could be read at all — is a
+        # day spent re-checking permissions that were right the first time.
+        # This check imitated that precedent without inheriting the split.
+        #
+        # rc 3 (the leaf is absent) cannot reach here: the `[ ! -f ]` arm above
+        # has already reported and `continue`d on that. It falls into the same
+        # arm as rc 1 so the case is total, and would say the same true thing.
+        if have_real_root; then
+            _vp_rc=0
+            path_is_root_secure "$BIN_DIR/$b" || _vp_rc=$?
+            if [ "$_vp_rc" = 2 ]; then
+                echo "verify: could not read the owner and mode of $BIN_DIR/$b — this host's" >&2
+                echo "verify: 'stat' answered neither the GNU form (stat -c '%u') nor the BSD" >&2
+                echo "verify: form (stat -f '%u') with a plain number, so its ownership is not" >&2
+                echo "verify: insecure, it is unknown. The permissions of $BIN_DIR are NOT" >&2
+                echo "verify: implicated — reading them is." >&2
+                _rc=1; continue
+            elif [ "$_vp_rc" != 0 ]; then
+                echo "verify: $BIN_DIR/$b is not root-owned and unwritable all the way to /" >&2
+                _rc=1; continue
+            fi
         fi
         # Against the archive copy this run placed it from — proving the mv
         # landed the bytes we staged, not that the file merely exists.
