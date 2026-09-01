@@ -6,10 +6,10 @@
 # binary or database.
 #
 # (Task 10) also drives the guard's post-success work — the stale-binary
-# sweep via the kept installer, the updater advance, snapshot retention — and
-# the deadline exit, the third of the watch loop's three ways out (the first
-# two, handoff->ok and installer-died, are covered by t_guard_ok and
-# tools/guard-installer-death.test.sh respectively).
+# sweep via the root-secure $BIN_DIR/install.sh, the updater advance, snapshot
+# retention, and the deadline exit, the third of the watch loop's three ways
+# out (the first two, handoff->ok and installer-died, are covered by
+# t_guard_ok and tools/guard-installer-death.test.sh respectively).
 #
 #     sh tools/guard-rollback.test.sh
 #     dash tools/guard-rollback.test.sh
@@ -234,8 +234,9 @@ t_guard_rolls_back() {
 
 # ---------------------------------------------------------------------------
 # Task 10 — the guard's post-success work: the stale-binary sweep (via the
-# kept installer, never `service install`), the updater advance, snapshot
-# retention, and the deadline exit. Run once per platform shape unless noted.
+# root-secure $BIN_DIR/install.sh, never a per-user $GW_HOME copy and never
+# `service install`), the updater advance, snapshot retention, and the
+# deadline exit. Run once per platform shape unless noted.
 # ---------------------------------------------------------------------------
 
 # The updater unit is rendered by install.sh but never started on a fresh
@@ -260,41 +261,53 @@ $(cat "$_calls")"
     rm -rf "$_r"
 }
 
-# The stale-binary sweep must run via the KEPT installer's own
-# sweep_stale_user_bins, reached through the manifest's gw_home= (the seam
-# Correction 1 requires), never by re-entering install.sh as
-# `burrowee-gateway-cli service install` — which would arm a SECOND guard
-# inside this one's own success path. This drives the REAL install.sh, not a
-# stand-in, because the claim under test is that guard.sh's sourcing actually
-# reaches the real function, with the right $BIN_DIR, not merely that some
-# function got called.
+# The stale-binary sweep must run via the ROOT-SECURE installer copy at
+# $BIN_DIR/install.sh — the one ensure_root_exec_surface places (root-owned,
+# verified non-root-unwritable all the way to /) on every real install —
+# never a per-user $GW_HOME copy, and never by re-entering install.sh as
+# `burrowee-gateway-cli service install` (which would arm a SECOND guard
+# inside this one's own success path).
+#
+# CRITICAL fix, review round 1: the first version of this test (and of
+# guard.sh) sourced a per-user $GW_HOME copy, reached via a gw_home= manifest
+# field. $GW_HOME resolves from the INVOKING OPERATOR's $HOME and
+# keep_installer_copy writes it with a plain `cp`, not run_root — writable by
+# that operator, or by anything running as them, at any time afterwards.
+# Sourcing that path as root turned "compromise one non-root account" into
+# unattended root code execution on the next successful restart. Both the
+# manifest field and the $GW_HOME sourcing are gone; this test now proves the
+# corrected seam instead.
+#
+# This drives the REAL install.sh, not a stand-in, because the claim under
+# test is that guard.sh's sourcing actually reaches the real function, with
+# the right $BIN_DIR, not merely that some function got called.
 t_guard_ok_sweeps_stale_bins() {
     _plat="$1"
     _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" advance
     _t="$(make_txn "$_r" "$_plat")"
     write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
 
-    _gwhome="$_r/gwhome"
-    mkdir -p "$_gwhome/migrations"
-    cp "$HERE/inner/gateway/install.sh" "$_gwhome/install.sh"
+    # Same layout ensure_root_exec_surface leaves under $BIN_DIR on a real
+    # host: install.sh itself, plus migrations/ beside it.
+    mkdir -p "$_r/bin/migrations"
+    cp "$HERE/inner/gateway/install.sh" "$_r/bin/install.sh"
     # A recording stand-in for the shipped library — same shape as the Go
     # suite's stageSweepLib (inner/gateway/install_test/stale_user_bins_test.go):
     # the deletion itself is that library's own contract, tested there;
     # recording the call and its environment is what this seam owns.
-    cat > "$_gwhome/migrations/lib_stale_user_bins.sh" <<STUB
+    cat > "$_r/bin/migrations/lib_stale_user_bins.sh" <<STUB
 STALE_USER_BINS="\$BINS"
 remove_stale_user_bins() {
     printf 'SWEEP_CALLED BIN_DIR=%s\n' "\$BIN_DIR" >> "$_r/sweep.calls"
 }
 STUB
-    printf 'gw_home=%s\n' "$_gwhome" >> "$_t/manifest"
 
     printf 'handoff\n' > "$_t/phase"
     run_guard "$_r" "$_t" "$_plat"
 
     [ "$(cat "$_t/phase")" = ok ] || fail "[$_plat] phase = $(cat "$_t/phase"), want ok"
     [ -f "$_r/sweep.calls" ] && grep -q 'SWEEP_CALLED' "$_r/sweep.calls" \
-        || fail "[$_plat] the kept installer's sweep never ran (guard.log: $(cat "$_t/guard.log" 2>/dev/null))"
+        || fail "[$_plat] the sweep never ran via the root-secure \$BIN_DIR/install.sh (guard.log: $(cat "$_t/guard.log" 2>/dev/null))"
     grep -q "BIN_DIR=$_r/bin$" "$_r/sweep.calls" 2>/dev/null \
         || fail "[$_plat] the sweep ran with the wrong \$BIN_DIR: $(cat "$_r/sweep.calls" 2>/dev/null)"
     rm -rf "$_r"

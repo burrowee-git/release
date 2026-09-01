@@ -126,41 +126,55 @@ rollback() {
 }
 
 # sweep_stale_bins_via_kept_installer — run the installer's own
-# sweep_stale_user_bins, the way keep_installer_copy leaves it for exactly
-# this: a copy of install.sh (and migrations/) at $GW_HOME, the value
-# snapshot_take recorded into the manifest because the guard, running under
-# launchd/systemd rather than the invoking operator's session, has no
-# reliable $HOME to resolve $GW_HOME from itself.
+# sweep_stale_user_bins by sourcing the ROOT-SECURE copy at
+# $BIN_DIR/install.sh — the one ensure_root_exec_surface places (and
+# verify_root_exec_surface proves root-owned and non-root-unwritable all the
+# way to /) on every install, well before this guard's post-success work can
+# ever run.
+#
+# NEVER the per-user copy at $GW_HOME (keep_installer_copy): this guard
+# already runs as root, and $GW_HOME resolves from the INVOKING OPERATOR's
+# $HOME — writable by that operator, or by anything running as them, at any
+# time after the install finishes. Sourcing that path as root turns
+# "compromise one non-root account that has ever run a gateway install" into
+# unattended root code execution on the next successful restart. This file
+# must never reference $GW_HOME or a gw_home= manifest field for that reason
+# — see install.sh's own header note beside keep_installer_copy: "root never
+# runs that one."
 #
 # Deliberately NOT `burrowee-gateway-cli service install`: that re-enters
 # install.sh in BURROWEE_UNITS_ONLY mode, which arms a SECOND guard inside
-# this one's own success path. Sourcing the kept installer reaches the one
+# this one's own success path. Sourcing the root-secure copy reaches the one
 # function this step needs without re-running any of the rest of it.
 #
 # Run in a subshell (`sh -c`), never dot-sourced into this shell directly:
 # install.sh defines BIN_DIR, SYS_DATA_DIR and other names this script also
 # uses, and dot-sourcing it here would overwrite them in place. $0 is set to
-# the kept installer's own path via the trailing argument — sh has no other
+# the installer's own path via the trailing argument — sh has no other
 # portable way to steer it — so install.sh's own `$(dirname "$0")/migrations`
-# resolution (stale_sweep_lib) finds the migrations/ copy keep_installer_copy
-# kept right beside it.
+# resolution (stale_sweep_lib) finds the migrations/ copy
+# ensure_root_exec_surface keeps right beside it, also under $BIN_DIR.
 #
 # Must run only AFTER a verified restart — see this file's header and
 # sweep_stale_user_bins' own comment in install.sh: it deletes per-user
 # binaries, and until the daemon has actually advanced onto the loaded units,
 # a still-running per-user process may still name one.
+#
+# A missing $BIN_DIR/install.sh (a pre-Task-10 host converged from an older
+# release, say) is a logged no-op, never a fallback to a less-secure copy:
+# skipping housekeeping is a cosmetic loss, sourcing a user-writable file as
+# root is not.
 sweep_stale_bins_via_kept_installer() {
-    _gw_home="$(sed -n 's/^gw_home=//p' "$TXN/manifest" 2>/dev/null || true)"
-    if [ -z "$_gw_home" ] || [ ! -f "$_gw_home/install.sh" ]; then
-        log "no kept installer at '${_gw_home:-<unset>}/install.sh' — skipping the stale-bin sweep"
+    if [ ! -f "$BIN_DIR/install.sh" ]; then
+        log "no root-secure installer at $BIN_DIR/install.sh — skipping the stale-bin sweep"
         return 0
     fi
-    if BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins' "$_gw_home/install.sh" \
+    if BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins' "$BIN_DIR/install.sh" \
         >> "$TXN/guard.log" 2>&1
     then
-        log "stale-bin sweep ran via $_gw_home/install.sh"
+        log "stale-bin sweep ran via $BIN_DIR/install.sh"
     else
-        log "stale-bin sweep failed (via $_gw_home/install.sh) — continuing"
+        log "stale-bin sweep failed (via $BIN_DIR/install.sh) — continuing"
     fi
 }
 

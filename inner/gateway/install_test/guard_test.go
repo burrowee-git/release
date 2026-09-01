@@ -1,5 +1,5 @@
-// guard_test.go — the two seams the guard's post-success work (Task 10)
-// depends on, tested from THIS repo's side of the boundary.
+// guard_test.go — source-level regression guards for guard.sh's post-success
+// work (Task 10), from THIS repo's side of the boundary.
 //
 // guard.sh's own dynamic behaviour — a real run against a fake host, on both
 // platform shapes — is covered end-to-end by tools/guard-rollback.test.sh's
@@ -9,20 +9,21 @@
 // bug. This file does NOT re-run guard.sh (TestFreshInstallHandsTheRestartToTheGuard
 // in daemon_advance_test.go already explains why that would either race a
 // process the suite's stubs never actually spawn, or assert a promise this
-// script's foreground no longer makes). What belongs here instead:
+// script's foreground no longer makes). What belongs here instead is a
+// static, line-anchored net on guard.sh's own source for its two sharpest
+// invariants — mirroring tools/install-no-bootout.test.sh's own style, which
+// scans install.sh for a similar reason; guard.sh had no static net of its
+// own before this:
 //
-//  1. install.sh's half of the seam that lets the guard find the kept
-//     installer at all: the manifest it writes must carry gw_home=, because
-//     the guard runs under launchd/systemd with no reliable $HOME of its own
-//     to resolve $GW_HOME from.
-//  2. A source-level guard on guard.sh's own most important invariant — it
-//     must never bootout the serve label — anchored so that Task 10's
-//     legitimate addition (bootout/bootstrap/enable/kickstart of the
-//     UPDATER label, which nothing routes through and is safe to unload)
-//     can never be mistaken for the one this whole plan exists to remove.
-//     Mirrors tools/install-no-bootout.test.sh's own style, which scans
-//     install.sh for the identical reason; guard.sh had no static net of its
-//     own before this.
+//  1. It must never source a per-user path as root (review round 1,
+//     CRITICAL: the first version of this file sourced $GW_HOME/install.sh,
+//     writable by the invoking operator, or anything running as them, at any
+//     time after the install finishes — sourcing that as root turned
+//     "compromise one non-root account" into unattended root code
+//     execution). It must source only the root-secure copy
+//     ensure_root_exec_surface places at $BIN_DIR/install.sh.
+//  2. It must never bootout the serve label — the reported bug's exact
+//     mechanism.
 package install_test
 
 import (
@@ -31,48 +32,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// latestTxnManifest reads the manifest of the transaction install.sh most
-// recently created under sysDataDir(home)/install/ — same selection rule as
-// latestTxnPhase, just a different file in the same directory.
-func latestTxnManifest(t *testing.T, home string) string {
-	t.Helper()
-	root := filepath.Join(sysDataDir(home), "install")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatalf("read transaction root %s: %v", root, err)
-	}
-	if len(entries) == 0 {
-		t.Fatalf("no transaction directory under %s — txn_begin never ran", root)
-	}
-	last := entries[len(entries)-1].Name()
-	return readFile(t, filepath.Join(root, last, "manifest"))
-}
-
-// TestFreshInstallRecordsGwHomeForTheGuard is Correction 1's install.sh half:
-// snapshot_take must write gw_home= into the manifest, or the guard's
-// post-success sweep (guard.sh's sweep_stale_bins_via_kept_installer) has no
-// way to find $GW_HOME/install.sh and silently no-ops on every real host.
-func TestFreshInstallRecordsGwHomeForTheGuard(t *testing.T) {
-	for _, goos := range forcedOSes {
-		t.Run(goos, func(t *testing.T) {
-			home := t.TempDir()
-			stub := stubInitSystemFor(t, goos)
-			staging := t.TempDir()
-			seedDummyBins(t, staging)
-
-			if out, err := runStaged(t, installShPath(t), staging, home, stub); err != nil {
-				t.Fatalf("fresh install failed: %v\n%s", err, out)
-			}
-
-			manifest := latestTxnManifest(t, home)
-			if !strings.Contains(manifest, "gw_home=") {
-				t.Errorf("manifest carries no gw_home= — the guard's post-success sweep has no way "+
-					"to find the kept installer at $GW_HOME/install.sh:\n%s", manifest)
-			}
-		})
-	}
-}
 
 // guardShSource reads inner/gateway/guard.sh, this repo's copy — the same
 // file the plist/unit guard_arm renders points at before it is ever copied
@@ -84,6 +43,47 @@ func guardShSource(t *testing.T) string {
 		t.Fatalf("read guard.sh: %v", err)
 	}
 	return string(b)
+}
+
+// TestGuardSweepsOnlyTheRootSecureInstaller is the regression guard for
+// review round 1's CRITICAL finding: the guard is already uid 0, and
+// sourcing any path that a non-root account (or anything running as one) can
+// write turns a single compromised operator account into unattended root
+// code execution on the next successful restart — including an
+// updater-triggered one. $GW_HOME resolves from the INVOKING OPERATOR's
+// $HOME (install.sh:194) and keep_installer_copy writes it with a plain
+// `cp`, never run_root (install.sh:1179) — exactly such a path. The only
+// copy safe to source as root is $BIN_DIR/install.sh, which
+// ensure_root_exec_surface places root-owned and verify_root_exec_surface
+// proves non-root-unwritable all the way to / on every install.
+//
+// Comment lines are skipped rather than banning the substring outright: this
+// file's own header, and guard.sh's own comments, explain the invariant in
+// prose using "$GW_HOME" — banning the literal substring everywhere would
+// make the documentation of the fix fail the check for the fix.
+func TestGuardSweepsOnlyTheRootSecureInstaller(t *testing.T) {
+	src := guardShSource(t)
+
+	sawRootSecureSource := false
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(line, "$GW_HOME") || strings.Contains(line, "gw_home=") {
+			t.Errorf("guard.sh references a per-user $GW_HOME path outside a comment — that path "+
+				"is writable by the invoking operator (or anything running as them) at any time "+
+				"after the install finishes, and this guard runs as root: %q", line)
+		}
+		if strings.Contains(line, `"$BIN_DIR/install.sh"`) {
+			sawRootSecureSource = true
+		}
+	}
+	if !sawRootSecureSource {
+		t.Error(`guard.sh never sources "$BIN_DIR/install.sh" — the root-secure copy ` +
+			"ensure_root_exec_surface places; this comparison would otherwise pass vacuously " +
+			"on a guard that sources nothing at all")
+	}
 }
 
 // TestGuardNeverUnsupervisesTheServeLabel is the source-level regression
