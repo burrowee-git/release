@@ -123,10 +123,36 @@ func stubInitSystem(t *testing.T) string {
 	t.Helper()
 	stub := t.TempDir()
 
+	// launchctl records and exits 0 — with ONE simulated side effect. guard_arm
+	// now polls for proof the guard actually STARTED ($TXN_DIR/guard.pid, or a
+	// "guard armed" line in guard.log) before letting the install proceed,
+	// because `launchctl bootstrap` exiting 0 means the job was LOADED, not
+	// that it ran: a guard that dies on exec used to give a green install that
+	// restarted nothing. A stub that only records IS that dead guard, so
+	// bootstrapping the guard's own plist writes the two artefacts a live guard
+	// writes as its first two statements. It still never spawns anything —
+	// guardStartSideEffect below reads the transaction directory back out of
+	// the plist rather than re-deriving it, so a plist naming the wrong
+	// directory still fails the poll.
 	p := filepath.Join(stub, "launchctl")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\necho \"launchctl $*\" >> \"$STUB_LOG\"\nexit 0\n"), 0o755); err != nil {
+	launchctl := "#!/bin/sh\n" +
+		"echo \"launchctl $*\" >> \"$STUB_LOG\"\n" +
+		"if [ \"$1\" = bootstrap ]; then\n" +
+		"    case \"$3\" in\n" +
+		"    *com.burrowee.gateway.guard.plist)\n" +
+		"        _txn=\"$(sed -n 's|.*<string>\\(.*/install/[^<]*\\)</string>.*|\\1|p' \"$3\" | head -1)\"\n" +
+		"        if [ -n \"$_txn\" ] && [ -d \"$_txn\" ]; then\n" +
+		"            echo 4242 > \"$_txn/guard.pid\"\n" +
+		"            echo '00:00:00 guard armed for '\"$_txn\" >> \"$_txn/guard.log\"\n" +
+		"        fi\n" +
+		"        ;;\n" +
+		"    esac\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(p, []byte(launchctl), 0o755); err != nil {
 		t.Fatalf("write stub launchctl: %v", err)
 	}
+
 	// systemctl records like launchctl, but also models a host where one
 	// specific call FAILS: STUB_SYSTEMCTL_FAIL=<substring> makes any matching
 	// invocation exit non-zero. A supervisor that refuses is the interesting
@@ -149,9 +175,27 @@ func stubInitSystem(t *testing.T) string {
 	// systemd-run would hand a live transient unit to the HOST's own systemd,
 	// which is exactly the shared-machine side effect every other stub here
 	// (launchctl, systemctl, sudo) exists to prevent.
-	if err := os.WriteFile(filepath.Join(stub, "systemd-run"), []byte("#!/bin/sh\necho \"systemd-run $*\" >> \"$STUB_LOG\"\nexit 0\n"), 0o755); err != nil {
+	//
+	// It DOES write the guard's first two artefacts, for the same reason the
+	// launchctl stub above does: guard_arm refuses to proceed on a guard that
+	// was accepted but never ran. The transaction directory is systemd-run's
+	// last argument.
+	systemdRun := "#!/bin/sh\n" +
+		"echo \"systemd-run $*\" >> \"$STUB_LOG\"\n" +
+		"for _a in \"$@\"; do _txn=\"$_a\"; done\n" +
+		"case \"$_txn\" in\n" +
+		"*/install/*)\n" +
+		"    if [ -d \"$_txn\" ]; then\n" +
+		"        echo 4242 > \"$_txn/guard.pid\"\n" +
+		"        echo '00:00:00 guard armed for '\"$_txn\" >> \"$_txn/guard.log\"\n" +
+		"    fi\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(stub, "systemd-run"), []byte(systemdRun), 0o755); err != nil {
 		t.Fatalf("write stub systemd-run: %v", err)
 	}
+
 	writeSudoStub(t, stub)
 	return stub
 }
@@ -311,7 +355,10 @@ func readFile(t *testing.T, path string) string {
 // "most recent" is still the honest selection rather than "the only one",
 // since a test may legitimately run install.sh more than once against the
 // same home.
-func latestTxnPhase(t *testing.T, home string) string {
+// latestTxnDir is the newest install transaction directory under home's system
+// data root. Stamps are UTC and fixed-width, and os.ReadDir returns entries
+// sorted by filename, so the last entry is the newest.
+func latestTxnDir(t *testing.T, home string) string {
 	t.Helper()
 	root := filepath.Join(sysDataDir(home), "install")
 	entries, err := os.ReadDir(root)
@@ -321,10 +368,14 @@ func latestTxnPhase(t *testing.T, home string) string {
 	if len(entries) == 0 {
 		t.Fatalf("no transaction directory under %s — txn_begin never ran", root)
 	}
-	last := entries[len(entries)-1].Name()
-	b, err := os.ReadFile(filepath.Join(root, last, "phase"))
+	return filepath.Join(root, entries[len(entries)-1].Name())
+}
+
+func latestTxnPhase(t *testing.T, home string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(latestTxnDir(t, home), "phase"))
 	if err != nil {
-		t.Fatalf("read phase file for transaction %s: %v", last, err)
+		t.Fatalf("read phase file for the newest transaction: %v", err)
 	}
 	return strings.TrimSpace(string(b))
 }
@@ -774,12 +825,26 @@ func TestInstallShUninstall(t *testing.T) {
 		}
 	}
 
-	// System unit files removed.
+	// The install guard, placed on the root-secure surface beside install.sh
+	// and migrations/ because launchd/systemd exec it AS ROOT. An uninstall
+	// that leaves it hands the next install a root-owned script nothing
+	// re-verified, on a host that no longer has a gateway.
+	if p := filepath.Join(binDir, "guard.sh"); func() bool { _, err := os.Stat(p); return err == nil }() {
+		t.Errorf("the install guard is still present after uninstall: %s", p)
+	}
+
+	// System unit files removed — the GUARD's plist among them. It is
+	// RunAtLoad, so one left behind re-execs the guard against a stale
+	// transaction directory at every boot, on a host with no gateway at all.
+	// guard.sh removes it itself on every exit path; this is the belt to that
+	// braces, for a guard that was SIGKILLed or could not write the directory.
 	if runtime.GOOS == "darwin" {
 		for _, name := range []string{
 			"com.burrowee.gateway.plist",
 			"com.burrowee.gateway.updater.plist",
+			"com.burrowee.gateway.guard.plist",
 		} {
+
 			p := filepath.Join(launchdDir(home), name)
 			if _, err := os.Stat(p); err == nil {
 				t.Errorf("unit file still present after uninstall: %s", p)

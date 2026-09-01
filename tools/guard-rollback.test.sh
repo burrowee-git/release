@@ -183,8 +183,18 @@ make_txn() {
 # long enough that a normal ok/rolled-back run never comes close to it;
 # t_guard_deadline_exceeded overrides it down to exercise the deadline branch
 # itself in a couple of seconds instead of ten.
+#
+# GUARD_RC carries the guard's own EXIT STATUS out to the caller, because the
+# status is half the contract (0 ok · 1 rolled-back · 2 failed) and the phase
+# file is the other half — the two can disagree, and one bug made them do
+# exactly that: apply_retention's prune loop returned 1 under `set -eu`, killing
+# the guard after `phase ok` was already written, so the transaction read "ok"
+# while the process reported "rolled-back" to anything watching. Assertions on
+# the phase alone cannot see that.
+GUARD_RC=0
 run_guard() {
     _r="$1"; _txn="$2"; _plat="$3"; _deadline="${4:-10}"
+
     GUARD_LAUNCHCTL="$_r/launchctl" \
     GUARD_SYSTEMCTL="$_r/systemctl" \
     GUARD_DEADLINE="$_deadline" GUARD_VERIFY_CEILING=3 GUARD_VERIFY_INTERVAL=1 \
@@ -194,7 +204,7 @@ run_guard() {
     BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
     BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
     GUARD_UNAME="$_plat" \
-    sh "$GUARD" "$_txn" >/dev/null 2>&1 || true
+    sh "$GUARD" "$_txn" >/dev/null 2>&1 && GUARD_RC=0 || GUARD_RC=$?
 }
 
 # A restart the new build survives ends 'ok', and never unsupervises the serve
@@ -374,7 +384,41 @@ t_guard_deadline_exceeded() {
     rm -rf "$_r"
 }
 
+# ---------------------------------------------------------------------------
+# I5 — the transient LaunchDaemon removes its OWN plist, on every exit path.
+#
+# The design said "transient LaunchDaemon, RunAtLoad, KeepAlive false, removes
+# its own plist"; it did not remove it. A plist left in /Library/LaunchDaemons
+# is RunAtLoad, so launchd re-execs `gateway-guard <that transaction dir>` at
+# EVERY BOOT. A terminal transaction exits harmlessly at the watch loop's
+# "already terminal" arm — but a NON-terminal one (power lost mid-install)
+# hands the boot-time guard a stale installer.pid that is certainly dead after
+# a reboot, and it rolls the host back: a weeks-old config/ and data/
+# (gateway.db included) copied over live state, by a process nobody asked for.
+#
+# Driven on the ok path AND the rollback path, because the removal is an EXIT
+# trap and a check on only one of them would not notice a trap that had become
+# a call before a single `exit`. Darwin only: Linux's guard is a
+# `systemd-run --collect` transient unit, which systemd reaps itself.
+# ---------------------------------------------------------------------------
+t_guard_removes_its_own_plist() {
+    _behaviour="$1"; _want_phase="$2"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" Darwin; fake_supervisor "$_r" Darwin "$_behaviour"
+    _t="$(make_txn "$_r" Darwin)"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf '<plist/>\n' > "$_r/units/com.burrowee.gateway.guard.plist"
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" Darwin
+
+    [ "$(cat "$_t/phase")" = "$_want_phase" ] \
+        || fail "plist-removal[$_behaviour]: phase = $(cat "$_t/phase"), want $_want_phase"
+    [ ! -e "$_r/units/com.burrowee.gateway.guard.plist" ] \
+        || fail "plist-removal[$_behaviour]: the guard left its own RunAtLoad plist behind — launchd re-runs it against this transaction at every boot"
+    rm -rf "$_r"
+}
+
 # Retention keeps this transaction and the two before it — platform-agnostic
+
 # (rm -rf and lexical sort, no supervisor call involved), so this runs once
 # rather than per platform, same discipline as the static checks below.
 t_guard_ok_prunes_old_transactions() {
@@ -694,9 +738,14 @@ GATEWAY_BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-co
 # before the handoff that puts the restart in the guard's hands.
 t_verify_precedes_handoff() {
     _f="$HERE/inner/gateway/install.sh"
+    # Leading whitespace is tolerated on the handoff anchor (and only there):
+    # `txn_phase handoff` now sits inside the `if [ "$GUARD_ARMED" = 1 ]` block
+    # that honours BURROWEE_NO_RESTART. The claim is about order, not column,
+    # and the anchor is still a whole line.
     _phase1="$(grep -n '^txn_phase replacing$' "$_f" | head -1 | cut -d: -f1)"
-    _v="$(grep -n 'verify_placement || {' "$_f" | head -1 | cut -d: -f1)"
-    _end="$(grep -n '^txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+    _v="$(grep -n '^verify_placement || abort_install ' "$_f" | head -1 | cut -d: -f1)"
+    _end="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+
     [ -n "$_phase1" ] || { fail "install.sh never reaches txn_phase replacing"; return; }
     [ -n "$_v" ]      || { fail "install.sh never calls verify_placement"; return; }
     [ -n "$_end" ]    || { fail "install.sh never reaches txn_phase handoff"; return; }

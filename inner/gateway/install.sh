@@ -213,6 +213,28 @@ SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 
 # ---------------------------------------------------------------------------
+# UNREACHABLE FROM THE FRESH-INSTALL PATH, AND KEPT ON PURPOSE — read this
+# before deleting any of it.
+#
+# WAIT_INTERVAL, WAIT_CEILING, SERVE_UNIT_STARTED, binary_version_stamp and
+# wait_for_running_version below are no longer called by the default mode:
+# Task 7 moved the restart (and therefore the wait that follows it) into
+# guard.sh, and SERVE_UNIT_STARTED is now set twice and read nowhere on this
+# component. BURROWEE_UNITS_ONLY still reaches load_units, which still sets it.
+#
+# They stay because this whole block is DRIFT-PINNED BYTE-FOR-BYTE against
+# inner/edge/install.sh by tools/install-waits-for-daemon.test.sh (its sections
+# 2 and 6): edge still waits synchronously, the house idiom for shared
+# install-time logic with no shared library is a duplicated block plus a pin,
+# and deleting gateway's half would not simplify anything — it would delete the
+# pin and let edge's copy drift unwatched. Anything inside the two extracted
+# regions (from the "# The post-start daemon wait" line through
+# `SERVE_UNIT_STARTED=0`, and from "# binary_version_stamp <binary>" through
+# the close of wait_for_running_version) must therefore change in BOTH files or
+# in neither — which is also why this note sits outside them.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # The post-start daemon wait (see wait_for_running_version, and the tail of this
 # script). WAIT_CEILING is a CEILING, not a sleep: the wait returns the instant
 # the daemon reports the version being installed, and $WAIT_INTERVAL is only how
@@ -1467,6 +1489,19 @@ start_unit_linux() {
     fi
 }
 
+# NOT THE SAME PARSER AS guard.sh's binary_version, AND NOT A CANDIDATE FOR
+# BEING MERGED WITH IT. This helper is byte-identical with edge's (the drift
+# pin described above) and filters candidate tokens through
+# `grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$'`, which REJECTS a
+# pre-release token: against core runtime_version.Report's two-line output the
+# real stamp `v0.3.1.beta.2026.08.31.62a6f215` fails that pattern and this
+# helper falls through to the SECOND line, the RUNNING daemon's version. The
+# guard needs the version of the binary it just placed, on a beta build, so it
+# carries its own `sed` that keeps the beta segment. Unifying the two would
+# silently break the guard's restart verification on every beta host. (The beta
+# blindness here is pre-existing and out of scope; it is written down at both
+# sites so the next reader who notices the duplication learns why it stands.)
+#
 # binary_version_stamp <binary> — the version token a binary reports for ITSELF,
 # or "" when it cannot be read.
 #
@@ -2022,11 +2057,19 @@ snapshot_restore() {
         run_root cp -p "$_snap/bin/$b" "$BIN_DIR/$b" || _rc=1
     done
 
+    # The same mapping guard.sh's unit_dir() holds, off the same two
+    # environment defaults (LAUNCHD_DIR / SYSTEMD_DIR, install.sh:204-206;
+    # guard.sh resolves BURROWEE_LAUNCHD_DIR / BURROWEE_SYSTEMD_DIR into names
+    # spelled identically). Two files restore the same unit files, so the two
+    # must agree — they used to agree only by coincidence, under different
+    # variable names and with the defaults written out inline on the guard's
+    # side. Change either seam and change both.
     case "$(uname -s)" in
     Darwin) _unit_dir="$LAUNCHD_DIR" ;;
     Linux)  _unit_dir="$SYSTEMD_DIR" ;;
     *)      _unit_dir="" ;;
     esac
+
     if [ -n "$_unit_dir" ] && [ -d "$_snap/units" ]; then
         for _u in "$_snap/units"/*; do
             [ -e "$_u" ] || continue
