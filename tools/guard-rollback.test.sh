@@ -727,6 +727,99 @@ $(cat "$_calls")"
 }
 
 # ---------------------------------------------------------------------------
+# `aborted` IS ONLY HONEST BEFORE A RESTART.
+#
+# The check above is the same fixture reached from the installer-died branch,
+# where nothing has been started and "the host is as it was found" is true.
+# rollback() has a fourth caller, and it is not: do_restart reaches it AFTER
+# restart_service has bootstrapped, enabled and kickstarted the new unit and
+# verify_serving then timed out.
+#
+# The run that gets there is the ordinary one. A fresh host, an operator who
+# ACCEPTED the consent prompt, an install that placed everything and handed
+# off — and a new build that never reports its version inside the ceiling
+# (a bad config, a port already bound, a crash-loop under launchd's
+# ThrottleInterval). $_want from the manifest is empty (no previous
+# running.json) and the snapshot is empty (nothing was ever installed), so it
+# lands in the very same empty-snapshot arm and used to tell that operator
+# "nothing was started; the host is as it was found (no gateway running)".
+# Both halves false: the unit is loaded, and it is probably crash-looping.
+#
+# `failed` is the phase for a host that is not serving and that this guard
+# could not get serving — "this host needs hands" — and it already carries
+# exit 2. The fixture is the accepted-consent path (phase=handoff, not a dying
+# installer) against a supervisor whose restart never advances running.json.
+# ---------------------------------------------------------------------------
+t_virgin_host_whose_new_build_never_comes_up_is_failed() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_virgin_host "$_r" "$_plat"
+    # "dead": the restart is driven, and running.json never appears.
+    fake_supervisor "$_r" "$_plat" dead
+    _t="$(make_virgin_txn "$_r")"
+
+    # Phase 1 placed the binary and rendered the unit; Phase 3 handed off.
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf '<unit/>\n' > "$_r/units/$(serve_unit_name "$_plat")"
+    printf '%s\n' "$(serve_unit_name "$_plat")" > "$_t/units-changed"
+    printf 'handoff\n' > "$_t/phase"
+
+    run_guard "$_r" "$_t" "$_plat"
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    # The premise of the whole check: something WAS started here.
+    grep -q "$(restart_verb "$_plat")" "$_calls" \
+        || fail "[$_plat] fixture broken — the guard never restarted, so this is not the post-restart path; calls:
+$(cat "$_calls")"
+    [ "$(cat "$_t/phase")" = failed ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want failed — the guard started the new unit and it never came up, so 'aborted' ('nothing was started') is false and 'ok' is absurd"
+    [ "$GUARD_RC" = 2 ] \
+        || fail "[$_plat] guard exited $GUARD_RC, want 2 (failed — this host needs hands)"
+    ! grep -q 'ABORTED' "$_t/guard.log" 2>/dev/null \
+        || fail "[$_plat] guard.log claims the install was ABORTED after it had already bootstrapped, enabled and kickstarted the new unit: $(cat "$_t/guard.log" 2>/dev/null)"
+    grep -q 'nothing was started' "$_t/guard.log" 2>/dev/null \
+        && fail "[$_plat] guard.log tells the operator nothing was started, on the path where the new build WAS started: $(cat "$_t/guard.log" 2>/dev/null)"
+    grep -q 'FAILED' "$_t/guard.log" 2>/dev/null \
+        || fail "[$_plat] guard.log does not record the failure: $(cat "$_t/guard.log" 2>/dev/null)"
+    # And it must not claim a restore that never happened — there was nothing
+    # in the snapshot to put back.
+    grep -q 'rollback did not come up either' "$_t/guard.log" 2>/dev/null \
+        && fail "[$_plat] guard.log implies a previous build was restored and failed; there was no previous build: $(cat "$_t/guard.log" 2>/dev/null)"
+    rm -rf "$_r"
+}
+
+# The control on the other side, and the reason the flag cannot simply be
+# "always report failed": the installer-died / deadline callers reach the same
+# arm with nothing started, and `aborted` is exactly right there.
+# t_abort_on_a_virgin_host_starts_nothing above is that control, driven from
+# the installer-died branch; this is the one from the empty-version-stamp
+# branch inside do_restart, which is also pre-restart.
+t_virgin_host_with_an_unreadable_binary_is_aborted() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_virgin_host "$_r" "$_plat"
+    fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_virgin_txn "$_r")"
+
+    # A placed binary that answers nothing at all — do_restart's
+    # "could not read the new binary's version stamp" arm, which rolls back
+    # BEFORE any restart.
+    printf '#!/bin/sh\nexit 1\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+    printf '<unit/>\n' > "$_r/units/$(serve_unit_name "$_plat")"
+    printf 'handoff\n' > "$_t/phase"
+
+    run_guard "$_r" "$_t" "$_plat"
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    [ ! -s "$_calls" ] \
+        || fail "[$_plat] the guard drove the supervisor although it never read a version stamp; calls:
+$(cat "$_calls")"
+    [ "$(cat "$_t/phase")" = aborted ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want aborted — nothing was started on this path, so 'failed' would send an operator to a host that needs nothing"
+    [ "$GUARD_RC" = 1 ] || fail "[$_plat] guard exited $GUARD_RC, want 1 (aborted)"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
 # I8 — a CHANGED unit body is re-read; an unchanged one is not.
 #
 # `bootstrap` on an already-loaded label exits 5 and does nothing, and
@@ -1334,6 +1427,8 @@ for _plat in Darwin Linux; do
     t_abort_does_not_bounce_a_live_daemon "$_plat"
     t_recycled_pid_does_not_read_as_alive "$_plat"
     t_abort_on_a_virgin_host_starts_nothing "$_plat"
+    t_virgin_host_whose_new_build_never_comes_up_is_failed "$_plat"
+    t_virgin_host_with_an_unreadable_binary_is_aborted "$_plat"
     t_guard_does_not_reload_an_unchanged_unit_body "$_plat"
     t_rollback_with_no_recorded_version_is_not_a_failure "$_plat"
 

@@ -44,6 +44,21 @@
 # way) but says the opposite thing about the host, and an operator reading
 # guard-status must not be told a previous build was restored when there was
 # never a previous build.
+#
+# AND IT IS ONLY HONEST BEFORE A RESTART. "Nothing was started; the host is as
+# it was found" is a claim about this guard's own actions, and rollback() is
+# reached from four places — three of them before any restart (an empty binary
+# version stamp, the installer dying, the deadline), one of them AFTER
+# restart_service has already bootstrapped, enabled and kickstarted the new
+# unit (do_restart's verify_serving failure). On a fresh host that took the
+# normal accepted-consent path and whose new build simply never reported its
+# version, that fourth path lands in the same empty-snapshot arm — and there
+# the sentence is false twice over: the new unit IS loaded, and it is probably
+# crash-looping. RESTART_ATTEMPTED below is what tells the two apart, and that
+# path reports `failed` ("this host needs hands"), which is what it is: the
+# host is not serving, and nothing could be put back because there was nothing
+# to put back. No new phase token for it — `failed` already means exactly that
+# and the gateway cli already renders it.
 set -eu
 
 
@@ -369,6 +384,21 @@ snapshot_has_binaries() {
     return 1
 }
 
+# RESTART_ATTEMPTED — has this guard already driven the supervisor at the SERVE
+# label this run? Set by do_restart immediately before restart_service, and
+# never cleared.
+#
+# It exists for one sentence: the empty-snapshot arm of rollback() below tells
+# the operator "nothing was started; the host is as it was found". That is a
+# claim about what THIS PROCESS did, and rollback() has four callers — three
+# reached before any restart, one reached after do_restart has already
+# bootstrapped, enabled and kickstarted the new unit. Only the phase file
+# distinguishes them otherwise, and it does not: do_restart writes `restarting`
+# before it reads the binary's version stamp, so it reads `restarting` on the
+# path where nothing has been started as well as on the path where something
+# has. A flag set exactly where the restart happens cannot be wrong about it.
+RESTART_ATTEMPTED=0
+
 # rollback — put the last working point back AND prove it is serving.
 #
 # EVERY restore step is failure-TOLERANT and logs its own failure, because a
@@ -445,7 +475,30 @@ rollback() {
     # already had under another install), and a binary nothing supervises is
     # inert — the stranding this whole design exists to prevent is a DAEMON
     # that is down, not a file that is present.
+    #
+    # ONE OF THE FOUR CALLERS CANNOT SAY THAT, and the split below is what the
+    # `aborted` wording costs elsewhere. do_restart reaches rollback a SECOND
+    # time, after restart_service has already bootstrapped, enabled and
+    # kickstarted the new unit and verify_serving then timed out. A fresh host
+    # that took the normal accepted-consent path — install, handoff, restart,
+    # and a build that never reports its version inside the ceiling — arrives
+    # here with an empty $_want (no previous running.json) and an empty
+    # snapshot (nothing was ever installed), so it lands in exactly this arm.
+    # Telling that operator "nothing was started; the host is as it was found"
+    # is false in both halves: the new unit is loaded and, given it never
+    # reported a version, is most likely crash-looping under its supervisor.
+    #
+    # `failed` is the honest verdict there — "the host is not serving and the
+    # guard could not get it serving; this needs hands" — and it is the phase
+    # that already carries exit 2. Nothing was restored, because there was
+    # nothing to restore; the log line says so rather than implying a previous
+    # build was tried and failed.
     if [ -z "$_want" ] && ! snapshot_has_binaries "$_snap"; then
+        if [ "$RESTART_ATTEMPTED" = 1 ]; then
+            phase failed
+            log "FAILED — the new build was started and never reported its version; the snapshot holds no previous install, so nothing was restored and nothing is serving. This host needs hands."
+            exit 2
+        fi
         phase aborted
         log "ABORTED — the snapshot holds no previous install to restore, so nothing was started; the host is as it was found (no gateway running)"
         exit 1
@@ -627,6 +680,11 @@ do_restart() {
         rollback
     fi
     log "restarting $LABEL, expecting $_want"
+    # BEFORE the call, never after: rollback() reads this to decide whether
+    # "nothing was started" is a true sentence, and a restart_service that
+    # drove the supervisor and then died would leave the flag clear and the
+    # claim false — the exact failure the flag exists to close.
+    RESTART_ATTEMPTED=1
     restart_service "$(restart_mode)"
     if verify_serving "$_want"; then
 
