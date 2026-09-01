@@ -2046,6 +2046,49 @@ snapshot_db() {
     echo "warning: restore a database that needs recovery on open (consistency=best-effort)" >&2
 }
 
+# ---------------------------------------------------------------------------
+# SHARED WITH guard.sh, BYTE FOR BYTE, and pinned by
+# tools/guard-rollback.test.sh so it cannot drift.
+#
+# The house idiom for install-time logic two scripts both need (there is no
+# shared shell library — see tools/install-waits-for-daemon.test.sh, which
+# pins wait_for_running_version and binary_version_stamp across the edge and
+# gateway installers the same way). A real library is the wrong shape HERE in
+# particular: guard.sh is execed as root by launchd/systemd out of $BIN_DIR
+# with the whole rollback path behind it, and giving that path a second file
+# it must find is a way for a rollback to fail that the current shape does not
+# have. install.sh cannot source guard.sh either — the sourcing that exists
+# runs the other way, and only in a subshell (guard.sh's
+# sweep_stale_bins_via_kept_installer), precisely because these two files
+# define the same names.
+#
+# So: one body, spelled identically in both files, and a test that fails the
+# build the moment they differ.
+# ---------------------------------------------------------------------------
+# snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
+# previous install's binaries, or is this directory the empty shell a fresh
+# host produces?
+#
+# snapshot_take copies only the names that were ALREADY in $BIN_DIR
+# (`[ -f "$BIN_DIR/$b" ]`), so on a host that has never had a gateway the
+# snapshot's bin/ is created and left empty — a distinction the rest of
+# rollback cannot make from the manifest alone, because `running_version` is
+# the placeholder `unknown` for BOTH "fresh host" and "the daemon was already
+# down".
+#
+# An `if` inside the loop, not `[ -e … ] && return 0`: an AND-list is the last
+# statement of the loop body, so on the final non-matching entry the `for`
+# itself returns 1 and `set -e` kills the guard mid-rollback. An `if` with no
+# `else` returns 0 whichever way it goes — the same shape, and the same
+# reason, as apply_retention's prune body below.
+snapshot_has_binaries() {
+    [ -d "$1/bin" ] || return 1
+    for _shb in "$1/bin"/*; do
+        if [ -e "$_shb" ]; then return 0; fi
+    done
+    return 1
+}
+
 # snapshot_restore — put the last working point back. Every failure is
 # reported and the function keeps going: a partial restore that gets the
 # binaries back is strictly better than one that stops at the first error.
@@ -2680,6 +2723,23 @@ consent_to_sever() {
 # foreground restore IS the whole undo, and marking the phase terminal records
 # it for guard-status. This is the ONLY remaining caller of snapshot_restore.
 #
+# AND IT WRITES THE PHASE THE SNAPSHOT ACTUALLY SUPPORTS. This branch used to
+# write `rolled-back` unconditionally, which guard-status renders as "the new
+# build did not come up — the previous one was restored and is serving". On a
+# VIRGIN host — no gateway ever installed, `BURROWEE_NO_RESTART=1`, a failed
+# verify_placement or verify_units — the snapshot is the empty shell
+# snapshot_take leaves behind, snapshot_restore copies nothing, and that
+# sentence names a build that never existed. `aborted` is the phase for
+# exactly that host ("there was no previous install to restore, so nothing was
+# started"), and it is true here in both halves: this mode restarted nothing by
+# construction. Same predicate the guard's own rollback uses on the same
+# directory, spelled the same way (snapshot_has_binaries above).
+#
+# Prose only, and knowingly so: nothing is started on this path either way, so
+# the phase file is the whole of what changes. But the phase file is what
+# guard-status reports to an operator, and it is the only record this mode
+# leaves.
+#
 # The exit status is 1 either way: an aborted install failed.
 # ---------------------------------------------------------------------------
 abort_install() {
@@ -2691,11 +2751,19 @@ abort_install() {
         echo "install: check the outcome with: burrowee gateway service guard-status" >&2
         exit 1
     fi
-    echo "install: $1 — restoring the previous install." >&2
-    echo "install: no guard was armed this run (BURROWEE_NO_RESTART), and nothing was" >&2
-    echo "install: restarted, so the running gateway is the one this restores." >&2
-    snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
-    txn_phase rolled-back
+    if snapshot_has_binaries "$TXN_DIR/snapshot"; then
+        echo "install: $1 — restoring the previous install." >&2
+        echo "install: no guard was armed this run (BURROWEE_NO_RESTART), and nothing was" >&2
+        echo "install: restarted, so the running gateway is the one this restores." >&2
+        snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
+        txn_phase rolled-back
+        exit 1
+    fi
+    echo "install: $1 — there is nothing to restore." >&2
+    echo "install: this host had no previous gateway install, and no guard was armed this" >&2
+    echo "install: run (BURROWEE_NO_RESTART), so nothing was started and nothing was undone." >&2
+    echo "install: the host is as it was found, apart from the files this run placed." >&2
+    txn_phase aborted
     exit 1
 }
 

@@ -360,6 +360,14 @@ verify_serving() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# SHARED WITH install.sh, BYTE FOR BYTE, and pinned by
+# tools/guard-rollback.test.sh so it cannot drift. install.sh's abort_install
+# asks the same question this file's rollback does — "is there a previous
+# install behind this snapshot at all" — and answers `aborted` rather than
+# `rolled-back` when there is not. See that file's copy for why the duplication
+# is deliberate here rather than a shared library.
+# ---------------------------------------------------------------------------
 # snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
 # previous install's binaries, or is this directory the empty shell a fresh
 # host produces?

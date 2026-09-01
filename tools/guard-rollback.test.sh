@@ -820,6 +820,114 @@ $(cat "$_calls")"
 }
 
 # ---------------------------------------------------------------------------
+# snapshot_has_binaries is SHARED between guard.sh and install.sh, and pinned.
+#
+# The guard's rollback and the installer's own no-guard abort_install ask the
+# same question of the same directory — "is there a previous install behind
+# this snapshot at all" — and both answer `aborted` rather than `rolled-back`
+# when there is not. There is no shared shell library (see
+# tools/install-waits-for-daemon.test.sh, which pins the wait helpers across
+# the edge and gateway installers exactly this way), and giving the guard's
+# rollback path a second file it must find would be a new way for a rollback
+# to fail. So: one body, spelled identically in both files, and this is what
+# makes a change to one visibly break the other.
+# ---------------------------------------------------------------------------
+extract_snapshot_has_binaries() {
+    awk '
+        /^# snapshot_has_binaries <snapshot-dir>/ { on = 1 }
+        on { print }
+        on && /^}$/ { exit }
+    ' "$1"
+}
+
+t_snapshot_has_binaries_is_pinned_across_both_files() {
+    _w="$(mktemp -d)"
+    extract_snapshot_has_binaries "$HERE/inner/gateway/guard.sh"   > "$_w/guard"
+    extract_snapshot_has_binaries "$HERE/inner/gateway/install.sh" > "$_w/install"
+    if [ ! -s "$_w/guard" ]; then
+        fail "no snapshot_has_binaries block found in inner/gateway/guard.sh"
+    elif [ ! -s "$_w/install" ]; then
+        fail "no snapshot_has_binaries block found in inner/gateway/install.sh"
+    elif ! cmp -s "$_w/guard" "$_w/install"; then
+        fail "snapshot_has_binaries has drifted between guard.sh and install.sh:
+$(diff "$_w/guard" "$_w/install" 2>&1 || true)"
+    fi
+    rm -rf "$_w"
+}
+
+# ---------------------------------------------------------------------------
+# abort_install's NO-GUARD branch (BURROWEE_NO_RESTART) records the phase the
+# snapshot actually supports.
+#
+# It used to write `rolled-back` unconditionally, which guard-status renders as
+# "the new build did not come up — the previous one was restored and is
+# serving". On a virgin host under that flag — nothing ever installed, a failed
+# verify_placement or verify_units — snapshot_restore copies nothing, and that
+# sentence names a build that never existed. Prose only (this mode starts
+# nothing either way), but the phase file is the whole of what this mode leaves
+# behind and it is what an operator reads.
+# ---------------------------------------------------------------------------
+run_abort_install() {
+    _r="$1"; _txn="$2"
+    _stub="$(install_stub_dir "$_r")"
+    (
+        cd "$_r" && \
+        BURROWEE_SOURCE_ONLY=1 \
+        PATH="$_stub:$PATH" \
+        BURROWEE_BIN_DIR="$_r/bin" \
+        BURROWEE_LAUNCHD_DIR="$_r/units" \
+        BURROWEE_SYSTEMD_DIR="$_r/units" \
+        BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
+        BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
+        sh -c ". '$HERE/inner/gateway/install.sh'; TXN_DIR='$_txn'; TXN_STAMP=teststamp; abort_install 'verify_units failed'" 2>&1
+    )
+}
+
+t_abort_install_without_a_guard_records_aborted_on_a_virgin_host() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    # The transaction snapshot_take leaves on a host that has never run a
+    # gateway: the directories exist and every one of them is empty.
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units" "$_t/snapshot/data"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t")" || _rc=$?
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc, want 1: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = aborted ] \
+        || fail "abort_install recorded phase '$(cat "$_t/phase" 2>/dev/null)' on a host with nothing to restore, want aborted — 'rolled-back' reads as 'the previous one was restored and is serving' about a build that never existed: $_out"
+    printf '%s\n' "$_out" | grep -q 'nothing to restore' \
+        || fail "abort_install's no-guard message does not say there was nothing to restore: $_out"
+    rm -rf "$_r"
+}
+
+# The control, and the half that must not regress: a host that DOES have a
+# previous install still restores it and still records rolled-back.
+t_abort_install_without_a_guard_still_rolls_back_a_real_install() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units" "$_t/snapshot/data"
+    printf 'OLD BINARY\n' > "$_t/snapshot/bin/burrowee-gateway"
+    chmod 755 "$_t/snapshot/bin/burrowee-gateway"
+    printf 'NEW BINARY\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t")" || _rc=$?
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc, want 1: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = rolled-back ] \
+        || fail "abort_install recorded phase '$(cat "$_t/phase" 2>/dev/null)' with a real previous install in the snapshot, want rolled-back: $_out"
+    grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "abort_install's no-guard branch did not restore the previous binary: $_out"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
 # I8 — a CHANGED unit body is re-read; an unchanged one is not.
 #
 # `bootstrap` on an already-loaded label exits 5 and does nothing, and
@@ -1441,6 +1549,9 @@ t_guard_ok_prunes_old_transactions
 t_guard_removes_its_own_plist advance ok
 t_guard_removes_its_own_plist dead rolled-back
 t_guard_reloads_a_changed_unit_body
+t_snapshot_has_binaries_is_pinned_across_both_files
+t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
+t_abort_install_without_a_guard_still_rolls_back_a_real_install
 
 t_heartbeat_defers_the_deadline
 t_verify_precedes_handoff
