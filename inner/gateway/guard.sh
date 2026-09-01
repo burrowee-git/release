@@ -192,21 +192,66 @@ running_pid() {
         "$SYS_DATA_DIR/running.json" 2>/dev/null || true
 }
 
+# supervisor_holds_serve_job — does the supervisor THIS GUARD ALREADY DRIVES
+# still hold the serve job?
+#
+# The deciding voice in running_alive below, and the only one of its three
+# conjuncts that reads live state rather than a file the daemon left behind.
+# launchd and systemd are the authorities on whether the job exists; this asks
+# the same binary restart_service would call, through the same GUARD_LAUNCHCTL
+# / GUARD_SYSTEMCTL seam, so there is no second notion of "the supervisor" in
+# this script.
+#
+# Darwin: `launchctl print system/<label>` exits non-zero when the label is not
+# loaded in the system domain — which is EXACTLY the state the migration's
+# bootout leaves behind, the one this whole design exists to notice. It answers
+# "unloaded" directly, without parsing launchd's output format (which differs
+# by macOS release and is not a contract).
+#
+# Linux: `systemctl is-active` exits 0 only for a unit systemd considers
+# active; inactive, failed, activating and unknown-unit all exit non-zero. The
+# EXIT STATUS, not the word on stdout: the status is the documented interface
+# and survives a locale or a version that words the state differently.
+#
+# ANY OTHER ANSWER IS "RESTART". A missing supervisor binary, a supervisor that
+# errors, an unrecognised $UNAME — all return 1 here, and all mean the guard
+# bounces the service. That direction is chosen deliberately: a false "alive"
+# strands the host with a dead daemon and no one watching, a false "dead" costs
+# one bounced connection.
+supervisor_holds_serve_job() {
+    case "$UNAME" in
+    Darwin) "$LAUNCHCTL" print "system/$LABEL"   >/dev/null 2>&1 ;;
+    Linux)  "$SYSTEMCTL" is-active "$UNIT"       >/dev/null 2>&1 ;;
+    *)      return 1 ;;
+    esac
+}
+
 # running_alive <want> — the daemon is REALLY up and REALLY serving <want>.
 #
-# Both halves are needed and neither is enough. running.json survives the
+# THREE conjuncts, and none of them is enough alone. running.json survives the
 # daemon that wrote it, so the version alone says only "the last daemon to
 # start reported this" — true of a host whose serve label was booted out
 # minutes ago by the migration. The pid alone says only "something with that
-# number exists". Together they are the strongest liveness statement available
-# without adding a probe this script has no business making: core's
-# runtime_version.WriteRunning records {"version","pid","started_at"} at serve
-# start, so a live pid beside a matching version is that daemon, still there.
+# number exists". Together they are strong but not sound: an install window is
+# minutes long, and a pid freed by the migration's stop can be handed to any
+# process started since (macOS wraps at 99998; a busy Linux host commonly at
+# 32768). The version still matches, because it is the same stale file
+# snapshot_take read — so pid+version alone can conclude "already serving"
+# about a host that is DOWN, which is the reported stranding restored as an
+# optimisation.
+#
+# The supervisor closes it: core's runtime_version.WriteRunning records
+# {"version","pid","started_at"} at serve start, so a live pid beside a
+# matching version identifies the daemon, and launchd/systemd still holding the
+# job is what says that daemon is the one running now. Cheap, because this
+# branch only ever decides whether to SKIP a restart — the expensive direction
+# is the safe one.
 running_alive() {
     _ra_pid="$(running_pid)"
     [ -n "$_ra_pid" ] || return 1
     [ "$(running_version)" = "$1" ] || return 1
-    kill -0 "$_ra_pid" 2>/dev/null
+    kill -0 "$_ra_pid" 2>/dev/null || return 1
+    supervisor_holds_serve_job
 }
 
 binary_version() {
@@ -423,7 +468,9 @@ rollback() {
     # version about a process that is gone. Reading the version alone would
     # conclude "already serving" about a DOWN daemon and skip the restart,
     # which is the stranding this design removes, reintroduced as an
-    # optimisation. The pid in that same file is what makes it decidable.
+    # optimisation. The pid in that same file narrows it; the supervisor's own
+    # answer (running_alive's third conjunct) is what decides it, because a pid
+    # freed minutes ago can already belong to something else.
     if [ -z "$_mode" ] && [ -n "$_want" ] && running_alive "$_want"; then
 
         phase rolled-back

@@ -136,27 +136,40 @@ setup_fake_host() {
     printf '{"version":"v0.2.13","pid":1,"started_at":0}\n' > "$_r/var/gateway/running.json"
 }
 
-# fake_supervisor <root> <platform> <behaviour> — writes the stub the guard
-# actually drives for <platform>. behaviour is "advance" (the restart makes
-# running.json report the NEW version) or "dead" (the restart never changes
-# running.json — the failing-new-build case).
+# fake_supervisor <root> <platform> <behaviour> [held] — writes the stub the
+# guard actually drives for <platform>. behaviour is "advance" (the restart
+# makes running.json report the NEW version) or "dead" (the restart never
+# changes running.json — the failing-new-build case).
+#
+# [held] is the LIVENESS axis, defaulting to "held": whether the supervisor
+# still holds the serve job, which is what `launchctl print system/<label>` and
+# `systemctl is-active <unit>` answer and what guard.sh's
+# supervisor_holds_serve_job asks them. "unheld" is a host whose migration
+# stopped (and on Darwin unloaded) the daemon — the real state behind the
+# recycled-pid case below, and the state running.json cannot express because
+# the daemon that wrote it is gone.
+#
+# Both stubs answer by EXIT STATUS, like the real tools and like the guard's
+# own probe: `launchctl print` exits non-zero on an unloaded label, and
+# `systemctl is-active` exits non-zero for anything but active.
 fake_supervisor() {
-    _r="$1"; _plat="$2"; _behaviour="$3"
+    _r="$1"; _plat="$2"; _behaviour="$3"; _held="${4:-held}"
     _bin="$(supervisor_bin "$_r" "$_plat")"
     _calls="$(supervisor_calls "$_r" "$_plat")"
     _verb="$(restart_verb "$_plat")"
+    if [ "$_held" = held ]; then _q=0; else _q=1; fi
     cat > "$_bin" <<STUB
 #!/bin/sh
-printf '%s\\n' "\$*" >> "$_calls"
+printf '%s\n' "\$*" >> "$_calls"
 case "\$1" in
   $_verb)
     if [ "$_behaviour" = advance ]; then
-      printf '{"version":"%s","pid":2,"started_at":0}\\n' "\$(cat "$_r/newver")" \\
+      printf '{"version":"%s","pid":2,"started_at":0}\n' "\$(cat "$_r/newver")" \
         > "$_r/var/gateway/running.json"
     fi
     ;;
-  print) exit 0 ;;
-  is-active) exit 0 ;;
+  print) exit $_q ;;
+  is-active) exit $_q ;;
 esac
 exit 0
 STUB
@@ -566,6 +579,66 @@ t_abort_does_not_bounce_a_live_daemon() {
     ! grep -q "$(restart_verb "$_plat")" "$(supervisor_calls "$_r" "$_plat")" \
         || fail "[$_plat] the guard bounced a daemon that was still serving — declining the prompt is a request NOT to drop this connection; calls:
 $(cat "$(supervisor_calls "$_r" "$_plat")")"
+
+    kill "$_dpid" 2>/dev/null || true
+    wait "$_dpid" 2>/dev/null || true
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# BLOCKER 2 — a recycled pid must not read as a live daemon.
+#
+# running.json's pid plus its version is strictly better than the version
+# alone, and still not sound. The install window is minutes long: the migration
+# stops the daemon, the kernel hands its pid to something else (macOS wraps at
+# 99998, a busy Linux host commonly at 32768), and the version still matches
+# because it is the same stale file snapshot_take read. pid+version alone then
+# concludes "already serving" and SKIPS the restart on a host that is down —
+# the reported stranding, restored as an optimisation.
+#
+# The fixture is exactly that host: a pid that is genuinely alive but is not
+# the gateway, a version that matches, and a supervisor that no longer holds
+# the job. The guard must restart.
+#
+# The costs are why this is biased: a false "alive" strands the host, a false
+# "dead" bounces one connection. t_abort_does_not_bounce_a_live_daemon is the
+# control on the other side — with the supervisor still holding the job, the
+# same shape must NOT restart — so a "fix" that simply always restarts is not
+# green either.
+# ---------------------------------------------------------------------------
+t_recycled_pid_does_not_read_as_alive() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+
+    # The supervisor no longer holds the serve job — the migration stopped it.
+    fake_supervisor "$_r" "$_plat" advance unheld
+    printf 'v0.2.13\n' > "$_r/newver"   # a restart brings the RESTORED build back
+
+    # A process that is genuinely alive and is NOT the gateway, wearing the
+    # pid the stopped daemon recorded for itself.
+    sh -c 'sleep 30' &
+    _dpid=$!
+    printf '{"version":"v0.2.13","pid":%s,"started_at":0}\n' "$_dpid" \
+        > "$_r/var/gateway/running.json"
+
+    sh -c 'sleep 30' &
+    _ipid=$!
+    printf '%s\n' "$_ipid" > "$_t/installer.pid"
+    printf 'verified\n' > "$_t/phase"
+
+    (sleep 1; kill -9 "$_ipid" 2>/dev/null || true) &
+    run_guard "$_r" "$_t" "$_plat" 30
+    wait "$_ipid" 2>/dev/null || true
+
+    grep -q "$(restart_verb "$_plat")" "$(supervisor_calls "$_r" "$_plat")" \
+        || fail "[$_plat] the guard skipped the restart on a host whose daemon was STOPPED — running.json's pid had been recycled and its version was the stale one, so pid+version alone read as 'still serving'; calls:
+$(cat "$(supervisor_calls "$_r" "$_plat")")"
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want rolled-back"
+    grep -q '"version":"v0.2.13"' "$_r/var/gateway/running.json" \
+        || fail "[$_plat] the daemon never came back up"
 
     kill "$_dpid" 2>/dev/null || true
     wait "$_dpid" 2>/dev/null || true
@@ -1259,6 +1332,7 @@ for _plat in Darwin Linux; do
     t_guard_deadline_exceeded "$_plat"
     t_abort_hands_the_undo_to_the_guard "$_plat"
     t_abort_does_not_bounce_a_live_daemon "$_plat"
+    t_recycled_pid_does_not_read_as_alive "$_plat"
     t_abort_on_a_virgin_host_starts_nothing "$_plat"
     t_guard_does_not_reload_an_unchanged_unit_body "$_plat"
     t_rollback_with_no_recorded_version_is_not_a_failure "$_plat"
