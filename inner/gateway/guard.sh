@@ -10,9 +10,9 @@
 # session, and anything still running in that session dies with it.
 #
 # It owns the outcome of the whole install, not just the restart, because the
-# restart is not the only thing that stops the daemon: the migration ladder's
-# adopt_user_tree.sh stops it too, seventeen lines earlier, to copy state at
-# rest. A guard armed only for the restart would watch the wrong line.
+# restart is not the only thing that stops the daemon: gateway's own migration
+# ladder (migrations/run.sh, stop_gateway) stops it too, earlier, to copy state
+# at rest. A guard armed only for the restart would watch the wrong line.
 #
 # AND IT OWNS EVERY ABORT, not just the ones that reach the handoff. The
 # installer's own foreground abort paths — a declined consent prompt, a failed
@@ -44,6 +44,21 @@
 # way) but says the opposite thing about the host, and an operator reading
 # guard-status must not be told a previous build was restored when there was
 # never a previous build.
+#
+# AND IT IS ONLY HONEST BEFORE A RESTART. "Nothing was started; the host is as
+# it was found" is a claim about this guard's own actions, and rollback() is
+# reached from four places — three of them before any restart (an empty binary
+# version stamp, the installer dying, the deadline), one of them AFTER
+# restart_service has already bootstrapped, enabled and kickstarted the new
+# unit (do_restart's verify_serving failure). On a fresh host that took the
+# normal accepted-consent path and whose new build simply never reported its
+# version, that fourth path lands in the same empty-snapshot arm — and there
+# the sentence is false twice over: the new unit IS loaded, and it is probably
+# crash-looping. RESTART_ATTEMPTED below is what tells the two apart, and that
+# path reports `failed` ("this host needs hands"), which is what it is: the
+# host is not serving, and nothing could be put back because there was nothing
+# to put back. No new phase token for it — `failed` already means exactly that
+# and the gateway cli already renders it.
 set -eu
 
 
@@ -170,22 +185,6 @@ elif command -v gtimeout >/dev/null 2>&1; then
     VERSION_BOUND="gtimeout 2"
 fi
 
-# binary_version — the version the freshly placed binary reports for ITSELF.
-#
-# DELIBERATELY NOT install.sh's binary_version_stamp, and not a candidate for
-# being merged with it. That helper is byte-identical with edge's (pinned by
-# tools/install-waits-for-daemon.test.sh) and filters tokens through
-# `grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$'`, which REJECTS a
-# pre-release token: against core runtime_version.Report's two-line output the
-# real stamp `v0.3.1.beta.2026.08.31.62a6f215` fails that pattern and the
-# helper falls through to the SECOND line — the RUNNING daemon's version — so
-# on a beta build it answers the question this guard is not asking. The `sed`
-# below takes the first version-shaped token off the FIRST line and keeps the
-# beta segment, which is the string running.json will actually carry.
-#
-# (The shared helper's beta blindness is pre-existing and out of scope here.
-# It is written down at both sites so the next reader who notices the
-# duplication learns that unifying them would silently break this one.)
 # running_pid — the pid the daemon recorded for itself in running.json, or "".
 running_pid() {
     sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
@@ -254,11 +253,44 @@ running_alive() {
     supervisor_holds_serve_job
 }
 
+# binary_version — the version the freshly placed binary reports for ITSELF.
+#
+# DELIBERATELY NOT install.sh's binary_version_stamp, and not a candidate for
+# being merged with it. That helper is byte-identical with edge's (pinned by
+# tools/install-waits-for-daemon.test.sh) and filters tokens through
+# `grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$'`, which REJECTS a
+# pre-release token: against core runtime_version.Report's two-line output the
+# real stamp `v0.3.1.beta.2026.08.31.62a6f215` fails that pattern and the
+# helper falls through to the SECOND line — the RUNNING daemon's version — so
+# on a beta build it answers the question this guard is not asking. The `sed`
+# below takes the first version-shaped token off the FIRST line and keeps the
+# beta segment, which is the string running.json will actually carry.
+#
+# (The shared helper's beta blindness is pre-existing and out of scope here.
+# It is written down at both sites so the next reader who notices the
+# duplication learns that unifying them would silently break this one.)
+#
+# This block sat ABOVE running_pid for two revisions — a header describing a
+# function eighty lines further down, with the function it actually stood over
+# carrying its own one-liner underneath it. Moved to where it belongs; nothing
+# about either function changed.
 binary_version() {
 
     # shellcheck disable=SC2086  # $VERSION_BOUND is a command PREFIX and must word-split; empty means no bound.
     BURROWEE_DISPATCHER_VERSION= $VERSION_BOUND "$BIN_DIR/burrowee-gateway" version 2>/dev/null |
         sed -n 's/.*\(v[0-9][0-9.a-z]*\).*/\1/p' | head -1
+}
+
+# serve_unit_file — the SERVE unit's basename on this platform, resolved once.
+# Both unit_body_changed and snapshot_has_serve_unit ask the same question
+# about the same file, and spelling it twice is how the two would come to
+# disagree about which file they mean.
+serve_unit_file() {
+    case "$UNAME" in
+    Darwin) printf '%s\n' "$LABEL.plist" ;;
+    Linux)  printf '%s\n' "$UNIT" ;;
+    *)      printf '\n' ;;
+    esac
 }
 
 # unit_body_changed — did THIS install rewrite the serve unit's file?
@@ -269,11 +301,19 @@ binary_version() {
 # signal; an absent file means nothing changed.
 unit_body_changed() {
     [ -f "$TXN/units-changed" ] || return 1
-    case "$UNAME" in
-    Darwin) grep -q "^$LABEL.plist\$" "$TXN/units-changed" ;;
-    Linux)  grep -q "^$UNIT\$"        "$TXN/units-changed" ;;
-    *)      return 1 ;;
-    esac
+    _ubc_u="$(serve_unit_file)"
+    [ -n "$_ubc_u" ] || return 1
+    grep -q "^$_ubc_u\$" "$TXN/units-changed"
+}
+
+# snapshot_has_serve_unit <snapshot-dir> — did snapshot_take capture the serve
+# unit's own file? snapshot_take copies only units that were already on disk
+# ([ -f ] per name), so on a host that has never had a gateway this is false
+# and the file now on disk is the one THIS run rendered.
+snapshot_has_serve_unit() {
+    _shsu_u="$(serve_unit_file)"
+    [ -n "$_shsu_u" ] || return 1
+    [ -f "$1/units/$_shsu_u" ]
 }
 
 # restart_service — kickstart -k / systemctl restart. NEVER bootout FROM THE
@@ -324,10 +364,61 @@ restart_service() {
 }
 
 # restart_mode — "reload" when the serve unit's file changed this install,
-# empty otherwise. One place decides it, so do_restart and rollback cannot
-# disagree about whether the plist needs re-reading.
+# empty otherwise. One place decides it, so nothing in do_restart can disagree
+# with itself about whether the plist needs re-reading.
 restart_mode() {
     if unit_body_changed; then printf 'reload\n'; else printf '\n'; fi
+}
+
+# rollback_restart_mode <snapshot-dir> — restart_mode's answer for the UNDO,
+# which is not the same question.
+#
+# do_restart is moving the host FORWARD onto the file this run rendered, so a
+# changed serve unit means launchd is holding a stale job and must re-read the
+# plist. rollback has just done the opposite: it copied the SNAPSHOT's unit
+# back over that file — so the answer turns on what launchd is holding IN
+# MEMORY at that moment, and that is not the same on every caller.
+#
+# THE QUESTION IS "WHAT DID THE SUPERVISOR LAST LOAD", NOT "WHAT IS ON DISK".
+# rollback has four callers and they divide exactly on RESTART_ATTEMPTED:
+#
+#   * NOT restarted yet (a declined consent, the installer dying, the deadline,
+#     an unreadable version stamp). Nothing has bootstrapped anything this run,
+#     so launchd still holds the definition it loaded BEFORE this install — the
+#     snapshot's. Restoring that file makes disk and memory agree again, and
+#     there is nothing to re-read.
+#
+#   * ALREADY restarted (do_restart's verify_serving failure — the mainstream
+#     rollback). restart_service ran with mode `reload`, which booted the label
+#     out and BOOTSTRAPPED THIS RUN'S PLIST: launchd's in-memory job is now the
+#     new definition. Restoring the snapshot's plist to disk does not undo
+#     that, and a plain `kickstart -k` restarts the job launchd already holds —
+#     so the host would go on running THIS RUN's unit definition against the
+#     RESTORED OLD BINARY, with the restored plist unread until the next
+#     reboot. That is "files converged, process still stale" in the undo
+#     direction, and it is worst exactly when it matters: a changed unit body
+#     is precisely the case where the old build may not tolerate the new
+#     ProgramArguments or environment, so the rollback fails to come up and the
+#     guard reports `failed` on a host that would have recovered.
+#
+# So the flag decides it, ahead of the snapshot question. The snapshot question
+# still answers the un-restarted callers, and its own narrow case survives: a
+# snapshot with NO serve unit leaves this run's file on disk, so a reload is
+# right there too.
+#
+# The empty answer is load-bearing and not merely an optimisation: rollback's
+# undisturbed-case branch (below) is gated on this mode being empty, and that
+# branch is what keeps a DECLINED consent prompt from dropping the very
+# connection the decline was protecting. A run that merely re-rendered the unit
+# template (a new StandardOutPath, say) used to take the bootout+bootstrap path
+# there and drop the operator's session — the one answer they gave to say "do
+# not". RESTART_ATTEMPTED is 0 on every one of those callers, so that case is
+# untouched by the branch above it.
+rollback_restart_mode() {
+    unit_body_changed || { printf '\n'; return 0; }
+    if [ "$RESTART_ATTEMPTED" = 1 ]; then printf 'reload\n'; return 0; fi
+    if snapshot_has_serve_unit "$1"; then printf '\n'; return 0; fi
+    printf 'reload\n'
 }
 
 # verify_serving <want> — the daemon reports <want> within the ceiling.
@@ -345,6 +436,14 @@ verify_serving() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# SHARED WITH install.sh, BYTE FOR BYTE, and pinned by
+# tools/guard-rollback.test.sh so it cannot drift. install.sh's abort_install
+# asks the same question this file's rollback does — "is there a previous
+# install behind this snapshot at all" — and answers `aborted` rather than
+# `rolled-back` when there is not. See that file's copy for why the duplication
+# is deliberate here rather than a shared library.
+# ---------------------------------------------------------------------------
 # snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
 # previous install's binaries, or is this directory the empty shell a fresh
 # host produces?
@@ -368,6 +467,21 @@ snapshot_has_binaries() {
     done
     return 1
 }
+
+# RESTART_ATTEMPTED — has this guard already driven the supervisor at the SERVE
+# label this run? Set by do_restart immediately before restart_service, and
+# never cleared.
+#
+# It exists for one sentence: the empty-snapshot arm of rollback() below tells
+# the operator "nothing was started; the host is as it was found". That is a
+# claim about what THIS PROCESS did, and rollback() has four callers — three
+# reached before any restart, one reached after do_restart has already
+# bootstrapped, enabled and kickstarted the new unit. Only the phase file
+# distinguishes them otherwise, and it does not: do_restart writes `restarting`
+# before it reads the binary's version stamp, so it reads `restarting` on the
+# path where nothing has been started as well as on the path where something
+# has. A flag set exactly where the restart happens cannot be wrong about it.
+RESTART_ATTEMPTED=0
 
 # rollback — put the last working point back AND prove it is serving.
 #
@@ -445,13 +559,36 @@ rollback() {
     # already had under another install), and a binary nothing supervises is
     # inert — the stranding this whole design exists to prevent is a DAEMON
     # that is down, not a file that is present.
+    #
+    # ONE OF THE FOUR CALLERS CANNOT SAY THAT, and the split below is what the
+    # `aborted` wording costs elsewhere. do_restart reaches rollback a SECOND
+    # time, after restart_service has already bootstrapped, enabled and
+    # kickstarted the new unit and verify_serving then timed out. A fresh host
+    # that took the normal accepted-consent path — install, handoff, restart,
+    # and a build that never reports its version inside the ceiling — arrives
+    # here with an empty $_want (no previous running.json) and an empty
+    # snapshot (nothing was ever installed), so it lands in exactly this arm.
+    # Telling that operator "nothing was started; the host is as it was found"
+    # is false in both halves: the new unit is loaded and, given it never
+    # reported a version, is most likely crash-looping under its supervisor.
+    #
+    # `failed` is the honest verdict there — "the host is not serving and the
+    # guard could not get it serving; this needs hands" — and it is the phase
+    # that already carries exit 2. Nothing was restored, because there was
+    # nothing to restore; the log line says so rather than implying a previous
+    # build was tried and failed.
     if [ -z "$_want" ] && ! snapshot_has_binaries "$_snap"; then
+        if [ "$RESTART_ATTEMPTED" = 1 ]; then
+            phase failed
+            log "FAILED — the new build was started and never reported its version; the snapshot holds no previous install, so nothing was restored and nothing is serving. This host needs hands."
+            exit 2
+        fi
         phase aborted
         log "ABORTED — the snapshot holds no previous install to restore, so nothing was started; the host is as it was found (no gateway running)"
         exit 1
     fi
 
-    _mode="$(restart_mode)"
+    _mode="$(rollback_restart_mode "$_snap")"
 
     # THE UNDISTURBED CASE, and the reason the installer's foreground abort
     # paths can safely hand their work here. When the operator declines the
@@ -627,9 +764,31 @@ do_restart() {
         rollback
     fi
     log "restarting $LABEL, expecting $_want"
+    # BEFORE the call, never after: rollback() reads this to decide whether
+    # "nothing was started" is a true sentence, and a restart_service that
+    # drove the supervisor and then died would leave the flag clear and the
+    # claim false — the exact failure the flag exists to close.
+    RESTART_ATTEMPTED=1
     restart_service "$(restart_mode)"
     if verify_serving "$_want"; then
 
+        # WRITTEN HERE AND NOT AFTER THE HOUSEKEEPING BELOW, deliberately, and
+        # the known cost is stated rather than traded away. `ok` means
+        # "verified serving", which is true at this line; moving it past the
+        # sweep would leave a guard killed mid-housekeeping recorded at
+        # `restarting`, and a guard relaunched against that transaction rolls
+        # a HEALTHY host back.
+        #
+        # The cost is a window: guard_refuse_concurrent skips terminal phases,
+        # so a second install started in the seconds below arms its own guard,
+        # and on Darwin boots this label out mid-sweep. Nothing is stranded —
+        # the daemon is up and verified, and the second install's own guard
+        # runs the same three steps on its own success — so the fix is not
+        # worth its price. Every discriminator that would close it (a
+        # completion marker, or refusing on a live pid regardless of phase)
+        # widens the recycled-pid hazard guard_refuse_concurrent's own header
+        # rejects: an install refused forever by a pid that no longer belongs
+        # to any guard is far worse than one skipped sweep.
         phase ok
         log "OK — $_want is serving"
 

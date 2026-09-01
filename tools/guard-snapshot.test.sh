@@ -157,9 +157,61 @@ t_snapshot_restores_everything() {
     rm -rf "$_root"
 }
 
+# ---------------------------------------------------------------------------
+# consistency=no-database — a run that captured no database must not claim an
+# exact copy of one.
+#
+# SNAPSHOT_CONSISTENCY is initialised to `exact` and snapshot_db early-returns
+# on a host with no gateway.db, so the manifest recorded `exact` for a snapshot
+# that contains no database at all — and `guard-status` prints that field
+# through to the operator verbatim (gateway's guard_status.go reads
+# txn.Manifest["consistency"] and formats it as free text; it is a manifest
+# field, not a phase, so a third value needs nothing changed in that repo).
+#
+# The value is a claim about what the snapshot HOLDS, which is what decides
+# whether a rollback can put the store back. "exact" on an empty snapshot is
+# the one reading that would send an operator looking for a database that was
+# never captured.
+# ---------------------------------------------------------------------------
+t_snapshot_records_no_database_when_there_is_none() {
+    _plat="$1"
+    _root="$(mktemp -d)"
+    setup_fake_host "$_root" "$_plat"
+    rm -f "$_root/var/gateway/gateway.db"
+    run_installer_fn "$_root" "$_plat" 'txn_begin; snapshot_take'
+
+    _txn="$(ls -d "$_root/var/gateway/install"/*/ | head -1)"
+    grep -q '^consistency=no-database$' "$_txn/manifest" \
+        || fail "[$_plat] manifest records '$(sed -n 's/^consistency=//p' "$_txn/manifest")' on a host with no gateway.db, want no-database — 'exact' claims a faithful copy of a database that was never there"
+    [ ! -f "$_txn/snapshot/data/gateway.db" ] \
+        || fail "[$_plat] a database appeared in the snapshot of a host that has none"
+    rm -rf "$_root"
+}
+
+# The control: a host that DOES have a database must never record
+# no-database. Which of the two real values it lands on (exact via the cli's
+# own `db snapshot` or sqlite3's .backup, best-effort via the three-file copy)
+# depends on what this box has installed, and both are honest — only the
+# no-database claim would be a lie here.
+t_snapshot_does_not_record_no_database_when_there_is_one() {
+    _plat="$1"
+    _root="$(mktemp -d)"
+    setup_fake_host "$_root" "$_plat"
+    run_installer_fn "$_root" "$_plat" 'txn_begin; snapshot_take'
+
+    _txn="$(ls -d "$_root/var/gateway/install"/*/ | head -1)"
+    grep -q '^consistency=no-database$' "$_txn/manifest" \
+        && fail "[$_plat] manifest records no-database on a host whose gateway.db was snapshotted"
+    grep -qE '^consistency=(exact|best-effort)$' "$_txn/manifest" \
+        || fail "[$_plat] manifest records an unrecognised consistency: $(sed -n 's/^consistency=//p' "$_txn/manifest")"
+    rm -rf "$_root"
+}
+
 for _plat in Darwin Linux; do
     t_snapshot_captures_everything "$_plat"
     t_snapshot_restores_everything "$_plat"
+    t_snapshot_records_no_database_when_there_is_none "$_plat"
+    t_snapshot_does_not_record_no_database_when_there_is_one "$_plat"
 done
 
 if [ "$fails" -ne 0 ]; then

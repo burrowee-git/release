@@ -394,8 +394,17 @@ t_guard_arm_honours_no_restart() {
 }
 
 # keep_installer_copy must keep guard.sh at $GW_HOME too, off the SAME
-# resolution guard_arm uses — a later units-only re-run's $0 IS the kept
-# $GW_HOME/install.sh, and without this copy that run finds no guard beside it.
+# resolution guard_arm uses — a later DEFAULT-MODE re-run of the kept copy has
+# $0 = $GW_HOME/install.sh, and without this copy that run finds no guard.sh
+# beside it and refuses.
+#
+# NOT a units-only re-run, and the earlier wording here said so and was wrong —
+# the same correction install.sh's own comment beside keep_installer_copy
+# already carries. BURROWEE_UNITS_ONLY exits inside its own mode block
+# (finish_with_updater_verdict) and never reaches guard_arm at all; what it does
+# reach is ensure_root_exec_surface, which places this copy into $BIN_DIR. The
+# copy that matters to a guard is the ROOT-OWNED one under $BIN_DIR; this one is
+# a source, never an exec target.
 t_keep_installer_copy_copies_guard_sh() {
     _root="$(mktemp -d)"
     setup_root "$_root"
@@ -427,8 +436,113 @@ t_keep_installer_copy_tolerates_missing_guard_sh() {
     rm -rf "$_root"
 }
 
+# ---------------------------------------------------------------------------
+# guard_arm's own root-secure refusal separates "could not look" from "not
+# secure", the same way verify_root_exec_surface does and this block did not.
+#
+# It refuses either way — a path launchd/systemd will exec AS ROOT must fail
+# closed — so what is under test is the message. "Check the ownership and modes
+# of $BIN_DIR and every directory above it" sent to a host whose tree is
+# already root:root 755, because this host's `stat` speaks neither the GNU nor
+# the BSD dialect, is the exact cost path_is_root_secure's header records from
+# the last time these two were conflated.
+#
+# HAVE_REAL_ROOT is pre-seeded because the harness's pass-through sudo makes
+# have_real_root answer "no" and skip the branch; STAT_FLAVOR=none is the real
+# undecidable shape, not a stub for it.
+# ---------------------------------------------------------------------------
+t_guard_arm_separates_unreadable_from_insecure() {
+    _plat="$1"
+    _root="$(mktemp -d)"
+    setup_root "$_root"
+    _installer="$(stage_payload "$_root" yes)"
+
+    _rc=0
+    run_guard_arm "$_root" "$_plat" "$_installer" \
+        'HAVE_REAL_ROOT=yes; STAT_FLAVOR=none; txn_begin; guard_arm' \
+        >"$_root/stdout" 2>"$_root/stderr" || _rc=$?
+    [ "$_rc" != 0 ] ||
+        fail "[$_plat] guard_arm armed a guard whose ownership could not be read at all"
+    grep -q 'could not read the owner and mode' "$_root/stderr" ||
+        fail "[$_plat] guard_arm blamed something other than the unreadable stat: $(cat "$_root/stderr")"
+    grep -q 'a non-root user could replace' "$_root/stderr" &&
+        fail "[$_plat] guard_arm told the operator the path is replaceable when it could not look at all: $(cat "$_root/stderr")"
+
+    # The control: stat answers fine, and the placed copy really is owned by
+    # this unprivileged test user.
+    rm -rf "$_root"; _root="$(mktemp -d)"
+    setup_root "$_root"
+    _installer="$(stage_payload "$_root" yes)"
+    _rc=0
+    run_guard_arm "$_root" "$_plat" "$_installer" \
+        'HAVE_REAL_ROOT=yes; txn_begin; guard_arm' \
+        >"$_root/stdout" 2>"$_root/stderr" || _rc=$?
+    [ "$_rc" != 0 ] ||
+        fail "[$_plat] guard_arm armed a guard that is not root-owned"
+    grep -q 'not root-owned and unwritable all the way to /' "$_root/stderr" ||
+        fail "[$_plat] guard_arm's insecure refusal does not name the ownership: $(cat "$_root/stderr")"
+    grep -q 'could not read the owner and mode' "$_root/stderr" &&
+        fail "[$_plat] guard_arm reported an unreadable stat on a host whose stat answered: $(cat "$_root/stderr")"
+    rm -rf "$_root"
+}
+
+# ---------------------------------------------------------------------------
+# "I SAW NOTHING" IS NOT ALWAYS "THERE IS NOTHING".
+#
+# guard_prove_armed polls for guard.pid / guard.log through txn_file_exists,
+# which degrades to `sudo -n` because the transaction is root-owned 0700 and
+# this script is routinely entered by an unprivileged shell. On a host whose
+# sudoers refuses a non-interactive re-auth (`Defaults timestamp_timeout=0` is
+# the common one) EVERY such read comes back empty — so a guard that started
+# perfectly is invisible, and the refusal above blocks an install that worked
+# on that same host before this proof existed. It fails CLOSED, which is the
+# right default and the wrong answer here.
+#
+# The discriminator is installer.pid: txn_begin wrote it into the same
+# directory, with the same owner and the same mode, moments earlier. If that
+# cannot be seen either, the reads are blind and nothing has been established
+# about the guard — warn and continue rather than refuse a fact nobody proved.
+#
+# The fixture makes the reads blind for real rather than stubbing the helper:
+# the transaction directory is chmod 000 (this suite runs unprivileged, so the
+# owner is locked out too) and the pass-through `sudo` stub re-execs as the
+# same user, which is exactly what a refused `sudo -n` leaves behind. Skipped
+# under uid 0, where mode bits do not apply and the scenario cannot exist.
+#
+# The CONTROL is t_guard_arm_refuses_when_the_guard_never_starts above: same
+# ceiling, readable transaction, dead guard — still a refusal. A "fix" that
+# simply stopped refusing is not green.
+# ---------------------------------------------------------------------------
+t_guard_arm_continues_when_the_transaction_cannot_be_read() {
+    _plat="$1"
+    if [ "$(id -u)" = 0 ]; then return 0; fi
+    _root="$(mktemp -d)"
+    setup_root "$_root"
+    _installer="$(stage_payload "$_root" yes)"
+
+    _rc=0
+    _out="$(RGA_START=no RGA_ARM_CEILING=2 \
+        run_guard_arm "$_root" "$_plat" "$_installer" \
+        'txn_begin; chmod 000 "$TXN_DIR"; guard_arm; echo "GUARD_ARMED=$GUARD_ARMED"' \
+        2>"$_root/stderr")" || _rc=$?
+    # Put the directory back before anything else touches it.
+    chmod 700 "$_root"/var/gateway/install/* 2>/dev/null || true
+
+    [ "$_rc" = 0 ] ||
+        fail "[$_plat] guard_arm refused an install because the transaction could not be READ — a blind 'sudo -n' is not evidence of a dead guard: $(cat "$_root/stderr")"
+    printf '%s\n' "$_out" | grep -q 'GUARD_ARMED=1' ||
+        fail "[$_plat] guard_arm continued but left GUARD_ARMED clear, so the handoff would never fire: $_out"
+    grep -q 'cannot be READ' "$_root/stderr" ||
+        fail "[$_plat] guard_arm continued silently — an operator must be told the arm-proof was blind: $(cat "$_root/stderr")"
+    grep -q 'guard never started' "$_root/stderr" &&
+        fail "[$_plat] guard_arm reported a dead guard when it could not read the transaction at all: $(cat "$_root/stderr")"
+    rm -rf "$_root"
+}
+
 for _plat in Darwin Linux; do
     t_guard_arm_finds_guard_beside_installer "$_plat"
+    t_guard_arm_continues_when_the_transaction_cannot_be_read "$_plat"
+    t_guard_arm_separates_unreadable_from_insecure "$_plat"
     t_guard_arm_refuses_without_guard_beside_installer "$_plat"
     t_guard_arm_refuses_when_the_guard_never_starts "$_plat"
     t_guard_arm_refuses_a_live_guard "$_plat"
