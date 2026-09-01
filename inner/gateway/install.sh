@@ -2866,6 +2866,28 @@ verify_units() {
 # daemon is already serving the snapshot's version and the unit body is
 # unchanged, which is precisely the "undisturbed" case this used to claim by
 # assertion and now establishes by observation.
+#
+# THE CLOSING ADVICE IS PER CAUSE, AND IT HAS TO BE.
+# "you do not need to stay connected" is true at the RESTART: `txn_phase
+# handoff` has already been written by then, so the installer's work is
+# finished and the guard CARRIES THE INSTALL THROUGH — restart, verify, and
+# roll back only if the new build does not come up. Staying connected adds
+# nothing.
+#
+# At the MIGRATION the same sentence is the reverse of what happens, and it
+# was being printed at the exact moment the operator decides. The stop is
+# ~150 lines BEFORE the handoff, so a severed session kills the installer at
+# phase `replacing`, and the guard's watch loop then takes its "installer pid
+# … exited at phase '…' without handing off — rolling back" arm: it UNDOES
+# the install rather than finishing it. So on a tunnelled host with a pending
+# rung an interactive install cannot complete either way — accepting rolls
+# back when the session drops, declining rolls back immediately — and the one
+# useful thing this prompt can do is say so and name the shape that does
+# work: re-run where nothing depends on this session surviving.
+#
+# Only the closing paragraph is split. The cause line, the transaction and
+# guard-status lines and the y/N prompt are shared, and the restart arm's
+# three lines are byte-for-byte what they have always been.
 
 consent_to_sever() {
     _when="$1"
@@ -2895,9 +2917,25 @@ consent_to_sever() {
 
         printf 'THROUGH that gateway — %s.\n' "$_cause"
         printf 'Continuing will drop this connection.\n\n'
-        printf 'A guard is already armed with a full snapshot of the previous install. It\n'
-        printf 'will restart the gateway, verify the new build comes up, and roll back to\n'
-        printf 'the snapshot if it does not — you do not need to stay connected.\n\n'
+        case "$_when" in
+        migration)
+            printf 'A guard is already armed with a full snapshot of the previous install, but\n'
+            printf 'it CANNOT carry this install through from here. The stop above comes\n'
+            printf 'BEFORE the installer hands off, so this session going takes the installer\n'
+            printf 'with it — and the guard rolls an installer that died mid-install BACK.\n'
+            printf 'Continuing leaves this host on the build it is running now, not the new\n'
+            printf 'one. Declining leaves it there too, undisturbed.\n\n'
+            printf 'To actually complete the install, re-run it where nothing depends on\n'
+            printf 'this session surviving:\n\n'
+            printf '  nohup <the installer> > /tmp/burrowee-install.log 2>&1 &\n'
+            printf '  (or under tmux/screen, or push the update from the console)\n\n'
+            ;;
+        *)
+            printf 'A guard is already armed with a full snapshot of the previous install. It\n'
+            printf 'will restart the gateway, verify the new build comes up, and roll back to\n'
+            printf 'the snapshot if it does not — you do not need to stay connected.\n\n'
+            ;;
+        esac
         printf '  transaction   %s\n' "$TXN_DIR"
         printf '  on reconnect  burrowee gateway service guard-status\n\n'
         printf 'Continue? [y/N] '

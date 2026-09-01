@@ -306,6 +306,66 @@ t_gate_names_the_migration_cause() {
         || fail "install.sh does not call consent_to_sever with the 'migration' cause"
 }
 
+# ---------------------------------------------------------------------------
+# THE PROMPT MUST NOT GIVE THE RESTART'S ADVICE AT THE MIGRATION.
+#
+# "you do not need to stay connected" is true at the Phase 3 restart: the
+# handoff is written, so the guard CARRIES THE INSTALL THROUGH. At the
+# migration it is the reverse — the stop comes before the handoff, so a
+# severed session kills the installer at phase `replacing` and the guard's
+# watch loop rolls the install BACK. Printing the restart's reassurance there
+# told the operator the opposite of what happens, at the moment they decide.
+#
+# The two arms are one `case` apart, which is exactly the kind of split a
+# later edit re-merges "to remove the duplication". These checks are what make
+# that visible instead of silent.
+# ---------------------------------------------------------------------------
+
+# closing_advice <migration|restart> — the printf lines one cause contributes
+# to the paragraph between "Continuing will drop this connection" and the
+# shared transaction/guard-status block. Anchored to those two lines rather
+# than to the function body, so it stays correct if the function grows.
+closing_advice() {
+    _ca_want="$1"
+    sed -n "/printf 'Continuing will drop this connection/,/printf '  transaction/p" "$INSTALL" \
+        | awk -v want="$_ca_want" '
+            /^[[:space:]]*migration\)/ { arm = "migration"; next }
+            /^[[:space:]]*\*\)/       { arm = "restart";   next }
+            /^[[:space:]]*;;/           { arm = "";          next }
+            arm == want                 { print }
+        '
+}
+
+t_causes_render_different_closing_advice() {
+    _mig="$(closing_advice migration)"
+    _res="$(closing_advice restart)"
+    [ -n "$_mig" ] || { fail "the prompt has no migration-specific closing advice"; return; }
+    [ -n "$_res" ] || { fail "the prompt has no restart closing advice"; return; }
+    [ "$_mig" != "$_res" ] \
+        || fail "both causes print the same closing advice — the migration arm has been re-merged"
+}
+
+# The restart's text is correct where it is and must not move.
+t_restart_keeps_its_advice() {
+    if ! closing_advice restart | grep -q 'you do not need to stay connected'; then
+        fail "the restart cause lost 'you do not need to stay connected', which is true there"
+    fi
+}
+
+# The migration's must not claim it, and must name the shape that does work.
+t_migration_advice_is_honest() {
+    _mig="$(closing_advice migration)"
+    if printf '%s\n' "$_mig" | grep -q 'you do not need to stay connected'; then
+        fail "the migration cause still tells the operator they may disconnect — the guard rolls that install BACK"
+    fi
+    if ! printf '%s\n' "$_mig" | grep -q 'nohup'; then
+        fail "the migration cause does not name a detached re-run, so it says what goes wrong and not what to do"
+    fi
+    if ! printf '%s\n' "$_mig" | grep -q 'BACK'; then
+        fail "the migration cause does not say the install is rolled back rather than finished"
+    fi
+}
+
 t_pending_asks
 t_nothing_pending_is_silent
 t_cannot_evaluate_does_not_ask
@@ -319,6 +379,9 @@ t_probe_env_matches_the_real_run
 t_gate_reads_has_tty
 t_gate_runs_before_the_migration_and_after_the_guard
 t_gate_names_the_migration_cause
+t_causes_render_different_closing_advice
+t_restart_keeps_its_advice
+t_migration_advice_is_honest
 
 if [ "$fails" -ne 0 ]; then
     printf '%s check(s) failed\n' "$fails" >&2
