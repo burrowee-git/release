@@ -2103,7 +2103,7 @@ snapshot_take() {
 # "recover" the host onto a store that will not open. Three ways down, best
 # first, and the manifest records which one was used.
 #
-# FOUR VALUES, NOT TWO: exact · best-effort · no-database.
+# THREE VALUES, NOT TWO: exact · best-effort · no-database.
 #
 # The early return below fires on every host that has never run a gateway, and
 # it used to leave this variable at its initial `exact` — so the manifest
@@ -2161,6 +2161,19 @@ snapshot_db() {
 #
 # So: one body, spelled identically in both files, and a test that fails the
 # build the moment they differ.
+#
+# AND THE PIN NOW STANDS IN THE WAY OF ONE KNOWN FIX, which is worth saying
+# here rather than being rediscovered at the point of failure. THIS copy runs
+# in the installer, which is routinely entered by an unprivileged shell, while
+# the transaction tree is root-owned 0700 — so its bare `[ -d ]` and glob are
+# blind in exactly the way txn_list_dir exists to correct, and abort_install's
+# no-guard branch can therefore read an empty snapshot on a host that has one.
+# The guard's copy has no such problem (it runs as root) and no such helper.
+# Routing this copy through txn_list_dir would fix the blindness and BREAK
+# byte-identity, so the pin would fail — correctly, since the two would no
+# longer be the same predicate. Fixing that finding therefore means re-scoping
+# the pin (or ending the duplication), not editing one copy and re-running the
+# test. Recorded, not fixed here.
 # ---------------------------------------------------------------------------
 # snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
 # previous install's binaries, or is this directory the empty shell a fresh

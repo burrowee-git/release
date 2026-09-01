@@ -376,23 +376,47 @@ restart_mode() {
 # do_restart is moving the host FORWARD onto the file this run rendered, so a
 # changed serve unit means launchd is holding a stale job and must re-read the
 # plist. rollback has just done the opposite: it copied the SNAPSHOT's unit
-# back over that file. When the snapshot held one, the content now on disk is
-# the content launchd already loaded before this install began — the in-memory
-# job and the file agree, and there is nothing to re-read.
+# back over that file — so the answer turns on what launchd is holding IN
+# MEMORY at that moment, and that is not the same on every caller.
 #
-# The bootout+bootstrap in that case is not merely redundant, it is the harm
-# this whole design exists to avoid one door further along: rollback's
-# undisturbed-case branch (below) skips the restart entirely when the daemon is
-# still serving the snapshot's build, precisely so that DECLINING the consent
-# prompt does not drop the connection the decline was protecting — and the
-# branch is gated on this mode being empty. A run that merely re-rendered the
-# unit template (a new StandardOutPath, say) therefore dropped the operator's
-# session on a decline, which is the one answer they gave to say "do not".
+# THE QUESTION IS "WHAT DID THE SUPERVISOR LAST LOAD", NOT "WHAT IS ON DISK".
+# rollback has four callers and they divide exactly on RESTART_ATTEMPTED:
 #
-# Narrow deliberately: when the snapshot has NO serve unit there is nothing to
-# have restored, the file on disk is this run's, and a reload is still correct.
+#   * NOT restarted yet (a declined consent, the installer dying, the deadline,
+#     an unreadable version stamp). Nothing has bootstrapped anything this run,
+#     so launchd still holds the definition it loaded BEFORE this install — the
+#     snapshot's. Restoring that file makes disk and memory agree again, and
+#     there is nothing to re-read.
+#
+#   * ALREADY restarted (do_restart's verify_serving failure — the mainstream
+#     rollback). restart_service ran with mode `reload`, which booted the label
+#     out and BOOTSTRAPPED THIS RUN'S PLIST: launchd's in-memory job is now the
+#     new definition. Restoring the snapshot's plist to disk does not undo
+#     that, and a plain `kickstart -k` restarts the job launchd already holds —
+#     so the host would go on running THIS RUN's unit definition against the
+#     RESTORED OLD BINARY, with the restored plist unread until the next
+#     reboot. That is "files converged, process still stale" in the undo
+#     direction, and it is worst exactly when it matters: a changed unit body
+#     is precisely the case where the old build may not tolerate the new
+#     ProgramArguments or environment, so the rollback fails to come up and the
+#     guard reports `failed` on a host that would have recovered.
+#
+# So the flag decides it, ahead of the snapshot question. The snapshot question
+# still answers the un-restarted callers, and its own narrow case survives: a
+# snapshot with NO serve unit leaves this run's file on disk, so a reload is
+# right there too.
+#
+# The empty answer is load-bearing and not merely an optimisation: rollback's
+# undisturbed-case branch (below) is gated on this mode being empty, and that
+# branch is what keeps a DECLINED consent prompt from dropping the very
+# connection the decline was protecting. A run that merely re-rendered the unit
+# template (a new StandardOutPath, say) used to take the bootout+bootstrap path
+# there and drop the operator's session — the one answer they gave to say "do
+# not". RESTART_ATTEMPTED is 0 on every one of those callers, so that case is
+# untouched by the branch above it.
 rollback_restart_mode() {
     unit_body_changed || { printf '\n'; return 0; }
+    if [ "$RESTART_ATTEMPTED" = 1 ]; then printf 'reload\n'; return 0; fi
     if snapshot_has_serve_unit "$1"; then printf '\n'; return 0; fi
     printf 'reload\n'
 }

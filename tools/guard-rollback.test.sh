@@ -834,6 +834,13 @@ $(cat "$_calls")"
 # rollback path a second file it must find would be a new way for a rollback
 # to fail. So: one body, spelled identically in both files, and this is what
 # makes a change to one visibly break the other.
+#
+# The pin is therefore also a CONSTRAINT, not just a safety net: the installer's
+# copy is privilege-blind against a root-owned 0700 transaction (it globs
+# directly instead of going through txn_list_dir), and the correction for that
+# would break byte-identity with a guard that runs as root and has no such
+# helper. Fixing it means re-scoping this pin or ending the duplication — not
+# editing one copy and re-running this check. See install.sh's own banner.
 # ---------------------------------------------------------------------------
 extract_snapshot_has_binaries() {
     awk '
@@ -918,12 +925,86 @@ $(cat "$_calls")"
     rm -rf "$_r"
 }
 
-# The control: same shape, but the snapshot holds NO serve unit, so the file on
-# disk after the restore is still the one THIS run rendered and launchd's
-# in-memory job is stale. The reload must survive that narrowing. Darwin only
-# — the bootout is a launchd-specific step; Linux's daemon-reload re-reads by
-# construction and t_guard_does_not_reload_an_unchanged_unit_body already pins
-# that the serve label is never unsupervised there.
+# COUNTED, NOT GREPPED, and that is the whole discriminator in the two checks
+# below. Both fixtures reach rollback THROUGH do_restart, whose own restart
+# already ran with mode `reload` and therefore already recorded one
+# `bootout system/com.burrowee.gateway`. A bare `grep -q bootout` is satisfied
+# by that forward bootout alone and says nothing about whether the ROLLBACK
+# re-read anything — the first version of the check below did exactly that, and
+# would have passed against the defect it was written to catch. Two restarts,
+# two bootouts; one bootout means the rollback did not reload.
+count_calls() {
+    grep -c "$2" "$1" 2>/dev/null || printf '0\n'
+}
+
+# ---------------------------------------------------------------------------
+# AFTER A FORWARD RESTART, A RESTORED PLIST MUST BE RE-READ — the mainstream
+# rollback, and the one the snapshot question alone gets wrong.
+#
+# rollback_restart_mode's first shape asked only "did the snapshot hold a serve
+# unit", on the premise that a restored file is the content launchd already
+# loaded before this install began. That premise holds on the pre-restart
+# callers and is false on this one:
+#
+#   1. do_restart runs restart_service with mode `reload` — bootout, then
+#      BOOTSTRAP OF THIS RUN'S PLIST, then kickstart. launchd's in-memory job
+#      is now the new definition.
+#   2. verify_serving fails, so rollback restores the snapshot's plist TO DISK.
+#   3. the snapshot DID hold a serve unit (make_txn snapshots it — this is the
+#      common fixture, not the exotic one), so the mode came back empty.
+#   4. restart_service "" bootstraps a label that is already loaded (exit 5,
+#      a no-op) and kickstarts the job launchd is holding — this run's.
+#
+# Net: the host runs THIS RUN's unit definition against the RESTORED OLD
+# BINARY, and the restored plist is not read until the next reboot. Benign only
+# while the old build tolerates the new ProgramArguments and environment — and
+# a changed unit body is exactly when it may not, in which case the rollback
+# does not come up and the guard reports `failed` about a host that would have
+# recovered. "Files converged, process still stale", in the undo direction.
+#
+# RESTART_ATTEMPTED already knows which caller this is, so it decides ahead of
+# the snapshot question.
+#
+# Darwin only: the bootout is the launchd-specific step. Linux's
+# `daemon-reload` + `restart` re-reads the unit by construction, and
+# t_guard_does_not_reload_an_unchanged_unit_body already pins that the serve
+# label is never unsupervised there.
+# ---------------------------------------------------------------------------
+t_rollback_after_a_forward_restart_rereads_the_restored_unit() {
+    _r="$(mktemp -d)"; setup_fake_host "$_r" Darwin
+    _t="$(make_txn "$_r" Darwin)"
+    # The snapshot KEEPS its serve unit — make_txn's own default, and the
+    # common case. That is the difference from the sibling below.
+    [ -f "$_t/snapshot/units/$(serve_unit_name Darwin)" ] \
+        || fail "fixture broken: make_txn no longer snapshots the serve unit"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    fake_supervisor "$_r" Darwin advance
+    printf 'v0.2.13\n' > "$_r/newver"
+    printf '%s\n' "$(serve_unit_name Darwin)" > "$_t/units-changed"
+    printf 'handoff\n' > "$_t/phase"
+
+    # newver is the OLD version, so do_restart's own verify (against v0.3.1)
+    # fails and routes this run through rollback — which is what makes the
+    # forward restart have already happened.
+    run_guard "$_r" "$_t" Darwin
+
+    _calls="$(supervisor_calls "$_r" Darwin)"
+    _boots="$(count_calls "$_calls" '^bootout system/com.burrowee.gateway$')"
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "forward-restart-then-restore: phase = $(cat "$_t/phase"), want rolled-back; calls:
+$(cat "$_calls")"
+    grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "forward-restart-then-restore: the rollback did not restore the previous binary"
+    [ "$_boots" = 2 ] \
+        || fail "the rollback restored the snapshot's plist and did NOT make launchd re-read it: do_restart had already bootstrapped THIS RUN's plist, so kickstart restarts the new unit definition against the restored OLD binary and the restored plist stays unread until reboot. Expected two bootouts (forward restart + rollback), saw $_boots; calls:
+$(cat "$_calls")"
+    rm -rf "$_r"
+}
+
+# The sibling, and the case the narrowing was originally written around: the
+# snapshot holds NO serve unit, so the file on disk after the restore is still
+# the one THIS run rendered. The reload must survive the narrowing there too —
+# by either route, since RESTART_ATTEMPTED is also 1 on this path.
 t_rollback_still_reloads_when_the_snapshot_holds_no_unit() {
     _r="$(mktemp -d)"; setup_fake_host "$_r" Darwin
     _t="$(make_txn "$_r" Darwin)"
@@ -940,10 +1021,11 @@ t_rollback_still_reloads_when_the_snapshot_holds_no_unit() {
     run_guard "$_r" "$_t" Darwin
 
     _calls="$(supervisor_calls "$_r" Darwin)"
+    _boots="$(count_calls "$_calls" '^bootout system/com.burrowee.gateway$')"
     [ "$(cat "$_t/phase")" = rolled-back ] \
         || fail "snapshot-holds-no-unit: phase = $(cat "$_t/phase"), want rolled-back"
-    grep -q 'bootout system/com.burrowee.gateway$' "$_calls" \
-        || fail "the rollback did not re-read a serve plist the snapshot could not restore — launchd is still holding this run's rendered job; calls:
+    [ "$_boots" = 2 ] \
+        || fail "the rollback did not re-read a serve plist the snapshot could not restore — launchd is still holding this run's rendered job. Expected two bootouts (forward restart + rollback), saw $_boots; calls:
 $(cat "$_calls")"
     rm -rf "$_r"
 }
@@ -1693,6 +1775,7 @@ t_guard_ok_prunes_old_transactions
 t_guard_removes_its_own_plist advance ok
 t_guard_removes_its_own_plist dead rolled-back
 t_guard_reloads_a_changed_unit_body
+t_rollback_after_a_forward_restart_rereads_the_restored_unit
 t_rollback_still_reloads_when_the_snapshot_holds_no_unit
 t_snapshot_has_binaries_is_pinned_across_both_files
 t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
