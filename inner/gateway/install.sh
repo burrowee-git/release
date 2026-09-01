@@ -1783,6 +1783,13 @@ snapshot_take() {
         printf 'running_version=%s\n' "${_running:-unknown}"
         printf 'uname=%s\n'           "$(uname -s)"
         printf 'consistency=%s\n'     "$SNAPSHOT_CONSISTENCY"
+        # The guard's post-success work (Task 10) needs the kept installer at
+        # $GW_HOME/install.sh to reach sweep_stale_user_bins — and the guard,
+        # running under launchd/systemd rather than the invoking operator's
+        # session, has no reliable $HOME of its own to resolve $GW_HOME from.
+        # Recorded here, the one place that still knows the real value, the
+        # same way running_version is recorded for the same reason.
+        printf 'gw_home=%s\n'         "$GW_HOME"
     } | run_root tee "$TXN_DIR/manifest" >/dev/null || return 1
 }
 

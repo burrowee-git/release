@@ -124,6 +124,11 @@ t_snapshot_captures_everything() {
     [ -f "$_txn/snapshot/data/state.txt" ]                    || fail "[$_plat] snapshot missing the state tree"
     grep -q '^running_version=' "$_txn/manifest" || fail "[$_plat] manifest records no running_version"
     grep -q '^consistency='     "$_txn/manifest" || fail "[$_plat] manifest records no consistency"
+    # gw_home= is what lets the guard find the kept installer at
+    # $GW_HOME/install.sh for its post-success sweep (Task 10) — the guard
+    # runs under launchd/systemd, with no reliable $HOME of its own to
+    # resolve $GW_HOME from, so this is the one place that still knows it.
+    grep -q '^gw_home=.\+$'     "$_txn/manifest" || fail "[$_plat] manifest records no gw_home"
     # The transaction tree must NOT snapshot itself.
     [ ! -d "$_txn/snapshot/data/install" ] || fail "[$_plat] snapshot recursed into install/"
     rm -rf "$_root"

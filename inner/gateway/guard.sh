@@ -125,6 +125,97 @@ rollback() {
     exit 2
 }
 
+# sweep_stale_bins_via_kept_installer — run the installer's own
+# sweep_stale_user_bins, the way keep_installer_copy leaves it for exactly
+# this: a copy of install.sh (and migrations/) at $GW_HOME, the value
+# snapshot_take recorded into the manifest because the guard, running under
+# launchd/systemd rather than the invoking operator's session, has no
+# reliable $HOME to resolve $GW_HOME from itself.
+#
+# Deliberately NOT `burrowee-gateway-cli service install`: that re-enters
+# install.sh in BURROWEE_UNITS_ONLY mode, which arms a SECOND guard inside
+# this one's own success path. Sourcing the kept installer reaches the one
+# function this step needs without re-running any of the rest of it.
+#
+# Run in a subshell (`sh -c`), never dot-sourced into this shell directly:
+# install.sh defines BIN_DIR, SYS_DATA_DIR and other names this script also
+# uses, and dot-sourcing it here would overwrite them in place. $0 is set to
+# the kept installer's own path via the trailing argument — sh has no other
+# portable way to steer it — so install.sh's own `$(dirname "$0")/migrations`
+# resolution (stale_sweep_lib) finds the migrations/ copy keep_installer_copy
+# kept right beside it.
+#
+# Must run only AFTER a verified restart — see this file's header and
+# sweep_stale_user_bins' own comment in install.sh: it deletes per-user
+# binaries, and until the daemon has actually advanced onto the loaded units,
+# a still-running per-user process may still name one.
+sweep_stale_bins_via_kept_installer() {
+    _gw_home="$(sed -n 's/^gw_home=//p' "$TXN/manifest" 2>/dev/null || true)"
+    if [ -z "$_gw_home" ] || [ ! -f "$_gw_home/install.sh" ]; then
+        log "no kept installer at '${_gw_home:-<unset>}/install.sh' — skipping the stale-bin sweep"
+        return 0
+    fi
+    if BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins' "$_gw_home/install.sh" \
+        >> "$TXN/guard.log" 2>&1
+    then
+        log "stale-bin sweep ran via $_gw_home/install.sh"
+    else
+        log "stale-bin sweep failed (via $_gw_home/install.sh) — continuing"
+    fi
+}
+
+# advance_updater — start (or restart) the updater unit. load_units used to do
+# this in the foreground; Task 7 removed load_units from the fresh-install
+# path entirely, which left the updater unit RENDERED but never started on a
+# fresh install. This is what restores it, after the serve daemon itself is
+# already proven up.
+#
+# Safe to bootout on Darwin, unlike the serve label: nothing routes through
+# the updater, so a guard killed mid-bootout strands nothing an operator needs
+# to reach the host.
+advance_updater() {
+    case "$UNAME" in
+    Darwin)
+        "$LAUNCHCTL" bootout "system/$LABEL.updater" 2>/dev/null || true
+        "$LAUNCHCTL" bootstrap system "${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}/$LABEL.updater.plist" 2>/dev/null || true
+        "$LAUNCHCTL" enable "system/$LABEL.updater" 2>/dev/null || true
+        "$LAUNCHCTL" kickstart -k "system/$LABEL.updater" 2>/dev/null || true
+        ;;
+    Linux)
+        "$SYSTEMCTL" enable --now burrowee-gateway-updater.service 2>/dev/null || true
+        "$SYSTEMCTL" restart burrowee-gateway-updater.service 2>/dev/null || true
+        ;;
+    esac
+    log "updater advanced"
+}
+
+# apply_retention — keep this transaction and the two before it. A snapshot is
+# a full copy of the state tree, so an unbounded ring of them is an unbounded
+# disk cost on a host nobody is watching. Transaction directories are named by
+# a UTC timestamp (txn_begin's TXN_STAMP), which sorts lexically, so `sort`
+# orders them chronologically with no extra bookkeeping.
+#
+# Deliberately not `head -n -3`: that negative-count form is a GNU extension
+# with no guaranteed BSD equivalent, and this script ships to real Darwin
+# hosts (the `head` on the guard's own platform, not just the suite's CI
+# box). Counted and sliced by hand instead, entirely in POSIX sh.
+apply_retention() {
+    _base="$SYS_DATA_DIR/install"
+    [ -d "$_base" ] || return 0
+    _total="$(ls -1 "$_base" 2>/dev/null | wc -l | tr -d ' ')"
+    _drop=$((_total - 3))
+    if [ "$_drop" -le 0 ]; then
+        log "snapshot retention: $_total kept, nothing to prune"
+        return 0
+    fi
+    _i=0
+    ls -1 "$_base" 2>/dev/null | sort | while read -r _old; do
+        _i=$((_i + 1))
+        [ "$_i" -le "$_drop" ] && [ -n "$_old" ] && rm -rf "$_base/$_old"
+    done
+    log "snapshot retention applied ($_drop pruned, 3 kept)"
+}
+
 do_restart() {
     phase restarting
     _want="$(binary_version)"
@@ -137,6 +228,13 @@ do_restart() {
     if verify_serving "$_want"; then
         phase ok
         log "OK — $_want is serving"
+
+        # Post-success work the installer used to do after load_units, moved
+        # here because a severed session skipped all of it.
+        sweep_stale_bins_via_kept_installer
+        advance_updater
+        apply_retention
+
         exit 0
     fi
     rollback

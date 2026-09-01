@@ -5,6 +5,12 @@
 # against install.sh's source. Nothing here touches a real launchd, systemd,
 # binary or database.
 #
+# (Task 10) also drives the guard's post-success work — the stale-binary
+# sweep via the kept installer, the updater advance, snapshot retention — and
+# the deadline exit, the third of the watch loop's three ways out (the first
+# two, handoff->ok and installer-died, are covered by t_guard_ok and
+# tools/guard-installer-death.test.sh respectively).
+#
 #     sh tools/guard-rollback.test.sh
 #     dash tools/guard-rollback.test.sh
 #
@@ -72,6 +78,26 @@ unsupervise_pattern() {
     case "$1" in
     Darwin) printf '%s\n' 'bootout system/com.burrowee.gateway$' ;;
     Linux)  printf 'stop %s$\n' "$2" ;;
+    esac
+}
+
+# updater_unit_name <platform> — the updater unit's filename on <platform>,
+# the same mapping snapshot_take uses.
+updater_unit_name() {
+    case "$1" in
+    Darwin) echo com.burrowee.gateway.updater.plist ;;
+    Linux)  echo burrowee-gateway-updater.service ;;
+    esac
+}
+
+# updater_advance_call <platform> — the exact recorded call that means "the
+# guard started (or restarted) the updater": launchd's kickstart, systemd's
+# restart, on the UPDATER label/unit specifically (never the bare serve one —
+# unsupervise_pattern above already anchors that check separately).
+updater_advance_call() {
+    case "$1" in
+    Darwin) printf '%s\n' 'kickstart -k system/com.burrowee.gateway.updater' ;;
+    Linux)  printf '%s\n' 'restart burrowee-gateway-updater.service' ;;
     esac
 }
 
@@ -153,11 +179,15 @@ make_txn() {
     printf '%s\n' "$_t"
 }
 
+# run_guard <root> <txn> <platform> [deadline] — deadline defaults to 10s,
+# long enough that a normal ok/rolled-back run never comes close to it;
+# t_guard_deadline_exceeded overrides it down to exercise the deadline branch
+# itself in a couple of seconds instead of ten.
 run_guard() {
-    _r="$1"; _txn="$2"; _plat="$3"
+    _r="$1"; _txn="$2"; _plat="$3"; _deadline="${4:-10}"
     GUARD_LAUNCHCTL="$_r/launchctl" \
     GUARD_SYSTEMCTL="$_r/systemctl" \
-    GUARD_DEADLINE=10 GUARD_VERIFY_CEILING=3 GUARD_VERIFY_INTERVAL=1 \
+    GUARD_DEADLINE="$_deadline" GUARD_VERIFY_CEILING=3 GUARD_VERIFY_INTERVAL=1 \
     BURROWEE_BIN_DIR="$_r/bin" \
     BURROWEE_LAUNCHD_DIR="$_r/units" \
     BURROWEE_SYSTEMD_DIR="$_r/units" \
@@ -199,6 +229,159 @@ t_guard_rolls_back() {
 
     [ "$(cat "$_t/phase")" = rolled-back ] || fail "[$_plat] phase = $(cat "$_t/phase"), want rolled-back"
     grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" || fail "[$_plat] rollback did not restore the old binary"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# Task 10 — the guard's post-success work: the stale-binary sweep (via the
+# kept installer, never `service install`), the updater advance, snapshot
+# retention, and the deadline exit. Run once per platform shape unless noted.
+# ---------------------------------------------------------------------------
+
+# The updater unit is rendered by install.sh but never started on a fresh
+# install — Task 7 removed load_units, which used to be what started it, from
+# the foreground flow entirely. Restoring it is this guard's job, and only
+# after the serve daemon itself has already proven up (t_guard_ok already
+# covers that ordering for the serve restart; this covers it for the
+# updater).
+t_guard_ok_advances_updater() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    [ "$(cat "$_t/phase")" = ok ] || fail "[$_plat] phase = $(cat "$_t/phase"), want ok"
+    grep -q "$(updater_advance_call "$_plat")" "$_calls" \
+        || fail "[$_plat] the updater was never advanced after a verified restart; calls:
+$(cat "$_calls")"
+    rm -rf "$_r"
+}
+
+# The stale-binary sweep must run via the KEPT installer's own
+# sweep_stale_user_bins, reached through the manifest's gw_home= (the seam
+# Correction 1 requires), never by re-entering install.sh as
+# `burrowee-gateway-cli service install` — which would arm a SECOND guard
+# inside this one's own success path. This drives the REAL install.sh, not a
+# stand-in, because the claim under test is that guard.sh's sourcing actually
+# reaches the real function, with the right $BIN_DIR, not merely that some
+# function got called.
+t_guard_ok_sweeps_stale_bins() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+
+    _gwhome="$_r/gwhome"
+    mkdir -p "$_gwhome/migrations"
+    cp "$HERE/inner/gateway/install.sh" "$_gwhome/install.sh"
+    # A recording stand-in for the shipped library — same shape as the Go
+    # suite's stageSweepLib (inner/gateway/install_test/stale_user_bins_test.go):
+    # the deletion itself is that library's own contract, tested there;
+    # recording the call and its environment is what this seam owns.
+    cat > "$_gwhome/migrations/lib_stale_user_bins.sh" <<STUB
+STALE_USER_BINS="\$BINS"
+remove_stale_user_bins() {
+    printf 'SWEEP_CALLED BIN_DIR=%s\n' "\$BIN_DIR" >> "$_r/sweep.calls"
+}
+STUB
+    printf 'gw_home=%s\n' "$_gwhome" >> "$_t/manifest"
+
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+
+    [ "$(cat "$_t/phase")" = ok ] || fail "[$_plat] phase = $(cat "$_t/phase"), want ok"
+    [ -f "$_r/sweep.calls" ] && grep -q 'SWEEP_CALLED' "$_r/sweep.calls" \
+        || fail "[$_plat] the kept installer's sweep never ran (guard.log: $(cat "$_t/guard.log" 2>/dev/null))"
+    grep -q "BIN_DIR=$_r/bin$" "$_r/sweep.calls" 2>/dev/null \
+        || fail "[$_plat] the sweep ran with the wrong \$BIN_DIR: $(cat "$_r/sweep.calls" 2>/dev/null)"
+    rm -rf "$_r"
+}
+
+# A restart the new build never survives (verify_serving times out on the new
+# version, forcing a deadline is unnecessary to prove that path — t_guard_ok
+# already covers it) is not what this checks. This is the THIRD way out of
+# the watch loop: nothing ever hands off, and nothing ever dies — the
+# installer sits at a non-terminal phase indefinitely (a genuinely wedged
+# migration), and the guard must not hold the host hostage forever. A short
+# GUARD_DEADLINE makes the branch reachable in a couple of seconds rather than
+# the production default of 900.
+# Run in the BACKGROUND, not through run_guard: this test pins the ceiling
+# ARITHMETIC itself, not merely the eventual outcome. A mutation that drops
+# the elapsed-time subtraction entirely (comparing the raw epoch clock to
+# DEADLINE instead of "now minus start") still ends at phase=rolled-back
+# eventually — the outcome-only assertions below would not catch it — but it
+# fires on the very first loop tick instead of after the deadline, which the
+# early-phase check below does catch.
+t_guard_deadline_exceeded() {
+    _plat="$1"
+    _deadline=4
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" dead
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'replacing\n' > "$_t/phase"
+
+    # The installer is still ALIVE throughout — this must be the deadline
+    # branch firing, not the installer-died branch (that one is
+    # tools/guard-installer-death.test.sh's job).
+    sh -c 'sleep 30' &
+    _ipid=$!
+    printf '%s\n' "$_ipid" > "$_t/installer.pid"
+
+    GUARD_LAUNCHCTL="$_r/launchctl" \
+    GUARD_SYSTEMCTL="$_r/systemctl" \
+    GUARD_DEADLINE="$_deadline" GUARD_VERIFY_CEILING=2 GUARD_VERIFY_INTERVAL=1 \
+    BURROWEE_BIN_DIR="$_r/bin" \
+    BURROWEE_LAUNCHD_DIR="$_r/units" \
+    BURROWEE_SYSTEMD_DIR="$_r/units" \
+    BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
+    BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
+    GUARD_UNAME="$_plat" \
+    sh "$GUARD" "$_t" >/dev/null 2>&1 &
+    _gpid=$!
+
+    # Halfway into a 4s deadline: the correct arithmetic has not fired yet.
+    sleep 2
+    _early="$(cat "$_t/phase")"
+
+    wait "$_gpid" 2>/dev/null || true
+    kill "$_ipid" 2>/dev/null || true
+    wait "$_ipid" 2>/dev/null || true
+
+    [ "$_early" = replacing ] \
+        || fail "[$_plat] phase was already '$_early' 2s into a ${_deadline}s deadline — the ceiling arithmetic fired too early"
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want rolled-back after the deadline"
+    grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "[$_plat] the deadline rollback did not restore the old binary"
+    grep -q 'deadline.*exceeded' "$_t/guard.log" 2>/dev/null \
+        || fail "[$_plat] guard.log does not record why it rolled back"
+    rm -rf "$_r"
+}
+
+# Retention keeps this transaction and the two before it — platform-agnostic
+# (rm -rf and lexical sort, no supervisor call involved), so this runs once
+# rather than per platform, same discipline as the static checks below.
+t_guard_ok_prunes_old_transactions() {
+    _r="$(mktemp -d)"; setup_fake_host "$_r" Linux; fake_supervisor "$_r" Linux advance
+    _install="$_r/var/gateway/install"
+    for _stamp in 20260101T000000Z 20260102T000000Z 20260103T000000Z 20260104T000000Z; do
+        mkdir -p "$_install/$_stamp"
+        printf 'stale\n' > "$_install/$_stamp/marker"
+    done
+    _t="$(make_txn "$_r" Linux)"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" Linux
+
+    [ "$(cat "$_t/phase")" = ok ] || fail "prune-fixture: phase = $(cat "$_t/phase"), want ok"
+    [ -d "$_t" ] || fail "retention deleted the transaction currently in flight"
+    [ -d "$_install/20260104T000000Z" ] || fail "retention deleted a transaction that should have been kept"
+    [ -d "$_install/20260103T000000Z" ] || fail "retention deleted a transaction that should have been kept"
+    [ -d "$_install/20260102T000000Z" ] && fail "retention kept a transaction older than the last two plus the current one"
+    [ -d "$_install/20260101T000000Z" ] && fail "retention kept a transaction older than the last two plus the current one"
     rm -rf "$_r"
 }
 
@@ -616,11 +799,15 @@ t_reattach_times_out_on_an_unrecognised_phase() {
 for _plat in Darwin Linux; do
     t_guard_ok "$_plat"
     t_guard_rolls_back "$_plat"
+    t_guard_ok_advances_updater "$_plat"
+    t_guard_ok_sweeps_stale_bins "$_plat"
+    t_guard_deadline_exceeded "$_plat"
     t_verify_units_passes "$_plat"
     t_verify_units_fails_when_unit_missing "$_plat"
     t_verify_units_fails_when_exec_target_not_executable "$_plat"
 done
 
+t_guard_ok_prunes_old_transactions
 t_verify_precedes_handoff
 t_consent_is_tty_gated
 t_reconnect_line_precedes_handoff
@@ -636,4 +823,4 @@ if [ "$fails" -ne 0 ]; then
     printf '%s: %d check(s) failed\n' "$0" "$fails" >&2
     exit 1
 fi
-printf 'ok: guard reaches ok and rolled-back correctly, and Phase 2 verification catches a bad placement (Darwin + Linux)\n'
+printf 'ok: guard reaches ok / rolled-back / deadline correctly, post-success work runs, and Phase 2 verification catches a bad placement (Darwin + Linux)\n'
