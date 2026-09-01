@@ -361,6 +361,42 @@ run_install_snippet() {
     )
 }
 
+# run_reattach <root> <phase> <ceiling> <interval> — write <phase> into a
+# fresh transaction's phase file, then run reattach() against it through the
+# same BURROWEE_SOURCE_ONLY seam run_install_snippet uses. reattach needs no
+# tty and no real supervisor — it only ever reads a phase file — so this is
+# the same shape as every verify_placement/verify_units check above, not a
+# new harness.
+#
+# REATTACH_CEILING/REATTACH_INTERVAL are exported BEFORE install.sh is
+# sourced, because install.sh reads them into shell variables with `${VAR:-…}`
+# defaults at source time — an env var set that way is exactly what a default
+# expansion picks up. TXN_DIR is the opposite: install.sh unconditionally
+# assigns `TXN_DIR=""` at its own top level (txn_begin is what sets it for
+# real, and this test never calls txn_begin), so an exported TXN_DIR would be
+# clobbered the instant the script is sourced. It is set in the SNIPPET,
+# after sourcing, same as TXN_STAMP.
+run_reattach() {
+    _r="$1"; _phase="$2"; _ceiling="$3"; _interval="$4"
+    _txn="$_r/txn"
+    rm -rf "$_txn"; mkdir -p "$_txn"
+    printf '%s\n' "$_phase" > "$_txn/phase"
+    _stub="$(install_stub_dir "$_r")"
+    (
+        cd "$_r" && \
+        BURROWEE_SOURCE_ONLY=1 \
+        PATH="$_stub:$PATH" \
+        BURROWEE_BIN_DIR="$_r/bin" \
+        BURROWEE_LAUNCHD_DIR="$_r/units" \
+        BURROWEE_SYSTEMD_DIR="$_r/units" \
+        BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
+        BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
+        REATTACH_CEILING="$_ceiling" \
+        REATTACH_INTERVAL="$_interval" \
+        sh -c ". '$HERE/inner/gateway/install.sh'; TXN_DIR='$_txn'; TXN_STAMP=teststamp; reattach" 2>&1
+    )
+}
+
 # write_archive_and_placement <root> — an archive dir and a $BIN_DIR that
 # agree byte-for-byte on every name in $GATEWAY_BINS: the passing baseline
 # every verify_placement check below starts from and mutates one property
@@ -518,6 +554,65 @@ t_verify_units_darwin_fails_when_plist_invalid() {
     rm -rf "$_r"
 }
 
+# ---------------------------------------------------------------------------
+# reattach() behavioural coverage (Task 9, fix round 1). New, non-trivial
+# logic — three terminal phases mapped to three distinct exit codes, plus a
+# timeout fallback — that was previously covered only structurally (does the
+# function exist, does it mention has_tty) and bypassed entirely in the Go
+# suite via REATTACH_CEILING=0. This is the verdict mapping an operator
+# actually reads to learn whether their host came back; it needs its own
+# behavioural proof, not just a source-text check.
+# ---------------------------------------------------------------------------
+
+# The three terminal phases map to the three exit codes reattach's own header
+# documents, and rolled-back/failed must both point the operator at
+# guard-status — the one place they can find out what actually happened once
+# they reconnect.
+t_reattach_maps_terminal_phases_to_exit_codes() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+
+    _rc=0; _out="$(run_reattach "$_r" ok 2 1)" || _rc=$?
+    [ "$_rc" -eq 0 ] || fail "reattach with phase=ok exited $_rc, want 0: $_out"
+    printf '%s\n' "$_out" | grep -q 'serving the new build' \
+        || fail "reattach's ok output does not say the gateway is serving: $_out"
+
+    _rc=0; _out="$(run_reattach "$_r" rolled-back 2 1)" || _rc=$?
+    [ "$_rc" -eq 1 ] || fail "reattach with phase=rolled-back exited $_rc, want 1: $_out"
+    printf '%s\n' "$_out" | grep -q 'guard-status' \
+        || fail "reattach's rolled-back output does not point at guard-status: $_out"
+
+    _rc=0; _out="$(run_reattach "$_r" failed 2 1)" || _rc=$?
+    [ "$_rc" -eq 2 ] || fail "reattach with phase=failed exited $_rc, want 2: $_out"
+    printf '%s\n' "$_out" | grep -q 'guard-status' \
+        || fail "reattach's failed output does not point at guard-status: $_out"
+
+    rm -rf "$_r"
+}
+
+# A phase that never reaches a terminal state — whether because the guard is
+# still legitimately working, or because a read caught the phase file
+# mid-write (a torn value; the guard's own default response to an
+# unrecognised phase is to roll back, but that is guard.sh's call, not
+# reattach's) — must never be mistaken for one. reattach's own logic makes no
+# distinction between "still pending" and "garbage": both fall through every
+# case arm identically and are handled by the same poll-then-give-up path, so
+# one garbage value exercises both. Giving up must be exit 0 (this session
+# not reattaching does not mean the install failed) with the honest
+# "has not reported yet" message, once the ceiling elapses.
+t_reattach_times_out_on_an_unrecognised_phase() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+
+    _rc=0
+    _out="$(run_reattach "$_r" "garbage-not-a-real-phase" 2 1)" || _rc=$?
+    [ "$_rc" -eq 0 ] || fail "reattach timing out on an unrecognised phase exited $_rc, want 0: $_out"
+    printf '%s\n' "$_out" | grep -q 'has not reported yet' \
+        || fail "reattach did not report giving up on an unrecognised phase: $_out"
+
+    rm -rf "$_r"
+}
+
 for _plat in Darwin Linux; do
     t_guard_ok "$_plat"
     t_guard_rolls_back "$_plat"
@@ -534,6 +629,8 @@ t_verify_placement_passes_on_matching_install
 t_verify_placement_catches_corrupted_binary
 t_verify_placement_catches_missing_binary
 t_verify_units_darwin_fails_when_plist_invalid
+t_reattach_maps_terminal_phases_to_exit_codes
+t_reattach_times_out_on_an_unrecognised_phase
 
 if [ "$fails" -ne 0 ]; then
     printf '%s: %d check(s) failed\n' "$0" "$fails" >&2
