@@ -1679,6 +1679,163 @@ sha256_of() {
 }
 
 # ---------------------------------------------------------------------------
+# The install transaction.
+#
+# ONE directory holds everything the guard needs to finish, or undo, an install
+# that the operator's session did not survive. It lives under the DATA root
+# because that is the root the guard can reach as root on every platform, and
+# because it must outlive both the installer process and the session.
+#
+#   $SYS_DATA_DIR/install/<stamp>/
+#     phase          one token, the state machine's whole shared state
+#     manifest       key=value: what was snapshotted, and how faithfully
+#     guard.log      the guard's own narration
+#     guard.pid      so a second install can refuse to race a live guard
+#     installer.pid  what the guard watches for an early death
+#     snapshot/      bin/ units/ config/ data/
+# ---------------------------------------------------------------------------
+TXN_DIR=""
+TXN_STAMP=""
+
+txn_begin() {
+    TXN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    TXN_DIR="$SYS_DATA_DIR/install/$TXN_STAMP"
+    run_root mkdir -p "$TXN_DIR/snapshot/bin" "$TXN_DIR/snapshot/units" || return 1
+    run_root chmod 700 "$SYS_DATA_DIR/install" "$TXN_DIR" || return 1
+    printf '%s\n' "$$" | run_root tee "$TXN_DIR/installer.pid" >/dev/null || return 1
+    txn_phase armed
+}
+
+# txn_phase <phase> — the ONLY writer of the phase file, and it writes
+# atomically. The guard polls this file; a partial write read as a phase name
+# would be an unrecognised state, and the guard's default for an unrecognised
+# state is to roll back. Write to a temp name in the same directory, then mv.
+txn_phase() {
+    [ -n "$TXN_DIR" ] || return 0
+    printf '%s\n' "$1" | run_root tee "$TXN_DIR/.phase.tmp" >/dev/null || return 1
+    run_root mv -f "$TXN_DIR/.phase.tmp" "$TXN_DIR/phase" || return 1
+}
+
+# snapshot_take — capture the last working point: binaries, units, config tree,
+# state tree. Runs BEFORE the first write, while the old daemon is still
+# serving, so everything here is a read of a live host.
+snapshot_take() {
+    _snap="$TXN_DIR/snapshot"
+
+    for b in $BINS; do
+        if [ -f "$BIN_DIR/$b" ]; then
+            run_root cp -p "$BIN_DIR/$b" "$_snap/bin/$b" || return 1
+        fi
+    done
+
+    case "$(uname -s)" in
+    Darwin)
+        for u in com.burrowee.gateway.plist com.burrowee.gateway.updater.plist; do
+            [ -f "$LAUNCHD_DIR/$u" ] && { run_root cp -p "$LAUNCHD_DIR/$u" "$_snap/units/$u" || return 1; }
+        done
+        ;;
+    Linux)
+        for u in burrowee-gateway.service burrowee-gateway-updater.service; do
+            [ -f "$SYSTEMD_DIR/$u" ] && { run_root cp -p "$SYSTEMD_DIR/$u" "$_snap/units/$u" || return 1; }
+        done
+        ;;
+    esac
+
+    # The config tree whole — the identity key is in here, and losing it is
+    # unrecoverable, so it is snapshotted for the same reason it is never
+    # regenerated.
+    if [ -d "$SYS_CONFIG_DIR" ]; then
+        run_root cp -Rp "$SYS_CONFIG_DIR" "$_snap/config" || return 1
+    fi
+
+    # The state tree, MINUS install/ (this directory — copying it into itself
+    # is unbounded) and MINUS logs/ (large, append-only, and restoring an old
+    # log is not part of any working point).
+    run_root mkdir -p "$_snap/data" || return 1
+    if [ -d "$SYS_DATA_DIR" ]; then
+        for _e in "$SYS_DATA_DIR"/*; do
+            [ -e "$_e" ] || continue
+            case "${_e##*/}" in
+                install | logs) continue ;;
+                gateway.db | gateway.db-wal | gateway.db-shm) continue ;;  # handled below
+            esac
+            run_root cp -Rp "$_e" "$_snap/data/" || return 1
+        done
+    fi
+
+    snapshot_db "$_snap/data/gateway.db"
+
+    _running="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$SYS_DATA_DIR/running.json" 2>/dev/null || true)"
+    {
+        printf 'stamp=%s\n'           "$TXN_STAMP"
+        printf 'running_version=%s\n' "${_running:-unknown}"
+        printf 'uname=%s\n'           "$(uname -s)"
+        printf 'consistency=%s\n'     "$SNAPSHOT_CONSISTENCY"
+    } | run_root tee "$TXN_DIR/manifest" >/dev/null || return 1
+}
+
+# snapshot_db <dst> — a CONSISTENT copy of gateway.db, taken while the old
+# daemon still holds it open. gateway.db is WAL-mode, so a plain cp under an
+# active writer can capture a header that does not match the pages beside it;
+# restoring that is worse than not rolling back, because the guard would
+# "recover" the host onto a store that will not open. Three ways down, best
+# first, and the manifest records which one was used.
+SNAPSHOT_CONSISTENCY=exact
+snapshot_db() {
+    _dst="$1"
+    [ -f "$SYS_DATA_DIR/gateway.db" ] || return 0
+
+    if run_root "$BIN_DIR/burrowee-gateway-cli" db snapshot "$_dst" 2>/dev/null; then
+        SNAPSHOT_CONSISTENCY=exact
+        return 0
+    fi
+    if command -v sqlite3 >/dev/null 2>&1 &&
+       run_root sqlite3 "$SYS_DATA_DIR/gateway.db" ".backup '$_dst'" 2>/dev/null; then
+        SNAPSHOT_CONSISTENCY=exact
+        return 0
+    fi
+    # Last resort: the database and BOTH sidecars together, so the pair can at
+    # least be reconciled by SQLite on open. Recorded honestly.
+    for _f in gateway.db gateway.db-wal gateway.db-shm; do
+        [ -f "$SYS_DATA_DIR/$_f" ] && run_root cp -p "$SYS_DATA_DIR/$_f" "${_dst%gateway.db}$_f"
+    done
+    SNAPSHOT_CONSISTENCY=best-effort
+    echo "warning: gateway.db was copied without an online backup — a rollback may" >&2
+    echo "warning: restore a database that needs recovery on open (consistency=best-effort)" >&2
+}
+
+# snapshot_restore — put the last working point back. Every failure is
+# reported and the function keeps going: a partial restore that gets the
+# binaries back is strictly better than one that stops at the first error.
+snapshot_restore() {
+    _snap="$TXN_DIR/snapshot"
+    _rc=0
+
+    for b in $BINS; do
+        [ -f "$_snap/bin/$b" ] || continue
+        run_root cp -p "$_snap/bin/$b" "$BIN_DIR/$b" || _rc=1
+    done
+
+    case "$(uname -s)" in
+    Darwin) _unit_dir="$LAUNCHD_DIR" ;;
+    Linux)  _unit_dir="$SYSTEMD_DIR" ;;
+    *)      _unit_dir="" ;;
+    esac
+    if [ -n "$_unit_dir" ] && [ -d "$_snap/units" ]; then
+        for _u in "$_snap/units"/*; do
+            [ -e "$_u" ] || continue
+            run_root cp -p "$_u" "$_unit_dir/${_u##*/}" || _rc=1
+        done
+    fi
+
+    [ -d "$_snap/config" ] && { run_root cp -Rp "$_snap/config/." "$SYS_CONFIG_DIR/" || _rc=1; }
+    [ -d "$_snap/data" ]   && { run_root cp -Rp "$_snap/data/."   "$SYS_DATA_DIR/"   || _rc=1; }
+
+    return "$_rc"
+}
+
+# ---------------------------------------------------------------------------
 # $BIN_DIR placement: one elevation decision, all-or-nothing.
 #
 # Mirrors gateway/update.sh's PLACE_ELEVATED (see that script's header for the
@@ -1788,6 +1945,13 @@ place_all_bins() {
 # ---------------------------------------------------------------------------
 # Mode dispatch.
 # ---------------------------------------------------------------------------
+
+# Sourced by the test suites to reach the helpers above without performing an
+# install. It is checked here, at the TOP of the mode dispatch, so no mode can
+# be entered by a sourcing caller.
+if [ -n "${BURROWEE_SOURCE_ONLY:-}" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # First, ahead of the consent prompt and every write: this mode places no
