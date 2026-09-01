@@ -845,6 +845,23 @@ sweep_stale_user_bins() {
 # place_unit <rendered-temp-file> <dst> — install a rendered unit at its
 # system path as root, only when content differs (a no-op refresh never needs
 # sudo). Must stay content-identical with the Go side's unit writers.
+#
+# IT ALSO RECORDS THAT THE FILE CHANGED, into $TXN_DIR/units-changed, one
+# basename per line. That marker is the only thing that tells the guard a
+# `kickstart -k` is not enough this run: kickstart restarts the job launchd
+# holds IN MEMORY and bootstrap no-ops on an already-loaded label, so with the
+# installer's bootout gone nothing re-reads a rewritten plist until the next
+# reboot — a changed ExecStart, KeepAlive or StandardOutPath silently not
+# taking effect. The guard is the safe place to bootout+bootstrap for it
+# (it is detached; see guard.sh's restart_service), and this is how it learns
+# it needs to. Written from the WRITE branch only: an unchanged unit records
+# nothing, which is exactly the signal.
+#
+# Best-effort and never fatal. The transaction directory is root-owned 0700, so
+# the append goes through run_root like every other write to it; a host where
+# that fails loses the reload optimisation, not the install. `tee -a` rather
+# than a redirect because the redirect would be opened by THIS shell, which is
+# not the one run_root elevates.
 # ---------------------------------------------------------------------------
 place_unit() {
     if [ -f "$2" ] && cmp -s "$1" "$2"; then
@@ -855,6 +872,10 @@ place_unit() {
     [ -d "$(dirname "$2")" ] || run_root mkdir -p "$(dirname "$2")" || { rm -f "$1"; return 1; }
     run_root /usr/bin/install -m 0644 "$1" "$2" || { rm -f "$1"; return 1; }
     rm -f "$1"
+    if [ -n "$TXN_DIR" ]; then
+        _pu_base="${2##*/}"
+        printf '%s\n' "$_pu_base" | run_root tee -a "$TXN_DIR/units-changed" >/dev/null 2>&1 || true
+    fi
     echo "service unit: $2"
 }
 
