@@ -244,10 +244,11 @@ func TestPayloadManifestsAgreeOnANewMigration(t *testing.T) {
 		t.Fatalf("assembly paths disagree after a migration was added:\n  tools/payload.sh: %v\n  assemble.go:      %v",
 			shell, goSide)
 	}
-	// updater.install.sh rides too: gateway's real, committed
-	// inner/gateway/updater.install.sh, resolved independent of this
-	// fixture's srcDir — same as install.sh's own provenance.
-	want := []string{"migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh", "update.sh", "updater.install.sh"}
+	// updater.install.sh AND guard.sh ride too: gateway's real, committed
+	// inner/gateway/updater.install.sh and inner/gateway/guard.sh, resolved
+	// independent of this fixture's srcDir — same as install.sh's own
+	// provenance. (shellManifest/goManifest both sort, hence guard.sh first.)
+	want := []string{"guard.sh", "migrations/run.sh", "migrations/v0_1_to_v0_2.sh", "migrations/v2_to_v3.sh", "update.sh", "updater.install.sh"}
 	if !reflect.DeepEqual(shell, want) {
 		t.Errorf("manifest = %v, want %v", shell, want)
 	}
