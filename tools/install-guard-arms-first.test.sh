@@ -15,9 +15,25 @@ FILE="$HERE/inner/gateway/install.sh"
 fails=0
 fail() { printf 'FAIL: %s\n' "$1" >&2; fails=$((fails + 1)); }
 
+# line_of <literal> — the first line that is exactly <literal> at COLUMN 0.
+#
+# The column matters and is not incidental: three of the four names below also
+# appear indented inside the BURROWEE_UNITS_ONLY mode block, which runs long
+# before the fresh-install flow this file is about. A whitespace-tolerant
+# anchor would read migrate_from_legacy's units-only call site and conclude the
+# guard is armed after the migration, on a file where it is armed before it.
 line_of() { grep -n "^$1\$" "$FILE" | head -1 | cut -d: -f1; }
 
+# line_of_indented <literal> — the same, but tolerating leading whitespace.
+# Used ONLY for `txn_phase handoff`, which now sits inside the
+# `if [ "$GUARD_ARMED" = 1 ]` block that honours BURROWEE_NO_RESTART (there is
+# no handoff when no guard was armed). It appears exactly once in the file, so
+# the tolerance cannot pick up a second, earlier call site the way it would for
+# the four names above.
+line_of_indented() { grep -n "^[[:space:]]*$1\$" "$FILE" | head -1 | cut -d: -f1; }
+
 L_ARM="$(line_of 'guard_arm')"
+
 L_SNAP="$(line_of 'snapshot_take')"
 L_PLACE="$(line_of 'place_all_bins')"
 L_MIGRATE="$(line_of 'migrate_from_legacy')"
@@ -51,7 +67,8 @@ fi
 # mode also call record_installed_version, earlier in the file and on paths
 # that exit long before ever reaching handoff — the one this test cares about
 # is the fresh-install flow's own, which is necessarily the last one written.
-L_HANDOFF="$(line_of 'txn_phase handoff')"
+L_HANDOFF="$(line_of_indented 'txn_phase handoff')"
+
 L_RECORD="$(grep -n '^ *record_installed_version ' "$FILE" | tail -1 | cut -d: -f1)"
 
 [ -n "$L_HANDOFF" ] || fail "install.sh never reaches txn_phase handoff"

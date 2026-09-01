@@ -2587,9 +2587,12 @@ consent_to_sever() {
     # to the one idiom that cannot take the script down with it.
     if ! ( exec 3<>/dev/tty ) 2>/dev/null; then return 0; fi
     exec 3<>/dev/tty
+    # The guard's deadline must not fire while an operator reads this prompt.
+    heartbeat_start
     {
         printf '\n'
         printf 'This host is serving as a burrowee gateway, and this session reaches it\n'
+
         printf 'THROUGH that gateway — %s.\n' "$_cause"
         printf 'Continuing will drop this connection.\n\n'
         printf 'A guard is already armed with a full snapshot of the previous install. It\n'
@@ -2662,6 +2665,12 @@ abort_install() {
 # ---------------------------------------------------------------------------
 REATTACH_CEILING="${REATTACH_CEILING:-180}"
 REATTACH_INTERVAL="${REATTACH_INTERVAL:-2}"
+# A floor of 1, for the same reason guard.sh floors GUARD_VERIFY_INTERVAL: the
+# loop below advances $_waited by exactly this value, so at 0 the counter never
+# moves and the ceiling is never reached — an infinite `sleep 0` spin, not a
+# fast poll. The seam is for a suite that wants a SHORT interval, and 1 is the
+# shortest one that terminates.
+[ "$REATTACH_INTERVAL" -gt 0 ] 2>/dev/null || REATTACH_INTERVAL=1
 
 # ---------------------------------------------------------------------------
 # reattach — follow the guard to its verdict.
@@ -2675,8 +2684,16 @@ REATTACH_INTERVAL="${REATTACH_INTERVAL:-2}"
 reattach() {
     _waited=0
     while [ "$_waited" -lt "$REATTACH_CEILING" ]; do
-        _p="$(cat "$TXN_DIR/phase" 2>/dev/null || echo unknown)"
+        # txn_read_phase, not a bare `cat`: the transaction directory is
+        # root-owned 0700 and this script is routinely run by an unprivileged
+        # shell that elevates per command, so a plain read returns "" for a
+        # phase file that plainly exists — and "" falls through every arm below
+        # to the give-up path, reporting "the guard has not reported yet" about
+        # a guard that reported minutes ago.
+        _p="$(txn_read_phase)"
+        [ -n "$_p" ] || _p=unknown
         case "$_p" in
+
         ok)
             echo "install: the gateway is serving the new build"
             return 0 ;;
@@ -3187,7 +3204,12 @@ elif ( exec 3<>/dev/tty ) 2>/dev/null; then
     # installed gateway reporting failure. has_tty above already probes this
     # way, for this reason.
     exec 3<>/dev/tty
+    # Same reason as the consent prompt's: this read can block for as long as
+    # the operator takes to find the blob, and the guard's deadline must not
+    # mistake that for a wedge.
+    heartbeat_start
     printf '\nSet up now? Paste the setup blob + PIN from the console (Enter to skip).\n' >&3 2>/dev/null || true
+
     printf 'blob> ' >&3 2>/dev/null || true
     blob=''; IFS= read -r blob <&3 2>/dev/null || blob=''
     if [ -n "$blob" ]; then
@@ -3201,6 +3223,7 @@ elif ( exec 3<>/dev/tty ) 2>/dev/null; then
     else
         printf 'Skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
     fi
+    heartbeat_stop
     exec 3>&- 2>/dev/null || true
 else
     echo "next: burrowee $COMP bootstrap <blob> <pin>"
@@ -3222,25 +3245,46 @@ fi
 # daemon on it, the same way it once asserted this script did).
 # ---------------------------------------------------------------------------
 
-# ---- Phase 3: consent ------------------------------------------------------
-consent_to_sever restart
+# Phases 3-5 exist only when a guard is watching. Under BURROWEE_NO_RESTART
+# (see guard_arm) nothing was armed, so there is nobody to consent to, nobody
+# to hand off to, and nobody to reattach to — the units are staged on disk and
+# that is the whole outcome. Skipping them is what makes the flag mean what
+# this file has always documented it to mean.
+_verdict=0
+if [ "$GUARD_ARMED" = 1 ]; then
+    # ---- Phase 3: consent --------------------------------------------------
+    consent_to_sever restart
 
-# ---- Phase 4: hand off ------------------------------------------------------
-# Printed BEFORE the handoff, never after: once the guard restarts the
-# gateway, this connection — tunnelled through the very daemon being
-# restarted — may already be gone, and a line printed into a dead connection
-# reaches no one.
-echo ""
-echo "handing the restart to the guard. If this connection drops, reconnect and run:"
-echo "    burrowee gateway service guard-status"
-echo ""
-txn_phase handoff
+    # ---- Phase 4: hand off -------------------------------------------------
+    # Printed BEFORE the handoff, never after: once the guard restarts the
+    # gateway, this connection — tunnelled through the very daemon being
+    # restarted — may already be gone, and a line printed into a dead
+    # connection reaches no one.
+    echo ""
+    echo "handing the restart to the guard. If this connection drops, reconnect and run:"
+    echo "    burrowee gateway service guard-status"
+    echo ""
+    txn_phase handoff
 
-# ---- Phase 5: reattach ------------------------------------------------------
-# Follow the guard to its verdict when the connection survives; if it does
-# not, the guard finishes the job regardless (reattach's own header).
-reattach
-_verdict=$?
+    # ---- Phase 5: reattach -------------------------------------------------
+    # Follow the guard to its verdict when the connection survives; if it does
+    # not, the guard finishes the job regardless (reattach's own header).
+    #
+    # `|| _verdict=$?`, never a bare call followed by `_verdict=$?`: this
+    # script runs under `set -e`, so a bare `reattach` returning 1 (rolled
+    # back) or 2 (the rollback failed) ABORTS here — skipping the doctor tail
+    # below, whose own header promises it runs "on every reattach outcome
+    # alike". The two outcomes that most need a diagnostic report were the two
+    # that never got one. C2 makes both of them ordinary rather than rare, so
+    # the comment and the code agree now.
+    reattach || _verdict=$?
+else
+    echo ""
+    echo "units staged on disk. Nothing was restarted (BURROWEE_NO_RESTART)."
+    echo "start the gateway when you are ready with:"
+    echo "    sudo burrowee gateway service install"
+    echo ""
+fi
 
 # ---- doctor, unconditionally ------------------------------------------------
 # On every reattach outcome alike — served, rolled back, still running, or

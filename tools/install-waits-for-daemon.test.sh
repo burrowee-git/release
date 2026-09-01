@@ -502,7 +502,12 @@ _rec_before="$(grep -n '^ *record_installed_version ' "$GW" | awk -F: -v fin="$_
 # to defer finish_with_updater_verdict — nothing past the point of no return
 # may still be pending), and doctor must run AFTER it, reporting on
 # reattach's own outcome rather than a build the guard has not yet restarted.
-_handoff_ln="$(grep -n '^txn_phase handoff$' "$GW" | head -n 1 | cut -d: -f1)"
+# Leading whitespace tolerated: `txn_phase handoff` now sits inside the
+# `if [ "$GUARD_ARMED" = 1 ]` block that honours BURROWEE_NO_RESTART (no guard
+# armed means no handoff). It still appears exactly once in the file, and the
+# claims below are about ORDER, not column.
+_handoff_ln="$(grep -n '^[[:space:]]*txn_phase handoff$' "$GW" | head -n 1 | cut -d: -f1)"
+
 [ -n "$_handoff_ln" ] || note "gateway: no txn_phase handoff in the full-install tail"
 last_use="$(grep -n 'gateway_already_set_up' "$GW" | tail -n 1 | cut -d: -f1)"
 [ -n "$last_use" ] && [ -n "$_handoff_ln" ] && [ "$_handoff_ln" -gt "$last_use" ] \
