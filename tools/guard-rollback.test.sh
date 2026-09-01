@@ -1,7 +1,9 @@
 #!/bin/sh
 # tools/guard-rollback.test.sh — drives inner/gateway/guard.sh against a fake
-# supervisor and a fake host tree. Nothing here touches a real launchd,
-# systemd, binary or database.
+# supervisor and a fake host tree, and (Task 8) drives install.sh's own
+# Phase 2 verification functions (verify_placement, verify_units) directly
+# against install.sh's source. Nothing here touches a real launchd, systemd,
+# binary or database.
 #
 #     sh tools/guard-rollback.test.sh
 #     dash tools/guard-rollback.test.sh
@@ -15,6 +17,9 @@
 # platform, the same way guard-snapshot.test.sh now parameterises its own
 # snapshot checks. Assertion BODIES are written once and taken per-platform
 # values from the helpers just below, rather than copy-pasted per platform.
+# The Task 8 checks below follow the same discipline for verify_units, whose
+# Darwin branch (a faked `plutil -lint`) has no real counterpart on this
+# suite's own Linux CI box — see make_plutil_stub.
 set -eu
 
 HERE="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -197,13 +202,302 @@ t_guard_rolls_back() {
     rm -rf "$_r"
 }
 
+# ---------------------------------------------------------------------------
+# Task 8 — Phase 2 (verify_placement / verify_units), run before anything is
+# restarted. Two static checks that the brief itself specifies, plus
+# behavioural coverage of the two functions against install.sh's own source,
+# via BURROWEE_SOURCE_ONLY the same way guard-snapshot.test.sh already does.
+# ---------------------------------------------------------------------------
+
+GATEWAY_BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
+
+# Verification runs BEFORE anything is restarted, so a bad placement is caught
+# while the old daemon is still serving and the operator is still connected —
+# the cheap failure, not the expensive one.
+#
+# This does NOT assert against `txn_phase handoff` — that token does not exist
+# yet (Task 9 introduces it), and a check that greps for a token no one has
+# written would be permanently red for no reason this task can fix. What is
+# provable right now is ordering relative to what already exists: verify_placement
+# runs after Phase 1 begins (`txn_phase replacing`) and before the foreground
+# script's own last statement (`finish_with_updater_verdict`, the unconditional
+# tail every mode — fresh install included — falls through to).
+t_verify_precedes_handoff() {
+    _f="$HERE/inner/gateway/install.sh"
+    _phase1="$(grep -n '^txn_phase replacing$' "$_f" | head -1 | cut -d: -f1)"
+    _v="$(grep -n 'verify_placement || {' "$_f" | head -1 | cut -d: -f1)"
+    _end="$(grep -n '^finish_with_updater_verdict$' "$_f" | tail -1 | cut -d: -f1)"
+    [ -n "$_phase1" ] || { fail "install.sh never reaches txn_phase replacing"; return; }
+    [ -n "$_v" ]      || { fail "install.sh never calls verify_placement"; return; }
+    [ -n "$_end" ]    || { fail "install.sh never reaches the end of the foreground flow"; return; }
+    [ "$_phase1" -lt "$_v" ] || fail "verify_placement (line $_v) runs before Phase 1 (line $_phase1)"
+    [ "$_v" -lt "$_end" ]    || fail "verify_placement (line $_v) runs after the end of the foreground flow (line $_end)"
+}
+
+# A verification failure must restore the snapshot rather than hand off.
+t_verify_failure_restores() {
+    grep -q 'verify_placement || {' "$HERE/inner/gateway/install.sh" \
+        || fail "a failed verify_placement does not branch to a restore"
+}
+
+# make_sudo_stub <dir> — a pass-through `sudo`, same shape as
+# guard-snapshot.test.sh's: install.sh's run_root always tries to elevate, and
+# these fixtures are tmpdirs the test process already owns.
+make_sudo_stub() {
+    mkdir -p "$1"
+    cat > "$1/sudo" <<'STUB'
+#!/bin/sh
+[ "$1" = "-n" ] && shift
+exec "$@"
+STUB
+    chmod 755 "$1/sudo"
+}
+
+# make_uname_stub <dir> <platform> — pins `uname -s`, same shape as
+# guard-snapshot.test.sh's, so verify_units' Darwin/Linux branch is chosen
+# deliberately rather than by whatever this suite happens to run on.
+make_uname_stub() {
+    mkdir -p "$1"
+    _plat="$2"
+    cat > "$1/uname" <<STUB
+#!/bin/sh
+if [ "\$1" = "-s" ]; then echo $_plat; else /usr/bin/uname "\$@"; fi
+STUB
+    chmod 755 "$1/uname"
+}
+
+# make_plutil_stub <dir> <exit-code> — a fake `plutil` so verify_units' Darwin
+# lint branch is exercised even from this suite's Linux CI box, which has no
+# real plutil at all — verify_units' own `command -v plutil` guard exists for
+# exactly that box, and without a stub the branch behind it would never run
+# from here. The exit code alone decides "valid" vs "not a valid plist";
+# a stub standing in for the check has no real plist syntax to validate.
+make_plutil_stub() {
+    mkdir -p "$1"
+    cat > "$1/plutil" <<STUB
+#!/bin/sh
+exit $2
+STUB
+    chmod 755 "$1/plutil"
+}
+
+# install_stub_dir <root> — the one fake-PATH directory every install.sh
+# function test below shares, so a test that needs an extra fake (plutil)
+# can drop it in after setup_install_stubs without a second helper that
+# regenerates the directory out from under it.
+install_stub_dir() { printf '%s\n' "$1/.stub"; }
+
+# setup_install_stubs <root> <platform> — the baseline fake PATH every
+# verify_placement/verify_units test needs: pass-through sudo (so run_root
+# never blocks on a real elevation prompt) and pinned uname. The pass-through
+# sudo also means have_real_root answers "no" here, same as it does under
+# the Go install_test harness — so verify_placement's root-secure check is
+# skipped in these fixtures exactly as it is there, and is not re-proven by
+# this suite (core/binary's IsRootSecure suite, plus install_test's own
+# root_exec_test.go, already own that predicate).
+setup_install_stubs() {
+    _r="$1"; _plat="$2"
+    _stub="$(install_stub_dir "$_r")"
+    make_sudo_stub "$_stub"
+    make_uname_stub "$_stub" "$_plat"
+}
+
+# run_install_snippet <root> <cwd> <snippet> — source install.sh
+# (BURROWEE_SOURCE_ONLY short-circuits the mode dispatch, same as
+# guard-snapshot.test.sh) with cwd at <cwd> — verify_placement's archive
+# comparison reads "./$b" relative to it — then run <snippet> against its
+# functions. stdout and stderr are merged so a failure message can be
+# grepped from the captured output.
+run_install_snippet() {
+    _r="$1"; _cwd="$2"; _snippet="$3"
+    _stub="$(install_stub_dir "$_r")"
+    (
+        cd "$_cwd" && \
+        BURROWEE_SOURCE_ONLY=1 \
+        PATH="$_stub:$PATH" \
+        BURROWEE_BIN_DIR="$_r/bin" \
+        BURROWEE_LAUNCHD_DIR="$_r/units" \
+        BURROWEE_SYSTEMD_DIR="$_r/units" \
+        BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
+        BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
+        sh -c ". '$HERE/inner/gateway/install.sh'; $_snippet" 2>&1
+    )
+}
+
+# write_archive_and_placement <root> — an archive dir and a $BIN_DIR that
+# agree byte-for-byte on every name in $GATEWAY_BINS: the passing baseline
+# every verify_placement check below starts from and mutates one property
+# away from.
+write_archive_and_placement() {
+    _r="$1"
+    mkdir -p "$_r/archive" "$_r/bin"
+    for b in $GATEWAY_BINS; do
+        printf '#!/bin/sh\necho %s\n' "$b" > "$_r/archive/$b"
+        chmod 755 "$_r/archive/$b"
+        cp "$_r/archive/$b" "$_r/bin/$b"
+    done
+}
+
+# verify_placement's whole job is proving the mv landed the bytes staged from
+# the archive, not merely that a file exists at $BIN_DIR — a good install
+# (matching bytes, executable) must pass. The root-secure check does not fire
+# in this fixture at all (see setup_install_stubs above).
+t_verify_placement_passes_on_matching_install() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    write_archive_and_placement "$_r"
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r/archive" 'verify_placement')" || _rc=$?
+    [ "$_rc" -eq 0 ] || fail "verify_placement rejected a correctly placed install: $_out"
+    rm -rf "$_r"
+}
+
+# Mutation proof: corrupt exactly one placed binary so its bytes diverge from
+# the archive copy it was supposedly moved from, and confirm verify_placement
+# actually notices — a check that never compared content would pass this
+# fixture just as happily as the one above.
+t_verify_placement_catches_corrupted_binary() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    write_archive_and_placement "$_r"
+    printf '#!/bin/sh\necho corrupted\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r/archive" 'verify_placement')" || _rc=$?
+    [ "$_rc" -ne 0 ] || fail "verify_placement passed a placed binary whose bytes do not match the archive"
+    printf '%s\n' "$_out" | grep -q 'does not match the archive copy' \
+        || fail "verify_placement's failure did not name the mismatch: $_out"
+    rm -rf "$_r"
+}
+
+# A binary the archive shipped but $BIN_DIR never received must fail too —
+# the archive comparison only runs once a file is confirmed present.
+t_verify_placement_catches_missing_binary() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    write_archive_and_placement "$_r"
+    rm -f "$_r/bin/burrowee-register"
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r/archive" 'verify_placement')" || _rc=$?
+    [ "$_rc" -ne 0 ] || fail "verify_placement passed with burrowee-register missing from \$BIN_DIR"
+    printf '%s\n' "$_out" | grep -q 'burrowee-register is missing' \
+        || fail "verify_placement's failure did not name the missing binary: $_out"
+    rm -rf "$_r"
+}
+
+# serve_unit_names <platform> — both unit files verify_units checks for
+# <platform>: serve + updater.
+serve_unit_names() {
+    case "$1" in
+    Darwin) printf '%s\n' com.burrowee.gateway.plist com.burrowee.gateway.updater.plist ;;
+    Linux)  printf '%s\n' burrowee-gateway.service burrowee-gateway-updater.service ;;
+    esac
+}
+
+# write_unit_fixture <root> <platform> — both unit files verify_units checks
+# for <platform>, plus an executable ExecStart target: the passing baseline
+# every verify_units check below starts from and mutates one property away
+# from.
+write_unit_fixture() {
+    _r="$1"; _plat="$2"
+    mkdir -p "$_r/units" "$_r/bin"
+    for _u in $(serve_unit_names "$_plat"); do
+        case "$_plat" in
+        Darwin) printf '<?xml version="1.0"?><plist version="1.0"><dict/></plist>\n' > "$_r/units/$_u" ;;
+        Linux)  printf '[Service]\nExecStart=/usr/local/bin/burrowee-gateway\n' > "$_r/units/$_u" ;;
+        esac
+    done
+    printf '#!/bin/sh\necho burrowee-gateway\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+}
+
+# A fully rendered install — both units present, the serve binary executable
+# — must pass verify_units, on both platform shapes. Darwin additionally runs
+# through a faked `plutil -lint` (make_plutil_stub): the real macOS tool does
+# not exist on the Linux CI box this suite runs on, but the branch that calls
+# it does, and the stub is what lets that branch be driven from here.
+t_verify_units_passes() {
+    _plat="$1"
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" "$_plat"
+    write_unit_fixture "$_r" "$_plat"
+    [ "$_plat" = Darwin ] && make_plutil_stub "$(install_stub_dir "$_r")" 0
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r" 'verify_units')" || _rc=$?
+    [ "$_rc" -eq 0 ] || fail "[$_plat] verify_units rejected a correctly rendered install: $_out"
+    rm -rf "$_r"
+}
+
+# Either unit file missing must fail — a unit that was never rendered is
+# exactly the state that looks like a clean install right up until the
+# restart.
+t_verify_units_fails_when_unit_missing() {
+    _plat="$1"
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" "$_plat"
+    write_unit_fixture "$_r" "$_plat"
+    [ "$_plat" = Darwin ] && make_plutil_stub "$(install_stub_dir "$_r")" 0
+    _u="$(serve_unit_names "$_plat" | head -1)"
+    rm -f "$_r/units/$_u"
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r" 'verify_units')" || _rc=$?
+    [ "$_rc" -ne 0 ] || fail "[$_plat] verify_units passed with $_u missing"
+    printf '%s\n' "$_out" | grep -q "$_u is missing" \
+        || fail "[$_plat] verify_units's failure did not name $_u: $_out"
+    rm -rf "$_r"
+}
+
+# The ExecStart target check is platform-independent — a unit that parses
+# fine but names a binary that is not there or not executable is the failure
+# mode that looks clean right up until the restart.
+t_verify_units_fails_when_exec_target_not_executable() {
+    _plat="$1"
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" "$_plat"
+    write_unit_fixture "$_r" "$_plat"
+    [ "$_plat" = Darwin ] && make_plutil_stub "$(install_stub_dir "$_r")" 0
+    chmod 644 "$_r/bin/burrowee-gateway"
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r" 'verify_units')" || _rc=$?
+    [ "$_rc" -ne 0 ] || fail "[$_plat] verify_units passed with a non-executable ExecStart target"
+    printf '%s\n' "$_out" | grep -q 'is not executable' \
+        || fail "[$_plat] verify_units's failure did not name the ExecStart target: $_out"
+    rm -rf "$_r"
+}
+
+# Darwin-only mutation proof: a plist that fails to lint must fail
+# verify_units even though the file is present — a presence-only check would
+# pass this fixture just as happily as a well-formed one.
+t_verify_units_darwin_fails_when_plist_invalid() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Darwin
+    write_unit_fixture "$_r" Darwin
+    make_plutil_stub "$(install_stub_dir "$_r")" 1
+    _rc=0
+    _out="$(run_install_snippet "$_r" "$_r" 'verify_units')" || _rc=$?
+    [ "$_rc" -ne 0 ] || fail "verify_units passed a plist that fails to lint"
+    printf '%s\n' "$_out" | grep -q 'is not a valid plist' \
+        || fail "verify_units's failure did not name the invalid plist: $_out"
+    rm -rf "$_r"
+}
+
 for _plat in Darwin Linux; do
     t_guard_ok "$_plat"
     t_guard_rolls_back "$_plat"
+    t_verify_units_passes "$_plat"
+    t_verify_units_fails_when_unit_missing "$_plat"
+    t_verify_units_fails_when_exec_target_not_executable "$_plat"
 done
+
+t_verify_precedes_handoff
+t_verify_failure_restores
+t_verify_placement_passes_on_matching_install
+t_verify_placement_catches_corrupted_binary
+t_verify_placement_catches_missing_binary
+t_verify_units_darwin_fails_when_plist_invalid
 
 if [ "$fails" -ne 0 ]; then
     printf '%s: %d check(s) failed\n' "$0" "$fails" >&2
     exit 1
 fi
-printf 'ok: guard reaches ok and rolled-back correctly (Darwin + Linux)\n'
+printf 'ok: guard reaches ok and rolled-back correctly, and Phase 2 verification catches a bad placement (Darwin + Linux)\n'

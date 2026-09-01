@@ -2032,6 +2032,74 @@ place_all_bins() {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 2 — verify what was placed, BEFORE anything is restarted.
+#
+# This is the cheap failure. Nothing has been severed: the old daemon is still
+# serving, the operator is still connected, and a restore here costs a copy.
+# Everything after the handoff costs a connection.
+# ---------------------------------------------------------------------------
+verify_placement() {
+    _rc=0
+    # Same gate as verify_root_exec_surface, and for the same reason: ownership
+    # can only be asserted where root was genuinely obtained. The sandboxed
+    # installer harness's pass-through `sudo` stub makes every "root-owned"
+    # file here owned by the test user, so asserting uid 0 in that harness
+    # would refuse every test run for a reason that says nothing about a real
+    # host. Skip once, ahead of the loop, rather than repeating the note per
+    # binary.
+    if ! have_real_root; then
+        echo "note: this run never reached uid 0, so the ownership of $BIN_DIR" >&2
+        echo "note: cannot be asserted — skipping the root-secure check." >&2
+    fi
+    for b in $BINS; do
+        if [ ! -f "$BIN_DIR/$b" ]; then
+            echo "verify: $BIN_DIR/$b is missing" >&2; _rc=1; continue
+        fi
+        if [ ! -x "$BIN_DIR/$b" ]; then
+            echo "verify: $BIN_DIR/$b is not executable" >&2; _rc=1; continue
+        fi
+        if have_real_root && ! path_is_root_secure "$BIN_DIR/$b"; then
+            echo "verify: $BIN_DIR/$b is not root-secure" >&2; _rc=1; continue
+        fi
+        # Against the archive copy this run placed it from — proving the mv
+        # landed the bytes we staged, not that the file merely exists.
+        if [ -f "./$b" ] && [ "$(sha256_of "./$b")" != "$(sha256_of "$BIN_DIR/$b")" ]; then
+            echo "verify: $BIN_DIR/$b does not match the archive copy" >&2; _rc=1
+        fi
+    done
+    return "$_rc"
+}
+
+# verify_units — the unit files parse, and the ExecStart they name exists.
+# A unit that names a binary that is not there is the failure mode that looks
+# like a clean install right up until the restart.
+verify_units() {
+    _rc=0
+    case "$(uname -s)" in
+    Darwin)
+        for u in com.burrowee.gateway.plist com.burrowee.gateway.updater.plist; do
+            _p="$LAUNCHD_DIR/$u"
+            [ -f "$_p" ] || { echo "verify: $_p is missing" >&2; _rc=1; continue; }
+            if command -v plutil >/dev/null 2>&1 && ! plutil -lint "$_p" >/dev/null 2>&1; then
+                echo "verify: $_p is not a valid plist" >&2; _rc=1
+            fi
+        done
+        ;;
+    Linux)
+        for u in burrowee-gateway.service burrowee-gateway-updater.service; do
+            _p="$SYSTEMD_DIR/$u"
+            [ -f "$_p" ] || { echo "verify: $_p is missing" >&2; _rc=1; continue; }
+        done
+        ;;
+    esac
+    [ -x "$BIN_DIR/burrowee-gateway" ] || {
+        echo "verify: the serve unit's ExecStart target $BIN_DIR/burrowee-gateway is not executable" >&2
+        _rc=1
+    }
+    return "$_rc"
+}
+
+# ---------------------------------------------------------------------------
 # Mode dispatch.
 # ---------------------------------------------------------------------------
 
@@ -2444,6 +2512,23 @@ report_unrecorded_migration
 if [ "$MIGRATE_UNRECORDED" = "0" ]; then
     record_installed_version "${BURROWEE_VERSION:-}"
 fi
+
+# ---- Phase 2: verify -------------------------------------------------------
+verify_placement || {
+    echo "install: verification failed — restoring the previous install." >&2
+    echo "install: nothing was restarted; the running gateway was not disturbed." >&2
+    snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
+    txn_phase rolled-back
+    exit 1
+}
+verify_units || {
+    echo "install: unit verification failed — restoring the previous install." >&2
+    snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
+    txn_phase rolled-back
+    exit 1
+}
+txn_phase verified
+echo "verified: binaries and units are in place and consistent"
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------
 # Re-install short-circuit: if this host already holds gateway STATE it is
