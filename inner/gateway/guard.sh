@@ -14,8 +14,31 @@
 # adopt_user_tree.sh stops it too, seventeen lines earlier, to copy state at
 # rest. A guard armed only for the restart would watch the wrong line.
 #
+# AND IT OWNS EVERY ABORT, not just the ones that reach the handoff. The
+# installer's own foreground abort paths — a declined consent prompt, a failed
+# Phase 2 check — do NOT restore or mark the transaction terminal themselves.
+# They print and exit, and this script's installer-died branch does the work,
+# because a foreground `snapshot_restore` only COPIES FILES: on a host whose
+# migration already stopped (and on Darwin unloaded) the daemon, "restored the
+# previous install" without a restart is the reported stranding through a
+# different door. Only rollback() below restores AND restarts AND verifies.
+#
+# BEING DETACHED IS ALSO WHAT LETS IT RELOAD A CHANGED UNIT. `bootstrap` on an
+# already-loaded label exits 5 and `kickstart -k` restarts the in-memory job:
+# neither re-reads the plist, so with the installer's bootout gone a rendered
+# change to ExecStart or KeepAlive took effect only at the next reboot. The
+# stranding was never the bootout itself — it was a bootout whose bootstrap sat
+# in a process the bootout could kill — so this script may do it, gated on
+# place_unit having recorded that the file actually changed. See
+# restart_service.
+#
+# IT ALSO REMOVES ITS OWN PLIST on every exit path (remove_guard_unit): the
+# guard job is RunAtLoad, and one left on disk re-runs against a finished (or
+# worse, a half-finished) transaction at every boot.
+#
 # EXIT CONTRACT: 0 ok · 1 rolled-back · 2 failed.
 set -eu
+
 
 TXN="${1:?usage: guard.sh <transaction-dir>}"
 
@@ -24,20 +47,91 @@ SYSTEMCTL="${GUARD_SYSTEMCTL:-systemctl}"
 UNAME="${GUARD_UNAME:-$(uname -s)}"
 BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
 SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
+SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
+
+# The unit directories, resolved ONCE and by the same env-default spellings
+# install.sh uses for its own LAUNCHD_DIR/SYSTEMD_DIR (install.sh:204-206).
+# They used to be open-coded inline in three places here under a different
+# variable name (_ud) than install.sh's snapshot_restore uses (_unit_dir), so
+# the two functions that restore the same files agreed only by coincidence of
+# defaults. One name per side, spelled identically, is the cheapest way to
+# make a future retune of either seam visibly break both.
+LAUNCHD_DIR="${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}"
+SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 
 # The installer copies state; a generous ceiling so a slow migration is not
 # mistaken for a wedged one.
 DEADLINE="${GUARD_DEADLINE:-900}"
 VERIFY_CEILING="${GUARD_VERIFY_CEILING:-60}"
 VERIFY_INTERVAL="${GUARD_VERIFY_INTERVAL:-2}"
+# A floor of 1, because VERIFY_INTERVAL is what the verify loop's counter
+# advances by: at 0 the counter never moves and `while [ "$_waited" -lt
+# "$VERIFY_CEILING" ]` is an infinite `sleep 0` spin that no ceiling ever ends
+# — a wedged guard, not a fast one. The seam exists for a suite that wants a
+# SHORT interval, and 1 is the shortest one that terminates.
+[ "$VERIFY_INTERVAL" -gt 0 ] 2>/dev/null || VERIFY_INTERVAL=1
 
 LABEL=com.burrowee.gateway
 UNIT=burrowee-gateway.service
+GUARD_LABEL=com.burrowee.gateway.guard
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >> "$TXN/guard.log"; }
 phase() { printf '%s\n' "$1" > "$TXN/.phase.tmp" && mv -f "$TXN/.phase.tmp" "$TXN/phase"; }
 now() { date -u +%s; }
 
+# unit_dir — the platform's system unit directory. install.sh's
+# snapshot_restore holds the identical case; see the LAUNCHD_DIR note above.
+unit_dir() {
+    case "$UNAME" in
+    Darwin) printf '%s\n' "$LAUNCHD_DIR" ;;
+    Linux)  printf '%s\n' "$SYSTEMD_DIR" ;;
+    *)      printf '\n' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# remove_guard_unit — the transient LaunchDaemon removes its OWN plist, on
+# EVERY exit path, which is what the design has always claimed and what the
+# first cut did not do.
+#
+# A plist left in /Library/LaunchDaemons is RunAtLoad, so launchd re-execs
+# `gateway-guard <that transaction dir>` at every boot, forever. A terminal
+# transaction exits harmlessly at the watch loop's "already terminal" arm — but
+# a NON-terminal one (power lost mid-install) hands the boot-time guard a stale
+# installer.pid that is certainly dead after a reboot, and it rolls the host
+# back: a weeks-old config/ and data/ (gateway.db included) copied over live
+# state, by a process nobody asked for, on a host that had recovered by itself.
+#
+# An EXIT trap and not a call before each `exit`: this script runs under
+# `set -eu`, so an unexpected non-zero anywhere leaves through a path no
+# explicit call sits on, and that is exactly the run whose plist must not
+# survive.
+#
+# The plist only, never `launchctl bootout` of this very job — that would kill
+# the guard inside its own exit trap. Removing the file is enough: launchd
+# keeps the (already exiting) job in memory until the next guard_arm boots the
+# label out, and with no file on disk there is nothing to load at boot.
+#
+# Linux needs nothing: guard_arm uses `systemd-run --collect`, which reaps the
+# transient unit itself.
+# ---------------------------------------------------------------------------
+remove_guard_unit() {
+    case "$UNAME" in
+    Darwin)
+        if [ -f "$LAUNCHD_DIR/$GUARD_LABEL.plist" ]; then
+            rm -f "$LAUNCHD_DIR/$GUARD_LABEL.plist" 2>/dev/null \
+                || log "could not remove $LAUNCHD_DIR/$GUARD_LABEL.plist — it will re-run at boot"
+        fi
+        ;;
+    esac
+}
+trap remove_guard_unit EXIT
+
+# THE FIRST TWO STATEMENTS, and install.sh depends on it. `launchctl bootstrap`
+# and `systemd-run` exiting 0 mean the job was LOADED, not that it RAN, so
+# guard_arm polls for exactly these two artefacts before it lets the install
+# proceed (install.sh's guard_arm, "the arm-proof poll"). A guard that dies on
+# exec must not read as a guard that is watching.
 printf '%s\n' "$$" > "$TXN/guard.pid"
 log "guard armed for $TXN"
 
@@ -49,19 +143,123 @@ running_version() {
         "$SYS_DATA_DIR/running.json" 2>/dev/null || true
 }
 
+# VERSION_BOUND — the same 2s ceiling install.sh's binary_version_stamp
+# applies, decided once here for the same reason it is decided there: this
+# probe execs the FRESHLY PLACED, possibly broken serve binary, and an
+# unbounded `version` on a binary that hangs hangs the prober. In install.sh
+# that wedged the installer; here it is worse — do_restart runs past the watch
+# loop, so the deadline that would have rescued a wedged install no longer
+# applies, and the guard sits at phase=restarting forever while guard-status
+# reports "the guard is still working" about a process that will never move.
+#
+# Same availability rule as install.sh's: `timeout` (GNU coreutils, on every
+# Linux host), `gtimeout` where a macOS host installed coreutils, and no bound
+# at all otherwise. A stock macOS host is still unbounded — a stated gap
+# inherited verbatim, not a new one.
+VERSION_BOUND=""
+if command -v timeout >/dev/null 2>&1; then
+    VERSION_BOUND="timeout 2"
+elif command -v gtimeout >/dev/null 2>&1; then
+    VERSION_BOUND="gtimeout 2"
+fi
+
+# binary_version — the version the freshly placed binary reports for ITSELF.
+#
+# DELIBERATELY NOT install.sh's binary_version_stamp, and not a candidate for
+# being merged with it. That helper is byte-identical with edge's (pinned by
+# tools/install-waits-for-daemon.test.sh) and filters tokens through
+# `grep -E '^v?[0-9]+(\.[0-9]+){0,5}(\.[0-9a-f]+)?$'`, which REJECTS a
+# pre-release token: against core runtime_version.Report's two-line output the
+# real stamp `v0.3.1.beta.2026.08.31.62a6f215` fails that pattern and the
+# helper falls through to the SECOND line — the RUNNING daemon's version — so
+# on a beta build it answers the question this guard is not asking. The `sed`
+# below takes the first version-shaped token off the FIRST line and keeps the
+# beta segment, which is the string running.json will actually carry.
+#
+# (The shared helper's beta blindness is pre-existing and out of scope here.
+# It is written down at both sites so the next reader who notices the
+# duplication learns that unifying them would silently break this one.)
+# running_pid — the pid the daemon recorded for itself in running.json, or "".
+running_pid() {
+    sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+        "$SYS_DATA_DIR/running.json" 2>/dev/null || true
+}
+
+# running_alive <want> — the daemon is REALLY up and REALLY serving <want>.
+#
+# Both halves are needed and neither is enough. running.json survives the
+# daemon that wrote it, so the version alone says only "the last daemon to
+# start reported this" — true of a host whose serve label was booted out
+# minutes ago by the migration. The pid alone says only "something with that
+# number exists". Together they are the strongest liveness statement available
+# without adding a probe this script has no business making: core's
+# runtime_version.WriteRunning records {"version","pid","started_at"} at serve
+# start, so a live pid beside a matching version is that daemon, still there.
+running_alive() {
+    _ra_pid="$(running_pid)"
+    [ -n "$_ra_pid" ] || return 1
+    [ "$(running_version)" = "$1" ] || return 1
+    kill -0 "$_ra_pid" 2>/dev/null
+}
+
 binary_version() {
-    BURROWEE_DISPATCHER_VERSION= "$BIN_DIR/burrowee-gateway" version 2>/dev/null |
+
+    # shellcheck disable=SC2086  # $VERSION_BOUND is a command PREFIX and must word-split; empty means no bound.
+    BURROWEE_DISPATCHER_VERSION= $VERSION_BOUND "$BIN_DIR/burrowee-gateway" version 2>/dev/null |
         sed -n 's/.*\(v[0-9][0-9.a-z]*\).*/\1/p' | head -1
 }
 
-# restart_service — kickstart -k / systemctl restart. NEVER bootout: an
-# unloaded job is supervised by nothing, so a guard that is itself killed
-# between a bootout and its bootstrap would strand exactly the state this
-# script exists to prevent.
+# unit_body_changed — did THIS install rewrite the serve unit's file?
+#
+# install.sh's place_unit appends the basename of every unit whose content it
+# actually replaced to $TXN/units-changed (it writes nothing when the rendered
+# file is byte-identical to the one already there). That marker is the whole
+# signal; an absent file means nothing changed.
+unit_body_changed() {
+    [ -f "$TXN/units-changed" ] || return 1
+    case "$UNAME" in
+    Darwin) grep -q "^$LABEL.plist\$" "$TXN/units-changed" ;;
+    Linux)  grep -q "^$UNIT\$"        "$TXN/units-changed" ;;
+    *)      return 1 ;;
+    esac
+}
+
+# restart_service — kickstart -k / systemctl restart. NEVER bootout FROM THE
+# INSTALLER: an unloaded job is supervised by nothing, so a shell that dies
+# between a bootout and its bootstrap strands exactly the state this script
+# exists to prevent — and on a gateway the bootout is what kills that shell.
+#
+# THE UNIT BODY IS THE ONE EXCEPTION, and it is why this function takes an
+# argument. `bootstrap` on an already-loaded label exits 5 and does nothing;
+# `kickstart -k` restarts the job launchd already holds IN MEMORY. Neither
+# re-reads the plist. So with the installer's bootout gone, a rendered change
+# to ExecStart, EnvironmentVariables, KeepAlive or StandardOutPath took effect
+# only at the next reboot — "files converged, process still stale", the exact
+# class this codebase has been burned by before. Linux never had the problem:
+# `daemon-reload` + `restart` re-reads the unit by construction.
+#
+# Doing it HERE is what makes it safe. The stranding was never the bootout
+# itself, it was a bootout whose bootstrap sat in a process the bootout could
+# kill. This guard is a child of launchd, has no controlling terminal, and is
+# not in the operator's session or process group (guard_arm's header): the
+# disconnect that killed the installer cannot reach it, so the bootout and the
+# bootstrap that follows are two statements in a process nothing is severing.
+# The window is bounded by this process being SIGKILLed, which would break the
+# rollback path too — and a plist left on disk is still loaded at the next
+# boot by launchd, so even that ends with a supervised job.
+#
+# tools/install-no-bootout.test.sh pins the INSTALLER; this file is
+# deliberately outside its scope, and the guard's own bootout below is
+# conditional on the file having actually changed.
 restart_service() {
+    _reload="${1:-}"
     case "$UNAME" in
     Darwin)
-        "$LAUNCHCTL" bootstrap system "${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}/$LABEL.plist" 2>/dev/null || true
+        if [ "$_reload" = reload ]; then
+            log "the serve unit's body changed — booting the label out so launchd re-reads the plist"
+            "$LAUNCHCTL" bootout "system/$LABEL" 2>/dev/null || true
+        fi
+        "$LAUNCHCTL" bootstrap system "$LAUNCHD_DIR/$LABEL.plist" 2>/dev/null || true
         "$LAUNCHCTL" enable "system/$LABEL" 2>/dev/null || true
         "$LAUNCHCTL" kickstart -k "system/$LABEL" 2>/dev/null || true
         ;;
@@ -71,6 +269,13 @@ restart_service() {
         "$SYSTEMCTL" restart "$UNIT" 2>/dev/null || true
         ;;
     esac
+}
+
+# restart_mode — "reload" when the serve unit's file changed this install,
+# empty otherwise. One place decides it, so do_restart and rollback cannot
+# disagree about whether the plist needs re-reading.
+restart_mode() {
+    if unit_body_changed; then printf 'reload\n'; else printf '\n'; fi
 }
 
 # verify_serving <want> — the daemon reports <want> within the ceiling.
@@ -88,11 +293,30 @@ verify_serving() {
     return 1
 }
 
+# rollback — put the last working point back AND prove it is serving.
+#
+# EVERY restore step is failure-TOLERANT and logs its own failure, because a
+# partial restore that gets the binaries back is strictly better than one that
+# stops at the first error. The config and data trees used to be the two
+# exceptions: `[ -d … ] && cp -Rp …` makes the cp the last member of an
+# AND-list, so a failing cp aborted the whole guard under `set -eu` — leaving
+# phase=rolling-back on disk forever, which guard-status reports as "the guard
+# is still working" about a process that no longer exists. install.sh's
+# snapshot_restore already collects a return code and keeps going, and the bin
+# and unit loops eight lines above already used `|| log`; this is that one
+# treatment, applied to all four.
 rollback() {
     phase rolling-back
     log "restoring the snapshot"
     _snap="$TXN/snapshot"
     _want="$(sed -n 's/^running_version=//p' "$TXN/manifest" 2>/dev/null || true)"
+    # snapshot_take records "unknown" when the host had no running.json to read
+    # — a fresh host, or one whose daemon was already down when the install
+    # began. It is a placeholder, never a version: comparing against it burns
+    # the whole verify ceiling and then reports `failed` ("this host needs
+    # hands") about a rollback that may have completed perfectly. Treated as
+    # "no stamp to verify against" below.
+    if [ "$_want" = unknown ]; then _want=""; fi
 
     if [ -d "$_snap/bin" ]; then
         for _b in "$_snap/bin"/*; do
@@ -100,22 +324,57 @@ rollback() {
             cp -p "$_b" "$BIN_DIR/${_b##*/}" || log "could not restore ${_b##*/}"
         done
     fi
-    case "$UNAME" in
-    Darwin) _ud="${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}" ;;
-    Linux)  _ud="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}" ;;
-    *)      _ud="" ;;
-    esac
+    _ud="$(unit_dir)"
     if [ -n "$_ud" ] && [ -d "$_snap/units" ]; then
         for _u in "$_snap/units"/*; do
             [ -e "$_u" ] || continue
             cp -p "$_u" "$_ud/${_u##*/}" || log "could not restore ${_u##*/}"
         done
     fi
-    [ -d "$_snap/config" ] && cp -Rp "$_snap/config/." "${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}/"
-    [ -d "$_snap/data" ]   && cp -Rp "$_snap/data/."   "$SYS_DATA_DIR/"
+    if [ -d "$_snap/config" ]; then
+        cp -Rp "$_snap/config/." "$SYS_CONFIG_DIR/" || log "could not restore the config tree"
+    fi
+    if [ -d "$_snap/data" ]; then
+        cp -Rp "$_snap/data/." "$SYS_DATA_DIR/" || log "could not restore the state tree"
+    fi
 
-    restart_service
-    if [ -n "$_want" ] && verify_serving "$_want"; then
+    _mode="$(restart_mode)"
+
+    # THE UNDISTURBED CASE, and the reason the installer's foreground abort
+    # paths can safely hand their work here. When the operator declines the
+    # consent prompt on a host whose daemon was never stopped, the daemon still
+    # running IS the snapshot's build — restoring the files is the whole of the
+    # undo, and bouncing the service would drop exactly the connection the
+    # decline was protecting. Skipped when the unit body changed too: a restored
+    # plist that launchd has not re-read is not a restored host.
+    #
+    # running_alive, NOT running_version, and the difference is the whole
+    # correctness of this branch. running.json is written by the daemon at
+    # START and is never removed when it stops, so on the case that matters —
+    # a migration that booted the label out — the file still names the old
+    # version about a process that is gone. Reading the version alone would
+    # conclude "already serving" about a DOWN daemon and skip the restart,
+    # which is the stranding this design removes, reintroduced as an
+    # optimisation. The pid in that same file is what makes it decidable.
+    if [ -z "$_mode" ] && [ -n "$_want" ] && running_alive "$_want"; then
+
+        phase rolled-back
+        log "ROLLED BACK — $_want was still serving throughout; files restored, nothing restarted"
+        exit 1
+    fi
+
+    restart_service "$_mode"
+    if [ -z "$_want" ]; then
+        # No stamp to verify against (see the "unknown" note above). The
+        # restore ran and the service was restarted; claiming `failed` here
+        # would send an operator to a host that needs nothing, and claiming a
+        # VERIFIED rollback would be a lie. Say which it is, in the log the
+        # operator reads.
+        phase rolled-back
+        log "ROLLED BACK — the snapshot recorded no running version, so the restore could not be verified against one"
+        exit 1
+    fi
+    if verify_serving "$_want"; then
         phase rolled-back
         log "ROLLED BACK — $_want is serving again; the new build was discarded"
         exit 1
@@ -191,7 +450,8 @@ advance_updater() {
     case "$UNAME" in
     Darwin)
         "$LAUNCHCTL" bootout "system/$LABEL.updater" 2>/dev/null || true
-        "$LAUNCHCTL" bootstrap system "${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}/$LABEL.updater.plist" 2>/dev/null || true
+        "$LAUNCHCTL" bootstrap system "$LAUNCHD_DIR/$LABEL.updater.plist" 2>/dev/null || true
+
         "$LAUNCHCTL" enable "system/$LABEL.updater" 2>/dev/null || true
         "$LAUNCHCTL" kickstart -k "system/$LABEL.updater" 2>/dev/null || true
         ;;
@@ -213,6 +473,18 @@ advance_updater() {
 # with no guaranteed BSD equivalent, and this script ships to real Darwin
 # hosts (the `head` on the guard's own platform, not just the suite's CI
 # box). Counted and sliced by hand instead, entirely in POSIX sh.
+#
+# THE PRUNE BODY IS AN `if`, NOT AN AND-LIST, and that is not style. The
+# previous shape ended each iteration with
+# `[ "$_i" -le "$_drop" ] && [ -n "$_old" ] && rm -rf …`. On the LAST
+# iteration the counter guard is false, so the AND-list — and with it the
+# `while`, and with it the whole pipeline — returns 1. A pipeline's failure is
+# not suppressed by the AND-lists INSIDE it, so `set -eu` killed the guard
+# right here, from the fourth transaction on: the `log` below never ran, the
+# caller died, do_restart never reached its `exit 0`, and the guard left with
+# status 1 — which its own contract defines as "rolled-back", on a host that
+# had just been verified serving the new build. The prune happened; the exit
+# contract did not. An `if` with no `else` returns 0 whichever way it goes.
 apply_retention() {
     _base="$SYS_DATA_DIR/install"
     [ -d "$_base" ] || return 0
@@ -225,7 +497,9 @@ apply_retention() {
     _i=0
     ls -1 "$_base" 2>/dev/null | sort | while read -r _old; do
         _i=$((_i + 1))
-        [ "$_i" -le "$_drop" ] && [ -n "$_old" ] && rm -rf "$_base/$_old"
+        if [ "$_i" -le "$_drop" ] && [ -n "$_old" ]; then
+            rm -rf "$_base/$_old" || log "could not prune $_old"
+        fi
     done
     log "snapshot retention applied ($_drop pruned, 3 kept)"
 }
@@ -238,8 +512,9 @@ do_restart() {
         rollback
     fi
     log "restarting $LABEL, expecting $_want"
-    restart_service
+    restart_service "$(restart_mode)"
     if verify_serving "$_want"; then
+
         phase ok
         log "OK — $_want is serving"
 
@@ -254,11 +529,41 @@ do_restart() {
     rollback
 }
 
+# heartbeat_epoch — the last time the installer said it was alive and working,
+# or 0 when it never has.
+#
+# THE DEADLINE IS NOT A WALL CLOCK ON THE INSTALL, it is a wedge detector, and
+# the two stopped being the same thing the moment the install grew blocking
+# prompts. The 900s clock starts at Phase 0 and spans BOTH of them (the setup
+# blob/PIN prompt and the consent prompt). An operator who walks away at
+# `blob>` gets the guard rolling back underneath a live installer, which then
+# writes phase=handoff to a guard that has already exited — nothing restarts,
+# reattach times out, the install exits 0, and success is reported over a
+# partially undone install.
+#
+# So install.sh refreshes $TXN/heartbeat (a UTC epoch) while it sits on a
+# prompt, and the deadline is measured from the LATER of "armed" and that
+# stamp. A missing, empty or non-numeric file means no heartbeat has ever been
+# written — the pre-existing behaviour exactly — because the installer's
+# heartbeat write is deliberately non-prompting and best-effort (see
+# install.sh's txn_heartbeat: a heartbeat that can block on a sudo password
+# would block on the very thing it measures).
+heartbeat_epoch() {
+    _hb="$(cat "$TXN/heartbeat" 2>/dev/null || echo 0)"
+    case "$_hb" in
+        '' | *[!0-9]*) _hb=0 ;;
+    esac
+    printf '%s\n' "$_hb"
+}
+
 # ---- watch ----------------------------------------------------------------
 # Three ways out, and every one of them is decided here rather than by whoever
 # is still alive:
 #   handoff        the installer finished its work and wants the restart
-#   installer died the session was severed mid-install — the migration case
+#   installer died the session was severed mid-install — the migration case,
+#                  AND every foreground abort (declined consent, a failed
+#                  Phase 2 check): those print and exit, and this branch is
+#                  what actually restores and restarts. See the file header.
 #   deadline       something is wedged; do not hold the host hostage
 _ipid="$(cat "$TXN/installer.pid" 2>/dev/null || echo 0)"
 _start="$(now)"
@@ -272,9 +577,13 @@ while :; do
         log "installer pid $_ipid exited at phase '$_p' without handing off — rolling back"
         rollback
     fi
-    if [ $(( $(now) - _start )) -ge "$DEADLINE" ]; then
-        log "deadline ${DEADLINE}s exceeded at phase '$_p' — rolling back"
+    _since="$_start"
+    _hb="$(heartbeat_epoch)"
+    if [ "$_hb" -gt "$_since" ]; then _since="$_hb"; fi
+    if [ $(( $(now) - _since )) -ge "$DEADLINE" ]; then
+        log "deadline ${DEADLINE}s exceeded at phase '$_p' (last heartbeat $_hb) — rolling back"
         rollback
     fi
     sleep 1
 done
+
