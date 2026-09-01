@@ -36,7 +36,14 @@
 # guard job is RunAtLoad, and one left on disk re-runs against a finished (or
 # worse, a half-finished) transaction at every boot.
 #
-# EXIT CONTRACT: 0 ok · 1 rolled-back · 2 failed.
+# EXIT CONTRACT: 0 ok · 1 rolled-back or aborted · 2 failed.
+#
+# `aborted` is the fourth phase and the youngest: an install that was undone on
+# a host that had NOTHING to undo to. See rollback's snapshot_has_binaries
+# branch — it exits 1 like `rolled-back` (the new build is not serving either
+# way) but says the opposite thing about the host, and an operator reading
+# guard-status must not be told a previous build was restored when there was
+# never a previous build.
 set -eu
 
 
@@ -293,6 +300,30 @@ verify_serving() {
     return 1
 }
 
+# snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
+# previous install's binaries, or is this directory the empty shell a fresh
+# host produces?
+#
+# snapshot_take copies only the names that were ALREADY in $BIN_DIR
+# (`[ -f "$BIN_DIR/$b" ]`), so on a host that has never had a gateway the
+# snapshot's bin/ is created and left empty — a distinction the rest of
+# rollback cannot make from the manifest alone, because `running_version` is
+# the placeholder `unknown` for BOTH "fresh host" and "the daemon was already
+# down".
+#
+# An `if` inside the loop, not `[ -e … ] && return 0`: an AND-list is the last
+# statement of the loop body, so on the final non-matching entry the `for`
+# itself returns 1 and `set -e` kills the guard mid-rollback. An `if` with no
+# `else` returns 0 whichever way it goes — the same shape, and the same
+# reason, as apply_retention's prune body below.
+snapshot_has_binaries() {
+    [ -d "$1/bin" ] || return 1
+    for _shb in "$1/bin"/*; do
+        if [ -e "$_shb" ]; then return 0; fi
+    done
+    return 1
+}
+
 # rollback — put the last working point back AND prove it is serving.
 #
 # EVERY restore step is failure-TOLERANT and logs its own failure, because a
@@ -336,6 +367,43 @@ rollback() {
     fi
     if [ -d "$_snap/data" ]; then
         cp -Rp "$_snap/data/." "$SYS_DATA_DIR/" || log "could not restore the state tree"
+    fi
+
+    # NOTHING TO RESTORE, SO NOTHING TO START — and this branch is a
+    # correctness fix, not an optimisation.
+    #
+    # `unknown` in the manifest means snapshot_take found no running.json.
+    # That is a fresh host as often as it is a stopped daemon, and on a fresh
+    # host the snapshot's bin/ is empty too: there is no previous binary, no
+    # previous plist, nothing this function can put back. Falling through to
+    # restart_service there does not restore anything — it bootstraps the unit
+    # THIS RUN just rendered, against the binary THIS RUN just placed, and on
+    # Linux `enable`s it as well. So:
+    #
+    #   * an operator who DECLINED the consent prompt on a fresh interactive
+    #     install got the gateway installed, started and enabled anyway — the
+    #     exact inverse of the answer they gave;
+    #   * a Phase 2 verification failure started a build whose own placement
+    #     or unit check had just failed;
+    #   * and both then reported `rolled-back`, which guard-status renders as
+    #     "the previous one was restored and is serving" about a host that has
+    #     no previous one and is serving nothing.
+    #
+    # `failed` would be no better: that phase means "the rollback did not come
+    # up either — this host needs hands", and a virgin host with no gateway
+    # running needs no hands at all. It is in exactly the state it was found
+    # in, which is the thing the operator has to be told. Hence a phase of its
+    # own.
+    #
+    # The binaries this run placed are left on disk. Removing them is not an
+    # undo this guard can make safely (it does not know which of them the host
+    # already had under another install), and a binary nothing supervises is
+    # inert — the stranding this whole design exists to prevent is a DAEMON
+    # that is down, not a file that is present.
+    if [ -z "$_want" ] && ! snapshot_has_binaries "$_snap"; then
+        phase aborted
+        log "ABORTED — the snapshot holds no previous install to restore, so nothing was started; the host is as it was found (no gateway running)"
+        exit 1
     fi
 
     _mode="$(restart_mode)"
@@ -571,7 +639,7 @@ while :; do
     _p="$(cat "$TXN/phase" 2>/dev/null || echo unknown)"
     case "$_p" in
         handoff) log "installer handed off"; do_restart ;;
-        ok | rolled-back | failed) log "already terminal ($_p)"; exit 0 ;;
+        ok | rolled-back | aborted | failed) log "already terminal ($_p)"; exit 0 ;;
     esac
     if [ "$_ipid" != 0 ] && ! kill -0 "$_ipid" 2>/dev/null; then
         log "installer pid $_ipid exited at phase '$_p' without handing off — rolling back"

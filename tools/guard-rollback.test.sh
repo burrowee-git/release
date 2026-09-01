@@ -147,11 +147,11 @@ fake_supervisor() {
     _verb="$(restart_verb "$_plat")"
     cat > "$_bin" <<STUB
 #!/bin/sh
-printf '%s\n' "\$*" >> "$_calls"
+printf '%s\\n' "\$*" >> "$_calls"
 case "\$1" in
   $_verb)
     if [ "$_behaviour" = advance ]; then
-      printf '{"version":"%s","pid":2,"started_at":0}\n' "\$(cat "$_r/newver")" \
+      printf '{"version":"%s","pid":2,"started_at":0}\\n' "\$(cat "$_r/newver")" \\
         > "$_r/var/gateway/running.json"
     fi
     ;;
@@ -569,6 +569,87 @@ $(cat "$(supervisor_calls "$_r" "$_plat")")"
 
     kill "$_dpid" 2>/dev/null || true
     wait "$_dpid" 2>/dev/null || true
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# BLOCKER 1 — an abort on a host with NO PRIOR INSTALL must start nothing.
+#
+# snapshot_take records running_version=unknown when there is no running.json,
+# and on a virgin host the snapshot's bin/ is empty as well: there is no
+# previous binary and no previous unit to put back. rollback() mapped `unknown`
+# to an empty $_want and then fell THROUGH to restart_service before reaching
+# the empty-$_want arm — so the "rollback" bootstrapped the unit this run had
+# just rendered, against the binary this run had just placed, `enable`d it on
+# Linux, and reported `rolled-back`.
+#
+# Which means: an operator declining the consent prompt on a fresh interactive
+# install got the gateway installed, started and enabled anyway — the exact
+# inverse of the answer they gave — and guard-status then told them "the
+# previous one was restored and is serving" about a host that has no previous
+# one.
+#
+# The fixture is a virgin host mid-install: nothing in $BIN_DIR but the newly
+# placed binary, an empty snapshot, the freshly rendered unit recorded in
+# units-changed (so a surviving fall-through would bootout AND bootstrap AND
+# enable AND kickstart, all of it visible), and an installer that dies without
+# handing off.
+# ---------------------------------------------------------------------------
+
+# setup_virgin_host <root> <platform> — a host that has never run a gateway:
+# the directory shape install.sh creates, and nothing else. No binaries, no
+# unit, no running.json.
+setup_virgin_host() {
+    _r="$1"
+    mkdir -p "$_r/bin" "$_r/etc/gateway/identity" "$_r/var/gateway" "$_r/units"
+}
+
+# make_virgin_txn <root> — the transaction snapshot_take leaves on such a
+# host: the directories exist, every one of them is empty, and the manifest
+# records the `unknown` placeholder rather than a version.
+make_virgin_txn() {
+    _r="$1"
+    _t="$_r/var/gateway/install/20260831T140211Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units" "$_t/snapshot/data"
+    printf 'stamp=20260831T140211Z\nrunning_version=unknown\nconsistency=exact\n' > "$_t/manifest"
+    printf 'v0.3.1\n' > "$_r/newver"
+    printf '%s\n' "$_t"
+}
+
+t_abort_on_a_virgin_host_starts_nothing() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_virgin_host "$_r" "$_plat"
+    fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_virgin_txn "$_r")"
+
+    # Mid-install: Phase 1 has placed the binary and rendered the unit.
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf '<unit/>\n' > "$_r/units/$(serve_unit_name "$_plat")"
+    printf '%s\n' "$(serve_unit_name "$_plat")" > "$_t/units-changed"
+
+    # The installer aborts — a declined consent prompt, or a failed Phase 2
+    # check — printing and exiting without handing off or restoring anything.
+    sh -c 'sleep 30' &
+    _ipid=$!
+    printf '%s\n' "$_ipid" > "$_t/installer.pid"
+    printf 'verified\n' > "$_t/phase"
+
+    (sleep 1; kill -9 "$_ipid" 2>/dev/null || true) &
+    run_guard "$_r" "$_t" "$_plat" 30
+    wait "$_ipid" 2>/dev/null || true
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    [ ! -s "$_calls" ] \
+        || fail "[$_plat] the abort drove the supervisor on a host with no previous install — there is nothing to restore, so anything started here is the NEW build, which the operator declined; calls:
+$(cat "$_calls")"
+    [ "$(cat "$_t/phase")" = aborted ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want aborted — 'rolled-back' claims a previous install was restored and is serving, and there is none"
+    [ "$GUARD_RC" = 1 ] \
+        || fail "[$_plat] guard exited $GUARD_RC, want 1 (the new build is not serving)"
+    [ ! -e "$_r/var/gateway/running.json" ] \
+        || fail "[$_plat] something reported itself running on a host where nothing should have been started: $(cat "$_r/var/gateway/running.json")"
+    grep -q 'ABORTED' "$_t/guard.log" 2>/dev/null \
+        || fail "[$_plat] guard.log does not record that nothing was started: $(cat "$_t/guard.log" 2>/dev/null)"
     rm -rf "$_r"
 }
 
@@ -1178,6 +1259,7 @@ for _plat in Darwin Linux; do
     t_guard_deadline_exceeded "$_plat"
     t_abort_hands_the_undo_to_the_guard "$_plat"
     t_abort_does_not_bounce_a_live_daemon "$_plat"
+    t_abort_on_a_virgin_host_starts_nothing "$_plat"
     t_guard_does_not_reload_an_unchanged_unit_body "$_plat"
     t_rollback_with_no_recorded_version_is_not_a_failure "$_plat"
 

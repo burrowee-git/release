@@ -1877,7 +1877,8 @@ txn_read_phase() {
 # state is to roll back. Write to a temp name in the same directory, then mv.
 #
 # IT WILL NOT OVERWRITE A TERMINAL PHASE. Once the guard has written ok,
-# rolled-back or failed, the transaction is over and the guard process is gone.
+# rolled-back, aborted or failed, the transaction is over and the guard process
+# is gone.
 # A later `txn_phase handoff` from a still-live installer — which is exactly
 # what an operator returning to a prompt after the guard's deadline fired
 # produces — would hand the restart to a process that has exited: nothing
@@ -1892,7 +1893,7 @@ txn_read_phase() {
 txn_phase() {
     [ -n "$TXN_DIR" ] || return 0
     case "$(txn_read_phase)" in
-    ok | rolled-back | failed)
+    ok | rolled-back | aborted | failed)
         echo "install: the guard has already finished this transaction (phase" >&2
         echo "install: $(txn_read_phase)) — not overwriting it with '$1'." >&2
         return 0
@@ -2312,7 +2313,7 @@ guard_refuse_concurrent() {
         kill -0 "$_grc_pid" 2>/dev/null || continue
         _grc_phase="$(txn_read_file "$_grc_t/phase")"
         case "$_grc_phase" in
-            ok | rolled-back | failed) continue ;;
+            ok | rolled-back | aborted | failed) continue ;;
         esac
         echo "error: a guard from an earlier install is still running (pid $_grc_pid," >&2
         echo "error: transaction $_grc_t, phase ${_grc_phase:-unknown})." >&2
@@ -2743,6 +2744,18 @@ reattach() {
         rolled-back)
             echo "install: the new build did not come up — the previous one was restored" >&2
             echo "install: and is serving. Details: burrowee gateway service guard-status" >&2
+            return 1 ;;
+        aborted)
+            # NOT folded into `rolled-back`, although both return 1. The guard
+            # writes this phase only when the snapshot held no previous install
+            # to restore — a fresh host, or one whose gateway was never there —
+            # so telling the operator "the previous one was restored and is
+            # serving" would name a build that does not exist and a daemon that
+            # is not running. The host is as it was found, and that is the one
+            # thing this line has to say.
+            echo "install: the install was aborted and nothing was started — this host had no" >&2
+            echo "install: previous gateway to restore, so no gateway is running." >&2
+            echo "install: Details: burrowee gateway service guard-status" >&2
             return 1 ;;
         failed)
             echo "install: the rollback did not come up either — this host needs hands." >&2
@@ -3349,6 +3362,6 @@ fi
 "$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
 
 # reattach's verdict, and nothing after it: 0 served / handed off unreported,
-# 1 rolled back, 2 rollback itself failed (see reattach's own header for the
-# exact mapping).
+# 1 rolled back or aborted with nothing started, 2 rollback itself failed (see
+# reattach's own header for the exact mapping).
 exit "$_verdict"
