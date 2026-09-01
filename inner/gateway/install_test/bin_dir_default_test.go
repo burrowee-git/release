@@ -127,20 +127,29 @@ func TestInstallShRefusesAMisdirectingPrefix(t *testing.T) {
 // exited 0, and left a host with binaries in a directory its root consumers
 // cannot see and no service units at all.
 //
-// So this asserts two of the three separable products of that surface —
-// units written, version anchor recorded in $BIN_DIR — from an ordinary
-// default install with no PREFIX in sight.
+// So this asserts all three separable products of that surface — units
+// written, the restart handed to the init system, and the version anchor
+// recorded in $BIN_DIR — from an ordinary default install with no PREFIX in
+// sight.
 //
-// The third product, "units handed to the init system", USED to be asserted
-// here too, synchronously, because load_units ran in this script's own
-// foreground process. It no longer does: the guard armed earlier in the flow
-// (guard_arm) now owns the restart, off this session, specifically so a
-// severed tunnelled operator does not take the daemon down with them. This
-// test's synchronous stub-calls.log check cannot see that restart — it may
-// not have happened yet by the time runStaged returns — so the assertion
-// moved rather than being weakened in place; the guard's own restart is
-// covered by tools/guard-rollback.test.sh and friends, and the renders here
-// still prove render_units ran on the plain default path.
+// The second product, "units handed to the init system", USED to be asserted
+// as "load_units restarted the SERVE unit synchronously" — true right up
+// until Task 9's own predecessor, when that restart moved off this script's
+// foreground into a detached guard (guard_arm, armed before the first write)
+// specifically so a severed tunnelled operator does not take the daemon down
+// with them. A synchronous stub-calls.log check could not see a restart that
+// might not have happened yet by the time runStaged returns, so the
+// assertion was dropped rather than left to pass vacuously.
+//
+// Task 9 restores it, in the shape the new architecture actually offers:
+// the guard itself (not the serve unit) is handed to the init system
+// (guardArmCall), and the transaction's own phase file reaches "handoff" —
+// the token that means "this script has done everything it is going to do
+// and the restart is now the guard's". Both are true synchronously, by the
+// time runStaged returns, without needing a real guard process to have run
+// at all (this suite's systemd-run/launchctl stubs only record the call —
+// see installShEnv's REATTACH_CEILING comment). The guard's OWN restart of
+// the serve unit is covered by tools/guard-rollback.test.sh and friends.
 func TestDefaultInstallEngagesThePrivilegedSurface(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -161,6 +170,12 @@ func TestDefaultInstallEngagesThePrivilegedSurface(t *testing.T) {
 
 	if _, statErr := os.Stat(coreUnitPath(home)); statErr != nil {
 		t.Errorf("no service unit at %s — render_units did not run on a default install: %v", coreUnitPath(home), statErr)
+	}
+	if calls := readFile(t, filepath.Join(home, "stub-calls.log")); !strings.Contains(calls, guardArmCall()) {
+		t.Errorf("the guard was never handed to the init system — a default install no longer restarts synchronously, so the guard is what must run:\n%s", calls)
+	}
+	if got := latestTxnPhase(t, home); got != "handoff" {
+		t.Errorf("transaction phase = %q, want %q — the foreground flow did not hand the restart to the guard", got, "handoff")
 	}
 	anchor := filepath.Join(binDir(home), ".installed-version")
 	if got, statErr := os.ReadFile(anchor); statErr != nil {

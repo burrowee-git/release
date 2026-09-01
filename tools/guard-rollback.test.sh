@@ -215,23 +215,60 @@ GATEWAY_BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-co
 # while the old daemon is still serving and the operator is still connected —
 # the cheap failure, not the expensive one.
 #
-# This does NOT assert against `txn_phase handoff` — that token does not exist
-# yet (Task 9 introduces it), and a check that greps for a token no one has
-# written would be permanently red for no reason this task can fix. What is
-# provable right now is ordering relative to what already exists: verify_placement
-# runs after Phase 1 begins (`txn_phase replacing`) and before the foreground
-# script's own last statement (`finish_with_updater_verdict`, the unconditional
-# tail every mode — fresh install included — falls through to).
+# UPDATED FOR TASK 9: this used to anchor to `finish_with_updater_verdict`
+# because `txn_phase handoff` did not exist yet — Task 9 is what writes it.
+# Now that it does, this asserts the real thing the brief always meant:
+# verify_placement runs after Phase 1 begins (`txn_phase replacing`) and
+# before the handoff that puts the restart in the guard's hands.
 t_verify_precedes_handoff() {
     _f="$HERE/inner/gateway/install.sh"
     _phase1="$(grep -n '^txn_phase replacing$' "$_f" | head -1 | cut -d: -f1)"
     _v="$(grep -n 'verify_placement || {' "$_f" | head -1 | cut -d: -f1)"
-    _end="$(grep -n '^finish_with_updater_verdict$' "$_f" | tail -1 | cut -d: -f1)"
+    _end="$(grep -n '^txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
     [ -n "$_phase1" ] || { fail "install.sh never reaches txn_phase replacing"; return; }
     [ -n "$_v" ]      || { fail "install.sh never calls verify_placement"; return; }
-    [ -n "$_end" ]    || { fail "install.sh never reaches the end of the foreground flow"; return; }
+    [ -n "$_end" ]    || { fail "install.sh never reaches txn_phase handoff"; return; }
     [ "$_phase1" -lt "$_v" ] || fail "verify_placement (line $_v) runs before Phase 1 (line $_phase1)"
-    [ "$_v" -lt "$_end" ]    || fail "verify_placement (line $_v) runs after the end of the foreground flow (line $_end)"
+    [ "$_v" -lt "$_end" ]    || fail "verify_placement (line $_v) runs after txn_phase handoff (line $_end)"
+}
+
+# A non-interactive install must NOT block on a prompt: console pushes, CI and
+# `curl … | sh` have no tty, and today they restart unconditionally. A
+# blocking prompt there would break every automated install.
+#
+# Comment lines are stripped before either grep: consent_to_sever's own header
+# talks ABOUT has_tty at length (why it is safe to assume a real /dev/tty open
+# will succeed once has_tty has already proved one exists), and a check that
+# did not strip comments would pass on that prose alone even with the actual
+# gate deleted from the CODE — proven by mutation while writing this test.
+t_consent_is_tty_gated() {
+    _f="$HERE/inner/gateway/install.sh"
+    grep -q 'consent_to_sever' "$_f" || { fail "install.sh never calls consent_to_sever"; return; }
+    _body="$(sed -n '/^consent_to_sever() {/,/^}/p' "$_f" | grep -v '^[[:space:]]*#')"
+    printf '%s\n' "$_body" | grep -q 'has_tty' \
+        || fail "consent_to_sever does not gate on has_tty"
+    printf '%s\n' "$_body" | grep -q 'BURROWEE_ASSUME_YES' \
+        || fail "consent_to_sever offers no non-interactive override"
+}
+
+# The reconnect instruction must be printed BEFORE the handoff — printing it
+# after is printing it into a connection that may already be gone.
+#
+# Anchored to the EXACT unconditional echo, at column 0 in the flow (never
+# inside a function body), not a bare substring search for "guard-status": a
+# plain substring match finds consent_to_sever's own prompt text AND
+# reattach's own messages first — both are function bodies that sit earlier
+# in the file than the flow that calls them, and both mention guard-status,
+# so a substring check "passes" against either one even with the actual
+# unconditional echo below deleted. Caught only by mutation while writing
+# this test; the exact-line anchor is what closes it.
+t_reconnect_line_precedes_handoff() {
+    _f="$HERE/inner/gateway/install.sh"
+    _r="$(grep -n '^echo "    burrowee gateway service guard-status"$' "$_f" | head -1 | cut -d: -f1)"
+    _h="$(grep -n '^txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+    [ -n "$_r" ] || { fail "install.sh never prints the unconditional guard-status reconnect line ahead of the handoff"; return; }
+    [ -n "$_h" ] || { fail "install.sh never reaches txn_phase handoff"; return; }
+    [ "$_r" -lt "$_h" ] || fail "the reconnect line (line $_r) is printed after the handoff (line $_h)"
 }
 
 # A verification failure must restore the snapshot rather than hand off.
@@ -490,6 +527,8 @@ for _plat in Darwin Linux; do
 done
 
 t_verify_precedes_handoff
+t_consent_is_tty_gated
+t_reconnect_line_precedes_handoff
 t_verify_failure_restores
 t_verify_placement_passes_on_matching_install
 t_verify_placement_catches_corrupted_binary

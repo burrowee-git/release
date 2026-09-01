@@ -242,6 +242,21 @@ func installShEnv(home, stubDir string, extraEnv ...string) []string {
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
 		"BURROWEE_LIBEXEC_DIR=" + libexecDir(home),
+		// REATTACH_CEILING=0 (Task 9): the fresh-install path now ends by
+		// polling the transaction's phase file for the guard's verdict
+		// (install.sh's reattach). This suite's systemd-run/launchctl stubs
+		// only RECORD the arm call (stubInitSystem's own header explains why:
+		// a real systemd-run would hand a live transient unit to the HOST's
+		// own systemd, which every other stub here exists to prevent) — no
+		// guard process ever actually runs here, so the phase file never
+		// reaches a terminal state on its own. Left at its production
+		// default (180s, polled every 2s) every fresh-install test in this
+		// package would block for up to three minutes apiece; ceiling 0 skips
+		// the wait loop outright (reattach's own `_waited -lt 0` is false on
+		// the first check) and takes the "guard has not reported yet" branch
+		// immediately, which is the correct, honest outcome for a harness
+		// that never arms a real guard.
+		"REATTACH_CEILING=0",
 	}
 	return append(env, extraEnv...)
 }
@@ -284,6 +299,34 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// latestTxnPhase reads the phase file of the transaction install.sh most
+// recently created under sysDataDir(home)/install/ — txn_begin's own
+// destination — and returns its content, trimmed.
+//
+// Transaction directories are named by a UTC timestamp (txn_begin's
+// TXN_STAMP), which sorts lexically, so the LAST entry is the most recent —
+// there is at most one per runInstallSh/runStaged call in this suite, but
+// "most recent" is still the honest selection rather than "the only one",
+// since a test may legitimately run install.sh more than once against the
+// same home.
+func latestTxnPhase(t *testing.T, home string) string {
+	t.Helper()
+	root := filepath.Join(sysDataDir(home), "install")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read transaction root %s: %v", root, err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("no transaction directory under %s — txn_begin never ran", root)
+	}
+	last := entries[len(entries)-1].Name()
+	b, err := os.ReadFile(filepath.Join(root, last, "phase"))
+	if err != nil {
+		t.Fatalf("read phase file for transaction %s: %v", last, err)
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // assertContains asserts that s contains every substring in want.

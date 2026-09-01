@@ -67,24 +67,67 @@ func TestLinuxInstallRestartsTheGatewayDaemon(t *testing.T) {
 	}
 }
 
-// TestLinuxFreshInstallRestartsTheGatewayDaemon USED to cover the same
-// guarantee as TestLinuxInstallRestartsTheGatewayDaemon from the OTHER entry
-// point that reached load_units: a plain default (fresh) install with no
-// mode flag.
+// TestFreshInstallHandsTheRestartToTheGuard restores, in the shape the
+// guarded-restart architecture actually offers, the guarantee
+// TestLinuxFreshInstallRestartsTheGatewayDaemon used to cover from the OTHER
+// entry point that reached load_units: a plain default (fresh) install with
+// no mode flag. Run on both platform shapes (forcedOSes), the same discipline
+// TestBothPlatformsAdvanceTheDaemon below already applies to the units-only
+// entry point — a Linux-only version of this would have missed exactly the
+// kind of platform-specific gap this whole file exists to catch.
 //
-// That entry point no longer reaches load_units at all, by design. A fresh
+// THAT ENTRY POINT NO LONGER REACHES load_units AT ALL, BY DESIGN. A fresh
 // install is exactly the case an operator runs from an SSH session tunnelled
 // THROUGH the gateway it is installing — load_units restarting the daemon in
 // this script's own foreground severed that session mid-install, silently
 // skipping everything after it, the version anchor included. The restart is
 // now the guard's job (guard_arm, armed before the first write), running in a
-// detached child that outlives this shell and this connection. A synchronous
-// check of stub-calls.log right after runStaged returns cannot observe that
-// restart — the guard may not have gotten to it yet — so this test cannot be
-// repaired in place; it would either race the guard or assert a promise this
-// script no longer makes. The units-only entry point (the test above) still
-// makes it, unchanged, and the guard's own restart-and-verify path is covered
-// by tools/guard-rollback.test.sh once the handoff lands (Task 9).
+// detached child that outlives this shell and this connection.
+//
+// WHY THE ORIGINAL COULD NOT SIMPLY BE REPAIRED, and still cannot: a
+// synchronous check of stub-calls.log right after runStaged returns cannot
+// observe the guard's OWN restart of the serve unit — the guard is a process
+// glued to launchd/systemd, and this suite's own stubs for those only RECORD
+// a call rather than actually spawning the guard process behind it
+// (stubInitSystem's header explains why: a real systemd-run would hand a live
+// transient unit to the HOST's own systemd). Asserting the guard's restart
+// from here would either race a process that never runs, or assert a promise
+// this script's foreground no longer makes at all.
+//
+// WHAT THIS TEST ASSERTS INSTEAD, now that Task 9 has written the handoff:
+// the two facts that ARE true synchronously, by the time this script's
+// foreground returns — the guard itself was handed off to the init system
+// (guardArmCallFor), and the transaction reached the "handoff" phase, the
+// token that means the restart is now the guard's problem, not this script's.
+// The guard's own restart-and-verify path (that it actually issues
+// `systemctl restart burrowee-gateway.service` / `launchctl kickstart -k`
+// once handed off) is covered end-to-end against the real guard.sh by
+// tools/guard-rollback.test.sh's t_guard_ok / t_guard_rolls_back, on both
+// platform shapes — this test's job is only that install.sh gets the handoff
+// there.
+func TestFreshInstallHandsTheRestartToTheGuard(t *testing.T) {
+	for _, goos := range forcedOSes {
+		t.Run(goos, func(t *testing.T) {
+			home := t.TempDir()
+			stub := stubInitSystemFor(t, goos)
+			staging := t.TempDir()
+			seedDummyBins(t, staging)
+
+			if out, err := runStaged(t, installShPath(t), staging, home, stub); err != nil {
+				t.Fatalf("fresh install failed: %v\n%s", err, out)
+			}
+
+			calls := readFile(t, filepath.Join(home, "stub-calls.log"))
+			if !strings.Contains(calls, guardArmCallFor(goos)) {
+				t.Errorf("%s: fresh install never handed the guard to the init system (want %q); init calls:\n%s",
+					goos, guardArmCallFor(goos), calls)
+			}
+			if got := latestTxnPhase(t, home); got != "handoff" {
+				t.Errorf("%s: transaction phase = %q, want %q — the foreground flow did not hand the restart to the guard", goos, got, "handoff")
+			}
+		})
+	}
+}
 
 // TestLinuxConvergedReinstallStillRestartsTheGatewayDaemon pins the restart
 // CONDITION, which is the design decision this change turns on: the restart is

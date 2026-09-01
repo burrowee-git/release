@@ -213,6 +213,35 @@ func serviceStartCall() string {
 	return "systemctl enable --now burrowee-gateway.service"
 }
 
+// guardArmCallFor is the stub-log SUBSTRING that proves the GUARD — not the
+// serve unit — was handed to the init system to run, for a test that forces
+// goos rather than inheriting the host's.
+//
+// Task 9: the restart no longer happens synchronously inside load_units's own
+// foreground on the fresh-install path. guard_arm hands guard.sh to
+// launchd/systemd instead (before the first write, Phase 0), and it is THAT
+// handoff — not a direct restart of the serve unit — that a fresh install now
+// performs before this script's foreground ever returns.
+//
+// Distinctive substrings, not the bare verb: on Darwin, guard_arm's own
+// `launchctl bootstrap system …` is textually indistinguishable from
+// load_units's (serviceStartCall's own value) by verb alone — both start
+// "launchctl bootstrap system" — so the guard's OWN plist name is what tells
+// the two apart. Linux has no such ambiguity: systemd-run is a verb load_units
+// never uses at all.
+func guardArmCallFor(goos string) string {
+	if goos == "darwin" {
+		return "com.burrowee.gateway.guard"
+	}
+	return "systemd-run --unit=burrowee-gateway-guard"
+}
+
+// guardArmCall is guardArmCallFor for the host's own runtime.GOOS, for a test
+// that does not force the platform.
+func guardArmCall() string {
+	return guardArmCallFor(runtime.GOOS)
+}
+
 // TestInstallShConvergesANodeShapedHostUnderEitherStatDialect is the acceptance
 // test for the whole install contract, run once per stat dialect and once per
 // shell: place the binaries in the correct folder, render the unit naming that

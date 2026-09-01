@@ -2100,6 +2100,134 @@ verify_units() {
 }
 
 # ---------------------------------------------------------------------------
+# consent_to_sever <migration|restart> — tell the operator their connection is
+# about to go, and why, before it goes.
+#
+# ASKED BEFORE THE STEP THAT SEVERS, and which step that is depends on the
+# run: a run with a pending migration loses the session inside
+# migrate_from_legacy, not at the restart — _shared/migrations/adopt_user_tree.sh
+# stops the daemon to copy state at rest, seventeen lines before render_units
+# even runs. A gate asked after the connection is already gone is not a gate.
+#
+# ONLY THE RESTART CALL SITE IS WIRED (below, Phase 3). The migration one is
+# not: gateway's own migrations/run.sh — the runner migrate_from_legacy
+# invokes — ships from the gateway repo, not this one (see that function's own
+# header), so there is no file in THIS repo that could announce "about to
+# stop" early enough for install.sh to act on before the fact. This function
+# stays written to cover it — its `case` already branches on "migration" —
+# should that hook ever become reachable from here.
+#
+# NON-INTERACTIVE RUNS DO NOT PROMPT. Console pushes, CI and `curl … | sh`
+# have no tty and today restart unconditionally; a blocking prompt would turn
+# every automated install into a hang. BURROWEE_ASSUME_YES=1 is the explicit,
+# scriptable override for an interactive host that wants the same behaviour
+# (a supervised push run FROM a terminal, say).
+#
+# A DECLINE UNDOES THE INSTALL, not merely the restart. The guard armed
+# earlier is already watching this transaction and treats ANY exit before the
+# handoff phase as an incomplete run — it will roll the snapshot back on
+# its own the moment this process exits, and its rollback also bounces the
+# (never-stopped) daemon once to reassert the old build. Declining and then
+# leaving the phase at "verified" would race that: the guard's own cleanup
+# fires within its next poll (~1s) regardless of what this function does.
+# Restoring the snapshot HERE and marking the phase "rolled-back" ourselves —
+# the exact move verify_placement's own failure already makes below — heads
+# that race off outright: the phase is already terminal by the time the guard
+# looks, so its watch loop takes the "already terminal" branch and does
+# nothing further, and the outcome ("previous install intact, nothing
+# restarted") is the one actually true of a daemon that was never touched.
+consent_to_sever() {
+    _when="$1"
+    if [ -n "${BURROWEE_ASSUME_YES:-}" ] || ! has_tty; then
+        return 0
+    fi
+    case "$_when" in
+    migration) _cause="a pending state migration is about to stop the gateway to copy its state at rest" ;;
+    *)         _cause="the gateway is about to be restarted onto the newly installed build" ;;
+    esac
+
+    # PROBED IN A SUBSHELL, then opened for real — the same two-step the
+    # setup-blob prompt below uses and for the same reason: dash treats a
+    # FAILED `exec` redirection as fatal and exits the WHOLE SCRIPT, even
+    # inside a construct that looks like it should only fail the construct.
+    # has_tty above already proved a controlling terminal exists, but it
+    # probes fd 0; this opens fd 3 read-write, and proving that specific open
+    # safe in a subshell first is what keeps every /dev/tty open in this file
+    # to the one idiom that cannot take the script down with it.
+    if ! ( exec 3<>/dev/tty ) 2>/dev/null; then return 0; fi
+    exec 3<>/dev/tty
+    {
+        printf '\n'
+        printf 'This host is serving as a burrowee gateway, and this session reaches it\n'
+        printf 'THROUGH that gateway — %s.\n' "$_cause"
+        printf 'Continuing will drop this connection.\n\n'
+        printf 'A guard is already armed with a full snapshot of the previous install. It\n'
+        printf 'will restart the gateway, verify the new build comes up, and roll back to\n'
+        printf 'the snapshot if it does not — you do not need to stay connected.\n\n'
+        printf '  transaction   %s\n' "$TXN_DIR"
+        printf '  on reconnect  burrowee gateway service guard-status\n\n'
+        printf 'Continue? [y/N] '
+    } >&3 2>/dev/null || true
+    _ans=''
+    IFS= read -r _ans <&3 2>/dev/null || _ans=''
+    exec 3>&- 2>/dev/null || true
+
+    case "$_ans" in
+        y | Y | yes | YES) return 0 ;;
+    esac
+    echo "install: declined — restoring the previous install." >&2
+    echo "install: nothing will be restarted; the running gateway is undisturbed." >&2
+    snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
+    txn_phase rolled-back
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# REATTACH_CEILING / REATTACH_INTERVAL — how long reattach (below) polls the
+# transaction's phase file for the guard's verdict before giving up on
+# watching it. Same test-seam shape as WAIT_CEILING/WAIT_INTERVAL above, and
+# for the same reason: production wants minutes (a migration copying a large
+# store, or a slow supervisor, can take a while), a suite that never runs a
+# real guard wants zero.
+# ---------------------------------------------------------------------------
+REATTACH_CEILING="${REATTACH_CEILING:-180}"
+REATTACH_INTERVAL="${REATTACH_INTERVAL:-2}"
+
+# ---------------------------------------------------------------------------
+# reattach — follow the guard to its verdict.
+#
+# DYING HERE IS HARMLESS. The guard is a child of launchd/systemd (guard_arm),
+# not of this shell, and it decides the outcome whether or not this process,
+# this shell, or the operator's own connection is still around to watch —
+# reattach is a convenience for the case they are, never a dependency for the
+# case they are not.
+# ---------------------------------------------------------------------------
+reattach() {
+    _waited=0
+    while [ "$_waited" -lt "$REATTACH_CEILING" ]; do
+        _p="$(cat "$TXN_DIR/phase" 2>/dev/null || echo unknown)"
+        case "$_p" in
+        ok)
+            echo "install: the gateway is serving the new build"
+            return 0 ;;
+        rolled-back)
+            echo "install: the new build did not come up — the previous one was restored" >&2
+            echo "install: and is serving. Details: burrowee gateway service guard-status" >&2
+            return 1 ;;
+        failed)
+            echo "install: the rollback did not come up either — this host needs hands." >&2
+            echo "install: burrowee gateway service guard-status $TXN_STAMP" >&2
+            return 2 ;;
+        esac
+        sleep "$REATTACH_INTERVAL"
+        _waited=$((_waited + REATTACH_INTERVAL))
+    done
+    echo "install: the guard has not reported yet; it is still running and will finish"
+    echo "install: without this session. burrowee gateway service guard-status"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Mode dispatch.
 # ---------------------------------------------------------------------------
 
@@ -2593,44 +2721,50 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Prove the NEW daemon is serving, then report — the last thing this script does
-# on the full-install path, because "hands back" is where the claim is made.
+# Phases 3-5: consent, handoff, reattach — the last things this script does on
+# the full-install path.
 #
-# THE PATH. burrowee-gateway writes running.json into
-# runtime_version.WriteRunning(cfg.paths.Home, version)
-# (cmd/burrowee-gateway/main.go), and GwPaths.Home is the DATA dir, not the
-# config dir (internal/gateway/home.go: GatewayPaths sets Home: dataDir) — so it
-# is $SYS_DATA_DIR here, never $SYS_CONFIG_DIR. Edge's own recordRunningVersion
-# header records what the second spelling of this decision cost, one component
-# over: a doctor reporting "the daemon is not running" about a daemon that was,
-# for 35h on a production node. These two names must stay in step;
-# tools/install-waits-for-daemon.test.sh asserts they do.
-#
-# Not on the BURROWEE_UNITS_ONLY, BURROWEE_UPDATE or BURROWEE_UNINSTALL paths:
-# each exits above. Update mode in particular renders units and deliberately
-# never loads them, so there is nothing there that a wait could be waiting for.
+# THE RESTART NO LONGER HAPPENS HERE. It used to be proved synchronously,
+# right at this point in the script, by waiting on running.json
+# ($SYS_DATA_DIR — never $SYS_CONFIG_DIR; runtime_version.WriteRunning writes
+# to cfg.paths.Home, the DATA dir, internal/gateway/home.go) after load_units
+# restarted the daemon in this shell's own foreground. That restart is the
+# guard's job now (guard_arm, armed back at Phase 0), specifically so this
+# script's foreground can be the thing that dies without changing the outcome
+# — and guard.sh's own running_version() reads that identical path
+# (tools/install-waits-for-daemon.test.sh asserts guard.sh agrees with the
+# daemon on it, the same way it once asserted this script did).
 # ---------------------------------------------------------------------------
-if [ "$SERVE_UNIT_STARTED" = 1 ]; then
-    WANT_VERSION="$(binary_version_stamp "$BIN_DIR/burrowee-gateway")"
-    if [ -n "$WANT_VERSION" ]; then
-        # The timeout's status is deliberately dropped: this wait never fails an
-        # install (see wait_for_running_version's contract).
-        wait_for_running_version "$SYS_DATA_DIR" "$WANT_VERSION" || true
-    else
-        echo "note: could not read the installed binary's version stamp — not waiting" >&2
-    fi
-else
-    echo "note: the serve unit was not (re)started by this run — not waiting on it"
-fi
+
+# ---- Phase 3: consent ------------------------------------------------------
+consent_to_sever restart
+
+# ---- Phase 4: hand off ------------------------------------------------------
+# Printed BEFORE the handoff, never after: once the guard restarts the
+# gateway, this connection — tunnelled through the very daemon being
+# restarted — may already be gone, and a line printed into a dead connection
+# reaches no one.
+echo ""
+echo "handing the restart to the guard. If this connection drops, reconnect and run:"
+echo "    burrowee gateway service guard-status"
+echo ""
+txn_phase handoff
+
+# ---- Phase 5: reattach ------------------------------------------------------
+# Follow the guard to its verdict when the connection survives; if it does
+# not, the guard finishes the job regardless (reattach's own header).
+reattach
+_verdict=$?
 
 # ---- doctor, unconditionally ------------------------------------------------
-# On the match path, the timeout path and the skipped path alike. The wait
-# answers one bit; doctor is the report an operator acts on, and after a timeout
-# it is the only thing that says what the daemon is actually doing.
+# On every reattach outcome alike — served, rolled back, still running, or
+# unreported. reattach answers one bit; doctor is the report an operator acts
+# on, and it is the only thing that says what the daemon is actually doing
+# once this session has reattached (or given up waiting).
 #
-# ITS EXIT STATUS IS NOT THIS INSTALL'S. The verdict was decided by start_unit_*
-# further up; a read-only `doctor` reports failing rows through its exit code,
-# which is a diagnostic doing its job and not a failed install. Hence the guard.
+# ITS EXIT STATUS IS NOT THIS INSTALL'S. The verdict is reattach's, from the
+# guard; a read-only `doctor` reports failing rows through its own exit code,
+# which is a diagnostic doing its job and not a second verdict on the install.
 #
 # STDIN IS /dev/null so it can neither prompt nor elevate. doctor's elevation
 # gate is `euid != 0 && stdin is a terminal` (gw.MayElevate,
@@ -2641,8 +2775,7 @@ fi
 # is the read-only verb.
 "$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
 
-# ---- the deferred updater verdict, and nothing after it ---------------------
-# Prints nothing and exits 0 on every healthy path. It sits below doctor because
-# a broken delivery channel is precisely the failure an operator needs the
-# diagnostic for; it sits at all because the exit status still has to report it.
-finish_with_updater_verdict
+# reattach's verdict, and nothing after it: 0 served / handed off unreported,
+# 1 rolled back, 2 rollback itself failed (see reattach's own header for the
+# exact mapping).
+exit "$_verdict"
