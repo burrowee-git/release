@@ -395,6 +395,282 @@ t_guard_ok_prunes_old_transactions() {
     [ -d "$_install/20260103T000000Z" ] || fail "retention deleted a transaction that should have been kept"
     [ -d "$_install/20260102T000000Z" ] && fail "retention kept a transaction older than the last two plus the current one"
     [ -d "$_install/20260101T000000Z" ] && fail "retention kept a transaction older than the last two plus the current one"
+
+    # THE EXIT CONTRACT, and this is the assertion the finding is about. The
+    # prune body used to end each iteration with
+    # `[ "$_i" -le "$_drop" ] && [ -n "$_old" ] && rm -rf …`. On the LAST
+    # iteration the counter guard is false, so the AND-list returns 1 — and an
+    # AND-list is not exempt from `set -e` when it is the final stage of a
+    # PIPELINE, which the `while` is. The guard died right there, after
+    # `phase ok` had already been written and BEFORE do_restart's `exit 0`, so
+    # it left with status 1: "rolled-back" by its own contract, on a host it
+    # had just verified serving the new build. Everything above still passed
+    # (the prune itself happened, the phase was already ok), which is why this
+    # went unseen — the status is the only witness.
+    [ "$GUARD_RC" = 0 ] \
+        || fail "the guard exited $GUARD_RC after pruning, want 0 — phase says ok but the exit contract says $([ "$GUARD_RC" = 1 ] && echo rolled-back || echo failed); guard.log:
+$(cat "$_t/guard.log" 2>/dev/null)"
+    grep -q 'snapshot retention applied' "$_t/guard.log" 2>/dev/null \
+        || fail "apply_retention never logged its result — it died inside the prune loop"
+    rm -rf "$_r"
+}
+
+# The ok path with NOTHING to prune must still exit 0 — the control for the
+# check above, so a "fix" that simply stopped pruning would be visible rather
+# than green.
+t_guard_ok_exits_zero() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+    [ "$GUARD_RC" = 0 ] || fail "[$_plat] a verified restart exited $GUARD_RC, want 0"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# C2 — THE FOREGROUND ABORT PATHS MUST END WITH A SERVING DAEMON.
+#
+# A declined consent prompt and a failed Phase 2 check used to do
+# `snapshot_restore; txn_phase rolled-back; exit 1` in the installer's own
+# foreground. snapshot_restore only COPIES FILES; `rolled-back` is terminal, so
+# the guard's watch loop took its "already terminal" arm and exited without
+# doing anything. On a MIGRATING host that is the reported stranding through a
+# different door: migrate_from_legacy runs ~150 lines before the consent
+# prompt, and adopt_user_tree.sh boots the serve label out of both domains to
+# copy state at rest, so from there until the guard's restart the gateway is
+# DOWN and, on Darwin, UNLOADED.
+#
+# The fixture below is that host: the daemon is stopped (running.json is the
+# STALE file the dead daemon left behind — it is never removed on stop, which
+# is exactly why the guard cannot use the version alone as a liveness test),
+# the installer dies at a non-terminal phase without handing off, and the guard
+# must restore AND restart AND verify.
+# ---------------------------------------------------------------------------
+t_abort_hands_the_undo_to_the_guard() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"
+    _t="$(make_txn "$_r" "$_plat")"
+
+    # Mid-install: the new build is on disk and the migration has stopped the
+    # daemon. running.json still names the OLD version, with a pid that is
+    # gone — the trap a version-only liveness check falls into.
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf '{"version":"v0.2.13","pid":999999,"started_at":0}\n' > "$_r/var/gateway/running.json"
+    fake_supervisor "$_r" "$_plat" advance
+    printf 'v0.2.13\n' > "$_r/newver"   # a restart brings the RESTORED build back
+
+    # The installer aborts (declined consent / failed verify) — it prints and
+    # exits, leaving the phase non-terminal and never restoring anything.
+    sh -c 'sleep 30' &
+    _ipid=$!
+    printf '%s\n' "$_ipid" > "$_t/installer.pid"
+    printf 'verified\n' > "$_t/phase"
+
+    (sleep 1; kill -9 "$_ipid" 2>/dev/null || true) &
+    run_guard "$_r" "$_t" "$_plat" 30
+    wait "$_ipid" 2>/dev/null || true
+
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] an aborted install left phase = $(cat "$_t/phase"), want rolled-back"
+    grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "[$_plat] the abort did not restore the previous binary"
+    grep -q "$(restart_verb "$_plat")" "$(supervisor_calls "$_r" "$_plat")" \
+        || fail "[$_plat] the abort restored files but never restarted the daemon — the host is left DOWN, which is the whole finding; guard.log:
+$(cat "$_t/guard.log" 2>/dev/null)"
+    grep -q '"version":"v0.2.13"' "$_r/var/gateway/running.json" \
+        || fail "[$_plat] the daemon never came back up after the abort"
+    rm -rf "$_r"
+}
+
+# The other half of C2's judgement call: on a host whose daemon was NEVER
+# stopped — an operator declining the prompt on a plain reinstall — the guard
+# restores the files and does NOT bounce the service. Declining is precisely a
+# request not to drop this connection, and a rollback that restarts anyway
+# drops it.
+#
+# The discriminator is liveness, not version: running.json's pid must name a
+# process that is actually alive. This fixture gives it one (a real sleep in
+# this shell), which the stranded-host case above deliberately does not.
+t_abort_does_not_bounce_a_live_daemon() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    fake_supervisor "$_r" "$_plat" advance
+
+    # A genuinely live "daemon", recorded in running.json the way core's
+    # runtime_version.WriteRunning records it.
+    sh -c 'sleep 30' &
+    _dpid=$!
+    printf '{"version":"v0.2.13","pid":%s,"started_at":0}\n' "$_dpid" > "$_r/var/gateway/running.json"
+
+    sh -c 'sleep 30' &
+    _ipid=$!
+    printf '%s\n' "$_ipid" > "$_t/installer.pid"
+    printf 'verified\n' > "$_t/phase"
+
+    (sleep 1; kill -9 "$_ipid" 2>/dev/null || true) &
+    run_guard "$_r" "$_t" "$_plat" 30
+    wait "$_ipid" 2>/dev/null || true
+
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want rolled-back"
+    grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "[$_plat] the undisturbed abort did not restore the previous binary"
+    ! grep -q "$(restart_verb "$_plat")" "$(supervisor_calls "$_r" "$_plat")" \
+        || fail "[$_plat] the guard bounced a daemon that was still serving — declining the prompt is a request NOT to drop this connection; calls:
+$(cat "$(supervisor_calls "$_r" "$_plat")")"
+
+    kill "$_dpid" 2>/dev/null || true
+    wait "$_dpid" 2>/dev/null || true
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# I8 — a CHANGED unit body is re-read; an unchanged one is not.
+#
+# `bootstrap` on an already-loaded label exits 5 and does nothing, and
+# `kickstart -k` restarts the job launchd holds IN MEMORY: neither re-reads the
+# plist. With the installer's bootout gone, a rendered change to ExecStart,
+# KeepAlive or StandardOutPath therefore took effect only at the next reboot —
+# "files converged, process still stale". The guard is the safe place to do the
+# bootout (it is detached; the stranding was a bootout whose bootstrap sat in a
+# killable session), gated on place_unit having recorded that the file actually
+# changed.
+#
+# Darwin only: Linux's `daemon-reload` + `restart` re-reads the unit by
+# construction, so there is nothing to gate there — which the unchanged-case
+# assertion below also proves, by running on both platforms.
+# ---------------------------------------------------------------------------
+t_guard_reloads_a_changed_unit_body() {
+    _r="$(mktemp -d)"; setup_fake_host "$_r" Darwin; fake_supervisor "$_r" Darwin advance
+    _t="$(make_txn "$_r" Darwin)"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'com.burrowee.gateway.plist\n' > "$_t/units-changed"
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" Darwin
+
+    _calls="$(supervisor_calls "$_r" Darwin)"
+    [ "$(cat "$_t/phase")" = ok ] || fail "changed-unit: phase = $(cat "$_t/phase"), want ok"
+    grep -q 'bootout system/com.burrowee.gateway$' "$_calls" \
+        || fail "the guard did not boot the serve label out for a CHANGED plist — launchd never re-reads it, so the rendered change takes effect only at the next reboot; calls:
+$(cat "$_calls")"
+    grep -q 'kickstart -k system/com.burrowee.gateway$' "$_calls" \
+        || fail "the guard booted the label out without restarting it"
+    rm -rf "$_r"
+}
+
+t_guard_does_not_reload_an_unchanged_unit_body() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    # Only the UPDATER's unit changed — the serve unit did not.
+    printf '%s\n' "$(updater_unit_name "$_plat")" > "$_t/units-changed"
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    [ "$(cat "$_t/phase")" = ok ] || fail "[$_plat] unchanged-unit: phase = $(cat "$_t/phase"), want ok"
+    ! grep -q "$(unsupervise_pattern "$_plat" "$(serve_unit_name "$_plat")")" "$_calls" \
+        || fail "[$_plat] the guard unsupervised the serve label although its unit file did not change; calls:
+$(cat "$_calls")"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# I13 — a rollback on a host with no recorded running version must not report
+# `failed`.
+#
+# snapshot_take writes running_version=unknown when running.json is absent (a
+# fresh host, or one whose daemon was already down when the install began).
+# "unknown" is non-empty, so verify_serving compared against the literal string
+# `unknown`, burned the whole 60s ceiling, failed, and the guard ended at phase
+# `failed` — "this host needs hands" — on a rollback that may have completed
+# perfectly.
+# ---------------------------------------------------------------------------
+t_rollback_with_no_recorded_version_is_not_a_failure() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" dead
+    _t="$(make_txn "$_r" "$_plat")"
+    printf 'stamp=20260831T140211Z\nrunning_version=unknown\nconsistency=exact\n' > "$_t/manifest"
+    rm -f "$_r/var/gateway/running.json"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'handoff\n' > "$_t/phase"
+
+    run_guard "$_r" "$_t" "$_plat"
+
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] phase = $(cat "$_t/phase"), want rolled-back — 'unknown' is a placeholder, not a version to verify against"
+    [ "$GUARD_RC" = 1 ] || fail "[$_plat] guard exited $GUARD_RC, want 1 (rolled-back)"
+    grep -q 'recorded no running version' "$_t/guard.log" 2>/dev/null \
+        || fail "[$_plat] guard.log does not say the restore could not be verified: $(cat "$_t/guard.log" 2>/dev/null)"
+    # And it never waited for a daemon to report the literal string "unknown".
+    # That is the precise symptom: verify_serving logs "daemon did not report
+    # <want>" with the string it compared, so the placeholder appearing there
+    # is proof it was treated as a version. Checked by CONTENT rather than by
+    # elapsed time — do_restart's own verify against the new build legitimately
+    # burns the ceiling first on this fixture, so a stopwatch here would be
+    # measuring the wrong wait.
+    grep -q 'did not report unknown' "$_t/guard.log" 2>/dev/null \
+        && fail "[$_plat] the guard waited for the daemon to report the literal string 'unknown'"
+    rm -rf "$_r"
+
+}
+
+# ---------------------------------------------------------------------------
+# I10 — the deadline measures a WEDGE, not an operator standing at a prompt.
+#
+# The 900s clock starts at Phase 0 and spans both blocking reads (the setup
+# blob/PIN prompt and the consent prompt). An operator who steps away at
+# `blob>` got the guard rolling back underneath a live installer, which then
+# wrote phase=handoff to a guard that had already exited: nothing restarted,
+# reattach timed out, and the install reported success over a partially undone
+# host. install.sh now refreshes $TXN/heartbeat across each blocking prompt and
+# the guard measures its deadline from the later of "armed" and that stamp.
+# ---------------------------------------------------------------------------
+t_heartbeat_defers_the_deadline() {
+    _plat=Linux
+    _deadline=4
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" dead
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'replacing\n' > "$_t/phase"
+
+    sh -c 'sleep 30' &
+    _ipid=$!
+    printf '%s\n' "$_ipid" > "$_t/installer.pid"
+
+    # A ticker standing in for install.sh's own heartbeat_start, refreshing
+    # while the (simulated) operator reads the prompt.
+    ( _n=0; while [ "$_n" -lt 12 ]; do date -u +%s > "$_t/heartbeat"; sleep 1; _n=$((_n + 1)); done ) &
+    _hb=$!
+
+    GUARD_LAUNCHCTL="$_r/launchctl" GUARD_SYSTEMCTL="$_r/systemctl" \
+    GUARD_DEADLINE="$_deadline" GUARD_VERIFY_CEILING=2 GUARD_VERIFY_INTERVAL=1 \
+    BURROWEE_BIN_DIR="$_r/bin" BURROWEE_LAUNCHD_DIR="$_r/units" \
+    BURROWEE_SYSTEMD_DIR="$_r/units" \
+    BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
+    BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
+    GUARD_UNAME="$_plat" \
+    sh "$GUARD" "$_t" >/dev/null 2>&1 &
+    _gpid=$!
+
+    # Well past a 4s deadline, but every second of it heartbeated.
+    sleep 8
+    _late="$(cat "$_t/phase")"
+
+    kill "$_hb" 2>/dev/null || true; wait "$_hb" 2>/dev/null || true
+    # The heartbeat has stopped; the deadline now runs from its last stamp.
+    wait "$_gpid" 2>/dev/null || true
+    kill "$_ipid" 2>/dev/null || true; wait "$_ipid" 2>/dev/null || true
+
+    [ "$_late" = replacing ] \
+        || fail "the guard rolled back at phase '$_late' 8s into a 4s deadline that was heartbeated the whole way — an operator standing at a prompt is not a wedge"
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "the deadline never fired after the heartbeat stopped: phase = $(cat "$_t/phase")"
     rm -rf "$_r"
 }
 
@@ -460,17 +736,52 @@ t_consent_is_tty_gated() {
 # this test; the exact-line anchor is what closes it.
 t_reconnect_line_precedes_handoff() {
     _f="$HERE/inner/gateway/install.sh"
-    _r="$(grep -n '^echo "    burrowee gateway service guard-status"$' "$_f" | head -1 | cut -d: -f1)"
-    _h="$(grep -n '^txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+    _r="$(grep -n '^[[:space:]]*echo "    burrowee gateway service guard-status"$' "$_f" | head -1 | cut -d: -f1)"
+    _h="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+
     [ -n "$_r" ] || { fail "install.sh never prints the unconditional guard-status reconnect line ahead of the handoff"; return; }
     [ -n "$_h" ] || { fail "install.sh never reaches txn_phase handoff"; return; }
     [ "$_r" -lt "$_h" ] || fail "the reconnect line (line $_r) is printed after the handoff (line $_h)"
 }
 
-# A verification failure must restore the snapshot rather than hand off.
-t_verify_failure_restores() {
-    grep -q 'verify_placement || {' "$HERE/inner/gateway/install.sh" \
-        || fail "a failed verify_placement does not branch to a restore"
+# A verification failure must abort rather than hand off — and it must abort
+# THROUGH abort_install, not by restoring in the foreground.
+#
+# REWRITTEN, and the rewrite is the finding. The old shape was
+# `snapshot_restore; txn_phase rolled-back; exit 1` inline, and this check
+# asserted the branch existed. Both halves of that branch were wrong:
+# snapshot_restore only COPIES FILES, and `rolled-back` is terminal, so the
+# guard's watch loop took its "already terminal" arm and did nothing. On a host
+# whose migration had already stopped (and on Darwin unloaded) the daemon —
+# migrate_from_legacy runs ~150 lines earlier — a failed Phase 2 check left it
+# down with the only process that could restart it told the job was finished.
+# The undo now goes to the guard, whose rollback() restores AND restarts AND
+# verifies. t_abort_hands_the_undo_to_the_guard below drives that end to end.
+t_verify_failure_aborts_to_the_guard() {
+    _f="$HERE/inner/gateway/install.sh"
+    grep -q '^verify_placement || abort_install ' "$_f" \
+        || fail "a failed verify_placement does not abort the install"
+    grep -q '^verify_units     || abort_install ' "$_f" \
+        || fail "a failed verify_units does not abort the install"
+    # The foreground must not pre-empt the guard: neither Phase 2 branch, nor
+    # the consent decline, may restore or mark the transaction terminal itself.
+    # Comments are stripped — abort_install's own header explains at length why
+    # it does not do those things, and an unstripped check would pass on that
+    # prose alone with the guard-handoff deleted from the code.
+    _body="$(sed -n '/^abort_install() {/,/^}/p' "$_f" | grep -v '^[[:space:]]*#')"
+    printf '%s\n' "$_body" | grep -q 'GUARD_ARMED' \
+        || fail "abort_install does not branch on whether a guard is watching"
+    _armed="$(printf '%s\n' "$_body" | sed -n '/GUARD_ARMED. = 1 /,/^    fi$/p')"
+    printf '%s\n' "$_armed" | grep -q 'snapshot_restore' \
+        && fail "abort_install restores in the foreground even with a guard armed — snapshot_restore only copies files, it never restarts"
+    printf '%s\n' "$_armed" | grep -q 'txn_phase' \
+        && fail "abort_install marks the transaction terminal with a guard armed — the guard then takes its 'already terminal' branch and does nothing"
+    _decline="$(sed -n '/^consent_to_sever() {/,/^}/p' "$_f" | grep -v '^[[:space:]]*#')"
+    printf '%s\n' "$_decline" | grep -q 'snapshot_restore' \
+        && fail "a declined consent still restores in the foreground"
+    printf '%s\n' "$_decline" | grep -q 'txn_phase' \
+        && fail "a declined consent still marks the transaction terminal"
+    return 0
 }
 
 # make_sudo_stub <dir> — a pass-through `sudo`, same shape as
@@ -811,20 +1122,33 @@ t_reattach_times_out_on_an_unrecognised_phase() {
 
 for _plat in Darwin Linux; do
     t_guard_ok "$_plat"
+    t_guard_ok_exits_zero "$_plat"
     t_guard_rolls_back "$_plat"
     t_guard_ok_advances_updater "$_plat"
     t_guard_ok_sweeps_stale_bins "$_plat"
     t_guard_deadline_exceeded "$_plat"
+    t_abort_hands_the_undo_to_the_guard "$_plat"
+    t_abort_does_not_bounce_a_live_daemon "$_plat"
+    t_guard_does_not_reload_an_unchanged_unit_body "$_plat"
+    t_rollback_with_no_recorded_version_is_not_a_failure "$_plat"
+
     t_verify_units_passes "$_plat"
     t_verify_units_fails_when_unit_missing "$_plat"
     t_verify_units_fails_when_exec_target_not_executable "$_plat"
 done
 
 t_guard_ok_prunes_old_transactions
+t_guard_removes_its_own_plist advance ok
+t_guard_removes_its_own_plist dead rolled-back
+t_guard_reloads_a_changed_unit_body
+
+t_heartbeat_defers_the_deadline
 t_verify_precedes_handoff
+
 t_consent_is_tty_gated
 t_reconnect_line_precedes_handoff
-t_verify_failure_restores
+t_verify_failure_aborts_to_the_guard
+
 t_verify_placement_passes_on_matching_install
 t_verify_placement_catches_corrupted_binary
 t_verify_placement_catches_missing_binary

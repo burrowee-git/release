@@ -2515,19 +2515,37 @@ verify_units() {
 # scriptable override for an interactive host that wants the same behaviour
 # (a supervised push run FROM a terminal, say).
 #
-# A DECLINE UNDOES THE INSTALL, not merely the restart. The guard armed
-# earlier is already watching this transaction and treats ANY exit before the
-# handoff phase as an incomplete run — it will roll the snapshot back on
-# its own the moment this process exits, and its rollback also bounces the
-# (never-stopped) daemon once to reassert the old build. Declining and then
-# leaving the phase at "verified" would race that: the guard's own cleanup
-# fires within its next poll (~1s) regardless of what this function does.
-# Restoring the snapshot HERE and marking the phase "rolled-back" ourselves —
-# the exact move verify_placement's own failure already makes below — heads
-# that race off outright: the phase is already terminal by the time the guard
-# looks, so its watch loop takes the "already terminal" branch and does
-# nothing further, and the outcome ("previous install intact, nothing
-# restarted") is the one actually true of a daemon that was never touched.
+# A DECLINE UNDOES THE INSTALL, not merely the restart — AND IT HANDS THAT
+# UNDO TO THE GUARD, which is the whole correction here.
+#
+# This function used to do `snapshot_restore; txn_phase rolled-back; exit 1`
+# itself, reasoning that marking the phase terminal first heads off a race
+# with the guard, and that "nothing was restarted; the running gateway is
+# undisturbed" is true of a daemon that was never touched.
+#
+# THE SECOND HALF IS FALSE ON EXACTLY THE RUN THIS DESIGN EXISTS FOR.
+# migrate_from_legacy runs ~150 lines before this prompt, and
+# _shared/migrations/adopt_user_tree.sh boots the serve label out of both
+# domains to copy state at rest. From there until the guard's own restart the
+# gateway is DOWN and, on Darwin, UNLOADED. snapshot_restore only copies files
+# — it never restarts anything — so on a migrating host "declined, restored"
+# left the daemon stopped, and `txn_phase rolled-back` then told the guard the
+# transaction was already finished: its watch loop takes the "already
+# terminal" branch and exits. That is the reported stranding through a
+# different door. It is reached by an EOF read, too: on a migrating host the
+# prompt below reads from a tty whose connection is already gone, EOF gives
+# _ans='', and an empty answer is a decline.
+#
+# So the decline prints and EXITS. The guard's installer-died branch is what
+# restores, restarts and VERIFIES — the three things a rollback is, of which
+# the foreground could only ever do the first. The race the old comment was
+# avoiding is not a race: the guard's rollback is the correct outcome, and it
+# arrives within one poll (~1s). And on a host whose daemon was never stopped
+# the guard does not bounce it either — rollback() skips the restart when the
+# daemon is already serving the snapshot's version and the unit body is
+# unchanged, which is precisely the "undisturbed" case this used to claim by
+# assertion and now establishes by observation.
+
 consent_to_sever() {
     _when="$1"
     if [ -n "${BURROWEE_ASSUME_YES:-}" ] || ! has_tty; then
@@ -2562,13 +2580,52 @@ consent_to_sever() {
     } >&3 2>/dev/null || true
     _ans=''
     IFS= read -r _ans <&3 2>/dev/null || _ans=''
+    heartbeat_stop
     exec 3>&- 2>/dev/null || true
 
     case "$_ans" in
         y | Y | yes | YES) return 0 ;;
     esac
-    echo "install: declined — restoring the previous install." >&2
-    echo "install: nothing will be restarted; the running gateway is undisturbed." >&2
+    abort_install "declined"
+
+}
+
+# ---------------------------------------------------------------------------
+# abort_install <why> — the ONE way this script gives up once a transaction is
+# open. There are two shapes, and which one applies is decided by whether a
+# guard is actually watching.
+#
+# GUARD ARMED (the default path): print, and exit. Do NOT restore, and do NOT
+# write a terminal phase. Both belong to the guard, and doing either here is
+# what made the three foreground abort paths — a declined consent, a failed
+# verify_placement, a failed verify_units — able to strand a host:
+# `snapshot_restore` copies files and nothing else, and `txn_phase rolled-back`
+# is terminal, so the guard was handed a finished transaction and did nothing.
+# On a run whose migration had already stopped (and on Darwin unloaded) the
+# daemon, that left it down with the only thing that could bring it back told
+# not to. The guard's rollback() restores AND restarts AND verifies, it is
+# running detached with the snapshot already in hand, and its installer-died
+# branch fires within one poll of this process exiting.
+#
+# NO GUARD ARMED (BURROWEE_NO_RESTART): nothing this run was ever going to
+# restart anything, and no guard exists to hand the undo to — so the
+# foreground restore IS the whole undo, and marking the phase terminal records
+# it for guard-status. This is the ONLY remaining caller of snapshot_restore.
+#
+# The exit status is 1 either way: an aborted install failed.
+# ---------------------------------------------------------------------------
+abort_install() {
+    if [ "$GUARD_ARMED" = 1 ]; then
+        echo "install: $1 — the guard is undoing this install." >&2
+        echo "install: it restores the previous binaries, units, config and state, and makes" >&2
+        echo "install: sure the gateway is serving again before it stops." >&2
+        echo "install: transaction $TXN_DIR" >&2
+        echo "install: check the outcome with: burrowee gateway service guard-status" >&2
+        exit 1
+    fi
+    echo "install: $1 — restoring the previous install." >&2
+    echo "install: no guard was armed this run (BURROWEE_NO_RESTART), and nothing was" >&2
+    echo "install: restarted, so the running gateway is the one this restores." >&2
     snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
     txn_phase rolled-back
     exit 1
@@ -3054,19 +3111,15 @@ if [ "$MIGRATE_UNRECORDED" = "0" ]; then
 fi
 
 # ---- Phase 2: verify -------------------------------------------------------
-verify_placement || {
-    echo "install: verification failed — restoring the previous install." >&2
-    echo "install: nothing was restarted; the running gateway was not disturbed." >&2
-    snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
-    txn_phase rolled-back
-    exit 1
-}
-verify_units || {
-    echo "install: unit verification failed — restoring the previous install." >&2
-    snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
-    txn_phase rolled-back
-    exit 1
-}
+#
+# Both failures go through abort_install, and neither restores or marks the
+
+# transaction terminal itself — see that function's header. The old shape's
+# "nothing was restarted; the running gateway was not disturbed" was false on
+# a migrating host, where the daemon has been down since migrate_from_legacy.
+verify_placement || abort_install "placement verification failed"
+verify_units     || abort_install "unit verification failed"
+
 txn_phase verified
 echo "verified: binaries and units are in place and consistent"
 
