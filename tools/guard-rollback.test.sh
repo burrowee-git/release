@@ -933,8 +933,34 @@ $(cat "$_calls")"
 # re-read anything — the first version of the check below did exactly that, and
 # would have passed against the defect it was written to catch. Two restarts,
 # two bootouts; one bootout means the rollback did not reload.
+#
+# `grep -c` PRINTS ITS COUNT AND STILL EXITS 1 when the count is zero, so the
+# obvious `grep -c … || printf '0\n'` appends a SECOND zero to the one grep
+# already wrote: the caller's `$( )` collapses to "0\n0", every arithmetic and
+# string comparison against it is wrong, and a failure message reads "saw 0\n0".
+# Capture first, then substitute for the non-zero exit — the substitution
+# already holds grep's own "0", and the fallback only has to cover the cases
+# where grep printed nothing at all (an unreadable or missing file, exit 2).
 count_calls() {
-    grep -c "$2" "$1" 2>/dev/null || printf '0\n'
+    _cc="$(grep -c "$2" "$1" 2>/dev/null)" || _cc="${_cc:-0}"
+    printf '%s\n' "${_cc:-0}"
+}
+
+# The helper's own no-match answer, pinned. Every assertion below compares
+# count_calls's output to a literal, so a helper that answers "0\n0" turns a
+# real regression into an unreadable failure message and an equality test that
+# can never pass — including the `[ "$_boots" = 2 ]` pair above, whose whole
+# job is to tell one bootout from two.
+t_count_calls_answers_zero_once() {
+    _ccw="$(mktemp -d)"
+    printf 'alpha\nbeta\n' > "$_ccw/log"
+    [ "$(count_calls "$_ccw/log" '^alpha$')" = 1 ] \
+        || fail "count_calls miscounted a single match: $(count_calls "$_ccw/log" '^alpha$')"
+    [ "$(count_calls "$_ccw/log" '^gamma$')" = 0 ] \
+        || fail "count_calls answered $(count_calls "$_ccw/log" '^gamma$') for no match, want a single 0 — 'grep -c' prints its own 0 and exits 1"
+    [ "$(count_calls "$_ccw/nope" '^alpha$')" = 0 ] \
+        || fail "count_calls answered $(count_calls "$_ccw/nope" '^alpha$') for a missing file, want 0"
+    rm -rf "$_ccw"
 }
 
 # ---------------------------------------------------------------------------
@@ -1777,6 +1803,7 @@ t_guard_removes_its_own_plist dead rolled-back
 t_guard_reloads_a_changed_unit_body
 t_rollback_after_a_forward_restart_rereads_the_restored_unit
 t_rollback_still_reloads_when_the_snapshot_holds_no_unit
+t_count_calls_answers_zero_once
 t_snapshot_has_binaries_is_pinned_across_both_files
 t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
 t_abort_install_without_a_guard_still_rolls_back_a_real_install
