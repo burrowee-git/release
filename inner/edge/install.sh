@@ -1034,14 +1034,24 @@ assert_system_tree() {
         dir_is_root_secure "$_ast" || _ast_rc=$?
         if [ "$_ast_rc" = 0 ]; then continue; fi
         if [ "$_ast_rc" = 2 ]; then
-            echo "error: could not read the owner and mode of $_ast — this host's 'stat'" >&2
-            echo "error: answered neither the GNU form (stat -c '%u') nor the BSD form" >&2
-            echo "error: (stat -f '%u') with a plain number." >&2
+            # TWO causes, and naming only one sends the operator to the wrong
+            # place. dir_is_root_secure walks the path component by component,
+            # so it answers 2 when a `stat` did not answer AND when a symlink
+            # on the way could not be followed — the second has nothing to do
+            # with which stat is on PATH. Asserting a dialect problem here
+            # would be the same misdirection the 1-vs-2 split exists to stop.
+            echo "error: could not establish the owner and mode of every directory on the" >&2
+            echo "error: way to $_ast, so nothing is known either way." >&2
             echo "error: refusing to install — edge's state would sit in a directory whose" >&2
             echo "error: ownership could not be established." >&2
             echo "hint: the permissions of $_ast are NOT implicated — reading them is." >&2
-            echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
-            echo "hint: system one; then re-run the installer." >&2
+            echo "hint: two things answer this way. Either this host's 'stat' answered" >&2
+            echo "hint: neither the GNU form (stat -c '%u') nor the BSD form (stat -f '%u')" >&2
+            echo "hint: with a plain number — check which stat is on PATH ('command -v stat')" >&2
+            echo "hint: and that it is the system one; or a symlink on the way could not be" >&2
+            echo "hint: followed, which is what a path rewritten while it is walked looks" >&2
+            echo "hint: like, and a re-run settles that one." >&2
+            echo "hint: then re-run the installer." >&2
         elif [ "$_ast_rc" = 3 ]; then
             echo "error: $_ast does not exist — refusing to install a service whose state" >&2
             echo "error: would sit in a directory this run failed to create." >&2
@@ -1086,8 +1096,9 @@ link_operator_bins() {
     if [ "$_lob_rc" != 0 ]; then
         case "$_lob_rc" in
         3) echo "note: $LINK_DIR does not exist on this host, so no burrowee command was linked into it." ;;
-        2) echo "note: the ownership of $LINK_DIR could not be read ('stat' answered neither dialect), so no" ;
-           echo "note: burrowee command was linked into it — a link is only safe in a directory proven root-owned." ;;
+        2) echo "note: the ownership of $LINK_DIR could not be established — either 'stat' answered neither" ;
+           echo "note: dialect, or a symlink on the way could not be followed — so no burrowee command was linked" ;
+           echo "note: into it: a link is only safe in a directory proven root-owned." ;;
         *) echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
            echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
            echo "note: unlinked and replaced, and the next 'sudo burrowee-edge-cli' would run that user's file as root." ;;

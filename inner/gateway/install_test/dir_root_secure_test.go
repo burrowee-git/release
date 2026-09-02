@@ -77,6 +77,15 @@ esac
 // tables set as given, returning the predicate's exit code.
 func dirIsRootSecure(t *testing.T, target string, uids, modes map[string]string) int {
 	t.Helper()
+	return dirIsRootSecureFrom(t, "", target, uids, modes)
+}
+
+// dirIsRootSecureFrom is dirIsRootSecure with the probe's working directory
+// chosen. A relative target is judged against the PHYSICAL working directory
+// and that directory's own components are part of the answer, so the cwd is an
+// input to the predicate and needs a seam like any other input.
+func dirIsRootSecureFrom(t *testing.T, cwd, target string, uids, modes map[string]string) int {
+	t.Helper()
 	stub := t.TempDir()
 	if err := os.WriteFile(filepath.Join(stub, "stat"), []byte(statStubTable), 0o755); err != nil {
 		t.Fatal(err)
@@ -94,6 +103,7 @@ func dirIsRootSecure(t *testing.T, target string, uids, modes map[string]string)
 	}
 	probe := rootSecureContractRegion(t) + "\ndir_is_root_secure " + shQuote(target) + "\nexit $?\n"
 	cmd := exec.Command("sh", "-c", probe)
+	cmd.Dir = cwd
 	cmd.Env = []string{
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STAT_UIDS=" + table("uids", uids),
@@ -197,8 +207,13 @@ func TestDirIsRootSecureReportsUndecidableNotInsecure(t *testing.T) {
 // of /usr/local can repoint `bin` whenever they like, after which every root
 // symlink this installer made addresses their directory instead.
 //
-// Mutation that reddens it: drop the `dir_chain_is_root_secure "$_ds_p"` call
-// from the `[ -L ]` branch, so only the resolved target is walked.
+// Mutations that redden it, both against the walk as it stands:
+//   - collapse the leaf as well, by inserting
+//     `_ds_in="$(cd "$_ds_in" 2>/dev/null && pwd -P)"` after the `[ -d ]` test
+//     — the pre-fix shape of this function. The walk then starts at the
+//     resolved target and the chain that HOLDS the link is never judged;
+//   - delete the `[ -L "$_ds_cur" ]` branch entirely, so the link is judged by
+//     its own uid and mode instead of being followed.
 func TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf(t *testing.T) {
 	root := canonicalTempDir(t)
 	holder := filepath.Join(root, "holder")
@@ -409,13 +424,18 @@ func TestDirIsRootSecureJudgesEverySubstitutableComponent(t *testing.T) {
 //     and `stat` on it need search permission on its PARENT only, and succeed.
 //     This half is real for every runner below root (CI runs as an ordinary
 //     uid) and vacuous for a root runner, which is what the second half covers.
-//   - STRUCTURAL: dir_is_root_secure's own body contains no `cd` at all. This
-//     is euid-independent, so it cannot go quietly vacuous the way a
-//     permission fixture can.
+//   - STRUCTURAL: neither dir_is_root_secure NOR dir_level_is_root_secure
+//     contains a `cd` at all. This is euid-independent, so it cannot go
+//     quietly vacuous the way a permission fixture can. Both bodies are
+//     inspected because the walk calls the helper once per component: a `cd`
+//     placed there would enter the leaf just as surely, and checking only the
+//     walk would leave the behavioural half — vacuous under a root runner — as
+//     the sole cover.
 //
 // Mutations that redden it: insert `cd "$_ds_in" || return 2` into
-// dir_is_root_secure (reddens the structural half always, and the behavioural
-// half whenever the suite runs below root).
+// dir_is_root_secure, or `cd "$1" || return 2` into dir_level_is_root_secure
+// (each reddens the structural half always, and the behavioural half whenever
+// the suite runs below root).
 func TestDirIsRootSecureNeverEntersTheDirectoryItJudges(t *testing.T) {
 	root := canonicalTempDir(t)
 	leaf := filepath.Join(root, "burrowee", "var")
@@ -429,14 +449,66 @@ func TestDirIsRootSecureNeverEntersTheDirectoryItJudges(t *testing.T) {
 	if rc := dirIsRootSecure(t, leaf, map[string]string{}, map[string]string{leaf: "700"}); rc != 0 {
 		t.Errorf("a root-owned 0700 leaf probed by an unprivileged operator: rc = %d, want 0 — the predicate entered the directory instead of stat'ing it from outside", rc)
 	}
-	body := shellFuncBody(t, rootSecureContractRegion(t), "dir_is_root_secure")
-	for i, line := range strings.Split(body, "\n") {
-		code := strings.TrimSpace(line)
-		if code == "" || strings.HasPrefix(code, "#") {
-			continue
+	region := rootSecureContractRegion(t)
+	for _, fn := range []string{"dir_is_root_secure", "dir_level_is_root_secure"} {
+		for i, line := range strings.Split(shellFuncBody(t, region, fn), "\n") {
+			code := strings.TrimSpace(line)
+			if code == "" || strings.HasPrefix(code, "#") {
+				continue
+			}
+			if strings.Contains(code, "cd ") {
+				t.Errorf("%s line %d changes directory: %q — the leaf is routinely root-owned 0700 and entering it is EACCES for the operator this installer runs as", fn, i+1, code)
+			}
 		}
-		if strings.Contains(code, "cd ") {
-			t.Errorf("dir_is_root_secure line %d changes directory: %q — the leaf is routinely root-owned 0700 and entering it is EACCES for the operator this installer runs as", i+1, code)
-		}
+	}
+}
+
+// TestDirIsRootSecureJudgesTheWorkingDirectoryOfARelativeSpelling covers the
+// branch that turns a relative spelling into an absolute one.
+//
+// It is here because the branch had NO coverage at all: replacing the whole
+// `_ds_cwd="$(pwd -P …)"` … `_ds_rest="${_ds_cwd%/}/$_ds_in"` body with
+// `_ds_rest="/$_ds_in"` — judging the path as if it hung off / — left
+// `go test -run TestDir` green, while a directory under a group-writable
+// working directory reported SECURE. Every input to this predicate has to be
+// driven, and the working directory is an input: the components of the cwd are
+// components of the path, so whoever can write one of them can move the whole
+// relative spelling somewhere else.
+//
+// Mutations that redden it:
+//   - `_ds_rest="/$_ds_in"` in place of the relative branch: the clean case
+//     answers 1 (there is no /local) instead of 0;
+//   - delete the mode test from dir_level_is_root_secure: the three
+//     group-writable cases;
+//   - delete its uid test: the not-root-owned case.
+func TestDirIsRootSecureJudgesTheWorkingDirectoryOfARelativeSpelling(t *testing.T) {
+	root := canonicalTempDir(t)
+	usr := filepath.Join(root, "usr")
+	if err := os.MkdirAll(filepath.Join(usr, "local", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]string{}
+	cases := []struct {
+		name  string
+		cwd   string
+		arg   string
+		uids  map[string]string
+		modes map[string]string
+		want  int
+	}{
+		{"a relative spelling under a root-owned working directory", usr, "local/bin", none, none, 0},
+		{"the working directory itself is group-writable", usr, "local/bin", none, map[string]string{usr: "775"}, 1},
+		{"a component ABOVE the working directory is group-writable", usr, "local/bin", none, map[string]string{root: "775"}, 1},
+		{"a component above the working directory is not root-owned", usr, "local/bin", map[string]string{root: "501"}, none, 1},
+		{"a relative spelling carrying . and ..", filepath.Join(usr, "local"), "./../local/bin", none, none, 0},
+		{"a relative spelling carrying . and .. above a group-writable directory",
+			filepath.Join(usr, "local"), "./../local/bin", none, map[string]string{root: "775"}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dirIsRootSecureFrom(t, tc.cwd, tc.arg, tc.uids, tc.modes); got != tc.want {
+				t.Errorf("dir_is_root_secure(%s) from %s = %d, want %d", tc.arg, tc.cwd, got, tc.want)
+			}
+		})
 	}
 }
