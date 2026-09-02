@@ -1993,7 +1993,31 @@ GUARD_ARMED=0
 txn_begin() {
     TXN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
     TXN_DIR="$SYS_DATA_DIR/install/$TXN_STAMP"
+    # THIS IS NOW THE FIRST THING THAT CREATES $SYS_DATA_DIR, and that is why
+    # the mode of the DATA ROOT is set here rather than left to whoever gets
+    # there first.
+    #
+    # ensure_system_log_dir owns the 0700 rule for that root, and it applies it
+    # only when it created the root itself ("_data_root_existed") — correct,
+    # because re-tightening a root an operator already has is not this
+    # installer's call. But the transaction moved ahead of it: `mkdir -p
+    # $SYS_DATA_DIR/install/<stamp>` creates $SYS_DATA_DIR as a side effect,
+    # with the caller's umask, and ensure_system_log_dir then finds it already
+    # there and leaves it alone. On a host with a permissive umask that is a
+    # data root at 0775 — holding gateway.db and the register/console sockets —
+    # created that way by every guarded install, which is exactly the outcome
+    # the 0700 rule exists to make impossible.
+    #
+    # So the same rule, applied by the function that now creates it first: note
+    # whether the root was there before, and tighten only what this call
+    # brought into existence. ensure_system_log_dir keeps its own copy of the
+    # test for the paths that reach it without a transaction.
+    _txn_data_root_existed=0
+    if [ -d "$SYS_DATA_DIR" ]; then _txn_data_root_existed=1; fi
     run_root mkdir -p "$TXN_DIR/snapshot/bin" "$TXN_DIR/snapshot/units" || return 1
+    if [ "$_txn_data_root_existed" = 0 ]; then
+        run_root chmod 0700 "$SYS_DATA_DIR" 2>/dev/null || true
+    fi
     run_root chmod 700 "$SYS_DATA_DIR/install" "$TXN_DIR" || return 1
     printf '%s\n' "$$" | run_root tee "$TXN_DIR/installer.pid" >/dev/null || return 1
     txn_phase armed
