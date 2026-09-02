@@ -30,10 +30,16 @@ updater_pin() {
     local mod_dir="$1"
     local v info raw time_raw hash date fp
     v="$(cd "${mod_dir}" && "${GO_BIN:-go}" list -m -f '{{.Version}}' github.com/burrowee-git/core/updater)"
-    case "${v}" in
-        v[0-9]*.[0-9]*.[0-9]*) : ;;   # clean tag
-        *) echo "✗ core/updater pinned to non-tag '${v}' in ${mod_dir} — repin to a tag before cut" >&2; exit 1 ;;
-    esac
+    # A TAG, and the same set internal/relconfig's cleanTag accepts — the two
+    # validators are asserted to mirror each other, and a glob that took
+    # `v0.3.0+build.7` or `v0.3.0-dirty` while the Go side refused them would
+    # render a stamp shape nothing downstream parses on one produce path and
+    # abort the cut on the other. Numeric MAJOR.MINOR.PATCH, optionally one
+    # dot-separated alphanumeric pre-release; no build metadata, no hyphen
+    # inside the pre-release.
+    if ! printf '%s' "${v}" | grep -Eq -- '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.]*)?$'; then
+        echo "✗ core/updater pinned to non-tag '${v}' in ${mod_dir} — repin to a tag before cut" >&2; exit 1
+    fi
     # A PSEUDO-VERSION is refused; a semver PRE-RELEASE tag is not. The two
     # share the hyphen — core/updater sits on core/vX.Y.0-beta.N for the whole
     # of a beta cycle, and the blanket `*-*` refusal made every beta cut die
