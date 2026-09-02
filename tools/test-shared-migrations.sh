@@ -2630,6 +2630,60 @@ OUT="$(
 )"; RC=$?
 assert_eq "$RC" 1 "--applies must answer no when the legacy dir IS the destination"
 
+# 37a7. THE GUARD IS PHYSICAL, NOT TEXTUAL. 37a6 closed ONE spelling — a
+#       trailing slash — with a text compare lifted from install.sh's
+#       normalize_dir, whose own comment says what it is: "TEXTUAL ONLY — no
+#       '.'/'..' folding, no symlink resolution, no relative-path anchoring".
+#       Textual is safe in normalize_dir because that gate REFUSES on a
+#       mismatch. Here the mismatch direction is DESTRUCTIVE: a spelling the
+#       compare cannot see is equal arms the sweep against the install
+#       destination, and every name it then decides `remove` for is a binary
+#       the installer just placed. Each spelling below folds, anchors or
+#       resolves to $BIN_DIR and answers "different" to a text compare.
+#       Mutation that reddens all four: put the textual body back as the whole
+#       of stale_exec_root_same_dir (the two sed lines and the compare) — the
+#       run then removes all four binaries out of the destination.
+for _s37 in dot dotdot relative symlink-alias; do
+    t37a7="$TMP/t37a7-$_s37"; exec_sweep_kit "$t37a7"; h37a7="$t37a7/home"
+    _cwd37="$PWD"
+    case "$_s37" in
+    dot) _leg37="$h37a7/sys/bin/." ;;
+    dotdot) _leg37="$h37a7/sys/bin/../bin" ;;
+    relative) _leg37="bin"; _cwd37="$h37a7/sys" ;;
+    symlink-alias)
+        ln -s "$h37a7/sys/bin" "$h37a7/sys/binlink"
+        _leg37="$h37a7/sys/binlink"
+        ;;
+    esac
+    OUT="$(
+        cd "$_cwd37" &&
+        HOME="$h37a7" COMP=edge \
+        COMP_HOME="$h37a7/sys/etc/edge" COMP_DATA="$h37a7/sys/var/edge" \
+        BIN_DIR="$h37a7/sys/bin" LEGACY_BIN_DIR="$_leg37" \
+        STALE_USER_BINS="$EDGE_BINS" \
+        STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+        LAUNCHD_DIR="$h37a7/no-launchd" SYSTEMD_DIR="$h37a7/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$h37a7/nowhere" SUDO=/nonexistent-sudo \
+        sh "$t37a7/migrations/sweep_stale_exec_root.sh" 2>&1
+    )"; RC=$?
+    assert_eq "$RC" 0 "a $_s37 spelling of the destination is a no-op, not a failure"
+    for b in $EDGE_BINS; do
+        assert_present "$h37a7/sys/bin/$b" "the install destination must be untouched ($_s37 spelling, $b)"
+    done
+    OUT="$(
+        cd "$_cwd37" &&
+        HOME="$h37a7" COMP=edge \
+        COMP_HOME="$h37a7/sys/etc/edge" COMP_DATA="$h37a7/sys/var/edge" \
+        BIN_DIR="$h37a7/sys/bin" LEGACY_BIN_DIR="$_leg37" \
+        STALE_USER_BINS="$EDGE_BINS" \
+        STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+        LAUNCHD_DIR="$h37a7/no-launchd" SYSTEMD_DIR="$h37a7/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$h37a7/nowhere" SUDO=/nonexistent-sudo \
+        sh "$t37a7/migrations/sweep_stale_exec_root.sh" --applies 2>&1
+    )"; RC=$?
+    assert_eq "$RC" 1 "--applies must answer no for a $_s37 spelling of the destination"
+done
+
 # 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"

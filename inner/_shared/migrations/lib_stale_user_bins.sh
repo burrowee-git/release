@@ -629,17 +629,45 @@ LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
 STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 
 # stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
-# stale_exec_root_same_dir A B — true when A and B name the same directory,
-# compared after collapsing repeated slashes and stripping trailing ones. The
-# rung this sweep replaced normalized both sides for a reason: a seam spelled
-# with a trailing slash on one side only makes a raw compare answer "different",
-# and the sweep then runs against the INSTALL DESTINATION and deletes the
-# binaries the installer just placed.
+# stale_exec_root_same_dir A B — true when A and B name the same directory.
+# $LEGACY_BIN_DIR and $BIN_DIR reach this library through independent seams, and
+# when they name the same place this sweep must NOT run: every name it would
+# then decide `remove` for is a binary the installer has just placed, whose
+# "twin" is the very file being deleted.
+#
+# RESOLVED PHYSICALLY, not compared as text. The first fix here collapsed
+# repeated slashes and stripped trailing ones with sed, which is the body of
+# install.sh's normalize_dir — and that function says out loud what it is:
+# "TEXTUAL ONLY — no '.'/'..' folding, no symlink resolution, no relative-path
+# anchoring". Textual is safe THERE because normalize_dir's gate REFUSES on a
+# mismatch. Here the mismatch direction is destructive, so every spelling the
+# text compare cannot see is a live way to delete the install: `/usr/local/bin/.`
+# and `/usr/local/bin/../bin` fold to the destination, a relative spelling
+# anchors to it, and a symlinked alias resolves to it — each of them answers
+# "different" to a text compare and arms the sweep against the destination.
+# One spelling was fixed and the class was left open; `cd`+`pwd -P` closes the
+# class, because the kernel does the folding, the anchoring and the resolution.
+#
+# The `cd` runs in a command substitution, so it is a SUBSHELL and the sourcing
+# installer's own working directory never moves. CDPATH is cleared because a
+# relative operand would otherwise be resolved against it.
+#
+# Falling back to the text compare when a side will not resolve is safe for the
+# one reason that matters: `cd` fails exactly when the directory cannot be
+# entered, and a legacy directory that cannot be entered is one this sweep can
+# unlink nothing out of. A non-existent legacy directory never reaches here at
+# all — both callers test `[ -d "$LEGACY_BIN_DIR" ]` first.
 #
 # Deliberately NOT named normalize_dir: inner/*/install.sh defines one and
 # sources this library from inside a function, so a second definition of that
 # name would silently take over for the rest of that shell.
 stale_exec_root_same_dir() {
+    _sersd_ra="$(CDPATH= cd -- "$1" 2>/dev/null && pwd -P)" || _sersd_ra=''
+    _sersd_rb="$(CDPATH= cd -- "$2" 2>/dev/null && pwd -P)" || _sersd_rb=''
+    if [ -n "$_sersd_ra" ] && [ -n "$_sersd_rb" ]; then
+        [ "$_sersd_ra" = "$_sersd_rb" ]
+        return $?
+    fi
     _sersd_a="$(printf '%s' "$1" | sed -e 's|//*|/|g' -e 's|/*$||')"
     _sersd_b="$(printf '%s' "$2" | sed -e 's|//*|/|g' -e 's|/*$||')"
     [ "${_sersd_a:-/}" = "${_sersd_b:-/}" ]

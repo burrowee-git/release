@@ -200,21 +200,30 @@ func TestDirIsRootSecureReportsUndecidableNotInsecure(t *testing.T) {
 	}
 }
 
-// TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf — a symlinked leaf
-// has TWO ancestor chains and both decide. Walking only the target's ignores
-// the directory that holds the link: with a group-writable /usr/local and
-// /usr/local/bin -> a root-owned tree, the target walks clean while the owner
-// of /usr/local can repoint `bin` whenever they like, after which every root
-// symlink this installer made addresses their directory instead.
+// TestDirIsRootSecureRefusesASymlinkedLeaf pins the shell half to the Go half
+// it declares itself the shell half OF.
 //
-// Mutations that redden it, both against the walk as it stands:
-//   - collapse the leaf as well, by inserting
-//     `_ds_in="$(cd "$_ds_in" 2>/dev/null && pwd -P)"` after the `[ -d ]` test
-//     — the pre-fix shape of this function. The walk then starts at the
-//     resolved target and the chain that HOLDS the link is never judged;
-//   - delete the `[ -L "$_ds_cur" ]` branch entirely, so the link is judged by
-//     its own uid and mode instead of being followed.
-func TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf(t *testing.T) {
+// core/binary's IsRootSecureDir refuses a symlinked leaf on its Lstat, and says
+// why in a directory-specific way: IsRootSecure (the FILE form) accepts one
+// because distros ship /bin/rm as a symlink, but "a config root that is a
+// symlink is not a packaging fact, it is somebody redirecting where the daemon
+// writes its secrets, so it is refused outright" (root_secure_unix.go).
+//
+// This predicate used to FOLLOW a symlinked leaf and accept it whenever both
+// chains were sound. The consequence was not a hole — both chains really were
+// judged — but a DIVERGENCE, and the divergence landed on the operator: a
+// symlinked $SYS_CONFIG_DIR installed cleanly, assert_system_tree passed, and
+// the daemon then refused at first start. Converting exactly that into a failed
+// install naming the directory is what assert_system_tree exists for.
+//
+// A symlinked ANCESTOR is a different question and is still followed and
+// judged — TestDirIsRootSecureJudgesEverySubstitutableComponent owns it.
+//
+// Mutations that redden it:
+//   - delete `[ ! -L "$_ds_in" ] || return 1`: the first three cases;
+//   - delete the trailing-slash strip loop above it: the trailing-slash case
+//     alone, because `[ -L /a/b/ ]` is false for a symlinked b.
+func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
 	root := canonicalTempDir(t)
 	holder := filepath.Join(root, "holder")
 	target := filepath.Join(root, "target", "bin")
@@ -228,24 +237,38 @@ func TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
+	dangling := filepath.Join(holder, "gone")
+	if err := os.Symlink(filepath.Join(root, "no-such-tree"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(holder, "real")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	none := map[string]string{}
 
-	// Both chains sound: secure.
-	if rc := dirIsRootSecure(t, link, none, none); rc != 0 {
-		t.Errorf("a symlinked leaf with both chains root-owned: rc = %d, want 0", rc)
+	// Both chains spotless, and it is STILL refused: the leaf being a link is
+	// the whole finding, not the tree it points into.
+	if rc := dirIsRootSecure(t, link, none, none); rc != 1 {
+		t.Errorf("a symlinked leaf with both chains root-owned: rc = %d, want 1 — core/binary's IsRootSecureDir refuses one outright, and an install that accepts it hands the operator a daemon that refuses at first start", rc)
 	}
-	// The HOLDER is group-writable while the target is spotless — the case the
-	// resolution alone cannot see.
-	if rc := dirIsRootSecure(t, link, none, map[string]string{holder: "775"}); rc != 1 {
-		t.Errorf("a group-writable directory holding the link: rc = %d, want 1 — its owner can repoint the link", rc)
+	// A trailing slash must not smuggle it past: `[ -L /a/b/ ]` is false.
+	if rc := dirIsRootSecure(t, link+"/", none, none); rc != 1 {
+		t.Errorf("a symlinked leaf spelled with a trailing slash: rc = %d, want 1", rc)
 	}
-	// And the mirror image: holder sound, target group-writable.
-	if rc := dirIsRootSecure(t, link, none, map[string]string{target: "775"}); rc != 1 {
-		t.Errorf("a group-writable symlink target: rc = %d, want 1", rc)
+	// Dangling: "somebody put a link here" (1), not "the directory is missing"
+	// (3) — the same order IsRootSecureDir takes, Lstat before anything else.
+	if rc := dirIsRootSecure(t, dangling, none, none); rc != 1 {
+		t.Errorf("a dangling symlink at the leaf: rc = %d, want 1 (a link is here), not 3 (nothing is here)", rc)
 	}
-	// A holder owned by someone other than root is refused on uid, not mode.
-	if rc := dirIsRootSecure(t, link, map[string]string{holder: "501"}, none); rc != 1 {
-		t.Errorf("a non-root-owned directory holding the link: rc = %d, want 1", rc)
+	// The control: a REAL directory under the same holder still answers 0, so
+	// the refusal is about the link and not about the fixture.
+	if rc := dirIsRootSecure(t, plain, none, none); rc != 0 {
+		t.Errorf("a real directory beside the link: rc = %d, want 0 — the refusal must be about the link, not the tree", rc)
+	}
+	// And the holder still decides for that real leaf.
+	if rc := dirIsRootSecure(t, plain, none, map[string]string{holder: "775"}); rc != 1 {
+		t.Errorf("a group-writable directory holding a real leaf: rc = %d, want 1", rc)
 	}
 }
 

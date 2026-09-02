@@ -486,6 +486,29 @@ have_real_root() {
 # The functions below are the WHOLE predicate — the shell half of
 # core/binary's IsRootSecure (files) and IsRootSecureDir (directories).
 # Anything that changes what "root-secure" means belongs in here.
+#
+# THE TWO PREDICATES IN HERE DO NOT CURRENTLY ANSWER THE SAME-STRENGTH
+# QUESTION, and the name of this region must not be read as promising that
+# they do:
+#
+#   dir_is_root_secure  walks the path COMPONENT BY COMPONENT from /,
+#                       resolving each symlink where it is met, so it judges
+#                       every directory substitutable for any component —
+#                       lexical chain, resolved chain, and the holder of every
+#                       link on the way.
+#   path_is_root_secure walks its ancestors LEXICALLY and resolves nothing, so
+#                       for a symlinked ancestor it never judges the chain that
+#                       holds the ancestor's TARGET. On Linux it happens to
+#                       refuse such a path because a symlink stats 0777; on
+#                       macOS a symlink stats 0755 and it does not.
+#
+# The weaker of the two is the one that gates a root EXEC (the unit's
+# ProgramArguments, the updater's ServeBin, RootExecInstallScript, every
+# RequireRootSecureExec subject). That is a known, reported gap with its own
+# surface and its own callers; closing it is its own change with its own
+# red-first tests, deliberately not folded into the directory form's — this
+# function has had four defects found in it in one day, three of them
+# introduced while fixing the previous one.
 
 # ---------------------------------------------------------------------------
 # The stat dialect, decided once.
@@ -664,6 +687,25 @@ path_is_root_secure() {
 # one platform and none on the other, which is a dialect bug wearing a security
 # check's clothes.
 #
+# A SYMLINKED LEAF IS REFUSED OUTRIGHT, and that is a deliberate match with
+# core/binary's IsRootSecureDir rather than a property of the walk. The Go
+# half states the reason and it is a directory-specific one: IsRootSecure
+# accepts a symlinked leaf because distros ship /bin/rm that way, but "a config
+# root that is a symlink is not a packaging fact, it is somebody redirecting
+# where the daemon writes its secrets, so it is refused outright"
+# (root_secure_unix.go). This shell half used to FOLLOW such a leaf and accept
+# it when both chains were sound, which meant an operator who symlinked
+# $SYS_CONFIG_DIR into a root-owned tree got a clean install, a passing
+# assert_system_tree, and a daemon that refused at first start — precisely the
+# outcome assert_system_tree exists to convert into a failed install naming the
+# directory. Two halves of one predicate disagreeing about the same tree is the
+# defect; the stricter half wins, because the looser one cannot be made to
+# accept anything the daemon will then reject.
+#
+# A symlinked ANCESTOR is still followed and judged — that is the substitution
+# this walk exists to catch, and Go accepts it too (too readily: see the region
+# header).
+#
 # NOTHING HERE ENTERS THE DIRECTORY IT IS ASKED ABOUT, and nothing here `cd`s
 # at all. This script runs UNPRIVILEGED and elevates per step, and the leaf is
 # routinely root-owned 0700 ($SYS_DATA_DIR): `cd` into that is EACCES for the
@@ -673,6 +715,21 @@ path_is_root_secure() {
 # walk touches must be 0755-and-root-owned to pass at all.
 dir_is_root_secure() {
     _ds_in="$1"
+    # Trailing slashes come off first: `[ -L /a/b/ ]` is FALSE for a symlinked
+    # b, because a trailing slash forces the kernel to resolve it, so a caller
+    # spelling the path with one would walk straight past the refusal below.
+    # / itself is left alone.
+    while :; do
+        case "$_ds_in" in
+        /) break ;;
+        */) _ds_in="${_ds_in%/}" ;;
+        *) break ;;
+        esac
+    done
+    # Refused before the existence test, exactly as IsRootSecureDir refuses on
+    # its Lstat before asking anything else: a dangling symlink at this path is
+    # "somebody put a link here", not "the directory is missing".
+    [ ! -L "$_ds_in" ] || return 1
     [ -d "$_ds_in" ] || return 3
     case "$_ds_in" in
     /*) _ds_rest="$_ds_in" ;;
