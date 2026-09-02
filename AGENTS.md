@@ -101,6 +101,10 @@ here.
 
 ## Tasks
 
+Open follow-ups: `tasks/2026-09-02/P1-v0-3-crossing-followups-gateway-relay-4h.md` — the
+gateway and relay halves of the 0.2→0.3 crossing, which must land before a 0.3 beta build
+reaches an existing 0.2 host.
+
 Deferred work for this repo lives at [`../../tasks/`](../../tasks/) (project
 root, beside `code/` — outside the working tree). One file per task, grouped by
 creation date: `tasks/{YYYY-MM-DD}/{priority}-{slug}-{hours}h.md`. `ls P*` shows
