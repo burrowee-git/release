@@ -35,10 +35,11 @@ line_of() { grep -n "^$1\$" "$FILE" | head -1 | cut -d: -f1; }
 
 # line_of_indented <literal> — the same, but tolerating leading whitespace.
 # Used ONLY for `txn_phase handoff`, which now sits inside the
-# `if [ "$GUARD_ARMED" = 1 ]` block that honours BURROWEE_NO_RESTART (there is
-# no handoff when no guard was armed). It appears exactly once in the file, so
-# the tolerance cannot pick up a second, earlier call site the way it would for
-# the four names above.
+# `if [ "$GUARD_ARMED" != 0 ]` block that honours BURROWEE_NO_RESTART (there is
+# no handoff when no guard was armed; `!= 0` rather than `= 1` because
+# GUARD_ARMED also carries `unproven` — see its declaration in install.sh). It
+# appears exactly once in the file, so the tolerance cannot pick up a second,
+# earlier call site the way it would for the four names above.
 line_of_indented() { grep -n "^[[:space:]]*$1\$" "$FILE" | head -1 | cut -d: -f1; }
 
 L_ARM="$(line_of 'guard_arm')"

@@ -1914,10 +1914,28 @@ sha256_of() {
 # ---------------------------------------------------------------------------
 TXN_DIR=""
 TXN_STAMP=""
-# GUARD_ARMED — 1 only once guard_arm has both handed the guard to the
-# supervisor AND proved it started (guard_prove_armed). It is what abort_install
-# branches on: with no guard watching, the foreground restore is the only undo
-# there is; with one, the foreground restore is the WRONG undo.
+# GUARD_ARMED — THREE VALUES, not two, because there are three states and
+# collapsing them lost a host.
+#
+#   0          no guard was armed at all (BURROWEE_NO_RESTART, or guard_arm
+#              refused). Nothing will restart, and the foreground restore in
+#              abort_install is the only undo there is.
+#   1          guard_arm handed the guard to the supervisor AND guard_prove_armed
+#              saw it start. A guard is watching; the foreground restore is the
+#              WRONG undo, because it copies files and never restarts.
+#   unproven   the supervisor accepted the guard and guard_prove_armed could not
+#              READ the transaction to tell whether it started — a root-owned
+#              0700 tree and a host whose sudoers refuses every `sudo -n`
+#              (timestamp_timeout=0). The install continues, because a blind read
+#              is not evidence of a dead guard; but nothing downstream may ASSUME
+#              a guard will clean up.
+#
+# `unproven` used to be spelled `1`. guard_prove_armed's fail-open returned 0 and
+# guard_arm set the flag regardless, so a host where the guard was genuinely dead
+# ran the whole install claiming one was watching — and a later abort_install
+# handed its undo to that guard, printing "the guard is undoing this install"
+# about nothing at all, restoring nothing, restarting nothing. Fail-open is still
+# right (see guard_prove_armed); asserting a guard exists is what was wrong.
 GUARD_ARMED=0
 
 txn_begin() {
@@ -2495,9 +2513,24 @@ EOF
         ;;
     esac
 
-    guard_prove_armed || return 1
-    GUARD_ARMED=1
-    echo "guard armed — transaction $TXN_DIR"
+    # Three outcomes, three states — see GUARD_ARMED's own declaration. `|| _gpa=$?`
+    # and not a bare call: this script runs under `set -e`, so guard_prove_armed's
+    # deliberate non-zero "unproven" return would abort the install here.
+    _gpa=0
+    guard_prove_armed || _gpa=$?
+    case "$_gpa" in
+    0)
+        GUARD_ARMED=1
+        echo "guard armed — transaction $TXN_DIR"
+        ;;
+    2)
+        GUARD_ARMED=unproven
+        echo "guard handed to the supervisor, unproven — transaction $TXN_DIR"
+        ;;
+    *)
+        return 1
+        ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -2596,6 +2629,16 @@ GUARD_ARM_INTERVAL="${GUARD_ARM_INTERVAL:-1}"
 # into a refusal costs the operator the install for a fact nobody established.
 # When installer.pid IS readable and neither guard marker appeared, the reads
 # work and the guard really did not start: that is the refusal, unchanged.
+#
+# THE BLIND PATH RETURNS 2, NOT 0, and that is the whole of what "fail open"
+# means here. It used to return 0, which guard_arm read as proof and turned into
+# GUARD_ARMED=1 — so on a host where the guard really had died, the install ran
+# to the end announcing a guard that was not there, and a later abort_install
+# deferred its entire undo to it: "the guard is undoing this install" printed
+# over a host where nothing restored anything and nothing restarted. Continuing
+# is still the right call (a blind read is not evidence of a dead guard, and
+# refusing costs the operator an install for a fact nobody established); saying
+# `1` about it was not. 2 means CONTINUE, UNPROVEN.
 # ---------------------------------------------------------------------------
 guard_prove_armed() {
     _gpa_waited=0
@@ -2619,7 +2662,9 @@ guard_prove_armed() {
         echo "hint: run the install as root (or with a warm sudo timestamp) to get the" >&2
         echo "hint: arm-proof back; watch the outcome with 'burrowee gateway service" >&2
         echo "hint: guard-status' either way." >&2
-        return 0
+        # 2, never 0: continue, but do not let anything downstream claim a guard
+        # is watching. See this function's header and GUARD_ARMED's declaration.
+        return 2
     fi
     echo "error: the install guard was handed to the supervisor, which accepted it, but the" >&2
     echo "error: guard never started: neither $TXN_DIR/guard.pid nor $TXN_DIR/guard.log" >&2
@@ -2994,7 +3039,28 @@ consent_to_sever() {
 # NO GUARD ARMED (BURROWEE_NO_RESTART): nothing this run was ever going to
 # restart anything, and no guard exists to hand the undo to — so the
 # foreground restore IS the whole undo, and marking the phase terminal records
-# it for guard-status. This is the ONLY remaining caller of snapshot_restore.
+# it for guard-status.
+#
+# GUARD UNPROVEN: the third state, and the reason GUARD_ARMED is not a boolean.
+# The supervisor accepted the guard and guard_prove_armed could not READ the
+# transaction to tell whether it started (a root-owned 0700 tree, and a host
+# whose sudoers refuses every `sudo -n`). Deferring the whole undo to a guard
+# that may not exist is how this branch used to strand such a host: it printed
+# "the guard is undoing this install" and did nothing, and nothing else ever
+# did anything either. So this arm takes the halves that are safe under BOTH
+# possibilities:
+#
+#   * it RESTORES in the foreground. If the guard is dead this is the only undo
+#     there is; if it is alive the guard restores the same files from the same
+#     snapshot moments later, and a file copied twice is a file copied.
+#   * it writes NO terminal phase. `rolled-back`/`aborted` are terminal, and a
+#     live guard reading a terminal phase takes its "already terminal" arm and
+#     stops — which would trade a possible stranding for a certain one, since
+#     only the guard can RESTART. Leaving the phase alone lets the guard reach
+#     its own verdict if it is there, and leaves guard-status showing a
+#     transaction that never finished if it is not, which is the truth.
+#   * it says both possibilities out loud, and gives the operator the one
+#     command that distinguishes them.
 #
 # AND IT WRITES THE PHASE THE SNAPSHOT ACTUALLY SUPPORTS. This branch used to
 # write `rolled-back` unconditionally, which guard-status renders as "the new
@@ -3022,6 +3088,22 @@ abort_install() {
         echo "install: sure the gateway is serving again before it stops." >&2
         echo "install: transaction $TXN_DIR" >&2
         echo "install: check the outcome with: burrowee gateway service guard-status" >&2
+        exit 1
+    fi
+    if [ "$GUARD_ARMED" = unproven ]; then
+        echo "install: $1 — a guard was handed to the supervisor, but this shell could not" >&2
+        echo "install: read the transaction to prove it started, so it may or may not be" >&2
+        echo "install: watching." >&2
+        echo "install: restoring the previous install here anyway: if the guard is dead this" >&2
+        echo "install: is the only undo there is, and if it is alive it restores the same" >&2
+        echo "install: files from the same snapshot." >&2
+        snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
+        echo "install: the transaction is deliberately NOT marked finished — a live guard" >&2
+        echo "install: reading a terminal phase would stop without restarting anything, and" >&2
+        echo "install: restarting is the half this shell cannot do." >&2
+        echo "install: transaction $TXN_DIR" >&2
+        echo "install: check whether the guard reported: burrowee gateway service guard-status" >&2
+        echo "install: if it never does, start the gateway by hand: sudo burrowee gateway service install" >&2
         exit 1
     fi
     if snapshot_has_binaries "$TXN_DIR/snapshot"; then
@@ -3665,8 +3747,15 @@ fi
 # to hand off to, and nobody to reattach to — the units are staged on disk and
 # that is the whole outcome. Skipping them is what makes the flag mean what
 # this file has always documented it to mean.
+#
+# `!= 0`, not `= 1`: GUARD_ARMED is also `unproven` (see its declaration), which
+# means the supervisor ACCEPTED the guard and only the proof was blind. A guard
+# that really did start is watching a deadline, and skipping the handoff would
+# leave it to time out and roll a healthy host back — so the handoff fires on
+# both non-zero states. What `unproven` changes is abort_install, which may not
+# hand its undo to a guard nobody saw, not whether the restart happens.
 _verdict=0
-if [ "$GUARD_ARMED" = 1 ]; then
+if [ "$GUARD_ARMED" != 0 ]; then
     # ---- Phase 3: consent --------------------------------------------------
     consent_to_sever restart
 

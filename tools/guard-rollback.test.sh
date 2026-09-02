@@ -1068,8 +1068,11 @@ $(cat "$_calls")"
 # nothing either way), but the phase file is the whole of what this mode leaves
 # behind and it is what an operator reads.
 # ---------------------------------------------------------------------------
+# <pre> is shell run after the transaction variables are set and before the
+# call. It exists for GUARD_ARMED, which is the branch selector and has three
+# values, not two — the default here is the 0 that BURROWEE_NO_RESTART leaves.
 run_abort_install() {
-    _r="$1"; _txn="$2"
+    _r="$1"; _txn="$2"; _pre="${3:-}"
     _stub="$(install_stub_dir "$_r")"
     (
         cd "$_r" && \
@@ -1080,7 +1083,7 @@ run_abort_install() {
         BURROWEE_SYSTEMD_DIR="$_r/units" \
         BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
         BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
-        sh -c ". '$HERE/inner/gateway/install.sh'; TXN_DIR='$_txn'; TXN_STAMP=teststamp; abort_install 'verify_units failed'" 2>&1
+        sh -c ". '$HERE/inner/gateway/install.sh'; TXN_DIR='$_txn'; TXN_STAMP=teststamp; $_pre abort_install 'verify_units failed'" 2>&1
     )
 }
 
@@ -1125,6 +1128,86 @@ t_abort_install_without_a_guard_still_rolls_back_a_real_install() {
         || fail "abort_install recorded phase '$(cat "$_t/phase" 2>/dev/null)' with a real previous install in the snapshot, want rolled-back: $_out"
     grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
         || fail "abort_install's no-guard branch did not restore the previous binary: $_out"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# AN UNPROVEN GUARD MUST NOT BE HANDED THE UNDO.
+#
+# guard_prove_armed fails OPEN: on a host whose sudoers refuses every `sudo -n`
+# (timestamp_timeout=0) the root-owned 0700 transaction cannot be read, so
+# neither guard.pid nor guard.log can be seen and the guard is not proven either
+# way. Continuing is right — a blind read is not evidence of a dead guard, and
+# refusing would cost the operator an install over a fact nobody established.
+#
+# What was wrong is what it left behind: GUARD_ARMED=1, an assertion that a
+# guard EXISTS. abort_install branches on exactly that, so a later verification
+# failure on a host whose guard really had died printed "the guard is undoing
+# this install", restored nothing, restarted nothing, and exited — deferring the
+# whole undo to a process that was not there.
+#
+# The third state has to do the two things that are safe whichever way the
+# coin landed:
+#
+#   * RESTORE in the foreground. Dead guard: this is the only undo there is.
+#     Live guard: it restores the same files from the same snapshot moments
+#     later, and a file copied twice is a file copied.
+#   * write NO terminal phase. `rolled-back` and `aborted` are terminal, and a
+#     live guard that reads a terminal phase takes its "already terminal" arm
+#     and stops — trading a possible stranding for a certain one, since
+#     restarting is the half only the guard can do.
+#
+# The two controls are the tests above and below: GUARD_ARMED=1 must still defer
+# everything, and GUARD_ARMED=0 must still restore AND mark the phase.
+# ---------------------------------------------------------------------------
+t_abort_install_with_an_unproven_guard_restores_and_leaves_the_phase_open() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units" "$_t/snapshot/data"
+    printf 'OLD BINARY\n' > "$_t/snapshot/bin/burrowee-gateway"
+    chmod 755 "$_t/snapshot/bin/burrowee-gateway"
+    printf 'NEW BINARY\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+    printf 'replacing\n' > "$_t/phase"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t" "GUARD_ARMED=unproven;")" || _rc=$?
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc with an unproven guard, want 1: $_out"
+    grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "abort_install deferred the undo to a guard nobody proved exists — nothing was restored, and if that guard is dead nothing ever will be: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = replacing ] \
+        || fail "abort_install marked the transaction '$(cat "$_t/phase" 2>/dev/null)' with an unproven guard — a live guard reading a terminal phase stops without restarting, which is the half this shell cannot do: $_out"
+    printf '%s\n' "$_out" | grep -q 'may or may not' \
+        || fail "abort_install did not tell the operator the guard was never proven: $_out"
+    rm -rf "$_r"
+}
+
+# The control for the arm above: a guard that WAS proven still gets the whole
+# undo, and this shell still restores nothing and marks nothing. Without it, an
+# "unproven" arm that simply swallowed the proven one would look green.
+t_abort_install_with_a_proven_guard_still_defers_everything() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units" "$_t/snapshot/data"
+    printf 'OLD BINARY\n' > "$_t/snapshot/bin/burrowee-gateway"
+    chmod 755 "$_t/snapshot/bin/burrowee-gateway"
+    printf 'NEW BINARY\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+    printf 'replacing\n' > "$_t/phase"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t" "GUARD_ARMED=1;")" || _rc=$?
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc with a proven guard, want 1: $_out"
+    grep -q 'NEW BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "abort_install restored in the foreground with a guard armed — snapshot_restore only copies files, it never restarts: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = replacing ] \
+        || fail "abort_install marked the transaction terminal with a guard armed — the guard then takes its 'already terminal' branch and does nothing: $_out"
     rm -rf "$_r"
 }
 
@@ -1295,7 +1378,7 @@ GATEWAY_BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-co
 t_verify_precedes_handoff() {
     _f="$HERE/inner/gateway/install.sh"
     # Leading whitespace is tolerated on the handoff anchor (and only there):
-    # `txn_phase handoff` now sits inside the `if [ "$GUARD_ARMED" = 1 ]` block
+    # `txn_phase handoff` now sits inside the `if [ "$GUARD_ARMED" != 0 ]` block
     # that honours BURROWEE_NO_RESTART. The claim is about order, not column,
     # and the anchor is still a whole line.
     _phase1="$(grep -n '^txn_phase replacing$' "$_f" | head -1 | cut -d: -f1)"
@@ -1807,6 +1890,8 @@ t_count_calls_answers_zero_once
 t_snapshot_has_binaries_is_pinned_across_both_files
 t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
 t_abort_install_without_a_guard_still_rolls_back_a_real_install
+t_abort_install_with_an_unproven_guard_restores_and_leaves_the_phase_open
+t_abort_install_with_a_proven_guard_still_defers_everything
 
 t_heartbeat_defers_the_deadline
 t_verify_precedes_handoff
