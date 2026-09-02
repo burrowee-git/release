@@ -789,6 +789,27 @@ do_restart() {
         # widens the recycled-pid hazard guard_refuse_concurrent's own header
         # rejects: an install refused forever by a pid that no longer belongs
         # to any guard is far worse than one skipped sweep.
+        #
+        # A THIRD DISCRIMINATOR WAS WEIGHED AND REJECTED, recorded here so it is
+        # not rediscovered as a new idea: a TIME-BOUNDED refusal — terminal
+        # phase AND a live guard.pid AND no completion marker AND a phase file
+        # younger than N seconds refuses; older than N, proceed. It is the one
+        # variant with NO forever-refusal hazard, and that is a real difference
+        # from the two above rather than a restatement of them: the age of the
+        # phase file only ever grows, so a recycled pid stops being able to
+        # block anything after N seconds whatever else on the host is true,
+        # which is precisely the promise a completion marker and a live-pid
+        # check cannot make.
+        #
+        # It was rejected on PRICE, not on correctness. It needs a fourth marker
+        # written into the transaction, a clock read inside
+        # guard_refuse_concurrent, and an N that nobody can choose honestly
+        # without a field report to fit it to — a knob whose only correct value
+        # is unknown is a knob that will be set wrong. What all of that buys is
+        # three housekeeping steps (the stale-bin sweep, the updater advance,
+        # the snapshot prune) on a host whose daemon has ALREADY been verified
+        # serving, and which the second install's own guard re-runs on its own
+        # success. Not worth it. Revisit if the window is ever reported hit.
         phase ok
         log "OK — $_want is serving"
 
