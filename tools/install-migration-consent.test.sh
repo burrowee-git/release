@@ -346,9 +346,76 @@ t_gate_runs_before_the_migration_and_after_the_guard() {
 # It must ask for the MIGRATION cause, not the restart one: consent_to_sever
 # renders a different reason for each, and the migration's is the one that is
 # true here.
+#
+# Column-anchored at four spaces, which is the fresh flow's own indentation.
+# The units-only call sits two levels deeper and is checked separately below —
+# a whitespace-tolerant grep here would be satisfied by EITHER, so deleting the
+# fresh flow's gate would still pass.
 t_gate_names_the_migration_cause() {
     grep -q '^    consent_to_sever migration$' "$INSTALL" \
         || fail "install.sh does not call consent_to_sever with the 'migration' cause"
+}
+
+# ---------------------------------------------------------------------------
+# THE SECOND GUARDED FLOW: BURROWEE_UNITS_ONLY.
+#
+# `burrowee gateway service install` and `doctor --fix` reach install.sh in
+# that mode, and they are what an operator repairing a host over their own
+# tunnel actually types. It runs migrate_from_legacy — the same runner, the
+# same stop — so it needs the same gate, asked in the same place. It had
+# neither until the mode was guarded.
+#
+# should_ask_before_migration itself is shared, so every behavioural check
+# above (the probe codes, the elevation, the environment, the no-tty and
+# assume-yes paths) already covers this flow's decision. What is specific to it
+# is WHERE the question is asked, which is what these two check.
+# ---------------------------------------------------------------------------
+
+# units_only_range — echoes "<start> <end>" for the mode block's line range, so
+# an anchor can be attributed to the right flow. Everything inside a mode block
+# is indented, which is why the column-0 anchors the checks above use cannot
+# reach it.
+units_only_range() {
+    _uor_a="$(grep -n '^if \[ -n "\${BURROWEE_UNITS_ONLY:-}" \]; then$' "$INSTALL" | head -1 | cut -d: -f1)"
+    [ -n "$_uor_a" ] || return 1
+    _uor_b="$(awk -v s="$_uor_a" 'NR > s && $0 == "fi" { print NR; exit }' "$INSTALL")"
+    [ -n "$_uor_b" ] || return 1
+    printf '%s %s\n' "$_uor_a" "$_uor_b"
+}
+
+# uo_first <pattern> <start> <end> — first matching line number inside the range.
+uo_first() {
+    grep -n "$1" "$INSTALL" | awk -F: -v a="$2" -v b="$3" '$1 > a && $1 < b { print $1; exit }'
+}
+
+t_units_only_gate_runs_before_the_migration_and_after_the_guard() {
+    _range="$(units_only_range)" || { fail "install.sh has no BURROWEE_UNITS_ONLY mode block"; return; }
+    _a="${_range% *}"; _b="${_range#* }"
+    _guard="$(uo_first '^[[:space:]]*guard_arm$' "$_a" "$_b")"
+    _ask="$(uo_first '^[[:space:]]*if should_ask_before_migration; then$' "$_a" "$_b")"
+    _mig="$(uo_first '^[[:space:]]*migrate_from_legacy$' "$_a" "$_b")"
+    [ -n "$_guard" ] || { fail "units-only never arms the guard"; return; }
+    [ -n "$_ask" ]   || { fail "units-only never asks should_ask_before_migration — service install stops the daemon on a tunnelled host with no warning"; return; }
+    [ -n "$_mig" ]   || { fail "units-only never calls migrate_from_legacy"; return; }
+    [ "$_guard" -lt "$_ask" ] \
+        || fail "units-only: the consent question (line $_ask) is asked before the guard is armed (line $_guard) — a decline would have nothing to hand the undo to"
+    [ "$_ask" -lt "$_mig" ] \
+        || fail "units-only: the consent question (line $_ask) is asked after migrate_from_legacy (line $_mig) — the connection it reads from is already gone"
+}
+
+# The MIGRATION cause, not the restart one. On this flow the distinction is if
+# anything sharper than on the fresh one: the migration's stop is the FIRST
+# thing that happens after the guard is armed, so the restart arm's "you do not
+# need to stay connected" would be wrong by the widest possible margin.
+t_units_only_names_the_migration_cause() {
+    _range="$(units_only_range)" || { fail "install.sh has no BURROWEE_UNITS_ONLY mode block"; return; }
+    _a="${_range% *}"; _b="${_range#* }"
+    [ -n "$(uo_first '^[[:space:]]*consent_to_sever migration$' "$_a" "$_b")" ] \
+        || fail "units-only does not call consent_to_sever with the 'migration' cause"
+    # And the restart cause is present too — the mode has both sever points,
+    # and the handoff's own prompt is the second one.
+    [ -n "$(uo_first '^[[:space:]]*consent_to_sever restart$' "$_a" "$_b")" ] \
+        || fail "units-only does not call consent_to_sever with the 'restart' cause before the handoff"
 }
 
 # ---------------------------------------------------------------------------
@@ -426,6 +493,8 @@ t_probe_honours_an_explicit_sudo
 t_gate_reads_has_tty
 t_gate_runs_before_the_migration_and_after_the_guard
 t_gate_names_the_migration_cause
+t_units_only_gate_runs_before_the_migration_and_after_the_guard
+t_units_only_names_the_migration_cause
 t_causes_render_different_closing_advice
 t_restart_keeps_its_advice
 t_migration_advice_is_honest

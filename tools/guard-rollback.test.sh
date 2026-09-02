@@ -336,6 +336,125 @@ STUB
     rm -rf "$_r"
 }
 
+# THE SWEEP RUNS ONLY AFTER A VERIFIED RESTART — the negative half, and the
+# half that carries the safety property.
+#
+# sweep_stale_user_bins deletes per-user binaries. Until the daemon has
+# actually come up on the loaded units, a still-running per-user process may
+# still name one of them — and on macOS the serve plist's
+# KeepAlive.PathState keys off the binary's existence, so unlinking it does not
+# merely stale a future restart, it stops the running daemon. The sweep used to
+# be ordered after the restart by sitting on the next line of install.sh, in a
+# single synchronous process; now it is ordered by sitting on do_restart's
+# verify_serving SUCCESS branch, which is a weaker-looking guarantee expressed
+# in code that can be got wrong in a way a line order cannot.
+#
+# So this is the same fixture as t_guard_ok_sweeps_stale_bins with the
+# supervisor set to `dead`: the new build never reports its version, the guard
+# rolls back, and the sweep must not have run. Without it, moving the three
+# post-success calls above the `if verify_serving` would pass every other test
+# in this file.
+t_guard_does_not_sweep_when_the_restart_fails() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" dead
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+
+    mkdir -p "$_r/bin/migrations"
+    cp "$HERE/inner/gateway/install.sh" "$_r/bin/install.sh"
+    cat > "$_r/bin/migrations/lib_stale_user_bins.sh" <<STUB
+STALE_USER_BINS="\$BINS"
+remove_stale_user_bins() {
+    printf 'SWEEP_CALLED BIN_DIR=%s\n' "\$BIN_DIR" >> "$_r/sweep.calls"
+}
+STUB
+
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] fixture broken: phase = $(cat "$_t/phase"), want rolled-back"
+    if [ -f "$_r/sweep.calls" ]; then
+        fail "[$_plat] the stale-binary sweep ran on a restart that was NOT verified — it deletes per-user binaries a still-running process may still name, and on Darwin the serve plist's KeepAlive.PathState turns that deletion into a stop: $(cat "$_r/sweep.calls")"
+    fi
+    # The updater advance is on the same success branch and carries the same
+    # claim in miniature: nothing post-success may run on a rollback.
+    if grep -q "$(updater_advance_call "$_plat")" "$(supervisor_calls "$_r" "$_plat")" 2>/dev/null; then
+        fail "[$_plat] the updater was advanced on a rollback — the post-success work ran on the failure branch"
+    fi
+    rm -rf "$_r"
+}
+
+# THE GUARD MUST NOT FLAP THE UNITS, and it is the only thing left that could:
+# the installer's foreground no longer touches either label on any path.
+#
+# The serve label is advanced with `kickstart -k` and NEVER booted out on the
+# unchanged-body path (a bootout unloads the job, and an unloaded job is
+# supervised by nothing). The updater label IS booted out first — nothing
+# routes through it, so unloading it strands nothing — and then bootstrapped,
+# in that order: bootstrap-then-bootout would start the unit and immediately
+# stop it.
+#
+# This claim used to live in the Go suite
+# (inner/gateway/install_test/render_test.go's TestInstallShDefaultPathDoesNotFlapUnits),
+# driven through BURROWEE_UNITS_ONLY because that mode still loaded units
+# synchronously. It cannot live there any more — the Go harness's launchctl
+# stub records calls and never spawns the guard, so the calls it would count
+# are no longer made in that process at all. Here they are made by the real
+# guard.sh against a real (fake) supervisor, which is where they now happen.
+t_guard_does_not_flap_the_units() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    [ "$(cat "$_t/phase")" = ok ] || { fail "[$_plat] fixture broken: phase = $(cat "$_t/phase"), want ok"; rm -rf "$_r"; return; }
+
+    case "$_plat" in
+    Darwin)
+        # Exactly one bootstrap per label — two of the same is the flap.
+        for _lbl in com.burrowee.gateway com.burrowee.gateway.updater; do
+            _n="$(count_calls "$_calls" "^bootstrap system $_r/units/$_lbl\\.plist\$")"
+            [ "$_n" = 1 ] \
+                || fail "[$_plat] $_lbl bootstrapped $_n time(s), want exactly 1; calls:
+$(cat "$_calls")"
+        done
+        # The serve label is advanced, and never unloaded (the unit body is
+        # unchanged in this fixture, so there is no reload to justify one).
+        [ "$(count_calls "$_calls" '^kickstart -k system/com\.burrowee\.gateway$')" -ge 1 ] \
+            || fail "[$_plat] the serve label was never kickstarted — the unit is loaded but the running process is still the old one; calls:
+$(cat "$_calls")"
+        [ "$(count_calls "$_calls" '^bootout system/com\.burrowee\.gateway$')" = 0 ] \
+            || fail "[$_plat] the serve label was booted out — an unloaded job is supervised by nothing; calls:
+$(cat "$_calls")"
+        # The updater is unloaded BEFORE it is bootstrapped, not after.
+        _ub="$(grep -n '^bootout system/com\.burrowee\.gateway\.updater$' "$_calls" | head -1 | cut -d: -f1)"
+        _us="$(grep -n "^bootstrap system $_r/units/com\\.burrowee\\.gateway\\.updater\\.plist\$" "$_calls" | head -1 | cut -d: -f1)"
+        { [ -n "$_ub" ] && [ -n "$_us" ] && [ "$_ub" -lt "$_us" ]; } \
+            || fail "[$_plat] the updater was bootstrapped before it was booted out (bootout=$_ub bootstrap=$_us) — that starts the unit and then stops it; calls:
+$(cat "$_calls")"
+        ;;
+    Linux)
+        # systemd re-reads the unit on daemon-reload, so there is no
+        # bootout/bootstrap pair to sequence; what must hold is that each unit
+        # is restarted and neither is plainly stopped.
+        [ "$(count_calls "$_calls" '^restart burrowee-gateway\.service$')" -ge 1 ] \
+            || fail "[$_plat] the serve unit was never restarted; calls:
+$(cat "$_calls")"
+        [ "$(count_calls "$_calls" '^restart burrowee-gateway-updater\.service$')" -ge 1 ] \
+            || fail "[$_plat] the updater unit was never restarted; calls:
+$(cat "$_calls")"
+        [ "$(count_calls "$_calls" '^stop burrowee-gateway\.service$')" = 0 ] \
+            || fail "[$_plat] the serve unit was stopped; calls:
+$(cat "$_calls")"
+        ;;
+    esac
+    rm -rf "$_r"
+}
+
 # A restart the new build never survives (verify_serving times out on the new
 # version, forcing a deadline is unnecessary to prove that path — t_guard_ok
 # already covers it) is not what this checks. This is the THIRD way out of
@@ -1515,15 +1634,82 @@ t_verify_precedes_handoff() {
     # `txn_phase handoff` now sits inside the `if [ "$GUARD_ARMED" != 0 ]` block
     # that honours BURROWEE_NO_RESTART. The claim is about order, not column,
     # and the anchor is still a whole line.
+    #
+    # THE LAST HANDOFF, NOT THE FIRST. This used to be `head -1` when the file
+    # held exactly one; BURROWEE_UNITS_ONLY now writes one of its own several
+    # hundred lines earlier, and against THAT one the fresh flow's column-0
+    # verify_placement reads as running after a handoff it has nothing to do
+    # with. The units-only flow's own Phase 2 is checked in
+    # t_units_only_verifies_what_it_actually_placed below.
     _phase1="$(grep -n '^txn_phase replacing$' "$_f" | head -1 | cut -d: -f1)"
     _v="$(grep -n '^verify_placement || abort_install ' "$_f" | head -1 | cut -d: -f1)"
-    _end="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+    _end="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | tail -1 | cut -d: -f1)"
 
     [ -n "$_phase1" ] || { fail "install.sh never reaches txn_phase replacing"; return; }
     [ -n "$_v" ]      || { fail "install.sh never calls verify_placement"; return; }
     [ -n "$_end" ]    || { fail "install.sh never reaches txn_phase handoff"; return; }
     [ "$_phase1" -lt "$_v" ] || fail "verify_placement (line $_v) runs before Phase 1 (line $_phase1)"
     [ "$_v" -lt "$_end" ]    || fail "verify_placement (line $_v) runs after txn_phase handoff (line $_end)"
+}
+
+# ---------------------------------------------------------------------------
+# BURROWEE_UNITS_ONLY's own Phase 2 — the one place the two guarded flows are
+# deliberately NOT the same, and the difference is worth an explicit test
+# because "skipped a verification step" is otherwise indistinguishable from
+# "forgot a verification step".
+#
+# That mode places no binaries. verify_placement walks $BINS — which includes
+# `burrowee` and `burrowee-register`, names nothing on this path ever places —
+# and its strongest check compares each one against the archive copy `./$b`,
+# which does not exist on a kept-installer run with no bundle beside it. Called
+# there it would fail installs that did nothing wrong, and where it did not
+# fail it would be walking files this run never touched: a green tick for work
+# that did not happen, which is worse than no tick.
+#
+# What the mode DOES place, it verifies where it places it: render_units calls
+# ensure_root_exec_surface, which ends in verify_root_exec_surface before a
+# single unit is written. verify_units applies unchanged — units really are
+# rendered here — and is called.
+#
+# So this asserts the split, both halves: verify_units inside the block and
+# before its handoff, verify_placement NOT inside the block, and the note that
+# says why present rather than the omission being silent.
+# ---------------------------------------------------------------------------
+units_only_range() {
+    _uor_f="$HERE/inner/gateway/install.sh"
+    _uor_a="$(grep -n '^if \[ -n "\${BURROWEE_UNITS_ONLY:-}" \]; then$' "$_uor_f" | head -1 | cut -d: -f1)"
+    [ -n "$_uor_a" ] || return 1
+    _uor_b="$(awk -v s="$_uor_a" 'NR > s && $0 == "fi" { print NR; exit }' "$_uor_f")"
+    [ -n "$_uor_b" ] || return 1
+    printf '%s %s\n' "$_uor_a" "$_uor_b"
+}
+
+uo_first_line() {
+    grep -n "$1" "$HERE/inner/gateway/install.sh" \
+        | awk -F: -v a="$2" -v b="$3" '$1 > a && $1 < b { print $1; exit }'
+}
+
+t_units_only_verifies_what_it_actually_placed() {
+    _f="$HERE/inner/gateway/install.sh"
+    _range="$(units_only_range)" || { fail "install.sh has no BURROWEE_UNITS_ONLY mode block"; return; }
+    _a="${_range% *}"; _b="${_range#* }"
+
+    _vu="$(uo_first_line '^[[:space:]]*verify_units || abort_install ' "$_a" "$_b")"
+    _ho="$(uo_first_line '^[[:space:]]*txn_phase handoff$' "$_a" "$_b")"
+    _vp="$(uo_first_line '^[[:space:]]*verify_placement' "$_a" "$_b")"
+
+    [ -n "$_vu" ] || { fail "units-only never runs verify_units — it renders units and hands the restart off without checking that the serve unit's ExecStart target is even executable"; return; }
+    [ -n "$_ho" ] || { fail "units-only never reaches txn_phase handoff"; return; }
+    [ "$_vu" -lt "$_ho" ] \
+        || fail "units-only: verify_units (line $_vu) runs after the handoff (line $_ho) — the cheap failure has been moved past the expensive one"
+    [ -z "$_vp" ] \
+        || fail "units-only calls verify_placement (line $_vp) — that mode places no binaries, so it walks names it never placed and compares them against an archive copy that does not exist"
+
+    # The inapplicability must be STATED, not silent. A future reader who finds
+    # verify_units alone and no explanation reads it as an oversight and
+    # "fixes" it.
+    sed -n "${_a},${_b}p" "$_f" | grep -q 'verify_placement IS DELIBERATELY NOT CALLED' \
+        || fail "units-only skips verify_placement with no comment saying so — the next reader cannot tell a decision from an omission"
 }
 
 # A non-interactive install must NOT block on a prompt: console pushes, CI and
@@ -1556,14 +1742,25 @@ t_consent_is_tty_gated() {
 # so a substring check "passes" against either one even with the actual
 # unconditional echo below deleted. Caught only by mutation while writing
 # this test; the exact-line anchor is what closes it.
+#
+# BOTH GUARDED FLOWS, PAIRED. There are two handoffs now (the fresh install's
+# and BURROWEE_UNITS_ONLY's) and two reconnect lines, and a check that took the
+# first of each would be satisfied by the units-only pair alone — the fresh
+# flow could lose its line entirely and this would stay green. First-with-first
+# and last-with-last is what makes each pair answerable on its own.
 t_reconnect_line_precedes_handoff() {
     _f="$HERE/inner/gateway/install.sh"
-    _r="$(grep -n '^[[:space:]]*echo "    burrowee gateway service guard-status"$' "$_f" | head -1 | cut -d: -f1)"
-    _h="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+    _rn="$(grep -c '^[[:space:]]*echo "    burrowee gateway service guard-status"$' "$_f" || true)"
+    _hn="$(grep -c '^[[:space:]]*txn_phase handoff$' "$_f" || true)"
+    [ "$_rn" = 2 ] || { fail "install.sh prints the guard-status reconnect line $_rn time(s), expected 2 (one per guarded flow)"; return; }
+    [ "$_hn" = 2 ] || { fail "install.sh reaches txn_phase handoff $_hn time(s), expected 2 (one per guarded flow)"; return; }
 
-    [ -n "$_r" ] || { fail "install.sh never prints the unconditional guard-status reconnect line ahead of the handoff"; return; }
-    [ -n "$_h" ] || { fail "install.sh never reaches txn_phase handoff"; return; }
-    [ "$_r" -lt "$_h" ] || fail "the reconnect line (line $_r) is printed after the handoff (line $_h)"
+    for _which in head tail; do
+        _r="$(grep -n '^[[:space:]]*echo "    burrowee gateway service guard-status"$' "$_f" | $_which -1 | cut -d: -f1)"
+        _h="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | $_which -1 | cut -d: -f1)"
+        [ "$_r" -lt "$_h" ] \
+            || fail "the reconnect line (line $_r) is printed after the handoff (line $_h) — once the guard restarts the gateway this connection may already be gone, and a line printed into it reaches no one"
+    done
 }
 
 # A verification failure must abort rather than hand off — and it must abort
@@ -1998,6 +2195,8 @@ for _plat in Darwin Linux; do
     t_guard_rolls_back "$_plat"
     t_guard_ok_advances_updater "$_plat"
     t_guard_ok_sweeps_stale_bins "$_plat"
+    t_guard_does_not_sweep_when_the_restart_fails "$_plat"
+    t_guard_does_not_flap_the_units "$_plat"
     t_guard_deadline_exceeded "$_plat"
     t_abort_hands_the_undo_to_the_guard "$_plat"
     t_abort_does_not_bounce_a_live_daemon "$_plat"
@@ -2030,6 +2229,7 @@ t_abort_install_with_a_proven_guard_still_defers_everything
 
 t_heartbeat_defers_the_deadline
 t_verify_precedes_handoff
+t_units_only_verifies_what_it_actually_placed
 
 t_consent_is_tty_gated
 t_reconnect_line_precedes_handoff
