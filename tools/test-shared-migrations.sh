@@ -2529,6 +2529,34 @@ assert_gone "$h37a2/old-bin/burrowee-edge-updater" "the stale 0.2 copy must be s
 assert_present "$h37a2/old-bin/burrowee-edge" "the installer's symlink still survives"
 assert_present "$h37a2/sys/etc/edge/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "and the receipt records a sweep that actually happened"
 
+# 37a3. THE UPDATER TRACK NEVER INHERITS THE LEGACY ANCHOR. The updater ladder
+#       runs the same run.sh with a throwaway scratch $COMP_HOME and its own
+#       ledger, where by contract the version gate never fires and every rung
+#       falls through to --applies. The transitional 0.2-anchor fallback must
+#       key on "$COMP_HOME IS the serve config tree", not merely on the scheme:
+#       a scratch home that is empty on every run would otherwise adopt the
+#       component's legacy anchor forever and gate the updater's rungs shut.
+#       Mutation that reddens it: drop the `$COMP_HOME = $SYS_CONFIG_ROOT/$COMP`
+#       conjunct from run.sh's fallback condition.
+t37a3="$TMP/t37a3"; exec_sweep_kit "$t37a3"; h37a3="$t37a3/home"
+mkdir -p "$h37a3/old-etc/edge" "$h37a3/scratch/etc/edge" "$h37a3/scratch/var/edge"
+printf 'v0.2.19.2026.08.27.deadbeef\n' > "$h37a3/old-etc/edge/installed-version"
+OUT="$(
+    HOME="$h37a3" \
+    COMP_HOME="$h37a3/scratch/etc/edge" COMP_DATA="$h37a3/scratch/var/edge" \
+    SYS_CONFIG_ROOT="$h37a3/sys/etc" SYS_DATA_ROOT="$h37a3/sys/var" \
+    BIN_DIR="$h37a3/sys/bin" \
+    LEGACY_SYS_CONFIG_ROOT="$h37a3/old-etc" LEGACY_SYS_DATA_ROOT="$h37a3/old-var" \
+    LEGACY_BIN_DIR="$h37a3/old-bin" \
+    STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+    LAUNCHD_DIR="$h37a3/no-launchd" SYSTEMD_DIR="$h37a3/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h37a3/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t37a3/migrations/run.sh" 2>&1
+)"; RC=$?
+assert_lacks "$OUT" "TRANSITIONAL" "a scratch COMP_HOME must never adopt the component's legacy anchor"
+assert_contains "$OUT" "sweep_stale_exec_root.sh applies: no recorded version" "the rung must fall through to --applies on the updater track"
+assert_eq "$RC" 2 "and run"
+
 # 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"
@@ -2545,9 +2573,9 @@ assert_contains "$OUT" "sweep_stale_exec_root.sh skipped: no recorded version, a
 #      than the seam names: the old copy is kept and the reason is said. The
 #      seam is what makes this drivable both ways without root.
 t37d="$TMP/t37d"; exec_sweep_kit "$t37d"; h37d="$t37d/home"
-EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d" run_exec_sweep_rung "$t37d" "$h37d" --applies
+EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d"; run_exec_sweep_rung "$t37d" "$h37d" --applies; unset EXEC_SWEEP_TWIN_OWNER
 assert_eq "$RC" 1 "--applies must answer no when no twin is trusted"
-EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d" run_exec_sweep_rung "$t37d" "$h37d"
+EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d"; run_exec_sweep_rung "$t37d" "$h37d"; unset EXEC_SWEEP_TWIN_OWNER
 assert_eq "$RC" 0 "the rung declines per name and exits 0"
 assert_present "$h37d/old-bin/burrowee-edge-updater" "an untrusted twin must keep the 0.2 copy in place"
 assert_contains "$OUT" "is not a regular file owned by nobody-such-user-37d" "and say which owner it wanted"
@@ -2558,7 +2586,7 @@ assert_contains "$OUT" "is not a regular file owned by nobody-such-user-37d" "an
 #      installer's later call (after the units moved) is what sweeps it.
 t37e="$TMP/t37e"; exec_sweep_kit "$t37e"; h37e="$t37e/home"; mkdir -p "$h37e/launchd"
 printf '<plist><dict><key>ProgramArguments</key><array><string>%s/old-bin/burrowee-edge-updater</string><string>run</string></array></dict></plist>\n' "$h37e" > "$h37e/launchd/com.burrowee.edge.updater.plist"
-EXEC_SWEEP_LAUNCHD_DIR="$h37e/launchd" run_exec_sweep_rung "$t37e" "$h37e"
+EXEC_SWEEP_LAUNCHD_DIR="$h37e/launchd"; run_exec_sweep_rung "$t37e" "$h37e"; unset EXEC_SWEEP_LAUNCHD_DIR
 assert_eq "$RC" 0 "a unit-named file is a decline, not a failure"
 assert_present "$h37e/old-bin/burrowee-edge-updater" "a file a unit still names must not be unlinked"
 assert_contains "$OUT" "$h37e/launchd/com.burrowee.edge.updater.plist still names $h37e/old-bin/burrowee-edge-updater" "and the unit must be named"
