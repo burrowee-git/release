@@ -1442,11 +1442,6 @@ if [ -d "./covers" ]; then
     done
 fi
 
-# The exec root is on nobody's PATH by design; what puts `burrowee-edge-cli` on
-# it is the set of links into $LINK_DIR — or, where that directory is not
-# root-secure, the PATH line this prints instead.
-link_operator_bins
-
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
 # ---- version-gated config migration ---------------------------------------
@@ -1494,6 +1489,13 @@ fi
 # There is no other install shape to fall through to: an unprivileged run was
 # refused at the top, with nothing placed.
 setup_root_service
+# The links come AFTER the units: link_operator_bins replaces
+# $LINK_DIR/burrowee-edge in place (rm -f, ln -sfn), and until setup_root_service
+# has re-rendered and reloaded the units they still name that exact path — on
+# macOS a KeepAlive.PathState job can observe the unlink and bounce the running
+# daemon onto the new binary before the 0.3 unit exists. Now the loaded units
+# name $SYS_BIN_DIR, so nothing running watches the link.
+link_operator_bins
 # Only now: the binaries are in $SYS_BIN_DIR and the units naming them are
 # not merely written but loaded. Deliberately NOT in BURROWEE_UNITS_ONLY
 # mode above — that path places no binaries at all, so the precondition
