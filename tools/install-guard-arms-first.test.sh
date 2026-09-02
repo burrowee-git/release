@@ -6,9 +6,17 @@
 # gateway, and only one of them is the restart. Gateway's own migration runner
 # (migrations/run.sh, from the gateway repo — NOT the shared ladder, which
 # gateway does not use) boots the daemon out to copy state at rest, and it runs
-# from migrate_from_legacy, before load_units. On a gateway
-# the operator's session is tunnelled through that daemon, so that migration
-# severs the session too. A guard armed after the migration cannot see it.
+# from migrate_from_legacy, a long way before the restart. On a gateway the
+# operator's session is tunnelled through that daemon, so that migration severs
+# the session too. A guard armed after the migration cannot see it.
+#
+# "BEFORE load_units" is how that used to be spelled, and it is no longer true
+# of this file in either half: load_units is not where the restart happens any
+# more (the guard restarts), and the check further down asserts load_units is
+# not called in the foreground AT ALL. Naming it as the later of the two events
+# would have described an ordering between the migration and a call this file
+# forbids. The ordering that survives — and the one asserted below — is
+# guard_arm before migrate_from_legacy.
 set -eu
 
 HERE="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
