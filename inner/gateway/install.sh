@@ -215,13 +215,18 @@ BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console bu
 # and burrowee-gateway-updater are spawned by a root parent that names the
 # real path, and burrowee-register is execed by the dispatcher the same way —
 # nothing a human types, so nothing to link (spec §6.1 rule 1: nothing root
-# execs ever names a link). $BINS \ $LINK_BINS is exactly the set the
-# 0.2→0.3 ladder rung sweeps out of /usr/local/bin, where 0.2 left real
-# copies of them.
+# execs ever names a link). $BINS \ $LINK_BINS is exactly the set the exec-root
+# sweep removes from /usr/local/bin, where 0.2 left real copies of them — run
+# by the guard after the verified restart (sweep_stale_exec_root), because a
+# unit still naming one of them is refused by the library until the units move.
 LINK_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
 # BURROWEE_LINK_DIR is a TEST-ONLY seam like BURROWEE_BIN_DIR: it redirects
 # the link directory so the suite never touches the real /usr/local/bin.
 LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
+# The 0.2 exec root the sweep reads is the SAME directory the links go into, so
+# it follows the link seam: a sandboxed run must never iterate the real
+# /usr/local/bin of the host it runs on (this workstation is a live 0.2 host).
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-$LINK_DIR}"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
 # The per-user component tree. Identical to $GW_HOME for this component, spelled
@@ -980,6 +985,24 @@ sweep_stale_user_bins() {
     remove_stale_user_bins
 }
 
+# sweep_stale_exec_root — the 0.2 exec root's real copies (/usr/local/bin), left
+# behind when 0.3 moved the binaries to $BIN_DIR. Same library, same guards.
+# Runs from the guard after the verified restart, never before the units have
+# moved: while a 0.2 unit still names /usr/local/bin/burrowee-gateway-updater
+# the library correctly refuses to unlink it, and the gateway repo's own rung
+# runs before render_units on every entry point — so this call is what clears
+# the copies on a real host.
+sweep_stale_exec_root() {
+    _sser_lib="$(stale_sweep_lib)"
+    [ -n "$_sser_lib" ] || return 0
+    if [ "$STALE_SWEEP_LOADED" != 1 ]; then
+        # shellcheck source=/dev/null
+        . "$_sser_lib"
+        STALE_SWEEP_LOADED=1
+    fi
+    remove_stale_exec_root_bins
+}
+
 # ---------------------------------------------------------------------------
 # place_unit <rendered-temp-file> <dst> — install a rendered unit at its
 # system path as root, only when content differs (a no-op refresh never needs
@@ -1076,10 +1099,16 @@ ensure_dir_stated() {
             return 1
         fi
         if ! run_root mkdir "$_eds_d"; then
-            echo "error: could not create $_eds_d (needs root) — refusing to install a service" >&2
-            echo "error: whose state would have to be created by an unprivileged user." >&2
-            echo "error: nothing has been installed; no binary was placed." >&2
-            return 1
+            # A child of a 0700 root-owned directory is invisible to the
+            # unprivileged stat above, and mkdir on it fails "File exists": ask
+            # root once, only on this failure path, so a steady-state re-run
+            # still costs no sudo when everything is visible.
+            if ! run_root test -d "$_eds_d"; then
+                echo "error: could not create $_eds_d (needs root) — refusing to install a service" >&2
+                echo "error: whose state would have to be created by an unprivileged user." >&2
+                echo "error: nothing has been installed; no binary was placed." >&2
+                return 1
+            fi
         fi
     fi
     if have_real_root && [ "$(stat_uid "$_eds_d" 2>/dev/null || echo -)" != 0 ]; then
@@ -1238,6 +1267,22 @@ link_operator_bins() {
         _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
     done
     [ -z "$_lob_linked" ] || echo "linked into $LINK_DIR: $_lob_linked"
+}
+
+# links_deferred_to_guard — true when a unit ALREADY ON DISK (on a steady host,
+# the one the supervisor is running) still names a path under $LINK_DIR: the
+# 0.2 layout. Replacing that path now (rm -f, ln -sfn) can bounce the daemon
+# on macOS (KeepAlive.PathState) before the 0.3 unit exists, and a rollback
+# would leave the restored 0.2 plist pointing at a dangling link. When it is
+# true the guard makes the links after the verified restart instead. Asked
+# BEFORE render_units, while the on-disk units are still the loaded ones; a
+# fresh host has no such unit and links right away.
+links_deferred_to_guard() {
+    for _ldg_f in "$LAUNCHD_DIR"/*.plist "$SYSTEMD_DIR"/burrowee-gateway*.service; do
+        [ -f "$_ldg_f" ] || continue
+        if grep -q "$LINK_DIR/burrowee" "$_ldg_f" 2>/dev/null; then return 0; fi
+    done
+    return 1
 }
 
 # unlink_operator_bins — RULE 4: removed on uninstall, and only when the link
@@ -3595,9 +3640,17 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         # silently overwritten from the bundle here, one function past the
         # exclusion meant to stop exactly that.
         ROOT_BIN_PLACE_EXCLUDE="burrowee-gateway-updater"
+        if links_deferred_to_guard; then LINKS_DEFERRED=1; else LINKS_DEFERRED=0; fi
         migrate_from_legacy
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
-        link_operator_bins
+        # Links now on a host whose loaded units never named the link path; after
+        # the verified restart (guard) where they still do. The exec-root sweep
+        # always follows the restart.
+        if [ "$LINKS_DEFERRED" = 1 ]; then
+            echo "note: the operator links into $LINK_DIR follow the restart (a loaded unit still names that path)"
+        else
+            link_operator_bins
+        fi
 
         # The version LAST, and only once everything above succeeded. Recording it
         # before the migration would mean a failed migration leaves the new version on
@@ -3778,10 +3831,9 @@ txn_phase replacing
 
 place_all_bins
 
-# The exec root is on nobody's PATH by design; what puts `burrowee-gateway-cli`
-# on it is the set of links into $LINK_DIR — or, where that directory is not
-# root-secure, the PATH line this prints instead.
-link_operator_bins
+# Decided here, BEFORE render_units, while the on-disk units are the loaded
+# ones: see links_deferred_to_guard. The links themselves follow render_units.
+if links_deferred_to_guard; then LINKS_DEFERRED=1; else LINKS_DEFERRED=0; fi
 
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
@@ -3818,6 +3870,15 @@ migrate_from_legacy
 keep_installer_copy
 
 render_units
+
+# The operator-typed links: now, on a host whose loaded units never named the
+# link path (a fresh install); after the verified restart, in the guard, on a
+# 0.2 host whose loaded units still do (links_deferred_to_guard above).
+if [ "$LINKS_DEFERRED" = 1 ]; then
+    echo "note: the operator links into $LINK_DIR follow the restart (a loaded unit still names that path)"
+else
+    link_operator_bins
+fi
 
 # load_units USED TO run right here, restarting the daemon in the foreground —
 # on the very connection an operator tunnelled through that gateway is reading
