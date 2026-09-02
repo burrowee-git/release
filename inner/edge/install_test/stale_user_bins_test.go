@@ -148,6 +148,7 @@ func TestEdgeStaleSweepNeverTakesTheDirectoryItJustFilled(t *testing.T) {
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
 		"SYS_BIN_DIR=" + dest,
+		"BURROWEE_LINK_DIR=" + filepath.Join(home, "usr-local-bin"),
 		"SYSTEMD_UNIT_DIR=" + unitDir,
 		"ROOT_HOME=" + filepath.Join(home, "root-home"),
 		"SYS_CONFIG_ROOT=" + filepath.Join(home, "sys-etc", "burrowee"),

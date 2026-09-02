@@ -217,38 +217,34 @@ func TestUnitsOnlyDoesNotRecordTheVersionOnAnUnrecordedMigration(t *testing.T) {
 	assertContains(t, out, "receipt could not be written")
 }
 
-// TestRecordInstalledVersionNeedsASystemConfigRoot is what survives of C1's M2
-// sub-case. That guard used to be two conditions — $BIN_DIR_IS_DEFAULT and
-// $SYS_CONFIG_DIR — because the first answered "is $BIN_DIR the privileged
-// copy's home at all". With the per-user prefix flow gone that answer is always
-// yes, so only the second condition is left, and it is the one this asserts.
+// TestRecordInstalledVersionWritesBothAnchors is what survives of C1's M2
+// sub-case. The $BIN_DIR copy used to be guarded on $SYS_CONFIG_DIR existing
+// — "has this host been converged to the root scheme yet" — and a units-only
+// run on a host without one had to leave it unwritten. Since 0.3 every mode
+// establishes the whole machine-owned tree before its first write
+// (ensure_system_tree), so the host IS converged by the time the version is
+// recorded and both anchors are written: $GW_HOME's for the ladder, $BIN_DIR's
+// for the root updater — and $BIN_DIR is now /usr/local/burrowee/bin, so the
+// second anchor moved with it (spec §9.3).
 //
-// It still matters: $BIN_DIR's copy is read by the ROOT-scheme updater, and a
-// host with no system config root has not been converged to that scheme, so
-// nothing there consults it. Writing it anyway would `run_root tee` a
-// root-owned file into a directory purely on the strength of an install that
-// has not happened yet.
-//
-// $BIN_DIR is staged here because BURROWEE_UNITS_ONLY places no binaries: a
-// `tee` into a non-existent directory fails on ENOENT regardless of the guard,
-// which would make this test pass unconditionally and catch nothing.
-func TestRecordInstalledVersionNeedsASystemConfigRoot(t *testing.T) {
+// A host with no tree at all is not a case this can model any more: the run
+// creates it. What it asserts instead is that the copy lands in the new
+// $BIN_DIR and nowhere else.
+func TestRecordInstalledVersionWritesBothAnchors(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	seedMigrateCapableCLI(t, home)
-	// Deliberately NO sysConfigDir(home): the host is not on the root scheme.
-	if err := os.MkdirAll(binDir(home), 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	runInstallSh(t, home, stub,
 		"BURROWEE_UNITS_ONLY=1",
 		"BURROWEE_VERSION=gateway/v0.2.0.2026.08.07.4f1c3ec8",
 	)
 
-	if _, statErr := os.Stat(filepath.Join(binDir(home), ".installed-version")); statErr == nil {
-		t.Errorf("record_installed_version wrote the root-scheme marker into %s on a host "+
-			"with no system config root at %s", binDir(home), sysConfigDir(home))
+	anchor := filepath.Join(binDir(home), ".installed-version")
+	if got, statErr := os.ReadFile(anchor); statErr != nil {
+		t.Errorf("no root-updater anchor at %s: %v", anchor, statErr)
+	} else if strings.TrimSpace(string(got)) != "v0.2.0.2026.08.07.4f1c3ec8" {
+		t.Errorf("root-updater anchor = %q, want v0.2.0.2026.08.07.4f1c3ec8", strings.TrimSpace(string(got)))
 	}
 	if got, want := installedVersion(t, home), "v0.2.0.2026.08.07.4f1c3ec8"; got != want {
 		t.Errorf("the ordinary $GW_HOME anchor was not written: got %q, want %q", got, want)

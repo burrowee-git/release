@@ -203,6 +203,13 @@
 #   ROOT_HOME                   root's home (the `root` COMP_HOME scheme)
 #   SUDO                        elevation command (default "sudo")
 #   BURROWEE_LEGACY_HOME_PARENTS  where to look for an account's home
+#   SYS_CONFIG_ROOT / SYS_DATA_ROOT  the `system` scheme's parents (0.3:
+#                                /usr/local/burrowee/{etc,var})
+#   LEGACY_SYS_CONFIG_ROOT / LEGACY_SYS_DATA_ROOT / LEGACY_BIN_DIR
+#                               the 0.2 layout (/usr/local/{etc,var}/burrowee,
+#                                /usr/local/bin) — read by the transitional
+#                                anchor fallback and handed to every rung, for
+#                                the 0.2→0.3 rungs that copy and sweep from it
 #   LEDGER_FILE                 which ladder to walk (default $HERE/ledger — the
 #                                serve ladder; the updater track points this at
 #                                $HERE/updater-ledger instead)
@@ -242,11 +249,28 @@ fi
 
 # ---------------------------------------------------------------------------
 # SYS_CONFIG_ROOT / SYS_DATA_ROOT — the machine-owned parents a `system`-scheme
-# component's two trees hang off. Seams for the test harness only; nothing on a
-# real host sets them, and no component that is not `system` reads them.
+# component's two trees hang off. Since 0.3 both sit under ONE tree burrowee
+# creates itself, /usr/local/burrowee — beside Homebrew's directories rather
+# than inside them — so a host has one ancestor chain to verify instead of
+# three. Seams for the test harness only; nothing on a real host sets them,
+# and no component that is not `system` reads them.
+#
+# LEGACY_SYS_CONFIG_ROOT / LEGACY_SYS_DATA_ROOT / LEGACY_BIN_DIR — the 0.2
+# layout, kept as a seam of its own: /usr/local/{etc,var}/burrowee held the
+# trees and /usr/local/bin the binaries. The transitional anchor fallback
+# below READS the 0.2 config tree once, and the 0.2→0.3 rungs copy and sweep
+# FROM these; nothing on this runner ever writes to them.
 # ---------------------------------------------------------------------------
-SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
-SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/var/burrowee}"
+SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/burrowee/etc}"
+SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"
+LEGACY_SYS_CONFIG_ROOT="${LEGACY_SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
+LEGACY_SYS_DATA_ROOT="${LEGACY_SYS_DATA_ROOT:-/usr/local/var/burrowee}"
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
+# Names the exec-root sweep must leave alone: the caller resolves them (no link
+# will replace them on this host), and the rung is handed the answer rather than
+# re-deriving it from a predicate it does not carry.
+STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
+SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/burrowee/bin}"
 
 # ---------------------------------------------------------------------------
 # $COMP_HOME / $COMP_DATA — the tree(s) this ladder is about.
@@ -319,7 +343,57 @@ esac
 # Renaming either would orphan every anchor already on a host in the field.
 VERSION_FILE="${VERSION_FILE:-.installed-version}"
 
-BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
+# ---------------------------------------------------------------------------
+# TRANSITIONAL — 0.2 → 0.3 only. WHERE THE ANCHOR IS READ FROM.
+#
+# For a `system`-scheme component the anchor and the receipts live INSIDE the
+# config tree that 0.3 moves (spec §9.2). On the first 0.3 run against a 0.2
+# host $COMP_HOME is the new, EMPTY root: no anchor, no receipts. The runner's
+# documented behaviour with no anchor is "each rung's probe decides", so the
+# ladder would re-evaluate every shipped 0.2.0 rung against a host they no
+# longer describe — and an adoption rung whose probe finds an empty
+# destination and a surviving pre-0.2 per-user tree answers YES, publishes
+# that stale tree into the new root, and because the copy never overwrites
+# the 0.2→0.3 copy then loses. A silent config and identity rollback.
+#
+# So the anchor — and ONLY the anchor — is read from the 0.2 tree when the
+# new root holds NO ANCHOR and the 0.2 tree holds one. A 0.2 host then
+# reports the version it really recorded,
+# the numeric gate retires the 0.2.0 rows on the evidence they were always
+# meant to be judged on, and only the 0.3.0 rows apply. It is a READ: nothing
+# is ever written to the legacy tree, and receipts are never looked for
+# there — a receipt keyed to the old tree says nothing about this one. Once a
+# 0.3 install records the anchor at the new root the old path is never
+# consulted again, which is what makes it transitional by construction.
+#
+# RECEIPTS ARE NOT PART OF THE CONDITION, deliberately: record_migration
+# creates migration-receipts/ after the FIRST completed rung while the anchor
+# is written only at the end of the install, so a host whose first 0.3 run
+# died between the two would answer "0.3 host" on the next run and re-probe
+# the 0.2.0 rows in fall-through mode — the rollback this block exists to
+# stop. Remove this block once 0.3 is the floor.
+# ---------------------------------------------------------------------------
+ANCHOR_HOME="$COMP_HOME"
+ANCHOR_IS_LEGACY=0
+LEGACY_COMP_HOME="$LEGACY_SYS_CONFIG_ROOT/$COMP"
+if [ "${COMP_HOME_SCHEME:-user}" = system ] \
+    && [ "$COMP_HOME" = "$SYS_CONFIG_ROOT/$COMP" ] \
+    && [ ! -f "$COMP_HOME/$VERSION_FILE" ] \
+    && [ -f "$LEGACY_COMP_HOME/$VERSION_FILE" ]; then
+    ANCHOR_HOME="$LEGACY_COMP_HOME"
+    ANCHOR_IS_LEGACY=1
+fi
+
+# A `system` component's binaries live at the 0.3 exec root and nowhere else, so
+# an unset BIN_DIR means THAT — never ${PREFIX:-/usr/local}/bin, which equals
+# $LEGACY_BIN_DIR and makes the exec-root sweep bail as "nothing replaced" on
+# every track that does not export BIN_DIR (the updater's). Other schemes keep
+# the PREFIX derivation their per-user installs round-trip through.
+if [ "${COMP_HOME_SCHEME:-user}" = system ]; then
+    BIN_DIR="${BIN_DIR:-$SYS_BIN_DIR}"
+else
+    BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
+fi
 SUDO="${SUDO:-sudo}"
 # Resolved HERE and exported to every rung by run_migration, for the same reason
 # $SUDO is: a rung that inherited a different supervisor than the runner probed
@@ -648,11 +722,12 @@ done
 # ---------------------------------------------------------------------------
 # installed_version — the recorded version of the component currently
 # installed, or empty. The installer writes it as the first line of
-# $COMP_HOME/$VERSION_FILE.
+# $COMP_HOME/$VERSION_FILE; $ANCHOR_HOME is that tree, or — transitionally,
+# see its definition — the 0.2 tree the new root has not been filled from yet.
 # ---------------------------------------------------------------------------
 installed_version() {
-    if [ ! -f "$COMP_HOME/$VERSION_FILE" ]; then echo ""; return 0; fi
-    head -n 1 "$COMP_HOME/$VERSION_FILE" 2>/dev/null | tr -d ' \t\r' || echo ""
+    if [ ! -f "$ANCHOR_HOME/$VERSION_FILE" ]; then echo ""; return 0; fi
+    head -n 1 "$ANCHOR_HOME/$VERSION_FILE" 2>/dev/null | tr -d ' \t\r' || echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -879,6 +954,10 @@ run_migration() {
         COMP_HOME="$COMP_HOME" \
         COMP_DATA="$COMP_DATA" \
         BIN_DIR="$BIN_DIR" \
+        LEGACY_SYS_CONFIG_ROOT="$LEGACY_SYS_CONFIG_ROOT" \
+        LEGACY_SYS_DATA_ROOT="$LEGACY_SYS_DATA_ROOT" \
+        LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
+        STALE_EXEC_ROOT_KEEP="$STALE_EXEC_ROOT_KEEP" \
         STALE_USER_BINS="${STALE_USER_BINS:-}" \
         MIGRATION_FORCED="$RERUN_RECORDED" \
         SUDO="$SUDO" \
@@ -969,6 +1048,14 @@ elif [ "$VERSION_NAMED" = 1 ]; then
     say "using --installed-version $_version; $COMP_HOME/$VERSION_FILE is NOT read"
 else
     _version="$(installed_version)"
+    # SAID BEFORE THE VERSION, because it changes what the version means: an
+    # operator reading "installed version 0.2.11" must know it was read out of
+    # the tree this ladder is about to migrate FROM.
+    if [ "$ANCHOR_IS_LEGACY" = 1 ]; then
+        say "TRANSITIONAL: $COMP_HOME holds no anchor and no receipts yet, so the recorded"
+        say "version is read from the 0.2 tree at $ANCHOR_HOME/$VERSION_FILE (read-only —"
+        say "receipts and the new anchor go to $COMP_HOME; the 0.2 tree is never written)"
+    fi
     # SAY WHICH INPUT THE LADDER IS ABOUT TO DECIDE ON. Every skip below is a
     # function of this one value, and "0.2.0 was recorded" and "nothing was
     # recorded, so each rung was asked" lead to opposite reasoning about the
@@ -978,17 +1065,17 @@ else
         # holds is a release stamp, what the gate uses is its first three
         # fields, and a reader who cannot see the second has no way to know the
         # date/sha tail was ignored rather than parsed into the comparison.
-        say "installed version $_version — compared as $(version_field "$_version" 1).$(version_field "$_version" 2).$(version_field "$_version" 3) (read from $COMP_HOME/$VERSION_FILE)"
+        say "installed version $_version — compared as $(version_field "$_version" 1).$(version_field "$_version" 2).$(version_field "$_version" 3) (read from $ANCHOR_HOME/$VERSION_FILE)"
     else
         # ABSENT and PRESENT-BUT-EMPTY are different facts and lead to different
         # next questions. "Absent" says nothing is wrong; a zero-byte anchor says
         # a writer got as far as creating the file and wrote no version into it,
         # which is a bug in whatever wrote it.
-        if [ -f "$COMP_HOME/$VERSION_FILE" ]; then
-            say "no installed version recorded ($COMP_HOME/$VERSION_FILE exists but"
+        if [ -f "$ANCHOR_HOME/$VERSION_FILE" ]; then
+            say "no installed version recorded ($ANCHOR_HOME/$VERSION_FILE exists but"
             say "holds no version) — each migration is asked directly whether it applies"
         else
-            say "no installed version recorded ($COMP_HOME/$VERSION_FILE is absent) —"
+            say "no installed version recorded ($ANCHOR_HOME/$VERSION_FILE is absent) —"
             say "each migration is asked directly whether it applies"
         fi
     fi

@@ -4,8 +4,8 @@
 # Ships at the ROOT of the verified release zip as `install.sh`. The outer
 # bootstrap verifies the zip (minisign + sha256) and ONLY THEN execs this with
 # cwd = the unzipped dir, so the binaries sit alongside this script. It installs
-# them into $BIN_DIR — /usr/local/bin, root-owned, ALWAYS — with the placement
-# elevated via run_root the same way a root-owned tree always required. As of
+# them into $BIN_DIR — /usr/local/burrowee/bin, root-owned, ALWAYS — with the
+# placement elevated via run_root the same way a root-owned tree always required. As of
 # 0.2.0 there is no per-user prefix flow at all: a PREFIX that would MISDIRECT
 # the install is REFUSED, loudly (see below), never silently redirected — while
 # one that merely names this same destination is honoured and then cleared. Set
@@ -26,26 +26,40 @@
 # controlling tty; with no tty and no cached credentials the unit step aborts
 # with guidance).
 #
-# ONE BINARY LOCATION. Every binary, including the ones something running AS
-# ROOT execs with nobody watching (the daemon, the console child it spawns, the
-# updater agent, the cli the migration shells to), lands in $BIN_DIR — the same
-# directory this script and its migrations/ are kept in too. This used to be
-# two directories: a per-user $BIN_DIR and a root-owned $LIBEXEC_DIR, kept apart
-# because $BIN_DIR's default was $HOME/.local/bin, and a root unit naming a
-# per-user path is a permanent uid-0 grant to that user (overwrite the binary,
-# wait for a reboot or a pushed update). Now that $BIN_DIR is always
-# root-owned, a root-owned $BIN_DIR/burrowee-gateway passes the identical
-# root-secure ancestor walk the separate tree existed to guarantee — the split
-# had no job left, and /usr/local/libexec/burrowee/gateway is retired: a
-# pre-existing one is simply never written to again and is left for an
-# operator to remove by hand — this script does not touch it.
+# ONE BINARY LOCATION, INSIDE ONE MACHINE-OWNED TREE. Every binary, including
+# the ones something running AS ROOT execs with nobody watching (the daemon,
+# the console child it spawns, the updater agent, the cli the migration shells
+# to), lands in $BIN_DIR — the same directory this script and its migrations/
+# are kept in too — and $BIN_DIR is one of three siblings under
+# /usr/local/burrowee: bin/ (the execution surface), etc/gateway (config, the
+# identity) and var/gateway (state). This script CREATES that tree, root-owned,
+# with every level's owner and mode stated (ensure_system_tree), and asserts
+# what it built before a unit may name any of it (assert_system_tree).
+#
+# HOW IT GOT HERE. The binaries used to live in two directories: a per-user
+# $BIN_DIR and a root-owned $LIBEXEC_DIR, kept apart because $BIN_DIR's default
+# was $HOME/.local/bin, and a root unit naming a per-user path is a permanent
+# uid-0 grant to that user. 0.2.0 collapsed them into /usr/local/bin on the
+# argument that a root-owned /usr/local/bin passes the identical root-secure
+# ancestor walk the separate tree existed to guarantee. THAT PREMISE IS FALSE
+# wherever Homebrew owns /usr/local/bin — on an Intel Mac brew creates and
+# chowns /usr/local/{bin,etc,var} to the console user long before burrowee is
+# installed, and 0.2's three independent roots then had two answers of "no" to
+# "is my state root-owned", with no way forward that did not take a directory
+# away from the package manager. 0.3 moves the exec root WITH the config/data
+# pair into one tree burrowee creates beside Homebrew's directories rather
+# than inside them: that restores the guarantee the libexec split gave without
+# restoring a second tree, because bin/ is inside the same tree as the state it
+# operates on and one ancestor chain answers for all three. The retired
+# /usr/local/libexec/burrowee/gateway is still left alone: never written, never
+# removed — an operator's call, by hand.
 #
 # THE SURVIVING INVARIANT (ensure_root_exec_surface / verify_root_exec_surface,
 # unchanged in kind): only a path that is root-owned and unwritable by non-root
-# ALL THE WAY TO / may be named in a unit or execed by the root updater. That
-# still refuses on a contested $BIN_DIR (an Intel Mac where Homebrew chowns
-# /usr/local, say) exactly as the old libexec check did — both paths share
-# /usr/local as an ancestor, so nothing about that refusal got weaker.
+# ALL THE WAY TO / may be named in a unit or execed by the root updater. On
+# every host that walk passes through /usr/local, which is root:wheel 755 on
+# macOS and root-owned on every Linux; what Homebrew chowns are its children,
+# and /usr/local/burrowee is not one of them.
 #
 # WHY THE DEFAULT MOVED AT ALL: something outside this component now execs
 # `burrowee` off PATH as root to find this gateway — a plain PATH binary a
@@ -88,7 +102,8 @@
 # writers fight, booting the daemon out on every refresh.
 set -eu
 
-# ONE DESTINATION, decided here and nowhere else: /usr/local/bin, root-owned.
+# ONE DESTINATION, decided here and nowhere else: /usr/local/burrowee/bin,
+# root-owned — the exec root of the machine-owned tree (see the header).
 # There is no branch left to take — every step below that treats $BIN_DIR as the
 # privileged surface (ensure_root_exec_surface, render_units, load_units,
 # migrate_from_legacy, record_installed_version) now runs on EVERY install,
@@ -96,15 +111,17 @@ set -eu
 #
 # BURROWEE_BIN_DIR is the surviving TEST-ONLY seam, and the only one: it
 # redirects this destination so the suite never writes into the real
-# /usr/local/bin. Never set it on a real host — nothing about the install's
-# meaning changes when it is set, which is exactly why it is safe for tests and
-# useless as a user-facing knob.
+# /usr/local/burrowee. Never set it on a real host — nothing about the
+# install's meaning changes when it is set, which is exactly why it is safe for
+# tests and useless as a user-facing knob. It must end in `bin`: $SYSTEM_ROOT
+# below is its parent, and the migration runner round-trips PREFIX=<that
+# parent> back through "${PREFIX}/bin".
 #
 # Resolved BEFORE the PREFIX gate below, because the gate's whole question is
 # "does this PREFIX name the destination we would have picked anyway?" — it
 # cannot ask that without $BIN_DIR. This is an assignment only: nothing is
 # created, placed or written until well after the gate.
-BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
+BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
 
 # normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
 # '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
@@ -168,8 +185,8 @@ if [ -n "${PREFIX:-}" ]; then
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
-        # /usr/local/bin (production truth, and what the suite's static pins
-        # check) and the resolved $_true_bin. They differ only when the
+        # /usr/local/burrowee/bin (production truth, and what the suite's static
+        # pins check) and the resolved $_true_bin. They differ only when the
         # BURROWEE_BIN_DIR test seam is set, and an operator reading a refusal on
         # a real host must see the real path either way.
         #
@@ -179,10 +196,11 @@ if [ -n "${PREFIX:-}" ]; then
         # the offending value, hiding the component, the destination and the
         # "nothing has been installed" line all at once.
         printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of gateway 0.2.0 this installer" >&2
-        echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
-        echo "install: flow is gone — the gateway's service units run as root and name the" >&2
-        echo "install: binaries absolutely, and other components resolve /usr/local/bin/burrowee" >&2
-        echo "install: by absolute path, so a per-user copy is invisible to both." >&2
+        echo "install: has one destination: /usr/local/burrowee/bin, root-owned. The per-user" >&2
+        echo "install: prefix flow is gone — the gateway's service units run as root and name" >&2
+        echo "install: the binaries absolutely, and other components resolve" >&2
+        echo "install: /usr/local/burrowee/bin/burrowee by absolute path, so a per-user copy" >&2
+        echo "install: is invisible to both." >&2
         printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
         echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
         exit 1
@@ -190,6 +208,45 @@ if [ -n "${PREFIX:-}" ]; then
     unset _prefix_bin _true_bin
 fi
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
+# LINK_BINS — the subset of $BINS an OPERATOR TYPES, and therefore the only
+# names symlinked from $LINK_DIR (/usr/local/bin) into $BIN_DIR so that
+# `burrowee-gateway-cli …` keeps working with no PATH change now that the exec
+# root is off PATH. Deliberately smaller than $BINS: burrowee-gateway-console
+# and burrowee-gateway-updater are spawned by a root parent that names the
+# real path, and burrowee-register is execed by the dispatcher the same way —
+# nothing a human types, so nothing to link (spec §6.1 rule 1: nothing root
+# execs ever names a link). $BINS \ $LINK_BINS is exactly the set the exec-root
+# sweep removes from /usr/local/bin, where 0.2 left real copies of them — run
+# by the guard after the verified restart (sweep_stale_exec_root), because a
+# unit still naming one of them is refused by the library until the units move.
+LINK_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
+# BURROWEE_LINK_DIR is a TEST-ONLY seam like BURROWEE_BIN_DIR: it redirects
+# the link directory so the suite never touches the real /usr/local/bin.
+LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
+# What link_operator_bins actually linked. The exec-root sweep leaves every
+# operator-typed name that is NOT in here alone: with no link at that path the
+# real 0.2 file is the only copy anything reaches by it.
+LINKED_OPERATOR_BINS=""
+
+# exec_root_keep_list — the operator-typed names no link will replace on this
+# host, resolved BEFORE anything runs so the ladder rung can be handed it too.
+# When $LINK_DIR is not root-secure link_operator_bins creates nothing, and the
+# real 0.2 file at each of those names stays the only copy anything reaches by
+# the absolute path — the shared `burrowee` dispatcher above all. The
+# installer's own later call narrows this to what it actually linked.
+exec_root_keep_list() {
+    # EVERY operator-typed name, unconditionally. This is what the LADDER is
+    # handed, and the ladder runs before link_operator_bins has made a single
+    # link — so at that moment no link has replaced anything, and the real 0.2
+    # file at each of these names is still the only copy reachable by the
+    # absolute path. The installer's own sweep, which runs after linking,
+    # narrows this to the names it could not link (LINKED_OPERATOR_BINS).
+    echo "$LINK_BINS"
+}
+# The 0.2 exec root the sweep reads is the SAME directory the links go into, so
+# it follows the link seam: a sandboxed run must never iterate the real
+# /usr/local/bin of the host it runs on (this workstation is a live 0.2 host).
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-$LINK_DIR}"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
 # The per-user component tree. Identical to $GW_HOME for this component, spelled
@@ -205,12 +262,25 @@ SERVICE_USER="$(id -un)"
 LAUNCHD_DIR="${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}"
 SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 # The root daemon's config and data roots — the same two constants the Go side
-# holds as systemConfigDir/systemDataDir (internal/gateway/home.go). They are
-# written into the units, so they must not drift from that pair. Same test-seam
-# caveat as above.
-SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
-SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
+# resolves through core's system_root (ConfigRoot/DataRoot + "gateway"). They
+# are written into the units, so they must not drift from that pair. Same
+# test-seam caveat as above.
+SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/burrowee/etc/gateway}"
+SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/burrowee/var/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
+# THE TREE ABOVE THE THREE ROOTS. In production all three parents are the one
+# directory /usr/local/burrowee, and the two intermediate levels are its etc/
+# and var/. They are DERIVED from the three seamed leaves rather than spelled
+# as a fourth seam so that a sandboxed run can never reach outside its
+# sandbox: a suite that redirects $BIN_DIR to <tmp>/bin has, by construction,
+# redirected the tree to <tmp> as well, and a seam it forgot to set would
+# otherwise default to the real /usr/local/burrowee — which on a Homebrew Mac
+# a pass-through `sudo` stub could actually create. Nothing above
+# $SYSTEM_ROOT is ever created or re-moded by this script (ensure_dir_stated
+# refuses a level whose parent is absent): /usr/local is not ours.
+SYSTEM_ROOT="$(dirname "$BIN_DIR")"
+SYS_ETC_ROOT="$(dirname "$SYS_CONFIG_DIR")"
+SYS_VAR_ROOT="$(dirname "$SYS_DATA_DIR")"
 
 # ---------------------------------------------------------------------------
 # UNREACHABLE FROM EVERY MODE, AND KEPT ON PURPOSE — read this before deleting
@@ -307,11 +377,11 @@ SERVE_UNIT_STARTED=0
 # gateway's alone — edge writes its version marker BEFORE setup_root_service, so
 # it has no anchor to strand.
 UPDATER_START_FAILED=0
-# THE PRIVILEGED EXECUTION SURFACE, collapsed into $BIN_DIR (formerly a separate
-# root-owned tree at /usr/local/libexec/burrowee/gateway, sibling of the system
-# config/data roots — retired now that $BIN_DIR's own default is root-owned; see
-# the header comment for why the split had no job left). A host that already
-# carries that tree keeps it, inert: nothing here ever writes to it again, and
+# THE PRIVILEGED EXECUTION SURFACE, $BIN_DIR — the bin/ of the machine-owned
+# tree, beside the config/data roots it serves (formerly a separate root-owned
+# tree at /usr/local/libexec/burrowee/gateway, then briefly /usr/local/bin; see
+# the header comment for why neither survived). A host that still carries the
+# libexec tree keeps it, inert: nothing here ever writes to it again, and
 # nothing here removes it either — that is an operator's call, by hand, not
 # this script's.
 #
@@ -394,6 +464,28 @@ have_real_root() {
     fi
     [ "$HAVE_REAL_ROOT" = yes ]
 }
+
+# === ROOT-SECURE CONTRACT BEGIN ===
+# Everything between this line and the matching END line is BYTE-IDENTICAL in
+# every inner installer that creates or verifies a machine-owned tree:
+#
+#   burrowee-git/release  inner/gateway/install.sh   (this copy is the reference)
+#   burrowee-git/release  inner/edge/install.sh
+#   burrowee-git/relay    install.sh                  (relay's inner installer
+#                                                      lives in its own repo)
+#
+# It is duplicated rather than sourced because it must run even when a bundle
+# carries no migrations/ directory at all (BURROWEE_UNITS_ONLY re-runs a kept
+# self-copy that may predate one), and because the gateway does not take the
+# shared ladder — inner/_shared is not in a gateway kit. The drift is guarded
+# instead of prevented: tools/shelllint/root_secure_contract_test.go compares
+# the two copies in this repo byte for byte, and the relay repo pins its copy
+# against this one. Edit one, edit all; nothing outside the sentinels is
+# compared, so the callers may differ freely.
+#
+# The functions below are the WHOLE predicate — the shell half of
+# core/binary's IsRootSecure (files) and IsRootSecureDir (directories).
+# Anything that changes what "root-secure" means belongs in here.
 
 # ---------------------------------------------------------------------------
 # The stat dialect, decided once.
@@ -489,13 +581,13 @@ mode_allows_nonroot_write() {
 #   1  not secure — a real answer about a real path that EXISTS
 #   2  undecidable — stat did not answer, so nothing is known either way
 #   3  the leaf does not exist at all — a different question than 1, and one
-#      that must not be answered with 1's message. It is reachable, since
-#      ROOT_BIN_PLACE_EXCLUDE (BURROWEE_UPDATE mode) deliberately leaves
-#      burrowee-gateway-updater unplaced this run, verify_root_exec_surface
-#      checks it anyway (a unit is about to name it either way), and a host
-#      converging off the pre-collapse layout has never had one at $BIN_DIR —
-#      "not root-owned" would blame ownership on a path that was never
-#      created, sending an operator to check permissions on nothing.
+#      that must not be answered with 1's message. It is reachable: an update
+#      mode may deliberately leave one name unplaced this run (the gateway's
+#      ROOT_BIN_PLACE_EXCLUDE skips its own running updater) while the
+#      verification still checks it, because a unit is about to name it
+#      either way — and a host converging off an older layout has never had
+#      one at $BIN_DIR. "Not root-owned" would blame ownership on a path that
+#      was never created, sending an operator to check permissions on nothing.
 #
 # 1 and 2 are separated because they send an operator to completely different
 # places, and collapsing them is what the dialect bug above actually cost: a
@@ -524,6 +616,77 @@ path_is_root_secure() {
     done
     return 0
 }
+
+# dir_is_root_secure <path> — the directory form of the predicate above, and
+# the shell half of core/binary's IsRootSecureDir. Same four codes; the leaf is
+# a DIRECTORY, so 3 means "no such directory" rather than "no such file". The
+# leaf and every ancestor up to / must be owned by uid 0 and carry no group or
+# other write bit — the leaf is walked exactly like an ancestor, because a
+# directory is where root's STATE is about to be created and a group-writable
+# one lets that group replace what root wrote.
+#
+# It is a separate function rather than a flag on path_is_root_secure because
+# the two are asked in different places for different reasons: one gates a
+# root EXEC, the other gates where root's state is about to be created, and a
+# shared flag would let a caller ask the wrong question with a one-character
+# typo — a directory passed to the file form answers 3 ("absent"), which reads
+# as "nothing to check" rather than as the wrong question.
+dir_is_root_secure() {
+    _ds_d="$1"
+    [ -d "$_ds_d" ] || return 3
+    # Walk the RESOLVED directory, never the lexical spelling. stat does not
+    # dereference a symlink and a macOS symlink is itself root-owned 0755, so a
+    # /usr/local/bin -> /Users/x/bin link passes every check while the directory
+    # a link would actually be written into is never examined — and root's own
+    # links then land somewhere that user can rewrite.
+    #
+    # RESOLVED THROUGH THE PARENT, never by entering the directory itself: this
+    # script runs UNPRIVILEGED and elevates per step, and the leaf it is asked
+    # about is routinely root-owned 0700 ($SYS_DATA_DIR). `cd` into that is
+    # EACCES for the operator, while stat'ing it from outside is not — an
+    # earlier form entered the leaf and refused every non-root install with a
+    # message about `stat` dialects. A symlinked leaf is still followed, since
+    # that is the substitution this resolution exists to catch.
+    _ds_p="$(cd "$(dirname "$_ds_d")" 2>/dev/null && pwd -P)" || return 2
+    [ -n "$_ds_p" ] || return 2
+    case "$_ds_d" in
+    /) ;;
+    *) _ds_d="${_ds_p%/}/$(basename "$_ds_d")" ;;
+    esac
+    # A SYMLINKED LEAF MUST SATISFY BOTH CHAINS. Resolving to the target and
+    # walking only from there ignores the directory that HOLDS the link: with a
+    # group-writable /usr/local and /usr/local/bin -> a root-owned tree, the
+    # target walks clean while the owner of /usr/local can repoint `bin` at any
+    # moment — after which root's own links address someone else's directory.
+    # The holder's chain is checked first, then the resolved target's below.
+    if [ -L "$_ds_d" ]; then
+        dir_chain_is_root_secure "$_ds_p" || return $?
+        _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
+        [ -n "$_ds_d" ] || return 2
+    fi
+    dir_chain_is_root_secure "$_ds_d"
+}
+
+# dir_chain_is_root_secure DIR — the ownership walk itself, from DIR up to /:
+# every level root-owned and writable by nobody else. Split out of
+# dir_is_root_secure so a symlinked leaf can be judged by the chain that HOLDS
+# the link as well as the one that holds its target. Takes an already-resolved
+# path; nothing else calls it.
+dir_chain_is_root_secure() {
+    _dc_d="$1"
+    while :; do
+        [ -d "$_dc_d" ] || return 1
+        _dc_v="$(stat_uid "$_dc_d")" || return 2
+        [ "$_dc_v" = 0 ] || return 1
+        _dc_v="$(stat_mode "$_dc_d")" || return 2
+        if mode_allows_nonroot_write "$_dc_v"; then return 1; fi
+        _dc_parent="$(dirname "$_dc_d")"
+        [ "$_dc_parent" != "$_dc_d" ] || break
+        _dc_d="$_dc_parent"
+    done
+    return 0
+}
+# === ROOT-SECURE CONTRACT END ===
 
 # ---------------------------------------------------------------------------
 # root_bin_source <name> — where this run's copy of a root-execed binary comes
@@ -573,15 +736,58 @@ root_bin_source() {
 # fallback — the cases where nothing upstream has placed anything yet.
 # ---------------------------------------------------------------------------
 ensure_root_exec_surface() {
-    run_root mkdir -p "$BIN_DIR" || return 1
-    # chown/chmod are best-effort: a tree root already established correctly
-    # needs neither, and re-tightening one somebody else owns is not this
-    # installer's call. The verification below is what decides, not these.
-    run_root chown 0:0 "$BIN_DIR" 2>/dev/null || true
-    run_root chmod 0755 "$BIN_DIR" 2>/dev/null || true
+    # The whole tree, not just $BIN_DIR — a units-only run may be the first
+    # thing to touch a host since its 0.2 install, and the units it is about
+    # to write name the config and data roots too. Every level is created with
+    # its owner and mode STATED and the result asserted before a unit may name
+    # it; see ensure_system_tree.
+    ensure_system_tree || return 1
 
     for _reb in $ROOT_BINS; do
         if [ -n "$ROOT_BIN_PLACE_EXCLUDE" ] && [ "$_reb" = "$ROOT_BIN_PLACE_EXCLUDE" ]; then
+            # The RUNNING updater is never replaced from the bundle — but on the
+            # 0.2→0.3 crossing the new exec root has no copy of it at all, and
+            # verify_root_exec_surface would refuse every unit. A copy of the
+            # running binary from the 0.2 exec root is not a replacement of it.
+            if [ ! -f "$BIN_DIR/$_reb" ]; then
+                # THE BUNDLE FIRST. Excluding this name from placement means
+                # "do not replace the RUNNING updater", and the running one is
+                # at $LEGACY_BIN_DIR — so putting the bundle's own verified copy
+                # at the new path replaces nothing. It is also the only source
+                # here that was signature-checked.
+                #
+                # $LEGACY_BIN_DIR is the fallback and only when root-secure: it
+                # is the directory this layout stopped trusting, console-user
+                # owned on the Homebrew Intel Mac the 0.3 tree exists for, and
+                # copying an unverified file from there into the root-secure
+                # exec root launders it — verify_root_exec_surface inspects the
+                # destination, and a root unit then execs it.
+                _reb_x="$(root_bin_source "$_reb")"
+                case "$_reb_x" in
+                "$LEGACY_BIN_DIR/"*) path_is_root_secure "$_reb_x" || _reb_x="" ;;
+                "") ;;
+                esac
+                if [ -z "$_reb_x" ] && [ -f "$LEGACY_BIN_DIR/$_reb" ] \
+                    && path_is_root_secure "$LEGACY_BIN_DIR/$_reb"; then
+                    _reb_x="$LEGACY_BIN_DIR/$_reb"
+                fi
+                if [ -z "$_reb_x" ] && [ -e "$LEGACY_BIN_DIR/$_reb" ]; then
+                    # A candidate EXISTS and was refused. Say that, rather than
+                    # letting verify_root_exec_surface report the destination as
+                    # merely absent — an operator told "missing" would go looking
+                    # for a placement bug instead of at the file that was skipped.
+                    echo "error: $LEGACY_BIN_DIR/$_reb is not root-secure, so it was not copied into $BIN_DIR." >&2
+                    echo "error: Re-run the full installer for this component, which carries a verified $_reb," >&2
+                    echo "error: rather than adopting whatever sits in the 0.2 exec root." >&2
+                    return 1
+                fi
+                # Nothing anywhere: leave it to verify_root_exec_surface, whose
+                # refusal names the destination path and the converging verb.
+                if [ -n "$_reb_x" ]; then
+                    run_root /usr/bin/install -m 0755 "$_reb_x" "$BIN_DIR/$_reb" || return 1
+                    echo "placed $BIN_DIR/$_reb from $_reb_x (the running updater is not replaced)"
+                fi
+            fi
             continue
         fi
         _reb_src="$(root_bin_source "$_reb")"
@@ -646,13 +852,14 @@ ensure_root_exec_surface() {
 #
 # This is the check that makes the placement above meaningful rather than
 # decorative — the SURVIVING invariant of the pre-collapse libexec design, now
-# aimed at $BIN_DIR instead of a separate tree (see the header comment for why
-# the tree itself had no job left once $BIN_DIR's default became root-owned).
-# /usr/local is root-owned on a modern macOS and on every Linux, but it is not
-# GUARANTEED to be: a host where a package manager chowned it (Homebrew on
-# Intel macOS) would otherwise get a root-scheme unit pointing into a path its
-# owner can rewrite. That refusal is UNCHANGED by the collapse: /usr/local was
-# already the ancestor both the old tree and the new one walk through.
+# aimed at the bin/ of the machine-owned tree (see the header comment for how
+# it got there). /usr/local is root-owned on a modern macOS and on every
+# Linux, but it is not GUARANTEED to be, and a host where a package manager
+# chowned it would otherwise get a root-scheme unit pointing into a path its
+# owner can rewrite. That refusal is UNCHANGED: /usr/local is the ancestor
+# every layout so far has walked through. What 0.3 removes is the case where
+# /usr/local is fine and its CHILDREN are not — Homebrew's bin/etc/var — by
+# never placing anything in them.
 # ---------------------------------------------------------------------------
 verify_root_exec_surface() {
     if ! have_real_root; then
@@ -914,6 +1121,39 @@ sweep_stale_user_bins() {
     remove_stale_user_bins
 }
 
+# sweep_stale_exec_root — the 0.2 exec root's real copies (/usr/local/bin), left
+# behind when 0.3 moved the binaries to $BIN_DIR. Same library, same guards.
+# Runs from the guard after the verified restart, never before the units have
+# moved: while a 0.2 unit still names /usr/local/bin/burrowee-gateway-updater
+# the library correctly refuses to unlink it, and the gateway repo's own rung
+# runs before render_units on every entry point — so this call is what clears
+# the copies on a real host.
+sweep_stale_exec_root() {
+    _sser_lib="$(stale_sweep_lib)"
+    [ -n "$_sser_lib" ] || return 0
+    if [ "$STALE_SWEEP_LOADED" != 1 ]; then
+        # shellcheck source=/dev/null
+        . "$_sser_lib"
+        STALE_SWEEP_LOADED=1
+    fi
+    # The exec-root half lives OUTSIDE the byte-pinned SHARED SWEEP CONTRACT
+    # region, and the gateway kit ships the gateway repo's copy of the library:
+    # a kit whose library predates it must say so, not die with "not found".
+    if ! command -v remove_stale_exec_root_bins >/dev/null 2>&1; then
+        echo "note: $_sser_lib has no remove_stale_exec_root_bins — THIS RELEASE IS INCOMPLETE:" >&2
+        echo "note: the 0.2 copies in $LEGACY_BIN_DIR were not swept. Re-run a complete release." >&2
+        return 0
+    fi
+    STALE_EXEC_ROOT_KEEP=""
+    for _ssk in $LINK_BINS; do
+        case " $LINKED_OPERATOR_BINS " in
+        *" $_ssk "*) ;;
+        *) STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:+$STALE_EXEC_ROOT_KEEP }$_ssk" ;;
+        esac
+    done
+    remove_stale_exec_root_bins
+}
+
 # ---------------------------------------------------------------------------
 # place_unit <rendered-temp-file> <dst> — install a rendered unit at its
 # system path as root, only when content differs (a no-op refresh never needs
@@ -953,35 +1193,278 @@ place_unit() {
 }
 
 # ---------------------------------------------------------------------------
-# ensure_system_log_dir — pre-create the units' log directory under the SYSTEM
-# data root, as root.
+# THE MACHINE-OWNED TREE: created level by level with the mode STATED, then
+# asserted with the same predicate the daemon applies.
 #
-# launchd applies StandardOutPath at exec, so a missing parent is not a log
-# that appears late — it is a daemon that fails to spawn. Creation goes through
-# run_root because a NON-ROOT process must never create the root daemon's data
-# root: on a host where /usr/local/var is writable by the installing user
-# (Intel macOS, where Homebrew chowns it) an unprivileged mkdir succeeds and
-# leaves the root daemon's gateway.db and register/console sockets inside a
-# directory that user fully controls.
+# Everything created inside the tree gets its ownership and mode stated
+# explicitly. Neither may arrive by inheritance, because all three sources of
+# inheritance are wrong:
 #
-# 0700 is set explicitly, and only on the directories this created: mkdir -p
-# applies the process umask (0755 on a typical host, which would leave the
-# store world-readable), and re-tightening a root somebody else already
-# established is not this installer's call. Never fatal — the daemon creates
-# the tree on first start, so a missing sudo costs a log file, not an install.
+#   * THE UMASK. `mkdir -p` under sudo creates root-owned directories at
+#     0777 &^ umask. An operator with `umask 002` gets 0775 — group-writable,
+#     and dir_is_root_secure refuses it. This is the shell half of the trap
+#     EnsureConfigRoot documents for os.MkdirAll (core config_root.go), whose
+#     mode argument is umask-masked too.
+#   * THE ARCHIVE. `unzip` restores the modes recorded in the payload, so a
+#     binary stored group-writable extracts group-writable. Every binary here
+#     is placed with `install -m 0755`, never `cp -p` (place_all_bins,
+#     ensure_root_exec_surface).
+#   * THE SOURCE FILE. `cp` takes the copy's mode from the source. Same answer.
+#
+# A NON-ROOT PROCESS MUST NEVER BE THE ONE TO CREATE ANY OF IT: on a host
+# where /usr/local is writable by the installing user (Intel macOS, where
+# Homebrew chowns it) an unprivileged mkdir succeeds and leaves the root
+# daemon's gateway.db, its register/console sockets and its identity inside a
+# directory that user fully controls. Every mkdir, chown and chmod here goes
+# through run_root, and the tree is ensured BEFORE the first write of every
+# mode — before decide_bin_place_elevated's unprivileged writability probe ever
+# looks at $BIN_DIR.
+#
+# The whole tree is OURS by construction: /usr/local/burrowee is created by
+# root, beside Homebrew's directories rather than inside them, so every level
+# is moded unconditionally — there is no "somebody else's parent" to leave
+# alone, which is what the 0.2 layout could never say about /usr/local/etc.
+# The one directory this never touches is the parent of $SYSTEM_ROOT
+# (/usr/local): a missing one is a refusal, not a mkdir.
+#
+# launchd applies StandardOutPath at exec, so $SYS_LOG_DIR is part of the tree
+# rather than something the daemon creates on first start: a missing log
+# directory is a daemon that fails to spawn.
 # ---------------------------------------------------------------------------
-ensure_system_log_dir() {
-    if [ -d "$SYS_LOG_DIR" ]; then return 0; fi
-    _data_root_existed=0
-    if [ -d "$SYS_DATA_DIR" ]; then _data_root_existed=1; fi
-    if ! run_root mkdir -p "$SYS_LOG_DIR"; then
-        echo "note: could not create $SYS_LOG_DIR (needs root) — the gateway creates it on first start" >&2
+
+# ensure_dir_stated <dir> <octal-mode> — one level: create it as root when
+# absent (plain mkdir — the caller states EVERY level, and a level whose parent
+# is missing is a level outside the tree this script owns), then own and mode
+# it. chmod is checked; chown is attempted only where elevation genuinely
+# yields uid 0 (have_real_root) and is best-effort even there, because the
+# assertion that follows (assert_system_tree) is what decides ownership — a
+# chown that "succeeded" proves nothing a stat does not, and a run that never
+# reached root cannot assert ownership at all. A steady-state re-run costs
+# stats and no sudo: nothing is written unless the stat disagrees.
+ensure_dir_stated() {
+    _eds_d="$1"; _eds_m="$2"
+    if [ ! -d "$_eds_d" ]; then
+        if [ ! -d "$(dirname "$_eds_d")" ]; then
+            echo "error: cannot create $_eds_d — its parent $(dirname "$_eds_d") does not exist," >&2
+            echo "error: and this installer creates nothing above $SYSTEM_ROOT." >&2
+            return 1
+        fi
+        if ! run_root mkdir "$_eds_d"; then
+            # A child of a 0700 root-owned directory is invisible to the
+            # unprivileged stat above, and mkdir on it fails "File exists": ask
+            # root once, only on this failure path, so a steady-state re-run
+            # still costs no sudo when everything is visible.
+            if ! run_root test -d "$_eds_d"; then
+                echo "error: could not create $_eds_d (needs root) — refusing to install a service" >&2
+                echo "error: whose state would have to be created by an unprivileged user." >&2
+                echo "error: nothing has been installed; no binary was placed." >&2
+                return 1
+            fi
+        fi
+    fi
+    if have_real_root && [ "$(stat_uid "$_eds_d" 2>/dev/null || echo -)" != 0 ]; then
+        run_root chown 0:0 "$_eds_d" 2>/dev/null || true
+    fi
+    if [ "$(stat_mode "$_eds_d" 2>/dev/null || echo -)" != "${_eds_m#0}" ]; then
+        if ! run_root chmod "$_eds_m" "$_eds_d"; then
+            echo "error: could not chmod $_eds_m $_eds_d (needs root) — refusing to leave a level" >&2
+            echo "error: of the machine-owned tree at a mode this installer did not state." >&2
+            echo "error: nothing has been installed; no binary was placed." >&2
+            return 1
+        fi
+    fi
+}
+
+# ensure_system_tree — the whole tree, top-down, one level at a time, then
+# asserted. The three chains meet at $SYSTEM_ROOT in production (bin/, etc/
+# and var/ are siblings under /usr/local/burrowee); under the test seams each
+# leaf may hang off its own sandbox parent, which is why each chain names its
+# own parent rather than assuming the first one's.
+#
+# The mode column, and why it is not one value: the three parents and bin/
+# are 0755 traversal-only directories that hold no secret. etc/gateway is
+# 0755 because console.token is 0640 root:<admin-group> and a 0700 parent
+# would silently revoke that grant — a mode nobody reading the token could
+# detect (the Go side says the same, ConfigRootMode). var/gateway and its
+# logs/ are 0700: nothing under them is for a non-owner.
+ensure_system_tree() {
+    ensure_dir_stated "$SYSTEM_ROOT" 0755 || return 1
+    ensure_dir_stated "$BIN_DIR" 0755 || return 1
+    ensure_dir_stated "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
+    ensure_dir_stated "$SYS_ETC_ROOT" 0755 || return 1
+    ensure_dir_stated "$SYS_CONFIG_DIR" 0755 || return 1
+    ensure_dir_stated "$(dirname "$SYS_VAR_ROOT")" 0755 || return 1
+    ensure_dir_stated "$SYS_VAR_ROOT" 0755 || return 1
+    ensure_dir_stated "$SYS_DATA_DIR" 0700 || return 1
+    ensure_dir_stated "$SYS_LOG_DIR" 0700 || return 1
+    assert_system_tree
+}
+
+# assert_system_tree — refuse when any root of the tree is not root-owned and
+# unwritable by non-root all the way to /, with the same predicate the daemon
+# applies (dir_is_root_secure, the shell half of IsRootSecureDir).
+#
+# An invariant checked only at first daemon start is one the operator meets
+# as a broken service; checked here it is a failed install naming the
+# directory that caused it. The FILES on the surface are asserted separately
+# and already — verify_root_exec_surface for what a unit names,
+# verify_placement for every binary placed — so this is the directory half
+# only. Same gate as both of those: ownership can only be asserted where
+# elevation genuinely reached uid 0, and the sandboxed harness's pass-through
+# `sudo` never does.
+#
+# rc 1 (insecure), rc 2 (undecidable) and rc 3 (absent) are three refusals
+# with three different next steps, exactly as verify_root_exec_surface keeps
+# them apart, and for the same reason: "check your permissions" is a day
+# wasted on a tree that was right the first time when what actually happened
+# is that stat did not answer.
+assert_system_tree() {
+    if ! have_real_root; then
+        echo "note: this run never reached uid 0, so the ownership of $SYSTEM_ROOT" >&2
+        echo "note: cannot be asserted — skipping the root-secure check on the tree." >&2
         return 0
     fi
-    if [ "$_data_root_existed" = 0 ]; then
-        run_root chmod 0700 "$SYS_DATA_DIR" 2>/dev/null || true
+    for _ast in "$SYSTEM_ROOT" "$BIN_DIR" "$SYS_ETC_ROOT" "$SYS_CONFIG_DIR" "$SYS_VAR_ROOT" "$SYS_DATA_DIR"; do
+        _ast_rc=0
+        dir_is_root_secure "$_ast" || _ast_rc=$?
+        if [ "$_ast_rc" = 0 ]; then continue; fi
+        if [ "$_ast_rc" = 2 ]; then
+            echo "error: could not read the owner and mode of $_ast — this host's 'stat'" >&2
+            echo "error: answered neither the GNU form (stat -c '%u') nor the BSD form" >&2
+            echo "error: (stat -f '%u') with a plain number." >&2
+            echo "error: refusing to install — the gateway's state would sit in a directory" >&2
+            echo "error: whose ownership could not be established." >&2
+            echo "hint: the permissions of $_ast are NOT implicated — reading them is." >&2
+            echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
+            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+        elif [ "$_ast_rc" = 3 ]; then
+            echo "error: $_ast does not exist — refusing to install a service whose state" >&2
+            echo "error: would sit in a directory this run failed to create." >&2
+            echo "hint: re-run 'burrowee gateway service install' from an interactive terminal" >&2
+            echo "hint: so the directory can be created as root." >&2
+        else
+            echo "error: $_ast is not root-owned and unwritable all the way to /." >&2
+            echo "error: refusing to install — the gateway's state would sit in a directory a" >&2
+            echo "error: non-root user could rewrite." >&2
+            echo "hint: check the ownership and modes of that directory and every directory" >&2
+            echo "hint: above it; each must be owned by root and not group- or world-writable." >&2
+        fi
+        return 1
+    done
+}
+
+# ---------------------------------------------------------------------------
+# THE /usr/local/bin SYMLINKS (spec §6.1). The exec root is
+# /usr/local/burrowee/bin, which is on nobody's PATH; the binaries an operator
+# types are linked from $LINK_DIR so `burrowee-gateway-cli …` still resolves.
+#
+# RULE 2 IS THE ONE THAT MATTERS: link ONLY into a root-secure directory. A
+# root-owned symlink is necessary but not sufficient — `unlink` is governed by
+# write permission on the CONTAINING directory, so in a Homebrew-owned
+# /usr/local/bin any user can delete root's link and drop their own file at
+# that name, and the operator's next `sudo burrowee-gateway-cli` runs it as
+# root. Root ownership of the link is not the protection; the directory's is.
+# So dir_is_root_secure is asked FIRST, and on anything but 0 no link is
+# created at all — the one line that adds the exec root to PATH is printed
+# instead. On the host this layout was written for (an Intel Mac whose
+# /usr/local/bin burrowee's own installer created under sudo before Homebrew
+# wanted it) it passes; on a Mac where brew got there first it declines.
+#
+# RULE 3: created as root, REPLACING whatever is there — `rm -f` then
+# `ln -sfn`, never a write through an existing link or file. Every 0.2 host
+# carries a real /usr/local/bin/burrowee-gateway-cli, and a stale regular
+# file left in place shadows the new install completely; a pre-existing
+# symlink pointing elsewhere would have ln's write land in that other file.
+#
+# RULE 1 is enforced by the renderers, not here: every unit, the updater's
+# ServeBin and the runner's cli path name $BIN_DIR. The links exist for
+# humans. RULE 4 is unlink_operator_bins below.
+#
+# NEVER FATAL. A link is a convenience; an install whose links could not be
+# made is a complete install with a PATH note.
+# ---------------------------------------------------------------------------
+link_operator_bins() {
+    _lob_rc=0
+    dir_is_root_secure "$LINK_DIR" || _lob_rc=$?
+    if [ "$_lob_rc" != 0 ]; then
+        case "$_lob_rc" in
+        3) echo "note: $LINK_DIR does not exist on this host, so no burrowee command was linked into it." ;;
+        2) echo "note: the ownership of $LINK_DIR could not be read ('stat' answered neither dialect), so no" ;
+           echo "note: burrowee command was linked into it — a link is only safe in a directory proven root-owned." ;;
+        *) echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
+           echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
+           echo "note: unlinked and replaced, and the next 'sudo burrowee-gateway-cli' would run that user's file as root." ;;
+        esac
+        echo "note: run the gateway's commands by their real path, or add the exec root to PATH:"
+        echo "    export PATH=\"$BIN_DIR:\$PATH\""
+        return 0
     fi
-    run_root chmod 0700 "$SYS_LOG_DIR" 2>/dev/null || true
+    _lob_linked=""
+    for _lob in $LINK_BINS; do
+        [ -f "$BIN_DIR/$_lob" ] || continue
+        # Already ours: a steady-state refresh needs no sudo at all.
+        if [ -L "$LINK_DIR/$_lob" ] && [ "$(readlink "$LINK_DIR/$_lob")" = "$BIN_DIR/$_lob" ]; then
+            _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
+            continue
+        fi
+        # ATOMIC, never unlink-then-relink. A 0.2 macOS plist holds
+        # KeepAlive.PathState on $LINK_DIR/burrowee-gateway; an `rm -f` there
+        # makes launchd observe the watched path vanish and SIGTERM the running
+        # gateway — the one the operator may be tunnelled through — which it
+        # then restarts from the OLD in-memory job definition now resolving
+        # through the new link. Building the link beside its name and renaming
+        # it over closes that window: rename(2) within one directory is atomic,
+        # so the path is never absent. Rule 3's "replace, never write through"
+        # still holds — a real file at the name is replaced, not followed.
+        _lob_tmp="$LINK_DIR/.burrowee-link.$$.$_lob"
+        if ! run_root ln -sfn "$BIN_DIR/$_lob" "$_lob_tmp"; then
+            echo "note: could not stage a link in $LINK_DIR for $_lob; run it by its real path." >&2
+            continue
+        fi
+        if ! run_root mv -f "$_lob_tmp" "$LINK_DIR/$_lob"; then
+            run_root rm -f "$_lob_tmp" || true
+            echo "note: could not put $LINK_DIR/$_lob in place — it still shadows $BIN_DIR/$_lob; remove it by hand." >&2
+            continue
+        fi
+        _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
+    done
+    LINKED_OPERATOR_BINS="$_lob_linked"
+    [ -z "$_lob_linked" ] || echo "linked into $LINK_DIR: $_lob_linked"
+}
+
+# links_deferred_to_guard — true when a unit ALREADY ON DISK (on a steady host,
+# the one the supervisor is running) still names a path under $LINK_DIR: the
+# 0.2 layout. Replacing that path now (rm -f, ln -sfn) can bounce the daemon
+# on macOS (KeepAlive.PathState) before the 0.3 unit exists, and a rollback
+# would leave the restored 0.2 plist pointing at a dangling link. When it is
+# true the guard makes the links after the verified restart instead. Asked
+# BEFORE render_units, while the on-disk units are still the loaded ones; a
+# fresh host has no such unit and links right away.
+links_deferred_to_guard() {
+    for _ldg_f in "$LAUNCHD_DIR"/*burrowee*gateway*.plist "$SYSTEMD_DIR"/burrowee-gateway*.service; do
+        [ -f "$_ldg_f" ] || continue
+        if grep -qF "$LINK_DIR/burrowee" "$_ldg_f" 2>/dev/null; then return 0; fi
+    done
+    return 1
+}
+
+# unlink_operator_bins — RULE 4: removed on uninstall, and only when the link
+# still points into OUR tree. A regular file at one of these names is the
+# operator's; a symlink pointing anywhere else is somebody else's.
+unlink_operator_bins() {
+    for _uob in $LINK_BINS; do
+        _uob_p="$LINK_DIR/$_uob"
+        [ -L "$_uob_p" ] || continue
+        case "$(readlink "$_uob_p")" in
+        "$BIN_DIR"/*) ;;
+        *) continue ;;
+        esac
+        # A link whose target still exists is still serving someone: the shared
+        # `burrowee` dispatcher stays in $BIN_DIR while a sibling component is
+        # installed, and its link must stay with it. Same rule as the edge's.
+        [ -e "$_uob_p" ] && continue
+        run_root rm -f "$_uob_p" || echo "note: could not remove the link $_uob_p (needs root) — remove it by hand" >&2
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -1196,20 +1679,20 @@ migration_sudo() {
 # version to decide whether an install is already current, and that home is now
 # $BIN_DIR. One writer for both keeps them from disagreeing.
 #
-# The $BIN_DIR copy is guarded on $SYS_CONFIG_DIR, which since the prefix flow
-# was removed is the whole question: $BIN_DIR is the system location on every
-# install, so what is left to ask is whether this host has actually been
-# converged to the root scheme yet. A host with no system config root has no
-# root-scheme updater reading that copy, and writing it would root-own a file in
-# a tree nothing on this host consults.
+# The $BIN_DIR copy used to be guarded on $SYS_CONFIG_DIR existing — "has this
+# host been converged to the root scheme yet". Since 0.3 every mode that
+# records a version has already established the whole machine-owned tree
+# (ensure_system_tree, before its first write), so the answer is always yes
+# and the guard would be dead: both anchors are written, unconditionally. The
+# $BIN_DIR copy moves WITH $BIN_DIR to /usr/local/burrowee/bin, and the root
+# updater reads it from there (core's local-update path, <exec dir>/
+# .installed-version); the uninstall block removes it from the same place.
 record_installed_version() {
     _ver="${1##*/}"
     if [ -z "$_ver" ]; then return 0; fi
     mkdir -p "$GW_HOME"
     printf '%s\n' "$_ver" > "$GW_HOME/.installed-version"
-    if [ -d "$SYS_CONFIG_DIR" ]; then
-        printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
-    fi
+    printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -1453,8 +1936,6 @@ render_units() {
     ensure_root_exec_surface || return 1
     case "$(uname -s)" in
     Darwin)
-        ensure_system_log_dir
-
         # Core unit. KeepAlive.PathState restarts the daemon after ANY exit
         # while the binary exists (a graceful SIGTERM exit is the
         # update-restart mechanism) and waits quietly when the volume holding
@@ -1501,8 +1982,6 @@ EOF
         ;;
 
     Linux)
-        ensure_system_log_dir
-
         # Core unit. Restart=always (not on-failure): a graceful SIGTERM exit
         # must still restart — that is the update-restart mechanism. No User=/
         # Group=/Environment=HOME=: the daemon runs as root and takes both path
@@ -2763,13 +3242,13 @@ guard_prove_armed() {
 #
 # Mirrors gateway/update.sh's PLACE_ELEVATED (see that script's header for the
 # full field history). $BIN_DIR was always writable under the old default
-# ($HOME/.local/bin); it is root-owned under the new one (/usr/local/bin), so
-# placing straight onto the final names with a bare `install` would die on the
-# first binary for anyone who is not already root. The elevation is decided
-# ONCE per mode, by a real create rather than assumed — a run already at uid 0,
-# or a host whose /usr/local is writable by the invoking user, never pays for a
-# sudo call it does not need — and every write of one placement goes through the
-# SAME decision, so a set can never end up half-elevated.
+# ($HOME/.local/bin); it is root-owned under the new one
+# (/usr/local/burrowee/bin), so placing straight onto the final names with a
+# bare `install` would die on the first binary for anyone who is not already
+# root. The elevation is decided ONCE per mode, by a real create rather than
+# assumed — a run already at uid 0 never pays for a sudo call it does not need
+# — and every write of one placement goes through the SAME decision, so a set
+# can never end up half-elevated.
 # ---------------------------------------------------------------------------
 BIN_PLACE_ELEVATED=0
 
@@ -2786,11 +3265,13 @@ bin_place_writable() {
     return 1
 }
 
-# decide_bin_place_elevated — the real-create probe, once. mkdir -p first so a
-# genuinely absent $BIN_DIR (fresh host, either default) does not read as
-# "unwritable" for the wrong reason.
+# decide_bin_place_elevated — the real-create probe, once. $BIN_DIR exists by
+# the time this is asked — ensure_system_tree created it AS ROOT ahead of the
+# first write of every mode — and it must not be created here: an unprivileged
+# `mkdir -p` succeeding on a host whose /usr/local the invoking user owns is
+# exactly how the exec surface would come to be owned by that user.
 decide_bin_place_elevated() {
-    if mkdir -p "$BIN_DIR" 2>/dev/null && bin_place_writable "$BIN_DIR"; then
+    if bin_place_writable "$BIN_DIR"; then
         BIN_PLACE_ELEVATED=0
     else
         BIN_PLACE_ELEVATED=1
@@ -3403,6 +3884,14 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     migrate_from_legacy
     render_units
 
+    # THE LINKS AND BOTH SWEEPS ARE NOT HERE ANY MORE. They used to follow a
+    # synchronous load_units on this path; the restart is now handed to the
+    # guard, and the guard runs them through the kept installer once it has
+    # PROVEN the new build is serving (sweep_stale_bins_via_kept_installer).
+    # That is the same ordering rule they always had — nothing may replace or
+    # remove a path the loaded units still name — now keyed to the restart
+    # that actually happened rather than to one this script performed.
+
     # ---- the state writes, ALL of them before the handoff --------------
     # These used to sit after load_units, which is to say after the sever
     # point — so an operator whose session died at the restart kept the newly
@@ -3571,6 +4060,10 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     _own_slot=0
     if [ -z "$_slot_owner" ] || [ "$_slot_owner" = "$SERVICE_USER" ]; then _own_slot=1; fi
 
+    # The tree first, AS ROOT, before any probe looks at $BIN_DIR — see
+    # ensure_system_tree. A failure here is before Phase 2 backs anything up.
+    ensure_system_tree || exit 1
+
     # Decide elevation ONCE, before the first write — same rule place_all_bins
     # follows below, and update.sh's PLACE_ELEVATED: a real create, not an
     # assumption. Failing to even create $BIN_DIR is the FIRST write of this
@@ -3686,6 +4179,13 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         ROOT_BIN_PLACE_EXCLUDE="burrowee-gateway-updater"
         migrate_from_legacy
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
+        # The links are made HERE on the update path: this path arms no guard —
+        # the updater restarts the service itself right after this script exits —
+        # so there is no later step to defer them to. The exec-root sweep still
+        # has to wait until the loaded units name $BIN_DIR: the units-only
+        # reinstall (`burrowee gateway service install`) does it after load_units.
+        link_operator_bins
+        echo "note: once the service has restarted onto the new units, 'sudo burrowee gateway service install' sweeps the 0.2 copies out of $LEGACY_BIN_DIR"
 
         # The version LAST, and only once everything above succeeded. Recording it
         # before the migration would mean a failed migration leaves the new version on
@@ -3747,11 +4247,26 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     _uninstall_failed=""
     if [ -d "$BIN_DIR" ]; then
         decide_bin_place_elevated
+        # Everything but the dispatcher first: the `burrowee` decision below
+        # asks whether any OTHER component is still installed, and asking it
+        # while this component's own binaries are still on disk would always
+        # answer yes.
         for b in $BINS; do
+            [ "$b" = burrowee ] && continue
             if [ -e "$BIN_DIR/$b" ] && ! bin_place_run rm -f "$BIN_DIR/$b"; then
                 _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }$b"
             fi
         done
+        # The bare `burrowee` dispatcher is SHARED with every co-installed
+        # component (an edge or a relay on the same host), so it goes only when
+        # nothing else of ours is left in $BIN_DIR. Same rule, same order, as
+        # the edge uninstall — and what makes the "keep a live link" guard in
+        # unlink_operator_bins reachable at all.
+        if ls "$BIN_DIR"/burrowee-* >/dev/null 2>&1; then
+            echo "kept $BIN_DIR/burrowee (dispatcher) — other burrowee components remain installed"
+        elif [ -e "$BIN_DIR/burrowee" ] && ! bin_place_run rm -f "$BIN_DIR/burrowee"; then
+            _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }burrowee"
+        fi
         # This script's own kept copy + migrations/, placed here by
         # ensure_root_exec_surface (never by BINS) — an uninstall that leaves
         # them behind hands the next install a root-owned installer it never
@@ -3765,6 +4280,12 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         [ -e "$BIN_DIR/guard.sh" ] && { bin_place_run rm -f "$BIN_DIR/guard.sh" || _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }guard.sh"; }
         [ -e "$BIN_DIR/.installed-version" ] && bin_place_run rm -f "$BIN_DIR/.installed-version"
     fi
+
+    # The operator-typed links, and only the ones that still point into
+    # $BIN_DIR (spec §6.1 rule 4). Before the binaries are reported gone so an
+    # operator reading the line does not still have a dangling `burrowee` on
+    # PATH.
+    unlink_operator_bins
 
     echo "removed from $BIN_DIR: $BINS"
     if [ -n "$_uninstall_failed" ]; then
@@ -3840,6 +4361,13 @@ fi
 # load_units ever restarts it, severing a tunnelled operator's session at the
 # migration, not the restart. snapshot_take runs first so the guard has a working point to
 # roll back to the moment it exists.
+#
+# THE TREE COMES FIRST, AS ROOT. The transaction lives under $SYS_DATA_DIR,
+# the guard is placed into $BIN_DIR, and decide_bin_place_elevated probes
+# $BIN_DIR's writability — every one of those needs the tree to exist already,
+# root-owned with its modes stated, or an unprivileged step creates it on a
+# host whose /usr/local the user owns. See ensure_system_tree.
+ensure_system_tree || exit 1
 txn_begin
 snapshot_take
 guard_arm
@@ -3853,10 +4381,9 @@ txn_phase replacing
 
 place_all_bins
 
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
-esac
+# Decided here, BEFORE render_units, while the on-disk units are the loaded
+# ones: see links_deferred_to_guard. The links themselves follow render_units.
+if links_deferred_to_guard; then LINKS_DEFERRED=1; else LINKS_DEFERRED=0; fi
 
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
@@ -3893,6 +4420,15 @@ migrate_from_legacy
 keep_installer_copy
 
 render_units
+
+# The operator-typed links: now, on a host whose loaded units never named the
+# link path (a fresh install); after the verified restart, in the guard, on a
+# 0.2 host whose loaded units still do (links_deferred_to_guard above).
+if [ "$LINKS_DEFERRED" = 1 ]; then
+    echo "note: the operator links into $LINK_DIR follow the restart (a loaded unit still names that path)"
+else
+    link_operator_bins
+fi
 
 # load_units USED TO run right here, restarting the daemon in the foreground —
 # on the very connection an operator tunnelled through that gateway is reading

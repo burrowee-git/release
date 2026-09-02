@@ -108,9 +108,9 @@ TXN="${1:?usage: guard.sh <transaction-dir>}"
 LAUNCHCTL="${GUARD_LAUNCHCTL:-launchctl}"
 SYSTEMCTL="${GUARD_SYSTEMCTL:-systemctl}"
 UNAME="${GUARD_UNAME:-$(uname -s)}"
-BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
-SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
-SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
+BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
+SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/burrowee/var/gateway}"
+SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/burrowee/etc/gateway}"
 
 # The unit directories, resolved ONCE and by the same env-default spellings
 # install.sh uses for its own LAUNCHD_DIR/SYSTEMD_DIR (install.sh:204-206).
@@ -734,10 +734,10 @@ sweep_stale_bins_via_kept_installer() {
         log "no root-secure installer at $BIN_DIR/install.sh — skipping the stale-bin sweep"
         return 0
     fi
-    if BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins' "$BIN_DIR/install.sh" \
+    if BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins || true; link_operator_bins || true; sweep_stale_exec_root || true' "$BIN_DIR/install.sh" \
         >> "$TXN/guard.log" 2>&1
     then
-        log "stale-bin sweep ran via $BIN_DIR/install.sh"
+        log "stale-bin sweep, operator links and exec-root sweep ran via $BIN_DIR/install.sh"
     else
         log "stale-bin sweep failed (via $BIN_DIR/install.sh) — continuing"
     fi

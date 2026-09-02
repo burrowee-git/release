@@ -54,12 +54,22 @@ func launchdDir(home string) string { return filepath.Join(home, "LaunchDaemons"
 func systemdDir(home string) string { return filepath.Join(home, "systemd-system") }
 
 // sysConfigDir/sysDataDir are the sandboxed stand-ins for the real system
-// roots (/usr/local/etc|var/burrowee/gateway) that the SYSTEM units name, via
+// roots (/usr/local/burrowee/etc|var/gateway) that the SYSTEM units name, via
 // the BURROWEE_SYSTEM_*_DIR seams. The suite must never create the real ones.
-func sysConfigDir(home string) string {
-	return filepath.Join(home, "system-etc", "burrowee", "gateway")
-}
-func sysDataDir(home string) string { return filepath.Join(home, "system-var", "burrowee", "gateway") }
+//
+// They sit UNDER systemRoot(home), beside binDir(home), in the production
+// shape: install.sh derives the tree's parents from these three leaves
+// (SYSTEM_ROOT = dirname $BIN_DIR, SYS_ETC_ROOT = dirname $SYS_CONFIG_DIR, …)
+// and creates every level with a plain mkdir — no -p — refusing a level whose
+// parent is missing. A sandbox shaped like the real tree is what lets the
+// suite assert every level's mode (system_tree_test.go) without the
+// installer growing a fourth seam that a suite could forget to set.
+func sysConfigDir(home string) string { return filepath.Join(systemRoot(home), "etc", "gateway") }
+func sysDataDir(home string) string   { return filepath.Join(systemRoot(home), "var", "gateway") }
+
+// systemRoot is the sandboxed /usr/local/burrowee — the one parent bin/, etc/
+// and var/ hang off. install.sh never creates or re-modes anything ABOVE it.
+func systemRoot(home string) string { return filepath.Join(home, "system") }
 
 // libexecDir is the sandboxed stand-in for guard_arm's real destination
 // (/usr/local/libexec/burrowee), via the BURROWEE_LIBEXEC_DIR seam — the one
@@ -92,8 +102,14 @@ func binDir(home string) string {
 	// runner PREFIX="$(dirname "$BIN_DIR")", which only round-trips back to
 	// this exact path through the runner's own "${PREFIX:-...}/bin" when the
 	// last path component really is "bin".
-	return filepath.Join(home, "system", "bin")
+	return filepath.Join(systemRoot(home), "bin")
 }
+
+// linkDir is the sandboxed stand-in for /usr/local/bin — where the
+// operator-typed binaries are SYMLINKED from (spec §6.1), via the
+// BURROWEE_LINK_DIR seam. Never the real directory: the machines this suite
+// runs on carry live burrowee links there.
+func linkDir(home string) string { return filepath.Join(home, "usr-local-bin") }
 
 // devBinDir is the HISTORICAL per-user bin dir ($HOME/.local/bin) — where
 // pre-collapse installs put everything, and so where a host arriving at a
@@ -358,6 +374,7 @@ func installShEnv(home, stubDir string, extraEnv ...string) []string {
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
 		"BURROWEE_LIBEXEC_DIR=" + libexecDir(home),
+		"BURROWEE_LINK_DIR=" + linkDir(home),
 		// REATTACH_CEILING=0 (Task 9): the fresh-install path now ends by
 		// polling the transaction's phase file for the guard's verdict
 		// (install.sh's reattach). This suite's systemd-run/launchctl stubs

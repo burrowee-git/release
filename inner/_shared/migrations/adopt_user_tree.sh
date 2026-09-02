@@ -195,7 +195,7 @@ if [ -z "${COMP:-}" ] || [ -z "${COMP_HOME:-}" ]; then
         exit 1
     fi
     if [ -z "${COMP_HOME:-}" ]; then
-        SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
+        SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/burrowee/etc}"
         case "${COMP_HOME_SCHEME:-user}" in
         system) COMP_HOME="$SYS_CONFIG_ROOT/$COMP" ;;
         root)   COMP_HOME="$(root_home)/.burrowee/$COMP" ;;
@@ -208,7 +208,7 @@ fi
 # invocation resolves it the same way, and every scheme but `system` answers with
 # $COMP_HOME so a component that never split reads exactly as it did before.
 if [ -z "${COMP_DATA:-}" ]; then
-    SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/var/burrowee}"
+    SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"
     case "${COMP_HOME_SCHEME:-user}" in
     system) COMP_DATA="$SYS_DATA_ROOT/$COMP" ;;
     *)      COMP_DATA="$COMP_HOME" ;;

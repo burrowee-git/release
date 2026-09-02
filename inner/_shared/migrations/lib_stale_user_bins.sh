@@ -584,3 +584,163 @@ remove_stale_user_bins() {
     return 0
 }
 # === SHARED SWEEP CONTRACT END ===
+
+# ---------------------------------------------------------------------------
+# THE STALE EXEC ROOT — /usr/local/bin's REAL copies of this component's
+# binaries, left behind when 0.3 moved the exec root to /usr/local/burrowee/bin.
+#
+# OUTSIDE THE CONTRACT REGION ABOVE, deliberately: this sweep exists only on
+# the shared ladder (edge, relay), and the gateway's copy of this library — the
+# other half of the byte-pinned region — sweeps its own exec root from its own
+# repo. It REUSES the region's decisions (stale_bin_verdict, system_twin_exists,
+# unit_naming_bin) rather than restating them, so what "ours", "has a twin" and
+# "still named by a unit" mean cannot drift between the two sweeps.
+#
+# WHAT IT DOES NOT TOUCH, per item, and why:
+#   * A SYMLINK, ours or anyone's. The 0.3 installer links the operator-typed
+#     names from /usr/local/bin into the new tree (spec §6.1); deleting one of
+#     those is deleting the install's PATH entry. Checked FIRST, before
+#     ownership, because a link's stamp is its target's.
+#   * A file that is not a burrowee binary (no build stamp) — an operator's own.
+#   * A name whose twin in $BIN_DIR is missing, not ours, not a regular file
+#     owned by $STALE_EXEC_ROOT_TWIN_OWNER, or group/other-writable: the new
+#     tree is asserted root-secure by the installer before this ladder runs,
+#     and this re-checks the one file it is about to leave as the only copy.
+#     The owner is a SEAM (default root) rather than a euid test, so a suite
+#     that cannot create root-owned files can still drive both directions.
+#   * A file some unit on this host still names. On macOS KeepAlive.PathState
+#     keys off the file's existence, so unlinking it stops a running daemon.
+#     This is why the rung's sweep is usually a no-op on the FIRST 0.3 run —
+#     the 0.2 units still name /usr/local/bin — and why the installers call
+#     this again after they have re-rendered the units to the new tree.
+# ---------------------------------------------------------------------------
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
+
+# STALE_EXEC_ROOT_KEEP — names the sweep must leave in $LEGACY_BIN_DIR no matter
+# what it decides about them. The installer sets it to the operator-typed names
+# it did NOT link: on a host whose /usr/local/bin is not root-secure,
+# link_operator_bins creates nothing and prints the PATH line instead, and the
+# real 0.2 file at that name is then the ONLY copy anything reaches by the
+# absolute path — the shared `burrowee` dispatcher above all, which every
+# co-installed component and every consumer resolves as /usr/local/bin/burrowee.
+# Removing it there would leave that path empty on exactly the host class this
+# whole change exists for. Empty on a host where the links WERE made: the link
+# replaced the file, so nothing is stranded.
+STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
+
+# stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
+stale_exec_root_is_kept() {
+    for _serik in $STALE_EXEC_ROOT_KEEP; do
+        [ "$_serik" = "$1" ] && return 0
+    done
+    return 1
+}
+STALE_EXEC_ROOT_TWIN_OWNER="${STALE_EXEC_ROOT_TWIN_OWNER:-root}"
+
+# stale_exec_root_twin_ok <bin> — $BIN_DIR/<bin> is a regular file owned by
+# $STALE_EXEC_ROOT_TWIN_OWNER and writable by nobody else. `find -prune` on
+# the file itself prints it iff every test holds; POSIX find, both dialects.
+stale_exec_root_twin_ok() {
+    [ -n "$(find "$BIN_DIR/$1" -prune -type f -user "$STALE_EXEC_ROOT_TWIN_OWNER" ! -perm -g+w ! -perm -o+w 2>/dev/null)" ]
+}
+
+# stale_exec_root_decision <bin> <operator-home> — the WHOLE decision for one
+# name at $LEGACY_BIN_DIR, as one word: symlink | absent | irregular | foreign
+# | no-twin | twin-untrusted | unit:<file> | remove. One function, used by
+# the probe and the sweep alike, for the reason stale_bin_decision gives.
+stale_exec_root_decision() {
+    _serd_p="$LEGACY_BIN_DIR/$1"
+    # stale_bin_verdict answers `symlink` FIRST, before ownership — a link's
+    # stamp is its target's — which is exactly the order this sweep needs.
+    _serd_v="$(stale_bin_verdict "$_serd_p")"
+    case "$_serd_v" in
+    ours) ;;
+    *) echo "$_serd_v"; return 0 ;;
+    esac
+    system_twin_exists "$1" || { echo no-twin; return 0; }
+    stale_exec_root_twin_ok "$1" || { echo twin-untrusted; return 0; }
+    if _serd_u="$(unit_naming_bin "$LEGACY_BIN_DIR" "$1" "$2")"; then
+        echo "unit:$_serd_u"
+        return 0
+    fi
+    echo remove
+}
+
+# stale_exec_root_bins_pending — whether a sweep right now would remove at
+# least one file: the rung's --applies probe. FAILS OPEN: a legacy directory
+# this process cannot read is "still needed", never "nothing there" — a wrong
+# yes costs one no-op run, a wrong no strands the copies forever.
+stale_exec_root_bins_pending() {
+    [ -n "$STALE_USER_BINS" ] || return 1
+    [ -d "$LEGACY_BIN_DIR" ] || return 1
+    [ "$LEGACY_BIN_DIR" != "$BIN_DIR" ] || return 1
+    _serp_dir="$LEGACY_BIN_DIR"
+    [ -r "$_serp_dir" ] && [ -x "$_serp_dir" ] || return 0
+    _serp_home="$(operator_home 2>/dev/null)"
+    for _serp_b in $STALE_USER_BINS; do
+        stale_exec_root_is_kept "$_serp_b" && continue
+        if [ "$(stale_exec_root_decision "$_serp_b" "$_serp_home" 2>/dev/null)" = remove ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# remove_stale_exec_root_bins — sweep $LEGACY_BIN_DIR, by exact name, per
+# item, saying what was decided about every name that was there. Silent for
+# an absent name, and never fatal.
+remove_stale_exec_root_bins() {
+    if [ -z "$STALE_USER_BINS" ]; then
+        echo "note: no binary list for the stale exec-root sweep (migrations/component.conf" >&2
+        echo "note: is missing or sets no STALE_USER_BINS) — nothing was swept." >&2
+        return 0
+    fi
+    [ -d "$LEGACY_BIN_DIR" ] || return 0
+    # Never the install destination itself — a host whose exec root never
+    # moved, or a seam pointing both at one directory.
+    [ "$LEGACY_BIN_DIR" != "$BIN_DIR" ] || return 0
+    if ! { [ -r "$LEGACY_BIN_DIR" ] && [ -x "$LEGACY_BIN_DIR" ]; }; then
+        echo "note: cannot read $LEGACY_BIN_DIR — its stale burrowee copies were not swept." >&2
+        return 0
+    fi
+    _rser_home="$(operator_home 2>/dev/null)"
+    for _rser_b in $STALE_USER_BINS; do
+        _rser_p="$LEGACY_BIN_DIR/$_rser_b"
+        if stale_exec_root_is_kept "$_rser_b"; then
+            [ -e "$_rser_p" ] && echo "kept $_rser_p — no link was made at that name, so this is the only copy anything reaches there"
+            continue
+        fi
+        _rser_d="$(stale_exec_root_decision "$_rser_b" "$_rser_home")"
+        case "$_rser_d" in
+        absent) ;;
+        symlink)
+            echo "kept $_rser_p — a symlink (the install's PATH entry when it points into $BIN_DIR), never swept"
+            ;;
+        irregular)
+            echo "note: $_rser_p is not a regular file — left in place." >&2
+            ;;
+        foreign)
+            echo "note: $_rser_p carries no burrowee build stamp — it is not ours, left in place." >&2
+            ;;
+        no-twin)
+            echo "kept $_rser_p — there is no $BIN_DIR/$_rser_b to replace it, so this is the live install, not a stale copy"
+            ;;
+        twin-untrusted)
+            echo "note: $BIN_DIR/$_rser_b is not a regular file owned by $STALE_EXEC_ROOT_TWIN_OWNER and writable by nobody" >&2
+            echo "note: else — refusing to remove $_rser_p and leave that as the only copy." >&2
+            ;;
+        unit:*)
+            echo "note: ${_rser_d#unit:} still names $_rser_p, so a supervisor may be running it —" >&2
+            echo "note: left in place. Once the units name $BIN_DIR, the next install sweeps it." >&2
+            ;;
+        remove)
+            if rm -f "$_rser_p"; then
+                echo "removed stale 0.2 exec-root copy: $_rser_p (the install is $BIN_DIR/$_rser_b)"
+            else
+                echo "note: could not remove $_rser_p — remove it by hand." >&2
+            fi
+            ;;
+        esac
+    done
+    return 0
+}

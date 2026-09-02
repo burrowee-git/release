@@ -28,10 +28,19 @@ import (
 	"github.com/burrowee-git/release-kit/build"
 )
 
-// cleanTag matches a release tag and nothing else: no pseudo-versions, no
-// pre-release or build suffixes. A pin that is not a clean tag means someone is
-// building against a branch or a replace, which must never reach a cut.
-var cleanTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
+// cleanTag matches a release tag: plain, or with a semver pre-release suffix —
+// core/updater sits on core/vX.Y.0-beta.N for the whole of a beta cycle (the
+// beta-cycle release-flow spec, D6), and the plain-only form made every beta
+// cut abort here. Build metadata (+…) is still refused. A pin that is not a
+// tag means someone is building against a branch or a replace, which must
+// never reach a cut.
+var cleanTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.]*)?$`)
+
+// pseudoVersion is the one hyphenated shape that means "this pin is not a tag
+// at all": go's <base>-<14-digit timestamp>-<12-hex> mint, on a plain or a
+// pre-release base. Mirrors tools/updater_pin.sh's case pattern exactly, so
+// both sides refuse the identical set.
+var pseudoVersion = regexp.MustCompile(`[-.][0-9]{14}-[0-9a-f]{12}$`)
 
 // hexHash matches a lowercase-hex string of at least 8 chars, ANCHORED at both
 // ends — mirroring tools/updater_pin.sh's `[0-9a-f]*` sed capture. bash's sed
@@ -135,8 +144,11 @@ func UpdaterPin(ctx context.Context, goBin, modDir string) (string, error) {
 	if v == "" {
 		return "", nil
 	}
+	if pseudoVersion.MatchString(v) {
+		return "", fmt.Errorf("relconfig: core/updater pin %q in %s is a pseudo-version — repin to a tag before cutting", v, modDir)
+	}
 	if !cleanTag.MatchString(v) {
-		return "", fmt.Errorf("relconfig: core/updater pinned to %q in %s — repin to a clean tag before cutting", v, modDir)
+		return "", fmt.Errorf("relconfig: core/updater pinned to non-tag %q in %s — repin to a clean tag before cutting", v, modDir)
 	}
 
 	// From here the module IS a dependency, pinned to a clean tag — every
@@ -169,7 +181,11 @@ func UpdaterPin(ctx context.Context, goBin, modDir string) (string, error) {
 	}
 	date := dateParts[1] + "." + dateParts[2] + "." + dateParts[3]
 	fp := meta.Origin.Hash[:8]
-	return fmt.Sprintf("%s.%s.%s", v, date, fp), nil
+	// A pre-release tag's hyphen is rendered as a dot (v0.3.0-beta.1 →
+	// v0.3.0.beta.1.<date>.<sha8>): every shipped stamp uses the dotted infix and
+	// core/updater/local.ChannelOf keys on the literal ".beta." — mirrors the
+	// shell helper's `tr - .`. A plain tag passes through unchanged.
+	return fmt.Sprintf("%s.%s.%s", strings.ReplaceAll(v, "-", "."), date, fp), nil
 }
 
 // applyUpdaterPin rewrites the version ldflag to updaterVersion for every

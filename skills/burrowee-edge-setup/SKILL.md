@@ -135,8 +135,8 @@ burrowee-edge-cli doctor          # read-only diagnostic: identity / console rea
 burrowee-edge-cli doctor --fix    # remediate the nginx front (install → apply → start) and issue/renew the host cert
 ```
 
-The edge is a **system install**: config root `/usr/local/etc/burrowee/edge`, data
-root `/usr/local/var/burrowee/edge`, both root-owned. Do NOT wrap the command in
+The edge is a **system install**: config root `/usr/local/burrowee/etc/edge`, data
+root `/usr/local/burrowee/var/edge`, both root-owned. Do NOT wrap the command in
 `sudo` yourself and do NOT pass `--home` — `--home` only renames the config root
 for non-standard layouts, and `doctor` requests consent-gated sudo elevation
 itself for the repairs that need root. **If nginx is still missing, `burrowee edge doctor --fix`
