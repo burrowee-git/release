@@ -628,7 +628,6 @@ LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
 # replaced the file, so nothing is stranded.
 STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 
-# stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
 # stale_exec_root_same_dir A B — true when A and B name the same directory.
 # $LEGACY_BIN_DIR and $BIN_DIR reach this library through independent seams, and
 # when they name the same place this sweep must NOT run: every name it would
@@ -673,6 +672,7 @@ stale_exec_root_same_dir() {
     [ "${_sersd_a:-/}" = "${_sersd_b:-/}" ]
 }
 
+# stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
 stale_exec_root_is_kept() {
     for _serik in $STALE_EXEC_ROOT_KEEP; do
         [ "$_serik" = "$1" ] && return 0

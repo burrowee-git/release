@@ -640,6 +640,85 @@ path_is_root_secure() {
     return 0
 }
 
+# dir_spelling_normalize <path> — sets $_dsn_out to <path> with the trailing
+# spellings removed that do not change WHICH DIRECTORY IS NAMED.
+#
+# THIS IS THE ONE HOME FOR THAT RULE, and it is a function rather than four
+# lines inline because the question "does this path name a symlink at its final
+# component" has now been answered wrongly three times in this file's history,
+# every time by somebody looking at one spelling. A predicate about a DIRECTORY
+# must be a function of the directory, not of how a caller spelled it, and
+# these are the spellings a caller can legally pass:
+#
+#   X                 the leaf is X. Tested as given.
+#   X/  X//           the same directory: a trailing separator only forces the
+#                     kernel to resolve X as a directory. STRIPPED — otherwise
+#                     `[ -L X/ ]` is false for a symlinked X and the refusal
+#                     below is one character away from being bypassed.
+#   X/.  X/./  X/.//. `.` names the directory itself, so it never changes which
+#                     directory is named. STRIPPED, repeatedly, interleaved
+#                     with the separators above.
+#   X/..              a DIFFERENT directory — X's parent, after symlink
+#                     resolution. NOT stripped, and it never needs to be: `..`
+#                     from any directory yields a real directory, so a path
+#                     ending in /.. cannot have a symlinked leaf.
+#   a/./b  a//b       interior; they do not touch the leaf. The walk skips and
+#                     collapses them, and `[ -L a/./b ]` lstats b correctly.
+#   bin  ./bin        relative; lstat anchors them to the working directory
+#                     exactly as the walk does.
+#   alias/bin         a symlinked ALIAS in an ANCESTOR position. The leaf is
+#                     the real directory b; the alias is followed and judged
+#                     like any other ancestor.
+#
+# It sets a variable rather than printing one because a command substitution
+# would strip a trailing newline from a path entitled to carry one, and because
+# every caller here is inside `set -eu`.
+dir_spelling_normalize() {
+    _dsn_out="$1"
+    while :; do
+        case "$_dsn_out" in
+        /) break ;;
+        */) _dsn_out="${_dsn_out%/}" ;;
+        */.) _dsn_out="${_dsn_out%/.}" ;;
+        *) break ;;
+        esac
+    done
+    # "/." and "/" both name the root, and the loop above empties the first.
+    [ -n "$_dsn_out" ] || _dsn_out=/
+}
+
+# dir_leaf_is_symlink <path> — true when the directory <path> names is reached
+# through a symlink at its FINAL component, in any legal spelling. Exported
+# from this region so a CALLER can ask the same question the predicate asked:
+# dir_is_root_secure answers 1 for this and for "somebody on the way can
+# rewrite it", and a caller that reports only the second sends an operator to
+# audit ownership and modes that are perfectly correct.
+dir_leaf_is_symlink() {
+    dir_spelling_normalize "$1"
+    [ -L "$_dsn_out" ]
+}
+
+# dir_absence_is_real <path> — true when a false `[ -d <path> ]` is a FACT
+# about <path> rather than a permission on the way to it. `[ -d ]` answers
+# false both when the path is not a directory and when this process cannot
+# SEARCH the parent to find out, and those are the file's 1-vs-2 split in
+# miniature. The second is ORDINARY here, not exotic: this walk descends
+# through directories it has just judged root-owned, and a root-owned 0700
+# one — $SYS_DATA_DIR's own shape — passes that judgement and is then
+# unsearchable by the unprivileged operator this installer runs as. Answering
+# "not secure" there sends them to check permissions that are exactly right.
+dir_absence_is_real() {
+    _dar_p="$1"
+    case "$_dar_p" in
+    */*)
+        _dar_p="${_dar_p%/*}"
+        [ -n "$_dar_p" ] || _dar_p=/
+        ;;
+    *) _dar_p=. ;;
+    esac
+    [ -x "$_dar_p" ]
+}
+
 # dir_is_root_secure <path> — the directory form of the predicate above, and
 # the shell half of core/binary's IsRootSecureDir. Same four codes; the leaf is
 # a DIRECTORY, so 3 means "no such directory" rather than "no such file". The
@@ -714,23 +793,18 @@ path_is_root_secure() {
 # a path all need search permission on its PARENT only, and every parent this
 # walk touches must be 0755-and-root-owned to pass at all.
 dir_is_root_secure() {
-    _ds_in="$1"
-    # Trailing slashes come off first: `[ -L /a/b/ ]` is FALSE for a symlinked
-    # b, because a trailing slash forces the kernel to resolve it, so a caller
-    # spelling the path with one would walk straight past the refusal below.
-    # / itself is left alone.
-    while :; do
-        case "$_ds_in" in
-        /) break ;;
-        */) _ds_in="${_ds_in%/}" ;;
-        *) break ;;
-        esac
-    done
+    # ONE normalization, here, before anything looks at the spelling —
+    # dir_spelling_normalize owns which spellings name the same directory.
+    dir_spelling_normalize "$1"
+    _ds_in="$_dsn_out"
     # Refused before the existence test, exactly as IsRootSecureDir refuses on
     # its Lstat before asking anything else: a dangling symlink at this path is
     # "somebody put a link here", not "the directory is missing".
-    [ ! -L "$_ds_in" ] || return 1
-    [ -d "$_ds_in" ] || return 3
+    if [ -L "$_ds_in" ]; then return 1; fi
+    if [ ! -d "$_ds_in" ]; then
+        if dir_absence_is_real "$_ds_in"; then return 3; fi
+        return 2
+    fi
     case "$_ds_in" in
     /*) _ds_rest="$_ds_in" ;;
     *)
@@ -805,9 +879,16 @@ dir_is_root_secure() {
 # 2 carry dir_is_root_secure's meanings. 3 is not this function's to answer:
 # only the leaf can legitimately be absent, and that is settled before the walk
 # starts. A component that has stopped being a directory mid-walk is 1 — the
-# path no longer denotes what it was asked about.
+# path no longer denotes what it was asked about — but a component this process
+# cannot even reach is 2, per dir_absence_is_real: the walk descends through
+# root-owned directories, a root-owned 0700 one passes and is unsearchable by
+# an unprivileged operator, and reporting that as "not secure" is the exact
+# misdirection the 1-vs-2 split exists to prevent.
 dir_level_is_root_secure() {
-    [ -d "$1" ] || return 1
+    if [ ! -d "$1" ]; then
+        if dir_absence_is_real "$1"; then return 1; fi
+        return 2
+    fi
     _dl_v="$(stat_uid "$1")" || return 2
     [ "$_dl_v" = 0 ] || return 1
     _dl_v="$(stat_mode "$1")" || return 2
@@ -1480,6 +1561,24 @@ assert_system_tree() {
             echo "error: would sit in a directory this run failed to create." >&2
             echo "hint: re-run 'burrowee gateway service install' from an interactive terminal" >&2
             echo "hint: so the directory can be created as root." >&2
+        elif dir_leaf_is_symlink "$_ast"; then
+            # rc 1 has TWO causes since the leaf rule matched the Go half, and
+            # the ownership text is a lie about this one: every directory on
+            # the way can be flawless and the answer is still 1. An operator
+            # who pointed a root at a link onto a root-owned data volume —
+            # an install that SUCCEEDED before — must not be sent to audit
+            # modes that are already correct. Same misdirection as rc 2's, one
+            # code over. dir_leaf_is_symlink is the predicate's own spelling
+            # rule, so this branch cannot drift from the refusal it explains.
+            echo "error: $_ast is a SYMLINK, and a machine-owned root must be a real" >&2
+            echo "error: directory — whatever the link points at, and however well owned" >&2
+            echo "error: that target is." >&2
+            echo "error: refusing to install — a link is a redirection of where root writes," >&2
+            echo "error: and nothing about its target's ownership records that it moved or" >&2
+            echo "error: stops it moving again." >&2
+            echo "hint: the ownership and modes on the way to $_ast are NOT implicated." >&2
+            echo "hint: point the setting at the real directory, or replace the link with the" >&2
+            echo "hint: directory itself; then re-run 'burrowee gateway service install'." >&2
         else
             echo "error: $_ast is not root-owned and unwritable all the way to /." >&2
             echo "error: refusing to install — the gateway's state would sit in a directory a" >&2
@@ -1530,9 +1629,16 @@ link_operator_bins() {
         2) echo "note: the ownership of $LINK_DIR could not be established — either 'stat' answered neither" ;
            echo "note: dialect, or a symlink on the way could not be followed — so no burrowee command was linked" ;
            echo "note: into it: a link is only safe in a directory proven root-owned." ;;
-        *) echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
-           echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
-           echo "note: unlinked and replaced, and the next 'sudo burrowee-gateway-cli' would run that user's file as root." ;;
+        *) if dir_leaf_is_symlink "$LINK_DIR"; then
+               echo "note: $LINK_DIR is a SYMLINK, so no burrowee command was linked into it — a machine-owned" ;
+               echo "note: link directory must be a real directory, whatever it points at: its target's ownership" ;
+               echo "note: records nothing about the link being repointed. The ownership and modes on the way to" ;
+               echo "note: it are NOT implicated." ;
+           else
+               echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
+               echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
+               echo "note: unlinked and replaced, and the next 'sudo burrowee-gateway-cli' would run that user's file as root." ;
+           fi ;;
         esac
         echo "note: run the gateway's commands by their real path, or add the exec root to PATH:"
         echo "    export PATH=\"$BIN_DIR:\$PATH\""
