@@ -2557,6 +2557,44 @@ assert_lacks "$OUT" "TRANSITIONAL" "a scratch COMP_HOME must never adopt the com
 assert_contains "$OUT" "sweep_stale_exec_root.sh applies: no recorded version" "the rung must fall through to --applies on the updater track"
 assert_eq "$RC" 2 "and run"
 
+# 37a4. THE KEEP-LIST. A name in $STALE_EXEC_ROOT_KEEP is never removed, however
+#       the per-name evidence reads. The installers hand the ladder every
+#       operator-typed name, because the rung runs BEFORE link_operator_bins has
+#       made a single link: until one has, the real 0.2 file at that name is the
+#       only copy anything reaches by the absolute path — the shared `burrowee`
+#       dispatcher above all, which every co-installed component resolves there.
+#       Mutation that reddens it: drop stale_exec_root_is_kept's call from
+#       remove_stale_exec_root_bins (or from the --applies probe, for the second
+#       half).
+t37a4="$TMP/t37a4"; exec_sweep_kit "$t37a4"; h37a4="$t37a4/home"
+seed_ours "$h37a4/old-bin" burrowee
+OUT="$(
+    HOME="$h37a4" \
+    COMP_HOME="$h37a4/sys/etc/edge" COMP_DATA="$h37a4/sys/var/edge" \
+    SYS_CONFIG_ROOT="$h37a4/sys/etc" SYS_DATA_ROOT="$h37a4/sys/var" \
+    BIN_DIR="$h37a4/sys/bin" \
+    LEGACY_SYS_CONFIG_ROOT="$h37a4/old-etc" LEGACY_SYS_DATA_ROOT="$h37a4/old-var" \
+    LEGACY_BIN_DIR="$h37a4/old-bin" \
+    STALE_EXEC_ROOT_KEEP="burrowee burrowee-edge burrowee-edge-cli" \
+    STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+    LAUNCHD_DIR="$h37a4/no-launchd" SYSTEMD_DIR="$h37a4/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h37a4/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t37a4/migrations/run.sh" 2>&1
+)"; RC=$?
+assert_eq "$RC" 2 "the sweep still runs — the keep-list narrows it, it does not disable it"
+assert_present "$h37a4/old-bin/burrowee" "a kept name must survive: no link has replaced it, so this is the only copy at that path"
+assert_present "$h37a4/old-bin/burrowee-edge-cli" "a kept operator-typed name survives too"
+assert_gone "$h37a4/old-bin/burrowee-edge-updater" "while a name NOT in the keep-list is still swept — per item, never per section"
+assert_contains "$OUT" "kept $h37a4/old-bin/burrowee — no link was made at that name" "and the rung says why it kept it"
+
+# 37a5. THE PROBE HONOURS IT TOO: with every removable name kept, --applies must
+#       answer no, or the runner authorises a sweep that then declines and the
+#       receipt closes the rung over copies it never touched.
+t37a5="$TMP/t37a5"; exec_sweep_kit "$t37a5"; h37a5="$t37a5/home"
+STALE_EXEC_ROOT_KEEP="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater" \
+    run_exec_sweep_rung "$t37a5" "$h37a5" --applies
+assert_eq "$RC" 1 "--applies must answer no when every removable name is kept"
+
 # 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"

@@ -108,6 +108,12 @@ set -eu
 # cannot ask that without $BIN_DIR. This is an assignment only: nothing is
 # created, placed or written until well after the gate.
 BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
+# The 0.2 exec root and the operator-typed names, for the ladder invocation
+# below — same contract as the edge's updater track: this script links nothing,
+# so the rung keeps every operator-typed name, and an unset LEGACY_BIN_DIR would
+# point the sweep at the real /usr/local/bin even under a seamed test.
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-${BURROWEE_LINK_DIR:-/usr/local/bin}}"
+LINK_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
 
 # normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
 # '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
@@ -376,6 +382,8 @@ if [ -n "$MIGRATIONS_DIR" ] && [ -f "$MIGRATIONS_DIR/run.sh" ] && [ -f "$MIGRATI
 			COMP_HOME="$_ul_home" \
 			COMP_DATA="$_ul_home" \
 			BIN_DIR="$BIN_DIR" \
+			LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
+			STALE_EXEC_ROOT_KEEP="$LINK_BINS" \
 			SUDO="$SUDO" \
 			SYSTEMCTL="$SYSTEMCTL" \
 			sh "$MIGRATIONS_DIR/run.sh"
