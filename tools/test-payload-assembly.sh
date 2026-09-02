@@ -53,7 +53,7 @@ trap 'rm -rf "${TMP}"' EXIT
 # assert nothing about what a kit carries.
 SHARED_FIX="${TMP}/shared-migrations"
 mkdir -p "${SHARED_FIX}"
-for f in adopt_user_tree.sh lib_paths.sh lib_stale_user_bins.sh run.sh stale_user_bins.sh upgrade.sh; do
+for f in adopt_updater_unit.sh adopt_user_tree.sh lib_paths.sh lib_stale_user_bins.sh repoint_lan_cert.sh run.sh stale_user_bins.sh sweep_stale_exec_root.sh upgrade.sh; do
     printf '#!/bin/sh\n' > "${SHARED_FIX}/${f}"
 done
 # shellcheck disable=SC2034  # read by the sourced payload.sh staging functions.
@@ -167,7 +167,7 @@ if run_public; then ok "cli: assembly succeeds"; else bad "cli: assembly failed"
 # updater.update.sh exists in this fixture's source and must NOT ship: cli
 # self-updates in-process, and the manifest is what decides that.
 check "cli payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-cli,install.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh"
+    "burrowee,burrowee-cli,install.sh,migrations/adopt_updater_unit.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/repoint_lan_cert.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/sweep_stale_exec_root.sh,migrations/upgrade.sh,update.sh"
 check "cli install.sh comes from inner/cli/, not the component source" \
     "$(unzip -p "${stage}/${asset}" install.sh)" "inner installer"
 
@@ -190,7 +190,7 @@ check "cli (darwin-amd64-legacy) asset name" "${asset}" "burrowee-cli-darwin-amd
     || bad "cli (darwin-amd64-legacy) zip missing at ${stage}/burrowee-cli-darwin-amd64-legacy.zip"
 check "cli (darwin-amd64-legacy) payload members (same manifest as stock — VARIANT changes symbols, not membership)" \
     "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-cli,install.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh"
+    "burrowee,burrowee-cli,install.sh,migrations/adopt_updater_unit.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/repoint_lan_cert.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/sweep_stale_exec_root.sh,migrations/upgrade.sh,update.sh"
 os=darwin; arch=arm64; variant=""   # restore the default fixture platform for the rest of this file
 
 # --- gateway: the regression, end to end through release.sh's own text -------
@@ -205,7 +205,7 @@ printf '#!/bin/sh\n'                                     > "${src}/migrations/v0
 printf '#!/bin/sh\n'                                     > "${src}/migrations/lib_stale_user_bins.sh"
 if run_public; then ok "gateway: assembly succeeds"; else bad "gateway: assembly failed"; fi
 check "gateway payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-gateway,install.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,update.sh"
+    "burrowee,burrowee-gateway,guard.sh,install.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,update.sh,updater.install.sh"
 
 # --- edge: a directory member whose content comes from another tree ----------
 fixture edge burrowee-edge
@@ -217,7 +217,7 @@ printf 'login cover\n' > "${EDGE_WEB}/login.html"
 shared_ladder_src "${src}"
 if run_public; then ok "edge: assembly succeeds"; else bad "edge: assembly failed"; fi
 check "edge payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-edge,covers/admin.html,covers/default.html,install.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh,updater.update.sh"
+    "burrowee,burrowee-edge,covers/admin.html,covers/default.html,install.sh,migrations/adopt_updater_unit.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/repoint_lan_cert.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/sweep_stale_exec_root.sh,migrations/upgrade.sh,update.sh,updater.install.sh,updater.update.sh"
 check "edge covers come from the edge.web tree, renamed" \
     "$(unzip -p "${stage}/${asset}" covers/default.html)" "login cover"
 
@@ -241,7 +241,7 @@ printf '0.2.2 stale_user_bins.sh\n0.2.2 adopt_unit_home_tree.sh\n' > "${src}/mig
 printf '#!/bin/sh\n' > "${src}/migrations/adopt_unit_home_tree.sh"
 if run_relay; then ok "relay: assembly succeeds"; else bad "relay: assembly failed"; fi
 check "relay payload members" "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,migrations/adopt_unit_home_tree.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,update.sh,updater.update.sh"
+    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,migrations/adopt_unit_home_tree.sh,migrations/adopt_updater_unit.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/repoint_lan_cert.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/sweep_stale_exec_root.sh,migrations/upgrade.sh,update.sh,updater.update.sh"
 
 # install.sh comes from the COMPONENT source on this path (the public components
 # take theirs from inner/<comp>/install.sh, asserted above) — the one provenance
@@ -263,7 +263,7 @@ payload_file_extras() {
 if run_relay; then ok "relay: assembly succeeds with an injected file member"; else bad "relay: assembly failed with an injected file member"; fi
 check "release.sh ships a file member the manifest declares" \
     "$(members "${stage}/${asset}")" \
-    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,migrations/adopt_unit_home_tree.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/upgrade.sh,relay.extra.sh,update.sh,updater.update.sh"
+    "burrowee,burrowee-relay,burrowee-relay-cli,burrowee-relay-updater,install.sh,migrations/adopt_unit_home_tree.sh,migrations/adopt_updater_unit.sh,migrations/adopt_user_tree.sh,migrations/component.conf,migrations/ledger,migrations/lib_paths.sh,migrations/lib_stale_user_bins.sh,migrations/repoint_lan_cert.sh,migrations/run.sh,migrations/stale_user_bins.sh,migrations/sweep_stale_exec_root.sh,migrations/upgrade.sh,relay.extra.sh,update.sh,updater.update.sh"
 
 # A declared member the source does not have must stop the cut here, not on the
 # operator's node at self-update time.
@@ -290,5 +290,26 @@ stage_payload_extras() { # file extras only — deliberately skip the migrations
 if ( run_relay ) >/dev/null 2>&1; then
     bad "relay: accepted a declared directory member that was never staged"
 else ok "relay: refuses a declared directory member that was never staged"; fi
+
+# --- a ledger row whose script is not staged refuses the whole cut ------------
+# The 0.3.0 rung ships by glob (shared_migration_scripts), so nothing names it
+# at assembly time except the component's ledger — which is exactly why a kit
+# whose ledger names it while the shared directory lost it must refuse
+# EVERYTHING here, at the cut, and never on a host: run.sh exits 1 on a ledger
+# row with no file, which the outer bootstrap reads as a failed install.
+os=darwin; arch=arm64; variant=""
+fixture edge burrowee-edge
+printf 'inner installer\n' > "${REPO_ROOT}/inner/edge/install.sh"
+printf 'update\n'          > "${src}/update.sh"
+printf 'updater self-update\n' > "${src}/updater.update.sh"
+printf 'admin cover\n' > "${EDGE_WEB}/admin.html"
+printf 'login cover\n' > "${EDGE_WEB}/login.html"
+shared_ladder_src "${src}"
+printf '0.2.0 stale_user_bins.sh\n0.3.0 sweep_stale_exec_root.sh\n' > "${src}/migrations/ledger"
+rm "${SHARED_FIX}/sweep_stale_exec_root.sh"
+if ( run_public ) >/dev/null 2>&1; then
+    bad "edge: accepted a ledger naming the 0.3.0 rung with the script missing from the shared set"
+else ok "edge: refuses a ledger naming the 0.3.0 rung with the script missing from the shared set"; fi
+printf '#!/bin/sh\n' > "${SHARED_FIX}/sweep_stale_exec_root.sh"
 
 if [ "${fail}" = 0 ]; then echo "ALL OK"; else echo "TESTS FAILED"; exit 1; fi
