@@ -397,59 +397,130 @@ path_is_root_secure() {
 # shared flag would let a caller ask the wrong question with a one-character
 # typo — a directory passed to the file form answers 3 ("absent"), which reads
 # as "nothing to check" rather than as the wrong question.
+#
+# THE PROPERTY, stated over components rather than over one resolved string:
+# every directory that could be SUBSTITUTED for any component of the path is
+# root-owned and unwritable by non-root. That is every component of the path as
+# spelled, every component of the path it resolves to, and — for each symlink
+# met on the way — the chain of directories that holds that link.
+#
+# THE WALK THEREFORE GOES DOWNWARD, ONE COMPONENT AT A TIME, RESOLVING EACH
+# SYMLINK WHERE IT IS MET. Collapsing the path first — `cd "$(dirname …)" &&
+# pwd -P` — and walking upward from the result is what this replaces, and it
+# was wrong in a way no leaf test can repair: physical resolution ERASES every
+# intermediate symlink, so neither the link nor the chain holding it is ever
+# stat'ed. With /usr group-writable and /usr/local a symlink into a root-owned
+# /opt/burrowee-local, the collapsed chain (/opt/burrowee-local/bin, /opt, /)
+# walks perfectly clean and the install proceeds — after which any member of
+# /usr's group repoints /usr/local at a tree they own, taking the identity and
+# host-cert directory this installer is about to create and the exec root root
+# will run binaries from. A `[ -L ]` test added for the LEAF does not reach it
+# either: the leaf was never the substitutable component.
+#
+# Downward is also what makes the holder chain free. Each component is judged
+# BEFORE the walk descends through it, so by the time a symlink is followed the
+# directory holding it has already been judged; following it just re-enters the
+# same loop on the target, from / again when the target is absolute, judging
+# that chain the same way.
+#
+# A SYMLINK'S OWN uid AND MODE ARE DELIBERATELY NOT TESTED. Replacing a symlink
+# is governed by write permission on the directory that holds it — the
+# component already judged — and the link's own mode is not even portable:
+# 0777 on Linux, 0755 on macOS. Testing it would refuse every symlinked path on
+# one platform and none on the other, which is a dialect bug wearing a security
+# check's clothes.
+#
+# NOTHING HERE ENTERS THE DIRECTORY IT IS ASKED ABOUT, and nothing here `cd`s
+# at all. This script runs UNPRIVILEGED and elevates per step, and the leaf is
+# routinely root-owned 0700 ($SYS_DATA_DIR): `cd` into that is EACCES for the
+# operator, and an earlier form that did it refused every non-root install with
+# a message about `stat` dialects. `[ -d ]`, `[ -L ]`, `readlink` and `stat` on
+# a path all need search permission on its PARENT only, and every parent this
+# walk touches must be 0755-and-root-owned to pass at all.
 dir_is_root_secure() {
-    _ds_d="$1"
-    [ -d "$_ds_d" ] || return 3
-    # Walk the RESOLVED directory, never the lexical spelling. stat does not
-    # dereference a symlink and a macOS symlink is itself root-owned 0755, so a
-    # /usr/local/bin -> /Users/x/bin link passes every check while the directory
-    # a link would actually be written into is never examined — and root's own
-    # links then land somewhere that user can rewrite.
-    #
-    # RESOLVED THROUGH THE PARENT, never by entering the directory itself: this
-    # script runs UNPRIVILEGED and elevates per step, and the leaf it is asked
-    # about is routinely root-owned 0700 ($SYS_DATA_DIR). `cd` into that is
-    # EACCES for the operator, while stat'ing it from outside is not — an
-    # earlier form entered the leaf and refused every non-root install with a
-    # message about `stat` dialects. A symlinked leaf is still followed, since
-    # that is the substitution this resolution exists to catch.
-    _ds_p="$(cd "$(dirname "$_ds_d")" 2>/dev/null && pwd -P)" || return 2
-    [ -n "$_ds_p" ] || return 2
-    case "$_ds_d" in
-    /) ;;
-    *) _ds_d="${_ds_p%/}/$(basename "$_ds_d")" ;;
+    _ds_in="$1"
+    [ -d "$_ds_in" ] || return 3
+    case "$_ds_in" in
+    /*) _ds_rest="$_ds_in" ;;
+    *)
+        # A relative spelling is judged against the physical working directory,
+        # whose own components are then walked like any other. `pwd -P` reports
+        # the cwd this process already has; it enters nothing.
+        _ds_cwd="$(pwd -P 2>/dev/null)" || return 2
+        [ -n "$_ds_cwd" ] || return 2
+        _ds_rest="${_ds_cwd%/}/$_ds_in"
+        ;;
     esac
-    # A SYMLINKED LEAF MUST SATISFY BOTH CHAINS. Resolving to the target and
-    # walking only from there ignores the directory that HOLDS the link: with a
-    # group-writable /usr/local and /usr/local/bin -> a root-owned tree, the
-    # target walks clean while the owner of /usr/local can repoint `bin` at any
-    # moment — after which root's own links address someone else's directory.
-    # The holder's chain is checked first, then the resolved target's below.
-    if [ -L "$_ds_d" ]; then
-        dir_chain_is_root_secure "$_ds_p" || return $?
-        _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
-        [ -n "$_ds_d" ] || return 2
-    fi
-    dir_chain_is_root_secure "$_ds_d"
+    # / is a component like any other, and the only one the loop below never
+    # reaches — every candidate it builds hangs off it.
+    dir_level_is_root_secure / || return $?
+    _ds_done=''    # the prefix already judged, fully resolved; '' means /
+    _ds_hops=0     # symlinks followed, so the loop terminates come what may
+    while :; do
+        # Separators, however many, carry no component.
+        while :; do
+            case "$_ds_rest" in
+            /*) _ds_rest="${_ds_rest#/}" ;;
+            *) break ;;
+            esac
+        done
+        [ -n "$_ds_rest" ] || return 0
+        case "$_ds_rest" in
+        */*)
+            _ds_comp="${_ds_rest%%/*}"
+            _ds_rest="${_ds_rest#*/}"
+            ;;
+        *)
+            _ds_comp="$_ds_rest"
+            _ds_rest=''
+            ;;
+        esac
+        case "$_ds_comp" in
+        .) continue ;;
+        # .. after a resolved prefix pops that prefix, exactly as the kernel
+        # resolves it — and the popped directory was judged on the way in.
+        ..)
+            _ds_done="${_ds_done%/*}"
+            continue
+            ;;
+        esac
+        _ds_cur="$_ds_done/$_ds_comp"
+        if [ -L "$_ds_cur" ]; then
+            _ds_hops=$((_ds_hops + 1))
+            # A cycle cannot arrive through the `[ -d ]` above — the kernel
+            # resolved the whole path to get there, and refuses a loop long
+            # before this bound. It is a path rewritten UNDERNEATH the walk
+            # that this stops, and "I could not follow it" is undecidable,
+            # not insecure.
+            [ "$_ds_hops" -le 64 ] || return 2
+            _ds_t="$(readlink "$_ds_cur" 2>/dev/null)" || return 2
+            [ -n "$_ds_t" ] || return 2
+            case "$_ds_t" in
+            /*)
+                _ds_done=''
+                _ds_rest="${_ds_t#/}/$_ds_rest"
+                ;;
+            *) _ds_rest="$_ds_t/$_ds_rest" ;;
+            esac
+            continue
+        fi
+        dir_level_is_root_secure "$_ds_cur" || return $?
+        _ds_done="$_ds_cur"
+    done
 }
 
-# dir_chain_is_root_secure DIR — the ownership walk itself, from DIR up to /:
-# every level root-owned and writable by nobody else. Split out of
-# dir_is_root_secure so a symlinked leaf can be judged by the chain that HOLDS
-# the link as well as the one that holds its target. Takes an already-resolved
-# path; nothing else calls it.
-dir_chain_is_root_secure() {
-    _dc_d="$1"
-    while :; do
-        [ -d "$_dc_d" ] || return 1
-        _dc_v="$(stat_uid "$_dc_d")" || return 2
-        [ "$_dc_v" = 0 ] || return 1
-        _dc_v="$(stat_mode "$_dc_d")" || return 2
-        if mode_allows_nonroot_write "$_dc_v"; then return 1; fi
-        _dc_parent="$(dirname "$_dc_d")"
-        [ "$_dc_parent" != "$_dc_d" ] || break
-        _dc_d="$_dc_parent"
-    done
+# dir_level_is_root_secure <dir> — one already-resolved component of the walk:
+# it is a directory, root owns it, and nobody else may write it. Codes 0, 1 and
+# 2 carry dir_is_root_secure's meanings. 3 is not this function's to answer:
+# only the leaf can legitimately be absent, and that is settled before the walk
+# starts. A component that has stopped being a directory mid-walk is 1 — the
+# path no longer denotes what it was asked about.
+dir_level_is_root_secure() {
+    [ -d "$1" ] || return 1
+    _dl_v="$(stat_uid "$1")" || return 2
+    [ "$_dl_v" = 0 ] || return 1
+    _dl_v="$(stat_mode "$1")" || return 2
+    if mode_allows_nonroot_write "$_dl_v"; then return 1; fi
     return 0
 }
 # === ROOT-SECURE CONTRACT END ===
