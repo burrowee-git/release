@@ -36,6 +36,37 @@
 # guard job is RunAtLoad, and one left on disk re-runs against a finished (or
 # worse, a half-finished) transaction at every boot.
 #
+# WHICH INSTALL MODES ARM A GUARD, AND WHY BURROWEE_UPDATE IS NOT ONE OF THEM.
+# Two do: the fresh install (install.sh's default path) and BURROWEE_UNITS_ONLY
+# (`burrowee gateway service install`, `doctor --fix`). Both are operator verbs
+# typed in a session that on a gateway routinely runs THROUGH the daemon they
+# stop and restart, and both carry the migration's stop as well as the restart.
+#
+# BURROWEE_UPDATE deliberately arms nothing, and this is written down here so
+# the question is not re-opened every time somebody notices the asymmetry:
+#
+#   * that mode RESTARTS NOTHING. install.sh's update branch ends
+#     `printf 'BURROWEE_CHANGED=…'; exit 0`; it renders unit files and never
+#     calls load_units. The restart decision belongs to the updater agent
+#     afterwards (gateway's internal/gateway/updater_agent/apply.go).
+#   * there is no session to sever. That path is driven by a daemon, with no
+#     operator, no tty and no tunnel — the whole failure this guard exists for
+#     cannot occur there.
+#   * the updater already IS the guard on that path, by enforcement rather
+#     than by convention: gateway's migrations/run.sh stops "only the gateway
+#     itself: never the updater. update.sh runs under the updater, so booting
+#     that out would kill the process running this script", and install.sh
+#     refuses to replace burrowee-gateway-updater from inside an update it is
+#     running. It also carries its own per-binary rollback
+#     ($BIN_DIR/<bin>.bak-$$, restored on failure).
+#   * and a guard there would be structurally wrong, not merely redundant: it
+#     would have to restart the process it is running underneath. A second
+#     supervisor under the supervisor is how the deadlock this design removes
+#     gets reintroduced.
+#
+# So: do not add txn_begin/snapshot_take/guard_arm to the BURROWEE_UPDATE
+# branch. The absence is the design.
+#
 # EXIT CONTRACT: 0 ok · 1 rolled-back or aborted · 2 failed.
 #
 # `aborted` is the fourth phase and the youngest: an install that was undone on
