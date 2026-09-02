@@ -198,8 +198,24 @@ fi
 # xattr. Elevated (see elevate's comment above): unlike updater.update.sh,
 # which runs FROM the already-privileged updater daemon, this script is the
 # fresh `curl | sh` entrypoint and cannot assume the invoking shell is root.
+# ensure_exec_root_stated — create the exec root and its parent with the mode
+# STATED, never inherited. `mkdir -p` under sudo creates 0777 &^ umask, so an
+# operator with `umask 002` gets 0775 — group-writable, which dir_is_root_secure
+# refuses and which this script would then render a root unit inside. This is a
+# `curl | sh` entrypoint of its own, so it can be the first thing to create the
+# tree; the full installer states every level the same way (ensure_system_tree).
+ensure_exec_root_stated() {
+    _eers_d="$1"
+    _eers_p="$(dirname "$_eers_d")"
+    for _eers_l in "$_eers_p" "$_eers_d"; do
+        [ -d "$_eers_l" ] || elevate mkdir "$_eers_l" || return 1
+        elevate chmod 755 "$_eers_l" || return 1
+        elevate chown 0 "$_eers_l" 2>/dev/null || true
+    done
+}
+
 place_bin() {
-    elevate mkdir -p "$(dirname "$2")"
+    ensure_exec_root_stated "$(dirname "$2")"
     elevate install -m 0755 "$1" "$2"
     if [ "$(uname -s)" = "Darwin" ]; then
         elevate xattr -d com.apple.quarantine "$2" 2>/dev/null || true
