@@ -350,10 +350,24 @@ for f in "$EDGE" "$GW"; do
     # comment) — the guard restarts and verifies unconditionally once handed
     # off, with no "was it even started" gate of its own to check, because the
     # handoff itself IS that gate (txn_phase only reaches it past a verified
-    # placement). SERVE_UNIT_STARTED keeps its OTHER job on gateway: the
-    # remaining foreground entry point that still restarts synchronously
-    # (BURROWEE_UNITS_ONLY, via load_units) is unaffected and still sets it,
-    # which is what the count and "which unit arms it" checks below still verify.
+    # placement).
+    #
+    # AND SERVE_UNIT_STARTED NOW HAS NO JOB LEFT ON GATEWAY EITHER. It used to
+    # keep one: BURROWEE_UNITS_ONLY still restarted synchronously through
+    # load_units. That mode is `service install` and `doctor --fix`, both typed
+    # in a session routinely tunnelled through the daemon they restart, so it
+    # hands the restart to the guard now as well and load_units has no caller
+    # on this component at all.
+    #
+    # THE SHAPE CHECKS BELOW STAY, AND ARE NOT VACUOUS. load_units,
+    # start_unit_darwin and start_unit_linux are RETAINED here deliberately —
+    # start_unit_* is pinned byte-identical across four files
+    # (tools/prefix-gate-drift.test.sh), load_units is gateway's only caller of
+    # the pair, and tools/install-no-bootout.test.sh anchors to the
+    # `kickstart -k` inside it. What these checks pin is that the retained copy
+    # still has the shape edge's live copy is compared against; they are a
+    # drift guard now rather than a behaviour guard, and section 7b says so
+    # again where it counts the verdict's call sites.
     if [ "$comp" != gateway ]; then
         grep -q 'if \[ "\$SERVE_UNIT_STARTED" = 1 \]; then' "$f" \
             || note "$comp: the wait is not gated on SERVE_UNIT_STARTED"
@@ -473,27 +487,31 @@ for _start in \
     grep -F "$_start" "$GW" | grep -q 'UPDATER_START_FAILED' \
         && note "gateway: a SERVE start records UPDATER_START_FAILED — the serve start must stay fatal"
 done
-# ONLY ONE mode that calls load_units still ends on the verdict: BURROWEE_UNITS_ONLY.
-# The full-install tail used to be the other (a fresh install re-places every
-# binary, so a dead updater there matters exactly as much) — Task 9 replaced
-# its ending with the guard handoff + reattach, and reattach reports the whole
-# install's verdict on its own, updater included: guard.sh's do_restart only
-# ever restarts the SERVE unit and never touches the updater unit at all, so a
-# dead updater on that path is not a fact this script's foreground can observe
-# any more (it happens, if it happens, on the far side of the handoff, unwatched
-# by anything finish_with_updater_verdict could report through).
+# NO MODE CALLS THE VERDICT ANY MORE, and that is the change rather than a
+# regression. The full-install tail stopped calling it at Task 9; units-only —
+# the last caller, and the reason this check read `= 1` — stopped when its own
+# restart went to the guard. Both now end on reattach's verdict, which reports
+# the WHOLE install: guard.sh's do_restart advances the updater
+# (advance_updater) on the far side of the handoff, where this script's
+# foreground cannot observe the start at all, so there is nothing left for
+# finish_with_updater_verdict to report through.
+#
+# `= 0` and not "the function is deleted": it is retained with load_units, for
+# the drift pins section 6 explains. What must not come back is a CALL — a mode
+# that ends on this verdict is a mode that restarted in the foreground.
 n_fin="$(grep -c '^ *finish_with_updater_verdict$' "$GW" || true)"
-[ "$n_fin" = 1 ] \
-    || note "gateway: finish_with_updater_verdict is called $n_fin times, expected 1 (units-only mode only)"
-# The verdict must run AFTER the anchor, which is the whole point of deferring
-# it — checked against record_installed_version's OWN occurrence inside
-# BURROWEE_UNITS_ONLY (the last one BEFORE finish_with_updater_verdict's single
-# remaining call), not the file's last occurrence: that one is now in the
-# full-install tail, a different mode this verdict no longer runs in at all.
-_fin_ln="$(grep -n '^ *finish_with_updater_verdict$' "$GW" | head -n 1 | cut -d: -f1)"
-_rec_before="$(grep -n '^ *record_installed_version ' "$GW" | awk -F: -v fin="$_fin_ln" '$1 < fin { last = $1 } END { print last + 0 }')"
-[ -n "$_fin_ln" ] && [ "$_rec_before" -gt 0 ] \
-    || note "gateway: finish_with_updater_verdict does not run after a record_installed_version call in its own mode"
+[ "$n_fin" = 0 ] \
+    || note "gateway: finish_with_updater_verdict is called $n_fin times, expected 0 — every mode ends on reattach's verdict now, and a mode ending on this one restarted in its own foreground"
+# THE GUARANTEE IT USED TO CARRY IS NOW STRONGER, AND IS CHECKED AS SUCH.
+# Deferring the verdict past record_installed_version existed so a failed
+# updater start could not strand the ladder's anchor. On both guarded flows the
+# anchor is now written before the HANDOFF — before the point of no return, not
+# merely before the exit status — so a severed session has banked it too. Both
+# pairs are asserted in tools/install-guard-arms-first.test.sh, which already
+# owns the handoff anchor and the mode-block extraction that tells the two
+# flows apart; duplicating them here would put the same claim in two files with
+# two spellings of "which handoff", which is how this check went wrong once
+# already.
 # gateway_already_set_up (the first-run enrollment probe) and doctor no
 # longer share a verdict with finish_with_updater_verdict at all — they are
 # in the full-install tail, which that call left entirely (above). What
@@ -502,11 +520,16 @@ _rec_before="$(grep -n '^ *record_installed_version ' "$GW" | awk -F: -v fin="$_
 # to defer finish_with_updater_verdict — nothing past the point of no return
 # may still be pending), and doctor must run AFTER it, reporting on
 # reattach's own outcome rather than a build the guard has not yet restarted.
-# Leading whitespace tolerated: `txn_phase handoff` now sits inside the
-# `if [ "$GUARD_ARMED" = 1 ]` block that honours BURROWEE_NO_RESTART (no guard
-# armed means no handoff). It still appears exactly once in the file, and the
-# claims below are about ORDER, not column.
-_handoff_ln="$(grep -n '^[[:space:]]*txn_phase handoff$' "$GW" | head -n 1 | cut -d: -f1)"
+# Leading whitespace tolerated: `txn_phase handoff` sits inside the
+# `if [ "$GUARD_ARMED" != 0 ]` block that honours BURROWEE_NO_RESTART (no guard
+# armed means no handoff). The claims below are about ORDER, not column.
+#
+# THE LAST ONE, NOT THE FIRST. It used to appear exactly once, so `head -n 1`
+# was the same line; units-only writes one too now, several hundred lines
+# earlier. Against that earlier handoff the enrollment prompt and the doctor
+# tail — both in the full-install tail — would read as ordered wrongly, and the
+# suite would go red about a flow it had not looked at.
+_handoff_ln="$(grep -n '^[[:space:]]*txn_phase handoff$' "$GW" | tail -n 1 | cut -d: -f1)"
 
 [ -n "$_handoff_ln" ] || note "gateway: no txn_phase handoff in the full-install tail"
 last_use="$(grep -n 'gateway_already_set_up' "$GW" | tail -n 1 | cut -d: -f1)"

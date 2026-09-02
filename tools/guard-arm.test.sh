@@ -512,6 +512,18 @@ t_guard_arm_separates_unreadable_from_insecure() {
 # The CONTROL is t_guard_arm_refuses_when_the_guard_never_starts above: same
 # ceiling, readable transaction, dead guard — still a refusal. A "fix" that
 # simply stopped refusing is not green.
+#
+# AND IT LEAVES GUARD_ARMED=unproven, NOT 1. Continuing is the right trade;
+# claiming a guard EXISTS is not, and the two used to be the same line.
+# abort_install branches on this variable, so `1` here meant a host whose guard
+# had genuinely died deferred its whole undo to it — "the guard is undoing this
+# install" printed over a host where nothing was restored and nothing was
+# restarted. The value has to be non-zero (the handoff still has to fire: a
+# guard that DID start is watching a deadline, and skipping the handoff would
+# have it time out and roll a healthy host back) and it has to be
+# distinguishable from proof. Hence a third value rather than a boolean. The
+# abort_install side is pinned in guard-rollback.test.sh
+# (t_abort_install_with_an_unproven_guard_restores_and_leaves_the_phase_open).
 # ---------------------------------------------------------------------------
 t_guard_arm_continues_when_the_transaction_cannot_be_read() {
     _plat="$1"
@@ -530,13 +542,31 @@ t_guard_arm_continues_when_the_transaction_cannot_be_read() {
 
     [ "$_rc" = 0 ] ||
         fail "[$_plat] guard_arm refused an install because the transaction could not be READ — a blind 'sudo -n' is not evidence of a dead guard: $(cat "$_root/stderr")"
-    printf '%s\n' "$_out" | grep -q 'GUARD_ARMED=1' ||
-        fail "[$_plat] guard_arm continued but left GUARD_ARMED clear, so the handoff would never fire: $_out"
+    printf '%s\n' "$_out" | grep -q 'GUARD_ARMED=0' &&
+        fail "[$_plat] guard_arm continued but left GUARD_ARMED clear, so the handoff would never fire and a guard that DID start would hit its deadline and roll a healthy host back: $_out"
+    printf '%s\n' "$_out" | grep -q 'GUARD_ARMED=unproven' ||
+        fail "[$_plat] guard_arm asserted a guard it never saw (GUARD_ARMED must be 'unproven', not '1'): abort_install branches on this and would hand its entire undo to a process that may not exist: $_out"
     grep -q 'cannot be READ' "$_root/stderr" ||
         fail "[$_plat] guard_arm continued silently — an operator must be told the arm-proof was blind: $(cat "$_root/stderr")"
     grep -q 'guard never started' "$_root/stderr" &&
         fail "[$_plat] guard_arm reported a dead guard when it could not read the transaction at all: $(cat "$_root/stderr")"
     rm -rf "$_root"
+}
+
+# THE HANDOFF GATE MUST ACCEPT THE THIRD STATE. guard_arm setting
+# GUARD_ARMED=unproven is only half the fix: the Phases 3-5 block that consents,
+# hands off and reattaches is what actually restarts the gateway, and a gate
+# spelled `= 1` would skip all three on a host whose guard was merely unproven —
+# printing "nothing was restarted (BURROWEE_NO_RESTART)" while a live guard sat
+# on its deadline waiting for a handoff that never came, and then rolled a
+# perfectly healthy host back. Structural, because driving the whole flow needs
+# a real supervisor; the value side is driven above.
+t_handoff_gate_accepts_an_unproven_guard() {
+    _f="$HERE/inner/gateway/install.sh"
+    _g="$(grep -n '^if \[ "\$GUARD_ARMED" ' "$_f" | head -1)"
+    [ -n "$_g" ] || { fail "install.sh no longer gates the handoff on GUARD_ARMED at all"; return; }
+    printf '%s\n' "$_g" | grep -q '!= 0' ||
+        fail "the handoff gate is spelled '$(printf '%s\n' "$_g" | cut -d: -f2-)' — it must accept 'unproven' as well as 1, or a guard that started but could not be proven times out and rolls a healthy host back"
 }
 
 for _plat in Darwin Linux; do
@@ -549,6 +579,7 @@ for _plat in Darwin Linux; do
     t_guard_arm_honours_no_restart "$_plat"
 done
 t_guard_arm_refuses_an_unsupported_platform
+t_handoff_gate_accepts_an_unproven_guard
 
 t_keep_installer_copy_copies_guard_sh
 t_keep_installer_copy_tolerates_missing_guard_sh

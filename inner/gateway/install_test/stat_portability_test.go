@@ -204,15 +204,6 @@ func seedNodeShapedHost(t *testing.T, home string) {
 	}
 }
 
-// serviceStartCall is the stub-log line that proves the unit was not merely
-// written but handed to the init system to run.
-func serviceStartCall() string {
-	if runtime.GOOS == "darwin" {
-		return "launchctl bootstrap system"
-	}
-	return "systemctl enable --now burrowee-gateway.service"
-}
-
 // guardArmCallFor is the stub-log SUBSTRING that proves the GUARD — not the
 // serve unit — was handed to the init system to run, for a test that forces
 // goos rather than inheriting the host's.
@@ -224,11 +215,17 @@ func serviceStartCall() string {
 // performs before this script's foreground ever returns.
 //
 // Distinctive substrings, not the bare verb: on Darwin, guard_arm's own
-// `launchctl bootstrap system …` is textually indistinguishable from
-// load_units's (serviceStartCall's own value) by verb alone — both start
+// `launchctl bootstrap system …` is textually indistinguishable by verb alone
+// from the one load_units used to issue for the serve label — both start
 // "launchctl bootstrap system" — so the guard's OWN plist name is what tells
-// the two apart. Linux has no such ambiguity: systemd-run is a verb load_units
-// never uses at all.
+// them apart. Linux has no such ambiguity: systemd-run is a verb nothing else
+// in this installer uses.
+//
+// serviceStartCall, the counterpart that named the SERVE unit's start, is gone
+// with the last caller of load_units: no mode issues that call from install.sh
+// any more, so a helper describing it could only ever be used to assert
+// something false. The verb itself is pinned where it is now issued —
+// tools/guard-rollback.test.sh, against the real guard.sh.
 func guardArmCallFor(goos string) string {
 	if goos == "darwin" {
 		return "com.burrowee.gateway.guard"
@@ -245,7 +242,17 @@ func guardArmCall() string {
 // TestInstallShConvergesANodeShapedHostUnderEitherStatDialect is the acceptance
 // test for the whole install contract, run once per stat dialect and once per
 // shell: place the binaries in the correct folder, render the unit naming that
-// folder, and start the service.
+// folder, and get the service started.
+//
+// STEP 3 IS THE HANDOFF NOW, not `systemctl enable --now`. This mode
+// (BURROWEE_UNITS_ONLY — `service install`, `doctor --fix`) is typed by an
+// operator whose session is routinely tunnelled through the gateway being
+// restarted, so the start moved into the guard, and what install.sh's own
+// foreground finishes with is the handoff. The contract is unchanged in
+// substance — an install that returns has arranged for the service to be
+// running — and the assertion follows it rather than pinning a verb this path
+// no longer issues. The guard's end of it is
+// tools/guard-rollback.test.sh (t_guard_ok, both platform shapes).
 //
 // Under the `bsd` dialect it passed before this change and passes after — that
 // is the control. Under `gnu` it is the outage, reproduced: the tree is placed
@@ -285,8 +292,14 @@ func TestInstallShConvergesANodeShapedHostUnderEitherStatDialect(t *testing.T) {
 				// 2. the unit names $BIN_DIR
 				unit := readFile(t, coreUnitPath(home))
 				assertContains(t, unit, filepath.Join(binDir(home), "burrowee-gateway"))
-				// 3. the service was handed to the init system
-				assertContains(t, readFile(t, filepath.Join(home, "stub-calls.log")), serviceStartCall())
+				// 3. the restart was handed to the guard, and the guard to
+				//    the init system. Both halves: an arm with no handoff
+				//    leaves a guard to time out and roll a healthy host back,
+				//    and a handoff with no arm restarts nothing at all.
+				assertContains(t, readFile(t, filepath.Join(home, "stub-calls.log")), guardArmCall())
+				if got := latestTxnPhase(t, home); got != "handoff" {
+					t.Errorf("transaction phase = %q, want %q — the install returned without arranging for the service to be started", got, "handoff")
+				}
 			})
 		}
 	}

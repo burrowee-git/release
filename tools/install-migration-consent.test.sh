@@ -69,6 +69,7 @@ stage_runner() {
         echo "echo \"CONFIG=\$BURROWEE_SYSTEM_CONFIG_DIR\" >> '$_sr_root/runner.log'"
         echo "echo \"DATA=\$BURROWEE_SYSTEM_DATA_DIR\" >> '$_sr_root/runner.log'"
         echo "echo \"PREFIX=\$PREFIX\" >> '$_sr_root/runner.log'"
+        echo "echo \"SUDO=\$SUDO\" >> '$_sr_root/runner.log'"
         if [ -z "$_sr_omit" ]; then
             # The token install.sh reads the file for. Spelled in a comment so
             # the stub carries it without having to implement the mode.
@@ -128,6 +129,50 @@ t_pending_asks() {
     [ "$_rc" = 0 ] || fail "a pending migration (probe 10) did not reach the consent prompt (rc=$_rc)"
     grep -q -- '--probe-pending' "$_r/runner.log" 2>/dev/null \
         || fail "install.sh never asked the runner: $(cat "$_r/runner.log" 2>/dev/null || echo '<no log>')"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# THE PROBE MUST NOT BE ABLE TO PROMPT, on the one host where it could.
+#
+# The probe is forked with both streams discarded — the exit code is the whole
+# of what it is for — so anything it writes to the terminal arrives without the
+# line that would explain it. It is also handed $SUDO, and it really does use
+# it: the runner's receipt_state reads root-owned 0600 receipts through that
+# command. So on the interactive host (the only one migration_sudo would ever
+# answer a bare `sudo` for) a cold sudo timestamp meant a bare `Password:`
+# appearing under an install that had not yet asked the operator anything —
+# the consent prompt this probe DECIDES is still ahead of it.
+#
+# `-n` costs at most the warning: a probe that cannot read a receipt exits 12,
+# and 12 is already "cannot tell, proceed exactly as today" (t_cannot_evaluate_
+# is_silent below). The same read happens seconds later in the real run, where
+# a prompt is expected and explained.
+#
+# tty_yes, deliberately — under tty_no migration_sudo already answers `sudo -n`
+# and the check would pass against the defect.
+# ---------------------------------------------------------------------------
+t_probe_elevation_never_prompts() {
+    _r="$(new_root)"
+    stage_runner "$_r" 10
+    _rc="$(ask "$_r" "$tty_yes")"
+    [ "$_rc" = 0 ] || fail "fixture broken: the probe path was not taken (rc=$_rc)"
+    grep -q '^SUDO=sudo -n$' "$_r/runner.log" 2>/dev/null \
+        || fail "the probe was handed a prompting elevation on an interactive host — its output is discarded, so a password prompt there has nothing to explain it: $(grep '^SUDO=' "$_r/runner.log" 2>/dev/null || echo '<no SUDO line>')"
+    rm -rf "$_r"
+}
+
+# An explicit SUDO from the caller still wins, in the probe as everywhere else:
+# it is the seam the updater and this suite reach the runner through, and a
+# probe that ignored it would be elevating differently from the run it speaks
+# for.
+t_probe_honours_an_explicit_sudo() {
+    _r="$(new_root)"
+    stage_runner "$_r" 10
+    _rc="$(SUDO='/bin/true' ask "$_r" "$tty_yes")"
+    [ "$_rc" = 0 ] || fail "fixture broken: the probe path was not taken (rc=$_rc)"
+    grep -q '^SUDO=/bin/true$' "$_r/runner.log" 2>/dev/null \
+        || fail "the probe overrode the caller's explicit SUDO: $(grep '^SUDO=' "$_r/runner.log" 2>/dev/null || echo '<no SUDO line>')"
     rm -rf "$_r"
 }
 
@@ -301,9 +346,76 @@ t_gate_runs_before_the_migration_and_after_the_guard() {
 # It must ask for the MIGRATION cause, not the restart one: consent_to_sever
 # renders a different reason for each, and the migration's is the one that is
 # true here.
+#
+# Column-anchored at four spaces, which is the fresh flow's own indentation.
+# The units-only call sits two levels deeper and is checked separately below —
+# a whitespace-tolerant grep here would be satisfied by EITHER, so deleting the
+# fresh flow's gate would still pass.
 t_gate_names_the_migration_cause() {
     grep -q '^    consent_to_sever migration$' "$INSTALL" \
         || fail "install.sh does not call consent_to_sever with the 'migration' cause"
+}
+
+# ---------------------------------------------------------------------------
+# THE SECOND GUARDED FLOW: BURROWEE_UNITS_ONLY.
+#
+# `burrowee gateway service install` and `doctor --fix` reach install.sh in
+# that mode, and they are what an operator repairing a host over their own
+# tunnel actually types. It runs migrate_from_legacy — the same runner, the
+# same stop — so it needs the same gate, asked in the same place. It had
+# neither until the mode was guarded.
+#
+# should_ask_before_migration itself is shared, so every behavioural check
+# above (the probe codes, the elevation, the environment, the no-tty and
+# assume-yes paths) already covers this flow's decision. What is specific to it
+# is WHERE the question is asked, which is what these two check.
+# ---------------------------------------------------------------------------
+
+# units_only_range — echoes "<start> <end>" for the mode block's line range, so
+# an anchor can be attributed to the right flow. Everything inside a mode block
+# is indented, which is why the column-0 anchors the checks above use cannot
+# reach it.
+units_only_range() {
+    _uor_a="$(grep -n '^if \[ -n "\${BURROWEE_UNITS_ONLY:-}" \]; then$' "$INSTALL" | head -1 | cut -d: -f1)"
+    [ -n "$_uor_a" ] || return 1
+    _uor_b="$(awk -v s="$_uor_a" 'NR > s && $0 == "fi" { print NR; exit }' "$INSTALL")"
+    [ -n "$_uor_b" ] || return 1
+    printf '%s %s\n' "$_uor_a" "$_uor_b"
+}
+
+# uo_first <pattern> <start> <end> — first matching line number inside the range.
+uo_first() {
+    grep -n "$1" "$INSTALL" | awk -F: -v a="$2" -v b="$3" '$1 > a && $1 < b { print $1; exit }'
+}
+
+t_units_only_gate_runs_before_the_migration_and_after_the_guard() {
+    _range="$(units_only_range)" || { fail "install.sh has no BURROWEE_UNITS_ONLY mode block"; return; }
+    _a="${_range% *}"; _b="${_range#* }"
+    _guard="$(uo_first '^[[:space:]]*guard_arm$' "$_a" "$_b")"
+    _ask="$(uo_first '^[[:space:]]*if should_ask_before_migration; then$' "$_a" "$_b")"
+    _mig="$(uo_first '^[[:space:]]*migrate_from_legacy$' "$_a" "$_b")"
+    [ -n "$_guard" ] || { fail "units-only never arms the guard"; return; }
+    [ -n "$_ask" ]   || { fail "units-only never asks should_ask_before_migration — service install stops the daemon on a tunnelled host with no warning"; return; }
+    [ -n "$_mig" ]   || { fail "units-only never calls migrate_from_legacy"; return; }
+    [ "$_guard" -lt "$_ask" ] \
+        || fail "units-only: the consent question (line $_ask) is asked before the guard is armed (line $_guard) — a decline would have nothing to hand the undo to"
+    [ "$_ask" -lt "$_mig" ] \
+        || fail "units-only: the consent question (line $_ask) is asked after migrate_from_legacy (line $_mig) — the connection it reads from is already gone"
+}
+
+# The MIGRATION cause, not the restart one. On this flow the distinction is if
+# anything sharper than on the fresh one: the migration's stop is the FIRST
+# thing that happens after the guard is armed, so the restart arm's "you do not
+# need to stay connected" would be wrong by the widest possible margin.
+t_units_only_names_the_migration_cause() {
+    _range="$(units_only_range)" || { fail "install.sh has no BURROWEE_UNITS_ONLY mode block"; return; }
+    _a="${_range% *}"; _b="${_range#* }"
+    [ -n "$(uo_first '^[[:space:]]*consent_to_sever migration$' "$_a" "$_b")" ] \
+        || fail "units-only does not call consent_to_sever with the 'migration' cause"
+    # And the restart cause is present too — the mode has both sever points,
+    # and the handoff's own prompt is the second one.
+    [ -n "$(uo_first '^[[:space:]]*consent_to_sever restart$' "$_a" "$_b")" ] \
+        || fail "units-only does not call consent_to_sever with the 'restart' cause before the handoff"
 }
 
 # ---------------------------------------------------------------------------
@@ -376,9 +488,13 @@ t_absent_runner_does_not_ask
 t_no_tty_never_probes
 t_assume_yes_never_probes
 t_probe_env_matches_the_real_run
+t_probe_elevation_never_prompts
+t_probe_honours_an_explicit_sudo
 t_gate_reads_has_tty
 t_gate_runs_before_the_migration_and_after_the_guard
 t_gate_names_the_migration_cause
+t_units_only_gate_runs_before_the_migration_and_after_the_guard
+t_units_only_names_the_migration_cause
 t_causes_render_different_closing_advice
 t_restart_keeps_its_advice
 t_migration_advice_is_honest

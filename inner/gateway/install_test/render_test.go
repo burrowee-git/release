@@ -150,8 +150,42 @@ func stubInitSystem(t *testing.T) string {
 	// guardStartSideEffect below reads the transaction directory back out of
 	// the plist rather than re-deriving it, so a plist naming the wrong
 	// directory still fails the poll.
+	// guardVerdictFn — the shell half of the STUB_GUARD_VERDICT seam, shared by
+	// both arm stubs below because both are "the supervisor accepted the guard".
+	//
+	// WHY A REAL DETACHED WRITER AND NOT A PRE-SEEDED PHASE FILE. install.sh's
+	// own flow writes `handoff` into that file AFTER the arm returns, so anything
+	// this stub wrote at arm time is overwritten a moment later — which is
+	// exactly the shape a real guard has, and exactly why the guard is a detached
+	// child of the init system rather than something the installer waits on. So
+	// the stub forks a watcher that waits for `handoff` to appear and only then
+	// writes the verdict, the same order of events a real guard produces.
+	//
+	// It is opt-in (STUB_GUARD_VERDICT unset = today's behaviour, no guard ever
+	// reports) because every other test in this package wants the honest
+	// "nothing ever ran" outcome REATTACH_CEILING=0 gives it.
+	//
+	// The severed-session half of the same fixture is NOT here — it is in
+	// writeSudoStub (STUB_GUARD_SEVER), because it has to be synchronous with
+	// the handoff and a poll cannot be. See that function's header.
+	//
+	// tmp-then-mv, like install.sh's own txn_phase: reattach reads this file on a
+	// poll, and a plain truncate-and-write is readable empty in between.
+	guardVerdictFn := "guard_verdict() {\n" +
+		"    [ -n \"${STUB_GUARD_VERDICT:-}\" ] || return 0\n" +
+		"    ( _i=0\n" +
+		"      while [ \"$_i\" -lt 60 ]; do\n" +
+		"        if [ \"$(cat \"$1/phase\" 2>/dev/null)\" = handoff ]; then\n" +
+		"            printf '%s\\n' \"$STUB_GUARD_VERDICT\" > \"$1/.stubphase\"\n" +
+		"            mv -f \"$1/.stubphase\" \"$1/phase\"\n" +
+		"            exit 0\n" +
+		"        fi\n" +
+		"        sleep 1; _i=$((_i + 1))\n" +
+		"      done ) >/dev/null 2>&1 &\n" +
+		"}\n"
+
 	p := filepath.Join(stub, "launchctl")
-	launchctl := "#!/bin/sh\n" +
+	launchctl := "#!/bin/sh\n" + guardVerdictFn +
 		"echo \"launchctl $*\" >> \"$STUB_LOG\"\n" +
 		"if [ \"$1\" = bootstrap ]; then\n" +
 		"    case \"$3\" in\n" +
@@ -160,6 +194,7 @@ func stubInitSystem(t *testing.T) string {
 		"        if [ -n \"$_txn\" ] && [ -d \"$_txn\" ]; then\n" +
 		"            echo 4242 > \"$_txn/guard.pid\"\n" +
 		"            echo '00:00:00 guard armed for '\"$_txn\" >> \"$_txn/guard.log\"\n" +
+		"            guard_verdict \"$_txn\"\n" +
 		"        fi\n" +
 		"        ;;\n" +
 		"    esac\n" +
@@ -196,7 +231,7 @@ func stubInitSystem(t *testing.T) string {
 	// launchctl stub above does: guard_arm refuses to proceed on a guard that
 	// was accepted but never ran. The transaction directory is systemd-run's
 	// last argument.
-	systemdRun := "#!/bin/sh\n" +
+	systemdRun := "#!/bin/sh\n" + guardVerdictFn +
 		"echo \"systemd-run $*\" >> \"$STUB_LOG\"\n" +
 		"for _a in \"$@\"; do _txn=\"$_a\"; done\n" +
 		"case \"$_txn\" in\n" +
@@ -204,6 +239,7 @@ func stubInitSystem(t *testing.T) string {
 		"    if [ -d \"$_txn\" ]; then\n" +
 		"        echo 4242 > \"$_txn/guard.pid\"\n" +
 		"        echo '00:00:00 guard armed for '\"$_txn\" >> \"$_txn/guard.log\"\n" +
+		"        guard_verdict \"$_txn\"\n" +
 		"    fi\n" +
 		"    ;;\n" +
 		"esac\n" +
@@ -270,9 +306,45 @@ func stubUname(t *testing.T, dir, goos string) {
 
 // writeSudoStub drops a pass-through `sudo` into dir: it records the call,
 // strips a leading -n, and executes the rest.
+//
+// STUB_GUARD_SEVER=1 adds one thing, and it is the only way to reproduce the
+// failure this whole design exists for: when the command it is about to run is
+// the `mv` that installs phase=handoff, it performs the mv and then KILLS the
+// installer, before returning. That is what the restart does to an operator
+// whose session is tunnelled through the gateway — the shell does not get to
+// run another line.
+//
+// IT HAS TO BE HERE AND NOT IN A WATCHER. A background watcher polling the
+// phase file is a second later, and a second is thousands of statements: an
+// installer that is still alive executes whatever sits below the handoff, so a
+// state write MOVED below it still lands and the assertion passes on the
+// defect. Verified by mutation — with the kill in the watcher, moving
+// record_installed_version below `txn_phase handoff` left the severed-session
+// test green. Killing from inside the elevation the handoff itself runs
+// through is synchronous with the handoff by construction.
+//
+// The pid comes from the transaction's own installer.pid ($$ as install.sh
+// wrote it at txn_begin), which is the same file guard.sh's watch loop polls to
+// detect exactly this event on a real host — not $PPID, which is whichever
+// subshell happened to invoke this stub.
 func writeSudoStub(t *testing.T, dir string) {
 	t.Helper()
-	content := "#!/bin/sh\necho \"sudo $*\" >> \"$STUB_LOG\"\n[ \"$1\" = \"-n\" ] && shift\nexec \"$@\"\n"
+	content := "#!/bin/sh\n" +
+		"echo \"sudo $*\" >> \"$STUB_LOG\"\n" +
+		"[ \"$1\" = \"-n\" ] && shift\n" +
+		"if [ -n \"${STUB_GUARD_SEVER:-}\" ] && [ \"$1\" = mv ]; then\n" +
+		"    case \"$3\" in\n" +
+		"    */.phase.tmp)\n" +
+		"        if [ \"$(cat \"$3\" 2>/dev/null)\" = handoff ]; then\n" +
+		"            \"$@\"\n" +
+		"            _sev_txn=\"$(dirname \"$4\")\"\n" +
+		"            kill -9 \"$(cat \"$_sev_txn/installer.pid\" 2>/dev/null)\" 2>/dev/null\n" +
+		"            exit 0\n" +
+		"        fi\n" +
+		"        ;;\n" +
+		"    esac\n" +
+		"fi\n" +
+		"exec \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(content), 0o755); err != nil {
 		t.Fatalf("write stub sudo: %v", err)
 	}
@@ -593,6 +665,42 @@ func TestInstallShCreatesSystemLogDir(t *testing.T) {
 	}
 }
 
+// TestFreshInstallAlsoLeavesTheDataRootPrivate is TestInstallShCreatesSystemLogDir's
+// missing sibling, and it is missing in the direction that matters.
+//
+// The 0700 rule for $SYS_DATA_DIR — it holds gateway.db and the register and
+// console sockets, so a permissive umask must never leave it group-readable —
+// was only ever asserted on the units-only path. The rule itself lives in
+// ensure_system_log_dir and applies only when THAT function created the root,
+// which was true until the install transaction moved ahead of it: txn_begin's
+// `mkdir -p $SYS_DATA_DIR/install/<stamp>` creates the root as a side effect,
+// with the caller's umask, and ensure_system_log_dir then finds it already
+// there and correctly declines to re-tighten a root it did not create.
+//
+// That made every guarded install leave a 0775 data root on a host with a
+// permissive umask — on BOTH paths, and only one of them had a test. This is
+// the other one, so a future rearrangement of the same kind fails on the fresh
+// install rather than being caught by units-only alone (or by nothing, if the
+// units-only assertion is ever the one that moves).
+func TestFreshInstallAlsoLeavesTheDataRootPrivate(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	staging := t.TempDir()
+	seedDummyBins(t, staging)
+
+	if out, err := runStaged(t, installShPath(t), staging, home, stub); err != nil {
+		t.Fatalf("fresh install failed: %v\n%s", err, out)
+	}
+
+	di, err := os.Stat(sysDataDir(home))
+	if err != nil {
+		t.Fatalf("stat system data root: %v", err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Errorf("system data root mode = %04o, want 0700 — it holds gateway.db and the register/console sockets, and the transaction directory created it with the caller's umask", perm)
+	}
+}
+
 // TestInstallShFreshInstall verifies that fresh mode (all dummy bins present)
 // installs them into BIN_DIR, writes both system unit files, and leaves a
 // self-copy at $GW_HOME/install.sh.
@@ -651,80 +759,151 @@ func TestInstallShFreshInstall(t *testing.T) {
 	}
 }
 
-// TestInstallShNoRestartStagesWithoutKicking verifies BURROWEE_NO_RESTART=1
-// (Task 8 — the local-stage counterpart to the gateway's `update`/`reinstall`
-// verbs without --auto) leaves the units installed/enabled but skips the
-// "kick a possibly-already-running instance" calls: on Darwin, no
-// bootout+re-bootstrap of an already-loaded label; on Linux, plain `enable`
-// (no `--now`), no explicit updater restart — and, since the daemon-advancing
-// step was added, no `restart burrowee-gateway.service` either. Both branches
-// run on every host.
-func TestInstallShNoRestartStagesWithoutKicking(t *testing.T) {
+// TestInstallShNoRestartStagesWithoutArming verifies BURROWEE_NO_RESTART=1 —
+// the local-stage counterpart to the gateway's `update`/`reinstall` verbs
+// without --auto — on the units-only path, where the flag's meaning changed
+// because the path it modifies did.
+//
+// IT USED TO MEAN "STAGED, NOT KICKED", AND THAT WAS A WEAKER PROMISE THAN THE
+// FLAG MAKES. The old shape went through load_units' staging branch: a Darwin
+// `bootstrap` of each label and a Linux `enable` without `--now`, skipping only
+// the kick of an already-running instance. But the serve plist this installer
+// writes is RunAtLoad, so a bootstrap of a label the host does not already hold
+// STARTS the daemon. An operator who set this flag because a start was
+// unacceptable got one anyway, on exactly the fresh host where the flag is most
+// likely to be set.
+//
+// It now means what it says, and the same thing it means on the fresh path
+// (guard_arm's own header): no guard is armed, nothing is handed off, the units
+// are rendered on disk and NOT loaded. That is a strictly larger claim than the
+// old one, so this test asserts the larger one — no supervisor call touching
+// either managed unit, from any verb.
+//
+// Both platform branches run on every host: the flag is read in one place
+// (guard_arm), but "which supervisor calls did NOT happen" is answerable only
+// per platform, and a platform whose branch is never driven is a platform whose
+// branch is never checked.
+func TestInstallShNoRestartStagesWithoutArming(t *testing.T) {
 	for _, goos := range forcedOSes {
-		t.Run(goos, func(t *testing.T) { testInstallShNoRestartStagesWithoutKicking(t, goos) })
+		t.Run(goos, func(t *testing.T) { testInstallShNoRestartStagesWithoutArming(t, goos) })
 	}
 }
 
-func testInstallShNoRestartStagesWithoutKicking(t *testing.T, goos string) {
+func testInstallShNoRestartStagesWithoutArming(t *testing.T, goos string) {
 	home := t.TempDir()
 	stub := stubInitSystemFor(t, goos)
 	seedMigrateCapableCLI(t, home)
 
 	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1", "BURROWEE_NO_RESTART=1")
-	assertContains(t, out, "BURROWEE_NO_RESTART set — units staged (not restarted)")
+	assertContains(t, out,
+		"BURROWEE_NO_RESTART set — the install guard is NOT armed",
+		"units staged on disk. Nothing was restarted (BURROWEE_NO_RESTART).",
+	)
+
+	// The durable outcome the flag DOES promise: both unit files written.
+	// Without this the assertions below pass on a run that did nothing at all.
+	for _, u := range unitPathsFor(home, goos) {
+		if _, err := os.Stat(u); err != nil {
+			t.Fatalf("BURROWEE_NO_RESTART=1: %s was not rendered — the flag stages units, it does not skip writing them: %v", u, err)
+		}
+	}
 
 	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
-	if goos == "darwin" {
-		// "bootout system/..." is load_units' own kick of an already-loaded
-		// label; "bootout gui/..." is remove_legacy_user_units tearing down
-		// legacy per-user units (unrelated to this guard) and must still fire.
-		if strings.Contains(calls, "bootout system/com.burrowee.gateway") {
-			t.Errorf("BURROWEE_NO_RESTART=1: bootout called, want units staged without kicking a running instance:\n%s", calls)
+	// No guard, and therefore no handoff and no restart by anybody. This is the
+	// assertion the old shape could not make: it armed and handed off, and the
+	// guard restarted the daemon on a run whose whole point was that nothing
+	// should start.
+	if strings.Contains(calls, guardArmCallFor(goos)) {
+		t.Errorf("BURROWEE_NO_RESTART=1 armed a guard (%q) — the guard restarts the gateway, which is the one thing this flag asks not to happen:\n%s",
+			guardArmCallFor(goos), calls)
+	}
+	if dir := latestTxnDirOrEmpty(t, home); dir != "" {
+		if b, err := os.ReadFile(filepath.Join(dir, "phase")); err == nil {
+			if got := strings.TrimSpace(string(b)); got == "handoff" {
+				t.Errorf("BURROWEE_NO_RESTART=1 reached phase %q — a handoff is a restart request", got)
+			}
 		}
-		assertContains(t, calls,
-			"launchctl bootstrap system "+launchdDir(home)+"/com.burrowee.gateway.plist",
-			"launchctl bootstrap system "+launchdDir(home)+"/com.burrowee.gateway.updater.plist",
-		)
-	} else {
-		if strings.Contains(calls, "enable --now") ||
-			strings.Contains(calls, "restart burrowee-gateway.service") ||
-			strings.Contains(calls, "restart burrowee-gateway-updater.service") {
-			t.Errorf("BURROWEE_NO_RESTART=1: enable --now/restart called, want units staged without starting:\n%s", calls)
+	}
+
+	// And nothing loaded either managed unit. "bootout gui/…" is
+	// remove_legacy_user_units tearing down the pre-system-level per-user units,
+	// and "systemctl --user …" is its Linux half: both are teardown of the OLD
+	// model, not a start of the new one, and both must still fire.
+	for _, line := range strings.Split(calls, "\n") {
+		c := strings.TrimSpace(line)
+		if c == "" || strings.Contains(c, "gui/") || strings.Contains(c, "--user") {
+			continue
 		}
-		assertContains(t, calls,
-			"systemctl enable burrowee-gateway.service",
-			"systemctl enable burrowee-gateway-updater.service",
-		)
+		if !strings.Contains(c, "com.burrowee.gateway") && !strings.Contains(c, "burrowee-gateway") {
+			continue
+		}
+		if strings.Contains(c, ".guard") {
+			continue // asserted absent above; a match here would be that failure twice
+		}
+		switch {
+		case strings.Contains(c, "bootstrap"), strings.Contains(c, "kickstart"),
+			strings.Contains(c, "enable"), strings.Contains(c, "restart"),
+			strings.Contains(c, "start "), strings.Contains(c, "bootout"):
+			t.Errorf("BURROWEE_NO_RESTART=1: %q touched a managed unit — on Darwin a bootstrap of the RunAtLoad serve plist STARTS the daemon, which is what this flag exists to prevent:\n%s", c, calls)
+		}
 	}
 }
 
-// TestInstallShDefaultPathDoesNotFlapUnits is the regression guard for the
-// BURROWEE_NO_RESTART guard's own blast radius: the staged and restart paths
-// must be mutually exclusive. An earlier shape ran the two bootstraps
-// unconditionally and THEN the bootout+bootstrap pair, which on a fresh Darwin
-// install started the service, stopped it, and started it again — a visible
-// flap on every install and reinstall. Each label must be bootstrapped exactly
-// once.
+// unitPathsFor is the pair of system unit files install.sh renders on goos.
+func unitPathsFor(home, goos string) []string {
+	if goos == "darwin" {
+		return []string{
+			filepath.Join(launchdDir(home), "com.burrowee.gateway.plist"),
+			filepath.Join(launchdDir(home), "com.burrowee.gateway.updater.plist"),
+		}
+	}
+	return []string{
+		filepath.Join(systemdDir(home), "burrowee-gateway.service"),
+		filepath.Join(systemdDir(home), "burrowee-gateway-updater.service"),
+	}
+}
+
+// latestTxnDirOrEmpty is latestTxnDir for a run that may legitimately have made
+// no transaction at all — which under BURROWEE_NO_RESTART it still does make
+// (guard_arm's header: the transaction and the snapshot are taken either way,
+// they are what guard-status reads afterwards), so this is tolerance for the
+// shape rather than an expectation about it.
+func latestTxnDirOrEmpty(t *testing.T, home string) string {
+	t.Helper()
+	root := filepath.Join(sysDataDir(home), "install")
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	return filepath.Join(root, entries[len(entries)-1].Name())
+}
+
+// TestInstallShUnitsOnlyTouchesNeitherManagedLabel is what is left of
+// TestInstallShDefaultPathDoesNotFlapUnits once the calls it counted stopped
+// being made in this process.
 //
-// THE TWO LABELS NO LONGER ADVANCE THE SAME WAY, and this test is the only
-// place that says so. The serve label is never booted out by the installer —
-// `bootout` unloads a job, an unloaded job is supervised by nothing, and on a
-// gateway the operator's session runs THROUGH the daemon being unloaded, so
-// the bootout causes the shell death that then strands the host. It advances
-// with `kickstart -k`, which restarts a loaded job in place with no unloaded
-// window. The UPDATER label still boots out: nothing routes through it, so
-// unloading it strands nothing.
+// That test pinned the flap: each label bootstrapped exactly once, the serve
+// label advanced with `kickstart -k` and never booted out (an unloaded job is
+// supervised by nothing, and on a gateway the bootout is what kills the shell
+// that would have bootstrapped it again), the updater booted out BEFORE it was
+// bootstrapped rather than after. It drove BURROWEE_UNITS_ONLY because that was
+// the last mode still loading units synchronously.
 //
-// This test asserted a bootout for BOTH labels, by exact whole-line match, and
-// so failed on macOS from the moment that call was removed — a failure nobody
-// saw, because it skips on Linux and Linux is where CI runs. Adapted here to
-// the two contracts that actually hold, without dropping either the flap guard
-// (bootstrap exactly once per label) or the advance guard (each label is
-// genuinely advanced, by its own verb). tools/install-no-bootout.test.sh pins
-// the serve-label half from the shell side; this is the Darwin behavioural half.
-func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
+// It is not any more, and this suite cannot follow the calls where they went:
+// stubInitSystem's launchctl RECORDS the arm and never spawns the guard behind
+// it (its own header explains why), so the guard's bootstrap/kickstart/bootout
+// sequence happens in no process this test can observe. The whole claim, per
+// platform shape, against the real guard.sh and a real (fake) supervisor, is
+// tools/guard-rollback.test.sh's t_guard_does_not_flap_the_units — written for
+// this change specifically so nothing was dropped in the move.
+//
+// WHAT REMAINS HERE IS THE HALF THAT IS STILL THIS FILE'S, and it is the half
+// that protects the move: install.sh's own foreground must touch NEITHER
+// managed label. A regression that re-adds a load_units call to this mode
+// would restore the flap AND the sever, and it would show up here first.
+func TestInstallShUnitsOnlyTouchesNeitherManagedLabel(t *testing.T) {
 	if runtime.GOOS != "darwin" {
-		t.Skip("launchctl bootout/bootstrap sequencing is Darwin-only")
+		t.Skip("launchctl call shapes are Darwin-only; the Linux half is TestLinuxUnitsOnlyIssuesNoRestartOfItsOwn")
 	}
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -736,65 +915,28 @@ func TestInstallShDefaultPathDoesNotFlapUnits(t *testing.T) {
 	// The sudo stub records its own "sudo -n launchctl …" line and then execs
 	// launchctl, which records "launchctl …" — so every real call appears on
 	// two lines. Match whole lines against the bare form to count each once.
-	var direct []string
 	for _, line := range strings.Split(calls, "\n") {
-		if s := strings.TrimSpace(line); strings.HasPrefix(s, "launchctl ") {
-			direct = append(direct, s)
+		c := strings.TrimSpace(line)
+		if !strings.HasPrefix(c, "launchctl ") {
+			continue
+		}
+		// The GUARD's own label is install.sh's to drive — that IS the handoff,
+		// and guard_arm boots it out first deliberately (nothing routes through
+		// it, and guard_refuse_concurrent has already proved no live guard is
+		// mid-flight). Legacy per-user teardown ("gui/…") stays too.
+		if strings.Contains(c, "com.burrowee.gateway.guard") || strings.Contains(c, "gui/") {
+			continue
+		}
+		if strings.Contains(c, "com.burrowee.gateway") {
+			t.Errorf("units-only drove %q against a managed label in install.sh's own foreground — the restart belongs to the guard, and a foreground one severs the connection the operator is running this over:\n%s", c, calls)
 		}
 	}
 
-	count := func(want string) (n, first int) {
-		first = -1
-		for i, c := range direct {
-			if c == want {
-				n++
-				if first < 0 {
-					first = i
-				}
-			}
-		}
-		return n, first
-	}
-
-	for _, tc := range []struct {
-		label       string
-		wantBootout bool
-	}{
-		{"com.burrowee.gateway", false},
-		{"com.burrowee.gateway.updater", true},
-	} {
-		bootstrap := "launchctl bootstrap system " + launchdDir(home) + "/" + tc.label + ".plist"
-		bootout := "launchctl bootout system/" + tc.label
-		kickstart := "launchctl kickstart -k system/" + tc.label
-
-		nBootstrap, firstBootstrap := count(bootstrap)
-		nBootout, firstBootout := count(bootout)
-		nKickstart, _ := count(kickstart)
-
-		if nBootstrap != 1 {
-			t.Errorf("%s: bootstrap called %d times, want exactly 1 (unit flap):\n%s", tc.label, nBootstrap, calls)
-		}
-		// Every label is advanced onto the freshly placed binary. Without
-		// this, a branch that quietly stopped starting the service at all
-		// would satisfy every other assertion here.
-		if nKickstart < 1 {
-			t.Errorf("%s: never kickstarted — the unit is loaded but the running process is still the old one:\n%s", tc.label, calls)
-		}
-		if !tc.wantBootout {
-			if nBootout != 0 {
-				t.Errorf("%s: booted out %d time(s) — the SERVE label must never be unloaded by the installer; "+
-					"an unloaded job is supervised by nothing and the session that would bootstrap it again "+
-					"is the one the bootout kills:\n%s", tc.label, nBootout, calls)
-			}
-			continue
-		}
-		if nBootout < 1 {
-			t.Errorf("%s: no bootout — a running updater would never be replaced:\n%s", tc.label, calls)
-			continue
-		}
-		if firstBootstrap >= 0 && firstBootstrap < firstBootout {
-			t.Errorf("%s: bootstrap precedes bootout — starts the unit before stopping it:\n%s", tc.label, calls)
-		}
+	// Not vacuous: the run really did reach the handoff, so "no managed-label
+	// call" is a fact about a completed install and not about one that fell
+	// over before it got there.
+	if got := latestTxnPhase(t, home); got != "handoff" {
+		t.Fatalf("transaction phase = %q, want %q — this run never reached the point the assertions above are about", got, "handoff")
 	}
 }
 
@@ -1155,10 +1297,27 @@ func migrationLog(t *testing.T, logPath string) string {
 	return string(b)
 }
 
-// TestInstallShRunsTheMigrationBeforeLoadingUnits: the migration stops the
-// gateway so gateway.db is copied at rest, and load_units is what starts it
-// again — so running it after would copy a live store, or never run at all.
-func TestInstallShRunsTheMigrationBeforeLoadingUnits(t *testing.T) {
+// TestInstallShRunsTheMigrationBeforeTheHandoff.
+//
+// The migration stops the daemon (gateway's own migrations/run.sh) and the
+// handoff is where the guard is told to start it again, so the migration has to
+// be finished before the handoff is written. Any other order and the guard
+// restarts a gateway whose state is still being copied out from under it.
+//
+// THE OLD SHAPE OF THIS TEST DID NOT ACTUALLY CHECK AN ORDER. It computed
+// `ran` (an index into stdout) and `started` (an index into the stub call log)
+// and then only asserted each was >= 0 — two positions in two different
+// streams, which cannot be compared even in principle, and the comparison was
+// never written. So it passed on any run where the migration ran and the
+// supervisor was called at all, in either order. It would go on passing now,
+// vacuously, off remove_legacy_user_units' own `systemctl --user` line.
+//
+// Both anchors are in ONE stream here — install.sh's own output — which is what
+// makes the ordering answerable: the staged migration prints "migration-ran",
+// and the handoff prints its reconnect banner immediately before txn_phase
+// handoff (deliberately before, so the line reaches the operator while the
+// connection still exists).
+func TestInstallShRunsTheMigrationBeforeTheHandoff(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	bundle := t.TempDir()
@@ -1176,18 +1335,18 @@ func TestInstallShRunsTheMigrationBeforeLoadingUnits(t *testing.T) {
 		t.Fatalf("the migration was never invoked; output:\n%s", out)
 	}
 	ran := strings.Index(out, "migration-ran")
-	load := "launchctl bootstrap"
-	if runtime.GOOS != "darwin" {
-		load = "systemctl"
-	}
-	// The stub calls are logged to a file, but their stdout is not in `out`;
-	// compare against the unit-write line instead, which load_units follows.
-	started := strings.Index(readFile(t, filepath.Join(home, "stub-calls.log")), load)
+	handoff := strings.Index(out, "handing the restart to the guard")
 	if ran < 0 {
 		t.Fatalf("migration output missing:\n%s", out)
 	}
-	if started < 0 {
-		t.Fatalf("units were never loaded; calls:\n%s", readFile(t, filepath.Join(home, "stub-calls.log")))
+	if handoff < 0 {
+		t.Fatalf("the restart was never handed to the guard, so nothing was ordered against it:\n%s", out)
+	}
+	if ran > handoff {
+		t.Errorf("the migration ran AFTER the handoff — the guard restarts the gateway while its state is still being copied:\n%s", out)
+	}
+	if got := latestTxnPhase(t, home); got != "handoff" {
+		t.Errorf("transaction phase = %q, want %q", got, "handoff")
 	}
 }
 
