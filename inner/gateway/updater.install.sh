@@ -13,8 +13,9 @@
 #
 # *** ENROLLMENT-PRESERVING — CRITICAL ***
 # Touches ONLY the updater binary + its unit. NEVER renames, moves, backs up,
-# or deletes $HOME/.burrowee/gateway, /usr/local/etc/burrowee/gateway,
-# /usr/local/var/burrowee/gateway, or anything under any of them — the full
+# or deletes $HOME/.burrowee/gateway, /usr/local/burrowee/etc/gateway,
+# /usr/local/burrowee/var/gateway (nor a 0.2 host's not-yet-migrated
+# /usr/local/{etc,var}/burrowee/gateway), or anything under any of them — the full
 # installer's ladder owns that state; this script does not resolve a
 # component home at all. Its own migration step (below) walks the updater's
 # ladder against a THROWAWAY scratch tree, never the real one, so that
@@ -55,7 +56,8 @@
 # specifically wants the updater running now.
 #
 # Env seams (production defaults shown; override in tests to avoid systemd):
-#   BURROWEE_BIN_DIR   the one binary destination (default: /usr/local/bin) —
+#   BURROWEE_BIN_DIR   the one binary destination (default:
+#                      /usr/local/burrowee/bin, the machine-owned tree's bin/) —
 #                      named to match gateway/install.sh's own seam, since the
 #                      guard below is a byte-identical copy of that file's.
 #   SYSTEMD_UNIT_DIR   systemd system-unit dir (default: /etc/systemd/system)
@@ -88,7 +90,8 @@ set -eu
 # gateway/install.sh itself names this seam, and the guard's whole point is to
 # be provably identical to that file's copy.
 # ── system install paths ─────────────────────────────────────────────────────
-# ONE DESTINATION, decided here and nowhere else: /usr/local/bin, root-owned.
+# ONE DESTINATION, decided here and nowhere else: /usr/local/burrowee/bin,
+# root-owned — the exec root of the machine-owned tree.
 # There is no branch left to take — every step below that treats $BIN_DIR as the
 # privileged surface (ensure_root_exec_surface, render_units, load_units,
 # migrate_from_legacy, record_installed_version) now runs on EVERY install,
@@ -96,15 +99,15 @@ set -eu
 #
 # BURROWEE_BIN_DIR is the surviving TEST-ONLY seam, and the only one: it
 # redirects this destination so the suite never writes into the real
-# /usr/local/bin. Never set it on a real host — nothing about the install's
-# meaning changes when it is set, which is exactly why it is safe for tests and
-# useless as a user-facing knob.
+# /usr/local/burrowee. Never set it on a real host — nothing about the
+# install's meaning changes when it is set, which is exactly why it is safe for
+# tests and useless as a user-facing knob.
 #
 # Resolved BEFORE the PREFIX gate below, because the gate's whole question is
 # "does this PREFIX name the destination we would have picked anyway?" — it
 # cannot ask that without $BIN_DIR. This is an assignment only: nothing is
 # created, placed or written until well after the gate.
-BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
+BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
 
 # normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
 # '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
@@ -168,8 +171,8 @@ if [ -n "${PREFIX:-}" ]; then
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
-        # /usr/local/bin (production truth, and what the suite's static pins
-        # check) and the resolved $_true_bin. They differ only when the
+        # /usr/local/burrowee/bin (production truth, and what the suite's static
+        # pins check) and the resolved $_true_bin. They differ only when the
         # BURROWEE_BIN_DIR test seam is set, and an operator reading a refusal on
         # a real host must see the real path either way.
         #
@@ -179,10 +182,11 @@ if [ -n "${PREFIX:-}" ]; then
         # the offending value, hiding the component, the destination and the
         # "nothing has been installed" line all at once.
         printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of gateway 0.2.0 this installer" >&2
-        echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
-        echo "install: flow is gone — the gateway's service units run as root and name the" >&2
-        echo "install: binaries absolutely, and other components resolve /usr/local/bin/burrowee" >&2
-        echo "install: by absolute path, so a per-user copy is invisible to both." >&2
+        echo "install: has one destination: /usr/local/burrowee/bin, root-owned. The per-user" >&2
+        echo "install: prefix flow is gone — the gateway's service units run as root and name" >&2
+        echo "install: the binaries absolutely, and other components resolve" >&2
+        echo "install: /usr/local/burrowee/bin/burrowee by absolute path, so a per-user copy" >&2
+        echo "install: is invisible to both." >&2
         printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
         echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
         exit 1

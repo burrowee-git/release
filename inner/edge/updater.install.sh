@@ -13,8 +13,9 @@
 #
 # *** ENROLLMENT-PRESERVING — CRITICAL ***
 # Touches ONLY the updater binary + its unit. NEVER renames, moves, backs up,
-# or deletes $HOME/.burrowee/edge, /usr/local/etc/burrowee/edge, or anything
-# under either — the full installer's ladder owns that state; this script
+# or deletes $HOME/.burrowee/edge, /usr/local/burrowee/etc/edge (nor a 0.2
+# host's not-yet-migrated /usr/local/etc/burrowee/edge), or anything
+# under any of them — the full installer's ladder owns that state; this script
 # does not resolve a component home at all. Its own migration step (below)
 # walks the updater's ladder against a THROWAWAY scratch tree, never the real
 # one, so that promise holds structurally rather than by convention.
@@ -30,7 +31,8 @@
 # specifically wants the updater running now.
 #
 # Env seams (production defaults shown; override in tests to avoid systemd):
-#   SYS_BIN_DIR   the one binary destination (default: /usr/local/bin)
+#   SYS_BIN_DIR   the one binary destination (default: /usr/local/burrowee/bin,
+#                 the machine-owned tree's bin/)
 #   PREFIX        install prefix — see the guard below. ROOT-ONLY: a PREFIX
 #                 naming any OTHER destination is refused, not honored. An
 #                 accepted one is UNSET before anything downstream runs.
@@ -56,7 +58,7 @@ set -eu
 # gate's whole question is "does this PREFIX name the destination we would have
 # picked anyway?" — it cannot ask that without $BIN_DIR. These are assignments
 # only: nothing is created, placed or written until well after the gate.
-SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/bin}"
+SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/burrowee/bin}"
 # BIN_DIR and SYS_BIN_DIR are ONE destination under two names: the units and the
 # test harness spell it SYS_BIN_DIR, the placement/uninstall code below spells it
 # BIN_DIR, and since the 0.2.0 collapse they can never differ. Resolved HERE, at
@@ -125,8 +127,8 @@ if [ -n "${PREFIX:-}" ]; then
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
-        # /usr/local/bin (production truth, and what the suite's static pins
-        # check) and the resolved $_true_bin. They differ only when the
+        # /usr/local/burrowee/bin (production truth, and what the suite's static
+        # pins check) and the resolved $_true_bin. They differ only when the
         # SYS_BIN_DIR test seam is set, and an operator reading a refusal on a
         # real host must see the real path either way.
         #
@@ -136,10 +138,11 @@ if [ -n "${PREFIX:-}" ]; then
         # the offending value, hiding the component, the destination and the
         # "nothing has been installed" line all at once.
         printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of edge 0.2.0 this installer" >&2
-        echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
-        echo "install: flow is gone — edge's service units run as root and name the binaries" >&2
-        echo "install: absolutely, and other components resolve /usr/local/bin/burrowee by" >&2
-        echo "install: absolute path, so a per-user copy is invisible to both." >&2
+        echo "install: has one destination: /usr/local/burrowee/bin, root-owned. The per-user" >&2
+        echo "install: prefix flow is gone — edge's service units run as root and name the" >&2
+        echo "install: binaries absolutely, and other components resolve" >&2
+        echo "install: /usr/local/burrowee/bin/burrowee by absolute path, so a per-user copy" >&2
+        echo "install: is invisible to both." >&2
         printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
         echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
         exit 1
