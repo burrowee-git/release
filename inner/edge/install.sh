@@ -507,6 +507,19 @@ sweep_stale_user_bins() {
     remove_stale_user_bins
 }
 
+# sweep_stale_exec_root — the 0.2 exec root's real copies (/usr/local/bin),
+# left behind when 0.3 moved the binaries to $BIN_DIR. Same library, same
+# guards, same reason it runs HERE as well as on the ladder
+# (migrations/sweep_stale_exec_root.sh): the rung runs before this installer
+# re-renders the units, and while a 0.2 unit still names
+# /usr/local/bin/burrowee-edge-updater the library correctly refuses to
+# unlink it — so on the first 0.3 install the rung is a no-op and this call,
+# after setup_root_service, is what actually clears the copies.
+sweep_stale_exec_root() {
+    [ "$SWEEP_LIB_LOADED" = 1 ] || return 0
+    remove_stale_exec_root_bins
+}
+
 # ---------------------------------------------------------------------------
 # run_migration_ladder — walk migrations/run.sh, which runs every migration in
 # migrations/ledger this host has not reached yet, oldest first.
@@ -1487,6 +1500,7 @@ setup_root_service
 # this sweep's safety rests on ("the new copies are already in place") is
 # not something that mode establishes.
 sweep_stale_user_bins
+sweep_stale_exec_root
 "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
 echo "edge system install complete."
 # The managed service runs the daemon; pairing is a separate operator step:

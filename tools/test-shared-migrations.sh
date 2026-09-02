@@ -2426,5 +2426,241 @@ assert_contains "$(cat "$ch36/env.seen" 2>/dev/null)" "LEGACY_SYS_DATA_ROOT=/usr
 assert_contains "$(cat "$ch36/env.seen" 2>/dev/null)" "LEGACY_BIN_DIR=/usr/local/bin" "run_migration must hand the rung the legacy exec root it resolved"
 
 # ---------------------------------------------------------------------------
+# 37. THE 0.3.0 EXEC-ROOT SWEEP (sweep_stale_exec_root.sh). 0.3 moved the
+#     binaries to /usr/local/burrowee/bin and linked the operator-typed names
+#     back into /usr/local/bin; what 0.2 left there as REAL files is what this
+#     rung removes — per name, and only a burrowee build with a trusted twin
+#     in the new tree that no unit still names.
+#
+#     Fixture: $ob is the 0.2 exec root, $nb the 0.3 one. Both are under
+#     $TMP; the twin-owner seam names this suite's own user, since the suite
+#     cannot create root-owned files (and one case names somebody else, to
+#     prove the seam is read).
+# ---------------------------------------------------------------------------
+# run_exec_sweep_ladder <kit> <home> [args…] — the ladder against a kit whose
+# roots hang off <home>/sys and whose 0.2 exec root is <home>/old-bin.
+run_exec_sweep_ladder() {
+    _res_kit="$1"; _res_home="$2"; shift 2
+    OUT="$(
+        HOME="$_res_home" \
+        COMP_HOME="$_res_home/sys/etc/edge" COMP_DATA="$_res_home/sys/var/edge" \
+        SYS_CONFIG_ROOT="$_res_home/sys/etc" SYS_DATA_ROOT="$_res_home/sys/var" \
+        BIN_DIR="$_res_home/sys/bin" \
+        LEGACY_SYS_CONFIG_ROOT="$_res_home/old-etc" LEGACY_SYS_DATA_ROOT="$_res_home/old-var" \
+        LEGACY_BIN_DIR="$_res_home/old-bin" \
+        STALE_EXEC_ROOT_TWIN_OWNER="${EXEC_SWEEP_TWIN_OWNER:-$(id -un)}" \
+        LAUNCHD_DIR="${EXEC_SWEEP_LAUNCHD_DIR:-$_res_home/no-launchd}" SYSTEMD_DIR="$_res_home/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$_res_home/nowhere" SUDO=/nonexistent-sudo \
+        sh "$_res_kit/migrations/run.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+# run_exec_sweep_rung <kit> <home> [args…] — the rung DIRECTLY, for the cases
+# whose subject is a note the rung prints on a name it declines.
+run_exec_sweep_rung() {
+    _rer_kit="$1"; _rer_home="$2"; shift 2
+    OUT="$(
+        HOME="$_rer_home" COMP=edge \
+        COMP_HOME="$_rer_home/sys/etc/edge" COMP_DATA="$_rer_home/sys/var/edge" \
+        BIN_DIR="$_rer_home/sys/bin" LEGACY_BIN_DIR="$_rer_home/old-bin" \
+        STALE_USER_BINS="$EDGE_BINS" \
+        STALE_EXEC_ROOT_TWIN_OWNER="${EXEC_SWEEP_TWIN_OWNER:-$(id -un)}" \
+        LAUNCHD_DIR="${EXEC_SWEEP_LAUNCHD_DIR:-$_rer_home/no-launchd}" SYSTEMD_DIR="$_rer_home/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$_rer_home/nowhere" SUDO=/nonexistent-sudo \
+        sh "$_rer_kit/migrations/sweep_stale_exec_root.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+# exec_sweep_kit <dir> — a system-scheme edge kit whose ledger carries only the
+# 0.3.0 sweep row, with the 0.3 tree populated (twins) and the 0.2 exec root
+# holding one of each shape: a real copy of ours (the updater — nobody types
+# it, so the installer never links it), a real copy of ours under an
+# operator-typed name (a host where the installer declined to link), a symlink
+# the installer made, and an operator's own foreign file.
+exec_sweep_kit() {
+    kit "$1" edge system installed-version $EDGE_BINS
+    printf '# ledger\n0.3.0 sweep_stale_exec_root.sh\n' > "$1/migrations/ledger"
+    _esk_h="$1/home"
+    mkdir -p "$_esk_h/sys/etc/edge" "$_esk_h/sys/var/edge"
+    seed_twins "$_esk_h/sys/bin" $EDGE_BINS
+    seed_ours "$_esk_h/old-bin" burrowee-edge-updater burrowee-edge-cli
+    seed_foreign "$_esk_h/old-bin" burrowee
+    ln -s "$_esk_h/sys/bin/burrowee-edge" "$_esk_h/old-bin/burrowee-edge"
+}
+
+# 37a. THE SWEEP, PER NAME: the two real copies of ours go, the link and the
+#      foreign file stay, the receipt lands in the NEW config root.
+t37="$TMP/t37"; exec_sweep_kit "$t37"; h37="$t37/home"
+run_exec_sweep_ladder "$t37" "$h37"
+assert_eq "$RC" 2 "no anchor + a pending exec-root sweep must exit 2 (migrations ran)"
+assert_contains "$OUT" "sweep_stale_exec_root.sh applies: no recorded version" "the --applies probe must select the rung"
+assert_gone "$h37/old-bin/burrowee-edge-updater" "the 0.2 real copy of the updater must be removed — nobody types it and the installer never links it"
+assert_gone "$h37/old-bin/burrowee-edge-cli" "a 0.2 real copy under an operator-typed name is removed too — the installer declined to link on this host"
+assert_present "$h37/old-bin/burrowee-edge" "the installer's symlink must survive"
+assert_eq "$(readlink "$h37/old-bin/burrowee-edge")" "$h37/sys/bin/burrowee-edge" "and still point into the 0.3 tree"
+assert_present "$h37/old-bin/burrowee" "an operator's own foreign file must survive"
+assert_contains "$OUT" "removed stale 0.2 exec-root copy: $h37/old-bin/burrowee-edge-updater" "the rung must name what it removed"
+assert_contains "$OUT" "kept $h37/old-bin/burrowee-edge — a symlink" "and say why the link was kept"
+assert_contains "$OUT" "$h37/old-bin/burrowee carries no burrowee build stamp" "and why the foreign file was kept"
+assert_present "$h37/sys/etc/edge/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "the receipt must land in the NEW config root"
+for b in $EDGE_BINS; do assert_present "$h37/sys/bin/$b" "the 0.3 tree must be untouched ($b)"; done
+
+# 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
+run_exec_sweep_ladder "$t37" "$h37"
+assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"
+assert_contains "$OUT" "sweep_stale_exec_root.sh skipped: its receipt records it completed here" "the receipt must gate the second run"
+assert_present "$h37/old-bin/burrowee-edge" "the link is still there after the second run"
+
+# 37c. NOTHING TO SWEEP: no 0.2 exec root at all — a host born on 0.3.
+t37c="$TMP/t37c"; exec_sweep_kit "$t37c"; h37c="$t37c/home"; rm -rf "$h37c/old-bin"
+run_exec_sweep_ladder "$t37c" "$h37c"
+assert_eq "$RC" 0 "with no 0.2 exec root the rung must decline"
+assert_contains "$OUT" "sweep_stale_exec_root.sh skipped: no recorded version, and --applies does not recognise" "the probe must answer no"
+
+# 37d. THE TWIN MUST BE TRUSTED. The new-tree copy is owned by somebody other
+#      than the seam names: the old copy is kept and the reason is said. The
+#      seam is what makes this drivable both ways without root.
+t37d="$TMP/t37d"; exec_sweep_kit "$t37d"; h37d="$t37d/home"
+EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d" run_exec_sweep_rung "$t37d" "$h37d" --applies
+assert_eq "$RC" 1 "--applies must answer no when no twin is trusted"
+EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d" run_exec_sweep_rung "$t37d" "$h37d"
+assert_eq "$RC" 0 "the rung declines per name and exits 0"
+assert_present "$h37d/old-bin/burrowee-edge-updater" "an untrusted twin must keep the 0.2 copy in place"
+assert_contains "$OUT" "is not a regular file owned by nobody-such-user-37d" "and say which owner it wanted"
+
+# 37e. A UNIT STILL NAMES IT: on the first 0.3 install the 0.2 updater unit
+#      still names /usr/local/bin/burrowee-edge-updater, and unlinking a file a
+#      supervisor may be running stops the daemon on macOS. Kept, and the
+#      installer's later call (after the units moved) is what sweeps it.
+t37e="$TMP/t37e"; exec_sweep_kit "$t37e"; h37e="$t37e/home"; mkdir -p "$h37e/launchd"
+printf '<plist><dict><key>ProgramArguments</key><array><string>%s/old-bin/burrowee-edge-updater</string><string>run</string></array></dict></plist>\n' "$h37e" > "$h37e/launchd/com.burrowee.edge.updater.plist"
+EXEC_SWEEP_LAUNCHD_DIR="$h37e/launchd" run_exec_sweep_rung "$t37e" "$h37e"
+assert_eq "$RC" 0 "a unit-named file is a decline, not a failure"
+assert_present "$h37e/old-bin/burrowee-edge-updater" "a file a unit still names must not be unlinked"
+assert_contains "$OUT" "$h37e/launchd/com.burrowee.edge.updater.plist still names $h37e/old-bin/burrowee-edge-updater" "and the unit must be named"
+assert_gone "$h37e/old-bin/burrowee-edge-cli" "while a name no unit mentions is still swept — per item, never per section"
+
+# 37f. --applies FAILS OPEN: a 0.2 exec root this process cannot read is
+#      "still needed", never "nothing there".
+if [ "$(id -u)" != 0 ]; then
+    t37f="$TMP/t37f"; exec_sweep_kit "$t37f"; h37f="$t37f/home"
+    chmod 000 "$h37f/old-bin"
+    run_exec_sweep_rung "$t37f" "$h37f" --applies
+    assert_eq "$RC" 0 "an unreadable 0.2 exec root must read as 'still needed'"
+    run_exec_sweep_rung "$t37f" "$h37f"
+    assert_eq "$RC" 0 "and the bare run declines out loud rather than failing the ladder"
+    assert_contains "$OUT" "cannot read $h37f/old-bin" "saying it could not read"
+    chmod 0755 "$h37f/old-bin"
+fi
+
+# 37g. NO TWIN: the 0.3 tree holds no copy of the name, so the 0.2 file is
+#      the live install and stays.
+t37g="$TMP/t37g"; exec_sweep_kit "$t37g"; h37g="$t37g/home"; rm -f "$h37g/sys/bin/burrowee-edge-updater"
+run_exec_sweep_rung "$t37g" "$h37g"
+assert_present "$h37g/old-bin/burrowee-edge-updater" "with no twin in the 0.3 tree the 0.2 copy is the live install"
+assert_contains "$OUT" "kept $h37g/old-bin/burrowee-edge-updater — there is no $h37g/sys/bin/burrowee-edge-updater" "and the rung says so"
+
+# 37h. BAD ARGUMENT — the same contract as its siblings.
+run_exec_sweep_rung "$t37g" "$h37g" --bogus
+assert_eq "$RC" 2 "an unknown argument must exit 2, like the other shared rungs"
+assert_contains "$OUT" "unknown argument" "and say so"
+
+# ---------------------------------------------------------------------------
+# 38. THE TRANSITIONAL ANCHOR READ (spec §9.2). For a system-scheme component
+#     the anchor lives inside the config tree 0.3 moves, so on the first 0.3
+#     run the new root is empty and the ladder would re-probe every shipped
+#     0.2.0 rung — and adopt_user_tree.sh, finding an empty destination and a
+#     surviving per-user tree, would publish that STALE tree into the new
+#     root, where never-overwrite makes it permanent. The runner reads the
+#     0.2 anchor instead, once, read-only, and the numeric gate retires the
+#     0.2.0 rows on the version the host really recorded.
+# ---------------------------------------------------------------------------
+# transitional_kit <dir> — edge's real ledger shape around the transition: the
+# two 0.2.0 rows and the 0.3.0 sweep, a per-user tree the adoption WOULD take,
+# the 0.2 config tree carrying an anchor, and an EMPTY 0.3 root.
+transitional_kit() {
+    adopt_kit "$1" edge system installed-version $EDGE_BINS
+    printf '# ledger\n0.2.0 stale_user_bins.sh\n0.2.0 adopt_user_tree.sh\n0.3.0 sweep_stale_exec_root.sh\n' > "$1/migrations/ledger"
+    _tk_h="$1/home"
+    mkdir -p "$_tk_h/old-etc/edge/migration-receipts" "$_tk_h/stubs"
+    echo "0.2.11.2026.08.20.deadbeef" > "$_tk_h/old-etc/edge/installed-version"
+    seed_per_user_tree "$_tk_h/.burrowee/edge"
+    seed_twins "$_tk_h/sys/bin" $EDGE_BINS
+    make_cli_stub "$_tk_h/sys/bin" edge
+    seed_ours "$_tk_h/old-bin" burrowee-edge-updater
+    make_supervisor_stub "$_tk_h/stubs" kills
+}
+run_transitional_ladder() {
+    _rtl_kit="$1"; _rtl_home="$2"; shift 2
+    CLI_STUB_LOG="$_rtl_home/stubs/cli.log"
+    OUT="$(
+        HOME="$_rtl_home" \
+        COMP_HOME="$_rtl_home/sys/etc/edge" COMP_DATA="$_rtl_home/sys/var/edge" \
+        SYS_CONFIG_ROOT="$_rtl_home/sys/etc" SYS_DATA_ROOT="$_rtl_home/sys/var" \
+        BIN_DIR="$_rtl_home/sys/bin" \
+        LEGACY_SYS_CONFIG_ROOT="$_rtl_home/old-etc" LEGACY_SYS_DATA_ROOT="$_rtl_home/old-var" \
+        LEGACY_BIN_DIR="$_rtl_home/old-bin" STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+        ROOT_HOME="$_rtl_home/root-home" \
+        LAUNCHD_DIR="$_rtl_home/no-launchd" SYSTEMD_DIR="$_rtl_home/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$_rtl_home/nowhere" SUDO_USER="" \
+        SUDO="$_rtl_home/stubs/sudo" SYSTEMCTL="$_rtl_home/stubs/supervisor" LAUNCHCTL="$_rtl_home/stubs/supervisor" \
+        CLI_STUB_LOG="$CLI_STUB_LOG" BURROWEE_MIGRATE_STOP_TIMEOUT=2 \
+        sh "$_rtl_kit/migrations/run.sh" "$@" 2>&1
+    )"
+    RC=$?
+}
+
+# 38a. THE FIRST 0.3 RUN AGAINST A 0.2 HOST: the 0.2 anchor is read, the two
+#      0.2.0 rows are retired by the gate, the adoption never runs, the
+#      per-user tree is NOT published into the new root, only the 0.3.0 sweep
+#      runs — and its receipt goes to the NEW root while the 0.2 tree is
+#      exactly as it was.
+t38="$TMP/t38"; transitional_kit "$t38"; h38="$t38/home"; ch38="$h38/sys/etc/edge"
+if [ -d "$ch38" ]; then fail "case 38a fixture: the 0.3 config root must NOT exist yet"; fi
+run_transitional_ladder "$t38" "$h38"
+assert_eq "$RC" 2 "the 0.3.0 sweep must run (migrations ran)"
+assert_contains "$OUT" "TRANSITIONAL: $ch38 holds no anchor and no receipts yet" "the runner must say it is reading the 0.2 anchor"
+assert_contains "$OUT" "installed version 0.2.11.2026.08.20.deadbeef — compared as 0.2.11 (read from $h38/old-etc/edge/installed-version)" "and name where it read it from"
+assert_contains "$OUT" "adopt_user_tree.sh skipped: installed 0.2.11.2026.08.20.deadbeef is not older than 0.2.0" "the numeric gate must retire the adoption on the recorded version"
+assert_contains "$OUT" "stale_user_bins.sh skipped: installed 0.2.11.2026.08.20.deadbeef is not older than 0.2.0" "and the 0.2.0 sweep"
+assert_gone "$ch38/identity/relay_ed.key" "the stale per-user tree must NOT have been published into the new root"
+assert_lacks "$(cat "$CLI_STUB_LOG" 2>/dev/null)" "migrate --from" "the cli's migrate verb must never have been invoked"
+assert_present "$h38/.burrowee/edge/identity/relay_ed.key" "and the per-user tree is untouched"
+assert_present "$ch38/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "the sweep's receipt lands in the NEW root"
+assert_gone "$h38/old-etc/edge/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "and never in the 0.2 tree"
+assert_gone "$ch38/installed-version" "the runner writes no anchor — that is the installer's, after exit 2"
+assert_eq "$(cat "$h38/old-etc/edge/installed-version")" "0.2.11.2026.08.20.deadbeef" "the 0.2 anchor is read-only"
+assert_gone "$h38/old-bin/burrowee-edge-updater" "the 0.3.0 sweep did run"
+
+# 38b. ONCE THE NEW ROOT HOLDS AN ANCHOR the 0.2 one is never consulted again
+#      — transitional by construction, not by a flag.
+t38b="$TMP/t38b"; transitional_kit "$t38b"; h38b="$t38b/home"; ch38b="$h38b/sys/etc/edge"; mkdir -p "$ch38b"
+echo "0.3.0.2026.09.01.cafef00d" > "$ch38b/installed-version"
+run_transitional_ladder "$t38b" "$h38b"
+assert_eq "$RC" 0 "a 0.3.0 anchor in the new root closes every row"
+assert_lacks "$OUT" "TRANSITIONAL" "the 0.2 anchor must not be consulted once the new root has one"
+assert_contains "$OUT" "(read from $ch38b/installed-version)" "the anchor is read from the new root"
+assert_present "$h38b/old-bin/burrowee-edge-updater" "and nothing ran"
+
+# 38c. A NEW ROOT WITH RECEIPTS BUT NO ANCHOR is a 0.3 host whose anchor was
+#      withheld (a lost receipt), not a 0.2 host: today's behaviour — each
+#      rung is asked — and the 0.2 anchor is not read.
+t38c="$TMP/t38c"; transitional_kit "$t38c"; h38c="$t38c/home"; ch38c="$h38c/sys/etc/edge"; mkdir -p "$ch38c/migration-receipts"
+run_transitional_ladder "$t38c" "$h38c"
+assert_lacks "$OUT" "TRANSITIONAL" "receipts in the new root mean the 0.2 anchor is not evidence about it"
+assert_contains "$OUT" "no installed version recorded ($ch38c/installed-version is absent)" "each rung is asked, from the new root"
+
+# 38d. A `user`-SCHEME COMPONENT IS UNAFFECTED, byte for byte: cli's tree
+#      never moved, so a legacy anchor beside it means nothing.
+t38d="$TMP/t38d"; kit "$t38d" cli user .installed-version $CLI_BINS
+h38d="$t38d/home"; ch38d="$h38d/.burrowee/cli"; mkdir -p "$ch38d" "$h38d/old-etc/cli"
+echo "0.2.11" > "$h38d/old-etc/cli/.installed-version"
+OUT="$(HOME="$h38d" COMP_HOME="$ch38d" BIN_DIR="$h38d/usr-local-bin" LEGACY_SYS_CONFIG_ROOT="$h38d/old-etc" \
+    LAUNCHD_DIR="$h38d/no-launchd" SYSTEMD_DIR="$h38d/no-systemd" BURROWEE_LEGACY_HOME_PARENTS="$h38d/nowhere" \
+    SUDO=/nonexistent-sudo sh "$t38d/migrations/run.sh" 2>&1)"; RC=$?
+assert_lacks "$OUT" "TRANSITIONAL" "a user-scheme component never reads a legacy anchor"
+assert_contains "$OUT" "no installed version recorded ($ch38d/.installed-version is absent)" "cli reads its own tree, exactly as before"
+
+# ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="
 [ "$FAILED" = 0 ] || exit 1

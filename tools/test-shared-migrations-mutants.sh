@@ -491,5 +491,40 @@ mutate repoints-a-working-value repoint_lan_cert.sh \
     "s@^    if elevate test -r \"\$_cur/cert.pem\"; then return 1; fi@    if false; then return 1; fi@" \
     "a relocated lan_cert whose cert.pem is readable is not touched (case 35d)"
 
+# --- the 0.3 transition ------------------------------------------------------
+#
+# @-DELIMITED, as above: every line here carries a `/` or a `|`.
+
+# The transitional anchor read. Without it the first 0.3 run finds no anchor
+# in the empty new root, re-probes the 0.2.0 adoption, and publishes a stale
+# per-user tree into the new root where never-overwrite makes it permanent.
+mutate transitional-anchor-not-read run.sh \
+    's@^    \&\& \[ -f "\$LEGACY_COMP_HOME/\$VERSION_FILE" \]; then$@    \&\& false; then@' \
+    "the 0.2 anchor is read when the new root holds neither anchor nor receipts (case 38a)"
+
+# The runner hands the legacy triple to every rung on the invocation line; a
+# rung that had to re-derive it would read a different host than the runner.
+mutate legacy-exec-root-not-handed-to-rungs run.sh \
+    's@^        LEGACY_BIN_DIR="\$LEGACY_BIN_DIR" \\$@        LEGACY_BIN_DIR="" \\@' \
+    "run_migration hands the rung the legacy exec root it resolved (case 36b)"
+
+# The exec-root sweep's per-name guards. Each one fails silently in the
+# safe-looking direction, which is why each gets its own mutant.
+mutate exec-root-sweep-takes-symlinks lib_stale_user_bins.sh \
+    's@^    if \[ -h "\$1" \]; then echo symlink; return 0; fi@    :@' \
+    "a symlink in the 0.2 exec root — the install's PATH entry — is never swept (case 37a)"
+
+mutate exec-root-sweep-trusts-any-twin lib_stale_user_bins.sh \
+    's@^    stale_exec_root_twin_ok "\$1" || { echo twin-untrusted; return 0; }@    :@' \
+    "the 0.2 copy is kept when the new-tree twin is not owned by the seam's owner (case 37d)"
+
+mutate exec-root-sweep-ignores-units lib_stale_user_bins.sh \
+    's@^    if _serd_u="\$(unit_naming_bin "\$LEGACY_BIN_DIR" "\$1" "\$2")"; then@    if false; then@' \
+    "a 0.2 copy a unit still names is left in place (case 37e)"
+
+mutate exec-root-probe-fails-closed lib_stale_user_bins.sh \
+    's@^    \[ -r "\$_serp_dir" \] \&\& \[ -x "\$_serp_dir" \] || return 0@    [ -r "$_serp_dir" ] \&\& [ -x "$_serp_dir" ] || return 1@' \
+    "an unreadable 0.2 exec root reads as 'still needed' (case 37f)"
+
 echo "== $RUN mutants, $SURVIVORS survived =="
 [ "$SURVIVORS" = 0 ] || exit 1
