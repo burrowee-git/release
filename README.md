@@ -45,7 +45,9 @@ Binaries land in
 edge**, which install to the root-owned `/usr/local/burrowee/bin` and nowhere else, then link the operator-typed names into `/usr/local/bin` when that directory is root-secure:
 their service units run as root and name the binaries absolutely, and other
 components resolve `/usr/local/burrowee/bin/burrowee` by absolute path. A `PREFIX` set
-for either is refused rather than honoured or silently overridden. The edge
+for either is refused rather than honoured or silently overridden. Both share
+the `burrowee` dispatcher link, and a 0.3 dispatcher resolves only 0.3 components: on a
+host running gateway and edge, upgrade both in the same session. The edge
 additionally requires root — it manages a system service, so run it with
 `sudo` (as the one-liner above does).
 
