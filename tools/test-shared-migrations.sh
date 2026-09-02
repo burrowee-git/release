@@ -2595,6 +2595,41 @@ STALE_EXEC_ROOT_KEEP="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-upd
     run_exec_sweep_rung "$t37a5" "$h37a5" --applies
 assert_eq "$RC" 1 "--applies must answer no when every removable name is kept"
 
+# 37a6. THE INSTALL-DESTINATION GUARD IS NORMALIZED. $LEGACY_BIN_DIR and
+#       $BIN_DIR reach this library through independent seams, and a spelling
+#       that differs only by a trailing or doubled slash names the SAME
+#       directory. A raw string compare answers "different", the sweep then runs
+#       against the install destination, and every name it decides `remove` for
+#       is a binary the installer just placed — with a "twin" that is the very
+#       file being deleted. Mutation that reddens it: put the raw
+#       `[ "$LEGACY_BIN_DIR" != "$BIN_DIR" ]` compare back at either site.
+t37a6="$TMP/t37a6"; exec_sweep_kit "$t37a6"; h37a6="$t37a6/home"
+# The 0.3 tree IS the legacy dir here, spelled with a trailing slash on one side.
+OUT="$(
+    HOME="$h37a6" COMP=edge \
+    COMP_HOME="$h37a6/sys/etc/edge" COMP_DATA="$h37a6/sys/var/edge" \
+    BIN_DIR="$h37a6/sys/bin" LEGACY_BIN_DIR="$h37a6/sys/bin/" \
+    STALE_USER_BINS="$EDGE_BINS" \
+    STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+    LAUNCHD_DIR="$h37a6/no-launchd" SYSTEMD_DIR="$h37a6/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h37a6/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t37a6/migrations/sweep_stale_exec_root.sh" 2>&1
+)"; RC=$?
+assert_eq "$RC" 0 "a legacy dir that IS the destination is a no-op, not a failure"
+for b in $EDGE_BINS; do assert_present "$h37a6/sys/bin/$b" "the install destination must be untouched ($b)"; done
+# and the probe must agree, or --applies authorises a sweep the run then declines
+OUT="$(
+    HOME="$h37a6" COMP=edge \
+    COMP_HOME="$h37a6/sys/etc/edge" COMP_DATA="$h37a6/sys/var/edge" \
+    BIN_DIR="$h37a6/sys/bin" LEGACY_BIN_DIR="$h37a6/sys/bin/" \
+    STALE_USER_BINS="$EDGE_BINS" \
+    STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+    LAUNCHD_DIR="$h37a6/no-launchd" SYSTEMD_DIR="$h37a6/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h37a6/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t37a6/migrations/sweep_stale_exec_root.sh" --applies 2>&1
+)"; RC=$?
+assert_eq "$RC" 1 "--applies must answer no when the legacy dir IS the destination"
+
 # 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"

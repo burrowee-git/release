@@ -629,6 +629,22 @@ LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
 STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 
 # stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
+# stale_exec_root_same_dir A B — true when A and B name the same directory,
+# compared after collapsing repeated slashes and stripping trailing ones. The
+# rung this sweep replaced normalized both sides for a reason: a seam spelled
+# with a trailing slash on one side only makes a raw compare answer "different",
+# and the sweep then runs against the INSTALL DESTINATION and deletes the
+# binaries the installer just placed.
+#
+# Deliberately NOT named normalize_dir: inner/*/install.sh defines one and
+# sources this library from inside a function, so a second definition of that
+# name would silently take over for the rest of that shell.
+stale_exec_root_same_dir() {
+    _sersd_a="$(printf '%s' "$1" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    _sersd_b="$(printf '%s' "$2" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    [ "${_sersd_a:-/}" = "${_sersd_b:-/}" ]
+}
+
 stale_exec_root_is_kept() {
     for _serik in $STALE_EXEC_ROOT_KEEP; do
         [ "$_serik" = "$1" ] && return 0
@@ -673,7 +689,7 @@ stale_exec_root_decision() {
 stale_exec_root_bins_pending() {
     [ -n "$STALE_USER_BINS" ] || return 1
     [ -d "$LEGACY_BIN_DIR" ] || return 1
-    [ "$LEGACY_BIN_DIR" != "$BIN_DIR" ] || return 1
+    ! stale_exec_root_same_dir "$LEGACY_BIN_DIR" "$BIN_DIR" || return 1
     _serp_dir="$LEGACY_BIN_DIR"
     [ -r "$_serp_dir" ] && [ -x "$_serp_dir" ] || return 0
     _serp_home="$(operator_home 2>/dev/null)"
@@ -697,8 +713,10 @@ remove_stale_exec_root_bins() {
     fi
     [ -d "$LEGACY_BIN_DIR" ] || return 0
     # Never the install destination itself — a host whose exec root never
-    # moved, or a seam pointing both at one directory.
-    [ "$LEGACY_BIN_DIR" != "$BIN_DIR" ] || return 0
+    # moved, or a seam pointing both at one directory. Normalized: a trailing
+    # slash on one side only would make this compare "different" and sweep the
+    # install away.
+    ! stale_exec_root_same_dir "$LEGACY_BIN_DIR" "$BIN_DIR" || return 0
     if ! { [ -r "$LEGACY_BIN_DIR" ] && [ -x "$LEGACY_BIN_DIR" ]; }; then
         echo "note: cannot read $LEGACY_BIN_DIR — its stale burrowee copies were not swept." >&2
         return 0
