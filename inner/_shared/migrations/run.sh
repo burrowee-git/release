@@ -266,6 +266,10 @@ SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"
 LEGACY_SYS_CONFIG_ROOT="${LEGACY_SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
 LEGACY_SYS_DATA_ROOT="${LEGACY_SYS_DATA_ROOT:-/usr/local/var/burrowee}"
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
+# Names the exec-root sweep must leave alone: the caller resolves them (no link
+# will replace them on this host), and the rung is handed the answer rather than
+# re-deriving it from a predicate it does not carry.
+STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/burrowee/bin}"
 
 # ---------------------------------------------------------------------------
@@ -353,17 +357,21 @@ VERSION_FILE="${VERSION_FILE:-.installed-version}"
 # the 0.2→0.3 copy then loses. A silent config and identity rollback.
 #
 # So the anchor — and ONLY the anchor — is read from the 0.2 tree when the
-# new root holds neither an anchor nor a receipts directory and the 0.2 tree
-# holds an anchor. A 0.2 host then reports the version it really recorded,
+# new root holds NO ANCHOR and the 0.2 tree holds one. A 0.2 host then
+# reports the version it really recorded,
 # the numeric gate retires the 0.2.0 rows on the evidence they were always
 # meant to be judged on, and only the 0.3.0 rows apply. It is a READ: nothing
 # is ever written to the legacy tree, and receipts are never looked for
 # there — a receipt keyed to the old tree says nothing about this one. Once a
 # 0.3 install records the anchor at the new root the old path is never
-# consulted again, which is what makes it transitional by construction. A new
-# root that holds receipts but no anchor is a 0.3 host whose anchor was
-# withheld (a lost receipt, exit 3) and keeps today's behaviour: the rungs
-# are asked. Remove this block once 0.3 is the floor.
+# consulted again, which is what makes it transitional by construction.
+#
+# RECEIPTS ARE NOT PART OF THE CONDITION, deliberately: record_migration
+# creates migration-receipts/ after the FIRST completed rung while the anchor
+# is written only at the end of the install, so a host whose first 0.3 run
+# died between the two would answer "0.3 host" on the next run and re-probe
+# the 0.2.0 rows in fall-through mode — the rollback this block exists to
+# stop. Remove this block once 0.3 is the floor.
 # ---------------------------------------------------------------------------
 ANCHOR_HOME="$COMP_HOME"
 ANCHOR_IS_LEGACY=0
@@ -949,6 +957,7 @@ run_migration() {
         LEGACY_SYS_CONFIG_ROOT="$LEGACY_SYS_CONFIG_ROOT" \
         LEGACY_SYS_DATA_ROOT="$LEGACY_SYS_DATA_ROOT" \
         LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
+        STALE_EXEC_ROOT_KEEP="$STALE_EXEC_ROOT_KEEP" \
         STALE_USER_BINS="${STALE_USER_BINS:-}" \
         MIGRATION_FORCED="$RERUN_RECORDED" \
         SUDO="$SUDO" \
