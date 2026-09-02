@@ -36,6 +36,37 @@
 # guard job is RunAtLoad, and one left on disk re-runs against a finished (or
 # worse, a half-finished) transaction at every boot.
 #
+# WHICH INSTALL MODES ARM A GUARD, AND WHY BURROWEE_UPDATE IS NOT ONE OF THEM.
+# Two do: the fresh install (install.sh's default path) and BURROWEE_UNITS_ONLY
+# (`burrowee gateway service install`, `doctor --fix`). Both are operator verbs
+# typed in a session that on a gateway routinely runs THROUGH the daemon they
+# stop and restart, and both carry the migration's stop as well as the restart.
+#
+# BURROWEE_UPDATE deliberately arms nothing, and this is written down here so
+# the question is not re-opened every time somebody notices the asymmetry:
+#
+#   * that mode RESTARTS NOTHING. install.sh's update branch ends
+#     `printf 'BURROWEE_CHANGED=…'; exit 0`; it renders unit files and never
+#     calls load_units. The restart decision belongs to the updater agent
+#     afterwards (gateway's internal/gateway/updater_agent/apply.go).
+#   * there is no session to sever. That path is driven by a daemon, with no
+#     operator, no tty and no tunnel — the whole failure this guard exists for
+#     cannot occur there.
+#   * the updater already IS the guard on that path, by enforcement rather
+#     than by convention: gateway's migrations/run.sh stops "only the gateway
+#     itself: never the updater. update.sh runs under the updater, so booting
+#     that out would kill the process running this script", and install.sh
+#     refuses to replace burrowee-gateway-updater from inside an update it is
+#     running. It also carries its own per-binary rollback
+#     ($BIN_DIR/<bin>.bak-$$, restored on failure).
+#   * and a guard there would be structurally wrong, not merely redundant: it
+#     would have to restart the process it is running underneath. A second
+#     supervisor under the supervisor is how the deadlock this design removes
+#     gets reintroduced.
+#
+# So: do not add txn_begin/snapshot_take/guard_arm to the BURROWEE_UPDATE
+# branch. The absence is the design.
+#
 # EXIT CONTRACT: 0 ok · 1 rolled-back or aborted · 2 failed.
 #
 # `aborted` is the fourth phase and the youngest: an install that was undone on
@@ -55,10 +86,20 @@
 # version, that fourth path lands in the same empty-snapshot arm — and there
 # the sentence is false twice over: the new unit IS loaded, and it is probably
 # crash-looping. RESTART_ATTEMPTED below is what tells the two apart, and that
-# path reports `failed` ("this host needs hands"), which is what it is: the
-# host is not serving, and nothing could be put back because there was nothing
-# to put back. No new phase token for it — `failed` already means exactly that
-# and the gateway cli already renders it.
+# path reports `failed`, which is what it is: the host is not serving, and
+# nothing could be put back because there was nothing to put back. No new phase
+# token for it — `failed` already means exactly that and the gateway cli
+# already renders it.
+#
+# THE CLI'S SUMMARY FOR `failed` HAD TO BE REWORDED FOR THIS, and the two repos
+# are in step deliberately. It used to read "the rollback itself did not come up
+# — this host needs hands", which is right about the OTHER `failed` writer (the
+# tail of rollback(), where a previous install really was restored and really
+# did not come back) and false here, where nothing was restored because there
+# was nothing to restore. It now says the one thing true of both writers — "the
+# host is not serving and the guard could not get it serving — this needs
+# hands" — and guard-status prints the guard log tail directly beneath it, where
+# each of the two FAILED lines below says in full which door this was.
 set -eu
 
 
@@ -437,12 +478,25 @@ verify_serving() {
 }
 
 # ---------------------------------------------------------------------------
-# SHARED WITH install.sh, BYTE FOR BYTE, and pinned by
-# tools/guard-rollback.test.sh so it cannot drift. install.sh's abort_install
-# asks the same question this file's rollback does — "is there a previous
-# install behind this snapshot at all" — and answers `aborted` rather than
-# `rolled-back` when there is not. See that file's copy for why the duplication
-# is deliberate here rather than a shared library.
+# THE ROOT-SIDE READER of the question install.sh's abort_install also asks —
+# "is there a previous install behind this snapshot at all" — which it answers
+# `aborted` rather than `rolled-back` when there is not.
+#
+# THE TWO ARE NO LONGER ONE BODY, and that is deliberate rather than drift.
+# This file is execed AS ROOT by launchd/systemd, so a bare `[ -d ]` and a glob
+# are a complete answer here and there is nothing better to reach for — the
+# elevated-read helpers are install.sh's, and giving the rollback path a second
+# file it must find is a way for a rollback to fail that this shape does not
+# have. install.sh runs from an unprivileged shell against a root-owned 0700
+# transaction, where the same two lines could answer "no binaries" out of
+# blindness, so its copy is a THREE-state reader over txn_list_dir
+# (snapshot_binaries_state). They were pinned byte-for-byte until that
+# difference had to be admitted.
+#
+# What is pinned now is the thing worth pinning: on a snapshot both readers can
+# see, they must reach the same verdict — tools/guard-rollback.test.sh,
+# t_snapshot_binaries_predicates_agree, which extracts both bodies and runs
+# them against one set of fixtures.
 # ---------------------------------------------------------------------------
 # snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
 # previous install's binaries, or is this directory the empty shell a fresh
@@ -548,11 +602,11 @@ rollback() {
     #     "the previous one was restored and is serving" about a host that has
     #     no previous one and is serving nothing.
     #
-    # `failed` would be no better: that phase means "the rollback did not come
-    # up either — this host needs hands", and a virgin host with no gateway
-    # running needs no hands at all. It is in exactly the state it was found
-    # in, which is the thing the operator has to be told. Hence a phase of its
-    # own.
+    # `failed` would be no better: that phase means "the host is not serving and
+    # the guard could not get it serving — this needs hands", and a virgin host
+    # with no gateway running needs no hands at all. It is in exactly the state
+    # it was found in, which is the thing the operator has to be told. Hence a
+    # phase of its own.
     #
     # The binaries this run placed are left on disk. Removing them is not an
     # undo this guard can make safely (it does not know which of them the host
@@ -789,6 +843,27 @@ do_restart() {
         # widens the recycled-pid hazard guard_refuse_concurrent's own header
         # rejects: an install refused forever by a pid that no longer belongs
         # to any guard is far worse than one skipped sweep.
+        #
+        # A THIRD DISCRIMINATOR WAS WEIGHED AND REJECTED, recorded here so it is
+        # not rediscovered as a new idea: a TIME-BOUNDED refusal — terminal
+        # phase AND a live guard.pid AND no completion marker AND a phase file
+        # younger than N seconds refuses; older than N, proceed. It is the one
+        # variant with NO forever-refusal hazard, and that is a real difference
+        # from the two above rather than a restatement of them: the age of the
+        # phase file only ever grows, so a recycled pid stops being able to
+        # block anything after N seconds whatever else on the host is true,
+        # which is precisely the promise a completion marker and a live-pid
+        # check cannot make.
+        #
+        # It was rejected on PRICE, not on correctness. It needs a fourth marker
+        # written into the transaction, a clock read inside
+        # guard_refuse_concurrent, and an N that nobody can choose honestly
+        # without a field report to fit it to — a knob whose only correct value
+        # is unknown is a knob that will be set wrong. What all of that buys is
+        # three housekeeping steps (the stale-bin sweep, the updater advance,
+        # the snapshot prune) on a host whose daemon has ALREADY been verified
+        # serving, and which the second install's own guard re-runs on its own
+        # success. Not worth it. Revisit if the window is ever reported hit.
         phase ok
         log "OK — $_want is serving"
 

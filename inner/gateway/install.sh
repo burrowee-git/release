@@ -213,16 +213,41 @@ SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 
 # ---------------------------------------------------------------------------
-# UNREACHABLE FROM THE FRESH-INSTALL PATH, AND KEPT ON PURPOSE — read this
-# before deleting any of it.
+# UNREACHABLE FROM EVERY MODE, AND KEPT ON PURPOSE — read this before deleting
+# any of it.
 #
 # WAIT_INTERVAL, WAIT_CEILING, SERVE_UNIT_STARTED, binary_version_stamp and
 # wait_for_running_version below are no longer called by the default mode:
 # Task 7 moved the restart (and therefore the wait that follows it) into
 # guard.sh, and SERVE_UNIT_STARTED is now set twice and read nowhere on this
-# component. BURROWEE_UNITS_ONLY still reaches load_units, which still sets it.
+# component.
 #
-# They stay because this whole block is DRIFT-PINNED BYTE-FOR-BYTE against
+# BURROWEE_UNITS_ONLY USED TO BE THE ONE MODE THAT STILL REACHED THEM, through
+# load_units, and it no longer does: `service install` and `doctor --fix` are
+# operator verbs typed in a session that is routinely tunnelled through the
+# gateway they restart, so that mode hands its restart to the guard exactly as
+# the fresh path does. The whole chain went unreachable with it —
+# load_units, start_unit_darwin, start_unit_linux, UPDATER_START_FAILED and
+# finish_with_updater_verdict included. NONE of it is dead weight to be swept
+# up in a later tidy:
+#
+#   * start_unit_darwin() and start_unit_linux() are pinned BYTE-IDENTICAL
+#     across four files by tools/prefix-gate-drift.test.sh, and load_units is
+#     gateway's only caller of them — deleting it leaves two functions nothing
+#     in this file references, which is the state a future reader deletes.
+#   * tools/install-no-bootout.test.sh requires a literal `kickstart -k` in
+#     this file, so that its "the installer never boots the serve label out"
+#     check cannot pass vacuously on a file that simply stopped starting the
+#     service. That literal lives in start_unit_darwin.
+#   * edge and relay still restart synchronously through the identical block.
+#     Gateway's copy is what the drift pins compare theirs against.
+#
+# So the correct reading of this whole region is "the shared shape, retained
+# for the pins, executed by the other components" — not "gateway code with no
+# caller". Removing it is a four-file change with its own brief, not a
+# side-effect of a gateway task.
+#
+# They stay ALSO because this block is DRIFT-PINNED BYTE-FOR-BYTE against
 # inner/edge/install.sh by tools/install-waits-for-daemon.test.sh (its sections
 # 2 and 6): edge still waits synchronously, the house idiom for shared
 # install-time logic with no shared library is a duplicated block plus a pin,
@@ -586,10 +611,18 @@ ensure_root_exec_surface() {
     # supervisor execs it AS ROOT (guard_arm), so it must sit on a path no
     # unprivileged user can rewrite. It is placed here so that every mode
     # converges it, and re-placed and PROVEN in guard_arm itself, which is the
-    # only caller that actually hands the path to launchd/systemd — a host
-    # converging off a bundle that predates the guard has nothing to place, and
-    # must not have `service install` refused over an artefact that run never
-    # arms. See guard_arm's own root-secure refusal.
+    # caller that actually hands the path to launchd/systemd.
+    #
+    # THE `[ -f ]` GUARD IS NOT A TOLERANCE FOR AN UNGUARDED INSTALL. It used
+    # to be, and the reason recorded here — "a host converging off a bundle
+    # that predates the guard has nothing to place, and must not have `service
+    # install` refused over an artefact that run never arms" — stopped being
+    # true when units-only started arming. Both install paths now refuse
+    # without a guard, in guard_arm, out loud. What this guard still buys is
+    # that the refusal happens THERE, with guard_arm's message naming what is
+    # missing and why root would have to exec it, rather than here as an
+    # `install` of a file that does not exist. See guard_arm's own root-secure
+    # refusal.
     _reb_guard="$(dirname "$0")/guard.sh"
     if [ -f "$_reb_guard" ] && { [ ! -f "$BIN_DIR/guard.sh" ] || ! cmp -s "$_reb_guard" "$BIN_DIR/guard.sh"; }; then
         run_root /usr/bin/install -m 0755 "$_reb_guard" "$BIN_DIR/guard.sh" || return 1
@@ -1100,17 +1133,36 @@ prior_install_present() {
 }
 
 # ---------------------------------------------------------------------------
-# migration_sudo — the elevation command handed to the runner, following THIS
-# script's own root policy (run_root): a prompting `sudo` only when there is a
-# controlling tty to prompt on, `sudo -n` otherwise. An explicit SUDO from the
-# caller wins, so the updater's own seam still reaches the runner.
+# migration_sudo [probe] — the elevation command handed to the runner, following
+# THIS script's own root policy (run_root): a prompting `sudo` only when there is
+# a controlling tty to prompt on, `sudo -n` otherwise. An explicit SUDO from the
+# caller wins in either mode, so the updater's own seam still reaches the runner.
 #
 # The documented install flow is `curl … | sh`, where stdin is the pipe. A bare
 # `sudo` there fails with "no tty present and no askpass program" — and it fails
 # AFTER the runner has stopped the gateway, with none of run_root's hint text.
+#
+# `probe` IS THE READ-ONLY CALLER, AND IT NEVER PROMPTS, tty or no tty.
+# should_ask_before_migration forks the runner with BOTH streams discarded
+# (`>/dev/null 2>&1`), because the only thing it wants from that run is the exit
+# code. A prompting `sudo` inside it is therefore a bare `Password:` on the
+# operator's terminal with every line that would explain it thrown away — the
+# runner's `receipt_state` reads a 0600 root-owned receipt through $SUDO, so it
+# is a real read on a real host and not a hypothetical. Worse, it is a prompt
+# for a decision the operator has not been shown yet: the probe runs BEFORE the
+# consent prompt it exists to decide whether to ask.
+#
+# The cost of `-n` here is nil in the normal case and small in the worst one.
+# The identical read happens seconds later in the real run — with a warm sudo
+# timestamp on essentially every host, and with run_root's own prose around it
+# when it is not — and a probe that cannot read a receipt answers 12, which
+# should_ask_before_migration already treats as "cannot tell, proceed exactly as
+# today". Losing a warning is what a blind probe costs. It is a much better
+# trade than an unexplained password prompt.
 # ---------------------------------------------------------------------------
 migration_sudo() {
     if [ -n "${SUDO:-}" ]; then echo "$SUDO"; return 0; fi
+    if [ "${1:-}" = probe ]; then echo "sudo -n"; return 0; fi
     if has_tty; then echo "sudo"; else echo "sudo -n"; fi
 }
 
@@ -1166,10 +1218,14 @@ record_installed_version() {
 #
 # THE SECOND SEVER POINT. There are two places an install stops the gateway, and
 # only one of them is the restart: the migration ladder stops it to copy state at
-# rest (gateway's own migrations/run.sh, stop_gateway), a long way before
-# load_units ever restarts it. On a host administered THROUGH that gateway the
-# migration takes the operator's session with it, and a consent prompt reached
-# afterwards is asked of a terminal that is already gone.
+# rest (gateway's own migrations/run.sh, stop_gateway), a long way before the
+# guard is ever handed the restart. On a host administered THROUGH that gateway
+# the migration takes the operator's session with it, and a consent prompt
+# reached afterwards is asked of a terminal that is already gone.
+#
+# BOTH GUARDED PATHS ASK IT — the fresh install and BURROWEE_UNITS_ONLY. The
+# units-only one is `gateway service install` and `doctor --fix`, which is the
+# shape an operator repairing a host over their own tunnel actually types.
 #
 # THE RUNNER IS THE ONLY AUTHORITY ON "IS ANYTHING PENDING", and this function
 # does not become a second one. It asks — `run.sh --probe-pending` — and the
@@ -1213,7 +1269,10 @@ should_ask_before_migration() {
     # resolved a different $GW_HOME, a different config root or a different
     # $BIN_DIR would be answering about a different host than the run it speaks
     # for — see that function's header for what each of these values is.
-    GW_HOME="$GW_HOME"         PREFIX="$(dirname "$BIN_DIR")"         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR"         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR"         SUDO="$(migration_sudo)"         sh "$_probe_runner" --probe-pending >/dev/null 2>&1
+    # `migration_sudo probe`, not `migration_sudo`: this fork discards both
+    # streams, so a prompting sudo inside it is a naked `Password:` with its
+    # own explanation thrown away. See migration_sudo's header.
+    GW_HOME="$GW_HOME"         PREFIX="$(dirname "$BIN_DIR")"         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR"         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR"         SUDO="$(migration_sudo probe)"         sh "$_probe_runner" --probe-pending >/dev/null 2>&1
     _probe_rc=$?
     set -e
     # 10 and nothing else. Every other code — 11, 12, an old runner's 64, or
@@ -1345,14 +1404,22 @@ keep_installer_copy() {
     # ("$(dirname "$0")/guard.sh"), so a later default-mode re-run of this kept
     # copy has a guard to place onto the root-secure surface.
     #
-    # NOT for a units-only re-run — the earlier version of this comment said so
-    # and was wrong. BURROWEE_UNITS_ONLY exits inside its own mode block
-    # (finish_with_updater_verdict) and never reaches guard_arm at all; what it
-    # does reach is ensure_root_exec_surface, which places this same copy into
-    # $BIN_DIR. The copy that matters to a guard is the ROOT-OWNED one guard_arm
-    # makes under $BIN_DIR; this one is a source, never an exec target. Root
-    # never runs this file — see ensure_root_exec_surface's note beside the
-    # install.sh copy, and guard.sh's own header.
+    # FOR A UNITS-ONLY RE-RUN TOO, and that is a correction of a correction.
+    # This note twice said the opposite: first that units-only needed the copy,
+    # then that it never reaches guard_arm at all. The second was true of the
+    # unguarded units-only mode and is not true now — `service install` and
+    # `doctor --fix` arm the same guard the fresh path does, out of
+    # "$(dirname "$0")/guard.sh", and $GW_HOME/install.sh is one of the two
+    # scripts the cli resolves to run (gatewayInstallScript). A $GW_HOME
+    # holding install.sh with no guard.sh beside it is therefore a host on
+    # which `service install` REFUSES, the same way the fresh path refuses,
+    # rather than one that quietly installs unguarded.
+    #
+    # This copy stays a SOURCE and never an exec target either way. The copy a
+    # guard is actually run from is the ROOT-OWNED one under $BIN_DIR
+    # (ensure_root_exec_surface places it, guard_arm re-places and PROVES it);
+    # root never runs this file — see ensure_root_exec_surface's note beside
+    # the install.sh copy, and guard.sh's own header.
 
     _src_guard="$(dirname "$0")/guard.sh"
     if [ -f "$_src_guard" ]; then
@@ -1681,19 +1748,20 @@ wait_for_running_version() {
 # bootstrap/enable so the service can be started later; only the "kick a
 # possibly-already-running unit" steps are skipped.
 #
-# WHO REACHES THIS, and it is a short list — every restart below inherits it:
-#   fresh install (default mode)   an operator install; every binary was just
-#                                  re-placed unconditionally a few lines earlier
-#   BURROWEE_UNITS_ONLY            `gateway service install` / the offline
-#                                  LocalReinstall — an operator/console verb
-# and, decisively, who does NOT:
-#   BURROWEE_UPDATE                the updater's own push path. It calls
-#                                  render_units and never load_units, because
-#                                  the process running this script is the one
-#                                  a restart here would kill mid-update. That
-#                                  exclusion is structural, not a flag — do not
-#                                  add a load_units call to that branch.
-#   BURROWEE_UNINSTALL             tears units down on its own terms.
+# NOBODY REACHES THIS ANY MORE, on gateway. The list used to read "fresh
+# install and BURROWEE_UNITS_ONLY", and both have since handed their restart to
+# guard.sh — the fresh path in Task 7, units-only in this change — because both
+# are operator verbs run from a session that is routinely tunnelled through the
+# daemon this function restarts. BURROWEE_UPDATE never called it (the process
+# running this script is the one a restart here would kill mid-update; that
+# exclusion is structural, not a flag — do not add a load_units call to that
+# branch), and BURROWEE_UNINSTALL tears units down on its own terms.
+#
+# The function stays for the drift pins that make edge's and relay's still-live
+# copies comparable, and for the `kickstart -k` literal
+# tools/install-no-bootout.test.sh anchors to. The long note near the top of
+# this file ("UNREACHABLE FROM EVERY MODE, AND KEPT ON PURPOSE") is the full
+# argument; read it before deleting this.
 #
 # UNGATED, same as render_units and for the same reason: the units it loads are
 # now written on every install, so declining to load them would leave a host
@@ -1839,8 +1907,14 @@ load_units() {
 
 # ---------------------------------------------------------------------------
 # finish_with_updater_verdict — the last statement of every mode that calls
-# load_units. Exits 0 when the updater started (or was never asked to), and 1
-# when its start failed, having let everything after load_units run first.
+# load_units, of which there are now none: it goes unreachable with load_units
+# itself (see that function's header, and the top-of-file note). The updater
+# start it reports on happens in the guard now (guard.sh's advance_updater,
+# after a verified restart), where this shell cannot observe it and reattach's
+# verdict already covers the whole install.
+#
+# Exits 0 when the updater started (or was never asked to), and 1 when its
+# start failed, having let everything after load_units run first.
 #
 # It is an exit and not a `return 1` because the whole point is that it happens
 # AFTER the state-recording work and the doctor tail: a `set -e` abort at the
@@ -1892,16 +1966,58 @@ sha256_of() {
 # ---------------------------------------------------------------------------
 TXN_DIR=""
 TXN_STAMP=""
-# GUARD_ARMED — 1 only once guard_arm has both handed the guard to the
-# supervisor AND proved it started (guard_prove_armed). It is what abort_install
-# branches on: with no guard watching, the foreground restore is the only undo
-# there is; with one, the foreground restore is the WRONG undo.
+# GUARD_ARMED — THREE VALUES, not two, because there are three states and
+# collapsing them lost a host.
+#
+#   0          no guard was armed at all (BURROWEE_NO_RESTART, or guard_arm
+#              refused). Nothing will restart, and the foreground restore in
+#              abort_install is the only undo there is.
+#   1          guard_arm handed the guard to the supervisor AND guard_prove_armed
+#              saw it start. A guard is watching; the foreground restore is the
+#              WRONG undo, because it copies files and never restarts.
+#   unproven   the supervisor accepted the guard and guard_prove_armed could not
+#              READ the transaction to tell whether it started — a root-owned
+#              0700 tree and a host whose sudoers refuses every `sudo -n`
+#              (timestamp_timeout=0). The install continues, because a blind read
+#              is not evidence of a dead guard; but nothing downstream may ASSUME
+#              a guard will clean up.
+#
+# `unproven` used to be spelled `1`. guard_prove_armed's fail-open returned 0 and
+# guard_arm set the flag regardless, so a host where the guard was genuinely dead
+# ran the whole install claiming one was watching — and a later abort_install
+# handed its undo to that guard, printing "the guard is undoing this install"
+# about nothing at all, restoring nothing, restarting nothing. Fail-open is still
+# right (see guard_prove_armed); asserting a guard exists is what was wrong.
 GUARD_ARMED=0
 
 txn_begin() {
     TXN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
     TXN_DIR="$SYS_DATA_DIR/install/$TXN_STAMP"
+    # THIS IS NOW THE FIRST THING THAT CREATES $SYS_DATA_DIR, and that is why
+    # the mode of the DATA ROOT is set here rather than left to whoever gets
+    # there first.
+    #
+    # ensure_system_log_dir owns the 0700 rule for that root, and it applies it
+    # only when it created the root itself ("_data_root_existed") — correct,
+    # because re-tightening a root an operator already has is not this
+    # installer's call. But the transaction moved ahead of it: `mkdir -p
+    # $SYS_DATA_DIR/install/<stamp>` creates $SYS_DATA_DIR as a side effect,
+    # with the caller's umask, and ensure_system_log_dir then finds it already
+    # there and leaves it alone. On a host with a permissive umask that is a
+    # data root at 0775 — holding gateway.db and the register/console sockets —
+    # created that way by every guarded install, which is exactly the outcome
+    # the 0700 rule exists to make impossible.
+    #
+    # So the same rule, applied by the function that now creates it first: note
+    # whether the root was there before, and tighten only what this call
+    # brought into existence. ensure_system_log_dir keeps its own copy of the
+    # test for the paths that reach it without a transaction.
+    _txn_data_root_existed=0
+    if [ -d "$SYS_DATA_DIR" ]; then _txn_data_root_existed=1; fi
     run_root mkdir -p "$TXN_DIR/snapshot/bin" "$TXN_DIR/snapshot/units" || return 1
+    if [ "$_txn_data_root_existed" = 0 ]; then
+        run_root chmod 0700 "$SYS_DATA_DIR" 2>/dev/null || true
+    fi
     run_root chmod 700 "$SYS_DATA_DIR/install" "$TXN_DIR" || return 1
     printf '%s\n' "$$" | run_root tee "$TXN_DIR/installer.pid" >/dev/null || return 1
     txn_phase armed
@@ -2144,59 +2260,57 @@ snapshot_db() {
 }
 
 # ---------------------------------------------------------------------------
-# SHARED WITH guard.sh, BYTE FOR BYTE, and pinned by
-# tools/guard-rollback.test.sh so it cannot drift.
+# THE SAME QUESTION guard.sh's snapshot_has_binaries asks — "is there a
+# previous install behind this snapshot at all" — asked from the OTHER side of
+# a privilege boundary, and answered with one more state because from here
+# there is one more thing that can be true.
 #
-# The house idiom for install-time logic two scripts both need (there is no
-# shared shell library — see tools/install-waits-for-daemon.test.sh, which
-# pins wait_for_running_version and binary_version_stamp across the edge and
-# gateway installers the same way). A real library is the wrong shape HERE in
-# particular: guard.sh is execed as root by launchd/systemd out of $BIN_DIR
-# with the whole rollback path behind it, and giving that path a second file
-# it must find is a way for a rollback to fail that the current shape does not
-# have. install.sh cannot source guard.sh either — the sourcing that exists
-# runs the other way, and only in a subshell (guard.sh's
-# sweep_stale_bins_via_kept_installer), precisely because these two files
-# define the same names.
+# WHY NOT ONE BODY IN BOTH FILES. It was, byte for byte, and the pin that held
+# it there was itself recorded as standing in the way of this fix. The guard
+# runs as ROOT, execed by launchd/systemd: a bare `[ -d ]` and a glob are a
+# complete answer for it, and it has no elevated-read helper to reach for.
+# install.sh is routinely entered by an UNPRIVILEGED shell that elevates per
+# command, and txn_begin makes the transaction root-owned 0700 — which is the
+# whole reason txn_read_file / txn_list_dir / txn_file_exists exist. The shared
+# body used neither, so from here it could answer "no binaries" out of pure
+# blindness, and abort_install's prose then told the operator a fact about
+# their host ("this host had no previous gateway install") that this shell had
+# not established and could not have.
 #
-# So: one body, spelled identically in both files, and a test that fails the
-# build the moment they differ.
+# So the duplication ends rather than being re-pinned: two readers with
+# genuinely different powers get two predicates, and the test that used to
+# demand byte-identity now demands the thing that actually matters — that on a
+# snapshot BOTH can see, the two answer the same
+# (tools/guard-rollback.test.sh, t_snapshot_binaries_predicates_agree).
 #
-# AND THE PIN NOW STANDS IN THE WAY OF ONE KNOWN FIX, which is worth saying
-# here rather than being rediscovered at the point of failure. THIS copy runs
-# in the installer, which is routinely entered by an unprivileged shell, while
-# the transaction tree is root-owned 0700 — so its bare `[ -d ]` and glob are
-# blind in exactly the way txn_list_dir exists to correct, and abort_install's
-# no-guard branch can therefore read an empty snapshot on a host that has one.
-# The guard's copy has no such problem (it runs as root) and no such helper.
-# Routing this copy through txn_list_dir would fix the blindness and BREAK
-# byte-identity, so the pin would fail — correctly, since the two would no
-# longer be the same predicate. Fixing that finding therefore means re-scoping
-# the pin (or ending the duplication), not editing one copy and re-running the
-# test. Recorded, not fixed here.
+# THE THIRD STATE IS THE POINT. "No binaries" and "I could not look" are
+# different facts about a host, and only one of them licenses the sentence
+# "there was nothing to restore".
 # ---------------------------------------------------------------------------
-# snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
-# previous install's binaries, or is this directory the empty shell a fresh
-# host produces?
+# snapshot_binaries_state <snapshot-dir> — prints one of:
 #
-# snapshot_take copies only the names that were ALREADY in $BIN_DIR
-# (`[ -f "$BIN_DIR/$b" ]`), so on a host that has never had a gateway the
-# snapshot's bin/ is created and left empty — a distinction the rest of
-# rollback cannot make from the manifest alone, because `running_version` is
-# the placeholder `unknown` for BOTH "fresh host" and "the daemon was already
-# down".
+#   some     the snapshot holds at least one previous binary
+#   none     it was READ, and it holds none — the empty shell a fresh host
+#            produces, because snapshot_take copies only names that were
+#            already in $BIN_DIR (`[ -f "$BIN_DIR/$b" ]`)
+#   unknown  this shell cannot see into the transaction at all
 #
-# An `if` inside the loop, not `[ -e … ] && return 0`: an AND-list is the last
-# statement of the loop body, so on the final non-matching entry the `for`
-# itself returns 1 and `set -e` kills the guard mid-rollback. An `if` with no
-# `else` returns 0 whichever way it goes — the same shape, and the same
-# reason, as apply_retention's prune body below.
-snapshot_has_binaries() {
-    [ -d "$1/bin" ] || return 1
-    for _shb in "$1/bin"/*; do
-        if [ -e "$_shb" ]; then return 0; fi
-    done
-    return 1
+# `none` and `unknown` are told apart by the SNAPSHOT DIRECTORY ITSELF, and it
+# is a discriminator this script guarantees rather than hopes for: txn_begin
+# creates `snapshot/bin` and `snapshot/units` before anything else happens, so
+# a snapshot dir that lists as empty is not a fresh host — it is a shell that
+# cannot read the directory. That is the same shape guard_prove_armed uses
+# installer.pid for, for the same reason: a file that CERTAINLY exists is what
+# turns an empty answer into evidence.
+#
+# txn_list_dir and not a glob: it is the helper that degrades to `sudo -n`,
+# which is what makes the common unprivileged install answer `some`/`none`
+# instead of `unknown`. Its own header explains why the elevation is
+# non-interactive.
+snapshot_binaries_state() {
+    if [ -n "$(txn_list_dir "$1/bin")" ]; then printf 'some\n'; return 0; fi
+    if [ -n "$(txn_list_dir "$1")" ]; then printf 'none\n'; return 0; fi
+    printf 'unknown\n'
 }
 
 # snapshot_restore — put the last working point back. Every failure is
@@ -2292,6 +2406,13 @@ guard_arm() {
     # anyway, and the guard restarted the daemon anyway. This file's own
     # documentation of the flag (load_units' header, and the design) said the
     # opposite the whole time.
+    #
+    # BURROWEE_UNITS_ONLY reaches this too now, and reads the same. It used to
+    # honour the flag through load_units' own staging branch — a `bootstrap` /
+    # `enable` without the kick — which was a WEAKER promise than the one the
+    # flag makes: on Darwin a `bootstrap` of a RunAtLoad plist starts the
+    # daemon. Both paths now leave the units rendered and unloaded, which is
+    # the promise.
     #
     # Honouring it means not arming here and not handing off later; the caller
     # reads GUARD_ARMED for the second half. The transaction and the snapshot
@@ -2473,9 +2594,24 @@ EOF
         ;;
     esac
 
-    guard_prove_armed || return 1
-    GUARD_ARMED=1
-    echo "guard armed — transaction $TXN_DIR"
+    # Three outcomes, three states — see GUARD_ARMED's own declaration. `|| _gpa=$?`
+    # and not a bare call: this script runs under `set -e`, so guard_prove_armed's
+    # deliberate non-zero "unproven" return would abort the install here.
+    _gpa=0
+    guard_prove_armed || _gpa=$?
+    case "$_gpa" in
+    0)
+        GUARD_ARMED=1
+        echo "guard armed — transaction $TXN_DIR"
+        ;;
+    2)
+        GUARD_ARMED=unproven
+        echo "guard handed to the supervisor, unproven — transaction $TXN_DIR"
+        ;;
+    *)
+        return 1
+        ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -2574,6 +2710,16 @@ GUARD_ARM_INTERVAL="${GUARD_ARM_INTERVAL:-1}"
 # into a refusal costs the operator the install for a fact nobody established.
 # When installer.pid IS readable and neither guard marker appeared, the reads
 # work and the guard really did not start: that is the refusal, unchanged.
+#
+# THE BLIND PATH RETURNS 2, NOT 0, and that is the whole of what "fail open"
+# means here. It used to return 0, which guard_arm read as proof and turned into
+# GUARD_ARMED=1 — so on a host where the guard really had died, the install ran
+# to the end announcing a guard that was not there, and a later abort_install
+# deferred its entire undo to it: "the guard is undoing this install" printed
+# over a host where nothing restored anything and nothing restarted. Continuing
+# is still the right call (a blind read is not evidence of a dead guard, and
+# refusing costs the operator an install for a fact nobody established); saying
+# `1` about it was not. 2 means CONTINUE, UNPROVEN.
 # ---------------------------------------------------------------------------
 guard_prove_armed() {
     _gpa_waited=0
@@ -2597,7 +2743,9 @@ guard_prove_armed() {
         echo "hint: run the install as root (or with a warm sudo timestamp) to get the" >&2
         echo "hint: arm-proof back; watch the outcome with 'burrowee gateway service" >&2
         echo "hint: guard-status' either way." >&2
-        return 0
+        # 2, never 0: continue, but do not let anything downstream claim a guard
+        # is watching. See this function's header and GUARD_ARMED's declaration.
+        return 2
     fi
     echo "error: the install guard was handed to the supervisor, which accepted it, but the" >&2
     echo "error: guard never started: neither $TXN_DIR/guard.pid nor $TXN_DIR/guard.log" >&2
@@ -2972,7 +3120,28 @@ consent_to_sever() {
 # NO GUARD ARMED (BURROWEE_NO_RESTART): nothing this run was ever going to
 # restart anything, and no guard exists to hand the undo to — so the
 # foreground restore IS the whole undo, and marking the phase terminal records
-# it for guard-status. This is the ONLY remaining caller of snapshot_restore.
+# it for guard-status.
+#
+# GUARD UNPROVEN: the third state, and the reason GUARD_ARMED is not a boolean.
+# The supervisor accepted the guard and guard_prove_armed could not READ the
+# transaction to tell whether it started (a root-owned 0700 tree, and a host
+# whose sudoers refuses every `sudo -n`). Deferring the whole undo to a guard
+# that may not exist is how this branch used to strand such a host: it printed
+# "the guard is undoing this install" and did nothing, and nothing else ever
+# did anything either. So this arm takes the halves that are safe under BOTH
+# possibilities:
+#
+#   * it RESTORES in the foreground. If the guard is dead this is the only undo
+#     there is; if it is alive the guard restores the same files from the same
+#     snapshot moments later, and a file copied twice is a file copied.
+#   * it writes NO terminal phase. `rolled-back`/`aborted` are terminal, and a
+#     live guard reading a terminal phase takes its "already terminal" arm and
+#     stops — which would trade a possible stranding for a certain one, since
+#     only the guard can RESTART. Leaving the phase alone lets the guard reach
+#     its own verdict if it is there, and leaves guard-status showing a
+#     transaction that never finished if it is not, which is the truth.
+#   * it says both possibilities out loud, and gives the operator the one
+#     command that distinguishes them.
 #
 # AND IT WRITES THE PHASE THE SNAPSHOT ACTUALLY SUPPORTS. This branch used to
 # write `rolled-back` unconditionally, which guard-status renders as "the new
@@ -2983,15 +3152,27 @@ consent_to_sever() {
 # sentence names a build that never existed. `aborted` is the phase for
 # exactly that host ("there was no previous install to restore, so nothing was
 # started"), and it is true here in both halves: this mode restarted nothing by
-# construction. Same predicate the guard's own rollback uses on the same
-# directory, spelled the same way (snapshot_has_binaries above).
+# construction.
 #
 # Prose only, and knowingly so: nothing is started on this path either way, so
 # the phase file is the whole of what changes. But the phase file is what
 # guard-status reports to an operator, and it is the only record this mode
 # leaves.
 #
-# The exit status is 1 either way: an aborted install failed.
+# AND IT NEVER ASSERTS A HOST FACT IT DID NOT OBSERVE. The predicate is
+# snapshot_binaries_state, which has three answers and not two: this script is
+# routinely entered by an unprivileged shell and the transaction is root-owned
+# 0700, so "the snapshot holds no binaries" and "this shell cannot read the
+# snapshot" are both reachable — and the old two-valued predicate collapsed
+# them, printing "this host had no previous gateway install" out of blindness.
+# On `unknown` this branch says exactly what it saw, restores nothing (there is
+# nothing it could read to restore) and — the important half — writes NO
+# terminal phase. `aborted` there would record "there was no previous install"
+# as a finding, in the one direction that costs something: an operator who has
+# one, and now believes this run established they do not. A transaction left
+# un-finalised reads as unfinished, which is what it is.
+#
+# The exit status is 1 on every arm: an aborted install failed.
 # ---------------------------------------------------------------------------
 abort_install() {
     if [ "$GUARD_ARMED" = 1 ]; then
@@ -3002,19 +3183,53 @@ abort_install() {
         echo "install: check the outcome with: burrowee gateway service guard-status" >&2
         exit 1
     fi
-    if snapshot_has_binaries "$TXN_DIR/snapshot"; then
+    if [ "$GUARD_ARMED" = unproven ]; then
+        echo "install: $1 — a guard was handed to the supervisor, but this shell could not" >&2
+        echo "install: read the transaction to prove it started, so it may or may not be" >&2
+        echo "install: watching." >&2
+        echo "install: restoring the previous install here anyway: if the guard is dead this" >&2
+        echo "install: is the only undo there is, and if it is alive it restores the same" >&2
+        echo "install: files from the same snapshot." >&2
+        snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
+        echo "install: the transaction is deliberately NOT marked finished — a live guard" >&2
+        echo "install: reading a terminal phase would stop without restarting anything, and" >&2
+        echo "install: restarting is the half this shell cannot do." >&2
+        echo "install: transaction $TXN_DIR" >&2
+        echo "install: check whether the guard reported: burrowee gateway service guard-status" >&2
+        echo "install: if it never does, start the gateway by hand: sudo burrowee gateway service install" >&2
+        exit 1
+    fi
+    case "$(snapshot_binaries_state "$TXN_DIR/snapshot")" in
+    some)
         echo "install: $1 — restoring the previous install." >&2
         echo "install: no guard was armed this run (BURROWEE_NO_RESTART), and nothing was" >&2
         echo "install: restarted, so the running gateway is the one this restores." >&2
         snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
         txn_phase rolled-back
         exit 1
-    fi
-    echo "install: $1 — there is nothing to restore." >&2
-    echo "install: this host had no previous gateway install, and no guard was armed this" >&2
-    echo "install: run (BURROWEE_NO_RESTART), so nothing was started and nothing was undone." >&2
-    echo "install: the host is as it was found, apart from the files this run placed." >&2
-    txn_phase aborted
+        ;;
+    none)
+        echo "install: $1 — there is nothing to restore." >&2
+        echo "install: this host had no previous gateway install, and no guard was armed this" >&2
+        echo "install: run (BURROWEE_NO_RESTART), so nothing was started and nothing was undone." >&2
+        echo "install: the host is as it was found, apart from the files this run placed." >&2
+        txn_phase aborted
+        exit 1
+        ;;
+    esac
+    # unknown — and the message says what was OBSERVED, not what is true of the
+    # host. The transaction is root-owned 0700, this shell is not root, and its
+    # `sudo -n` fallback was refused, so nothing at all could be read out of it:
+    # a previous install may be sitting in that snapshot unrestored.
+    echo "install: $1 — and this shell cannot read the transaction, so whether there is a" >&2
+    echo "install: previous install to restore could not be established." >&2
+    echo "install: $TXN_DIR is root-owned and 0700; this install is running unprivileged and" >&2
+    echo "install: its non-interactive elevation ('sudo -n') was refused, which is what a" >&2
+    echo "install: sudoers with timestamp_timeout=0 does to every read here." >&2
+    echo "install: nothing was started (BURROWEE_NO_RESTART) and nothing was restored." >&2
+    echo "install: the transaction is deliberately left unfinished rather than recorded as" >&2
+    echo "install: 'nothing to restore', which this run did not observe." >&2
+    echo "install: inspect it as root: sudo ls -l $TXN_DIR/snapshot/bin" >&2
     exit 1
 }
 
@@ -3077,7 +3292,16 @@ reattach() {
             echo "install: Details: burrowee gateway service guard-status" >&2
             return 1 ;;
         failed)
-            echo "install: the rollback did not come up either — this host needs hands." >&2
+            # NOT "the rollback did not come up either". Two guard paths write
+            # `failed`, and only one of them rolled anything back: the other is
+            # a host with no previous install to restore, whose new build was
+            # started and never reported its version. This line is read by an
+            # operator who may be on either, so it says the half that is true of
+            # both and leaves the which-door to the guard log guard-status
+            # prints. Same sentence the cli's own guardPhaseSummary renders —
+            # the two are kept in step on purpose.
+            echo "install: the host is not serving and the guard could not get it serving —" >&2
+            echo "install: this needs hands." >&2
             echo "install: burrowee gateway service guard-status $TXN_STAMP" >&2
             return 2 ;;
         esac
@@ -3101,26 +3325,91 @@ if [ -n "${BURROWEE_SOURCE_ONLY:-}" ]; then
 fi
 
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
+    # ------------------------------------------------------------------
+    # `burrowee gateway service install` and `doctor --fix`, both of which
+    # reach here through installGatewayUnits (gateway's
+    # cmd/burrowee-gateway-cli/service.go). Both are OPERATOR verbs, typed in
+    # an operator's session — and on a gateway that session is routinely
+    # tunnelled THROUGH the daemon this mode stops and starts.
+    #
+    # SO THIS MODE IS GUARDED, exactly like the fresh-install path below, and
+    # for exactly the same two sever points:
+    #
+    #   migrate_from_legacy   gateway's own migrations/run.sh stops (and on
+    #                         Darwin unloads) the daemon to copy state at rest
+    #   the restart           which used to be load_units, right here, in this
+    #                         script's own foreground
+    #
+    # It had BOTH and neither was protected: an operator running `service
+    # install` over their own tunnel lost the shell at whichever came first,
+    # and everything after it — the version anchor above all — silently never
+    # ran, on a host whose daemon was already down.
+    #
+    # ONE GUARD, THE SAME ONE. txn_begin / snapshot_take / guard_arm here are
+    # the same three calls the fresh path makes, handing the same guard.sh to
+    # the same supervisor; there is no second implementation and no
+    # units-only variant of it. What differs is stated at each of the two
+    # points below where it actually differs.
+    # ------------------------------------------------------------------
+
     # First, ahead of the consent prompt and every write: this mode places no
     # binaries at all, so the cli the runner will probe is the one already on
     # disk. If it cannot migrate, render_units below would leave root-scheme
     # units on a host whose state never moved.
     assert_can_migrate "$(migrate_cli_path)"
+    # AHEAD OF txn_begin, and deliberately not moved down beside the fresh
+    # path's own call. Both of these are read-and-refuse: they inspect the
+    # unit already on disk and either return or exit, writing nothing. Run
+    # before the transaction exists, a refusal costs a snapshot that was never
+    # taken and a guard that was never armed. Run after, the same refusal
+    # exits the installer at phase `replacing`, and the guard's installer-died
+    # branch then "rolls back" a host on which nothing was ever done. The
+    # fresh path has no choice — it has already placed binaries by the time it
+    # asks — and this one does.
     check_service_override
+
+    # ---- Phase 0: snapshot + arm --------------------------------------
+    # BEFORE remove_legacy_user_units, which is this mode's first write, and a
+    # long way before migrate_from_legacy, which is its first STOP. Arming
+    # after either would leave the guard blind to the sever point that
+    # actually fires first on a migrating host.
+    txn_begin
+    snapshot_take
+    guard_arm
+
+    # ---- Phase 1: replace ---------------------------------------------
+    # `replacing` and not a new token: the phase file is a state machine
+    # shared with guard.sh and with the cli's guardPhaseSummary, and what this
+    # phase means there is "writes are in flight and the snapshot can undo
+    # them", which is exactly true here. That this mode's writes are units and
+    # migrated state rather than binaries is not a distinction anything
+    # downstream acts on.
+    txn_phase replacing
+
     remove_legacy_user_units
-    # Before render_units as well as before load_units. Before load_units because
-    # the migration stops the gateway to copy its store at rest and load_units is
-    # what starts it again; before render_units because a migration that fails for
-    # ANY reason exits this script — and a root-scheme unit left on disk by a run
-    # that then aborted is bootstrapped by launchd at the next reboot regardless,
-    # against a config root the migration never populated.
+    # The migration's own consent gate, asked BEFORE the stop and not at the
+    # restart — the same reasoning, and the same call, as the fresh path's:
+    # on a host with a pending rung the runner stops the daemon and takes a
+    # tunnelled operator's session with it, so a prompt read afterwards is
+    # read from a terminal that no longer exists. Silent when nothing is
+    # pending, never asked at all with no tty (should_ask_before_migration).
+    if should_ask_before_migration; then
+        consent_to_sever migration
+    fi
+    # Before render_units. A migration that fails for ANY reason exits this
+    # script — and a root-scheme unit left on disk by a run that then aborted
+    # is bootstrapped by launchd at the next reboot regardless, against a
+    # config root the migration never populated.
     migrate_from_legacy
     render_units
-    load_units
-    # Only now: the units naming $BIN_DIR are not merely written, they are the
-    # ones the supervisor is running. See sweep_stale_user_bins' header for why
-    # this cannot move earlier.
-    sweep_stale_user_bins
+
+    # ---- the state writes, ALL of them before the handoff --------------
+    # These used to sit after load_units, which is to say after the sever
+    # point — so an operator whose session died at the restart kept the newly
+    # rendered root-scheme units and the migrated state, and kept an anchor
+    # still naming the OLD release. record_installed_version is what the NEXT
+    # run's migration gate reads, so a stale anchor there does not merely
+    # mis-report this run: it feeds the wrong floor into every run after it.
     report_unrecorded_migration
     # The anchor, from the fourth and last entry point. Its absence here is a
     # large part of why the ledger is effectively unwritten in the field: the
@@ -3135,15 +3424,124 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     if [ "$MIGRATE_UNRECORDED" = "0" ]; then
         record_installed_version "${BURROWEE_VERSION:-}"
     fi
-    # This mode calls load_units too, so it owns the same deferred verdict: the
-    # anchor above is written first, and only then does a failed updater start
-    # decide the exit status.
-    finish_with_updater_verdict
-fi
 
+    # ---- Phase 2: verify ----------------------------------------------
+    #
+    # verify_placement IS DELIBERATELY NOT CALLED HERE, and skipping it is not
+    # a gap this mode tolerates — it is a check that has nothing to say about
+    # this mode, in two independent ways:
+    #
+    #   * it walks $BINS, which includes `burrowee` and `burrowee-register`.
+    #     This mode places neither (nothing but ensure_root_exec_surface
+    #     places anything at all here), so on a host that legitimately does
+    #     not carry them it would fail an install that did nothing wrong.
+    #   * its last and strongest check compares each placed binary's sha256
+    #     against the archive copy `./$b`. There is no archive on this path —
+    #     `service install` runs a kept installer with no bundle beside it —
+    #     so that comparison is skipped by its own `[ -f "./$b" ]` guard and
+    #     the "verify" would be a walk of files this run never touched.
+    #
+    # WHAT ACTUALLY PLACES ANYTHING HERE ALREADY VERIFIES ITSELF.
+    # render_units calls ensure_root_exec_surface, which places $ROOT_BINS,
+    # this script and guard.sh into $BIN_DIR and then ends in
+    # verify_root_exec_surface — the root-owned, non-root-writable-to-/ walk
+    # over every path a unit is about to name. It returns non-zero and
+    # render_units aborts under `set -e` before a single unit is written. So
+    # the placement this mode performs is proved by the function that performs
+    # it, which is a stronger arrangement than a second pass over it here.
+    #
+    # verify_units DOES apply and IS called: units are genuinely rendered on
+    # this path, and its own last check — that the serve unit's ExecStart
+    # target is executable — is precisely the pairing between the unit just
+    # written and the binary ensure_root_exec_surface just placed.
+    echo "note: this mode places no binaries, so there is no bundle to verify a" >&2
+    echo "note: placement against; the root-exec surface render_units did place was" >&2
+    echo "note: proved by verify_root_exec_surface before any unit was written." >&2
+    verify_units || abort_install "unit verification failed"
+
+    txn_phase verified
+    echo "verified: the units are in place and consistent"
+
+    # ---- Phases 3-5: consent, handoff, reattach ------------------------
+    #
+    # THE RESTART IS NOT PERFORMED HERE. load_units used to be the statement
+    # above this one, and it restarted the daemon in this shell's foreground —
+    # the shell reading its output over a tunnel through that very daemon. The
+    # guard armed at Phase 0 owns it now: it holds the snapshot, it is a child
+    # of launchd/systemd rather than of this session, and it can roll back if
+    # the new build does not come up, which this shell cannot do once its own
+    # connection is the thing that just dropped.
+    #
+    # sweep_stale_user_bins moved with it rather than staying here. It deletes
+    # per-user binaries, and until the daemon has actually restarted onto the
+    # loaded units a still-running per-user process may still name one — so it
+    # must run AFTER a verified restart, which on this path means inside the
+    # guard. guard.sh's do_restart runs it (sweep_stale_bins_via_kept_installer)
+    # off the root-secure $BIN_DIR/install.sh, only on the verified-serving
+    # branch. The updater start load_units used to perform moves the same way,
+    # to the guard's advance_updater — which is why finish_with_updater_verdict
+    # is gone from this mode's tail: there is no foreground updater start left
+    # for it to report on, and reattach's verdict covers the whole install.
+    #
+    # `!= 0`, not `= 1`: GUARD_ARMED is also `unproven` (see its declaration).
+    # Same reasoning as the fresh path's — a guard the supervisor accepted is
+    # watching a deadline, and skipping the handoff would leave it to time out
+    # and roll a healthy host back.
+    _verdict=0
+    if [ "$GUARD_ARMED" != 0 ]; then
+        consent_to_sever restart
+
+        # Printed BEFORE the handoff, never after: once the guard restarts the
+        # gateway, this connection — tunnelled through the very daemon being
+        # restarted — may already be gone, and a line printed into a dead
+        # connection reaches no one.
+        echo ""
+        echo "handing the restart to the guard. If this connection drops, reconnect and run:"
+        echo "    burrowee gateway service guard-status"
+        echo ""
+        txn_phase handoff
+
+        # `|| _verdict=$?`, never a bare call: under `set -e` a reattach
+        # returning 1 (rolled back) or 2 (the rollback failed) would abort
+        # here instead of reaching the exit below with the verdict it just
+        # computed.
+        reattach || _verdict=$?
+    else
+        # BURROWEE_NO_RESTART, honoured here the same way the fresh path
+        # honours it (guard_arm's own header): nothing was armed, so there is
+        # nobody to consent to, nobody to hand off to and nobody to reattach
+        # to. The units are rendered on disk and NOT loaded — loading them is
+        # what starts them, since a Darwin `bootstrap` on a RunAtLoad plist
+        # starts the daemon, which is the one thing this flag asks not to
+        # happen.
+        echo ""
+        echo "units staged on disk. Nothing was restarted (BURROWEE_NO_RESTART)."
+        echo "start the gateway when you are ready with:"
+        echo "    sudo burrowee gateway service install"
+        echo ""
+    fi
+
+    # NO DOCTOR TAIL, unlike the fresh path, and the reason is this mode's own
+    # callers: `doctor --fix` reaches here through installGatewayUnits, so a
+    # doctor call at the end of this block would be doctor running itself as
+    # its own last remediation step. The fresh path has no such caller.
+    #
+    # reattach's verdict, and nothing after it: 0 served / handed off
+    # unreported, 1 rolled back or aborted with nothing started, 2 the
+    # rollback itself failed.
+    exit "$_verdict"
+fi
 if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # ------------------------------------------------------------------
     # Update mode: per-binary sha256 change detection, transactional swap.
+    #
+    # NO INSTALL GUARD HERE, and that is a decision rather than an omission:
+    # this mode restarts nothing (it ends at BURROWEE_CHANGED and leaves the
+    # restart to the updater agent), it runs under a daemon with no operator
+    # session to sever, and the updater it runs under is already the thing
+    # that survives — a guard here would have to restart the process running
+    # it. The full argument is in guard.sh's header ("WHICH INSTALL MODES ARM
+    # A GUARD"); do not re-derive it, and do not add guard_arm below.
     # ------------------------------------------------------------------
 
     # Parse --version <ver> if present (does NOT gate the swap; sha256 does).
@@ -3634,8 +4032,15 @@ fi
 # to hand off to, and nobody to reattach to — the units are staged on disk and
 # that is the whole outcome. Skipping them is what makes the flag mean what
 # this file has always documented it to mean.
+#
+# `!= 0`, not `= 1`: GUARD_ARMED is also `unproven` (see its declaration), which
+# means the supervisor ACCEPTED the guard and only the proof was blind. A guard
+# that really did start is watching a deadline, and skipping the handoff would
+# leave it to time out and roll a healthy host back — so the handoff fires on
+# both non-zero states. What `unproven` changes is abort_install, which may not
+# hand its undo to a guard nobody saw, not whether the restart happens.
 _verdict=0
-if [ "$GUARD_ARMED" = 1 ]; then
+if [ "$GUARD_ARMED" != 0 ]; then
     # ---- Phase 3: consent --------------------------------------------------
     consent_to_sever restart
 

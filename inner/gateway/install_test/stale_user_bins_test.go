@@ -26,25 +26,53 @@
 // resolve to a real $HOME/.local/bin — the machines this suite runs on have
 // live burrowee installs in exactly that directory.
 //
-// WHY THESE RUN UNDER BURROWEE_UNITS_ONLY NOW, NOT THE PLAIN DEFAULT INSTALL.
-// The seam above used to be reachable from a plain fresh install: render
-// units, load them, THEN sweep. Fresh install no longer calls load_units (or
-// anything after it) in its own foreground at all — that restart is now the
-// guard's job, armed before the first write, specifically so a tunnelled
-// operator's severed session cannot skip it. sweep_stale_user_bins moves with
-// it in principle, but not in this change: it is deleted from the fresh
-// flow outright rather than relocated, because until the guard has verified
-// the daemon actually came up on the new units, a still-running per-user
-// process may still name one of the binaries the sweep deletes — that
-// relocation is Task 10's, inside the guard, after a verified restart.
-// BURROWEE_UNITS_ONLY is the one foreground entry point that still does
-// exactly what this file tests — load, then sweep, in one synchronous
-// process — so the seam stays covered here without inventing Task 10's
-// guard-side call.
+// WHERE THE SEAM IS DRIVEN FROM, AND WHY IT MOVED TWICE.
+//
+// It was reachable from a plain fresh install once: render units, load them,
+// THEN sweep. Task 7 took load_units and everything after it off that path, so
+// these tests were retargeted onto BURROWEE_UNITS_ONLY, which was then the one
+// foreground entry point that still did exactly this — load, then sweep, in one
+// synchronous process.
+//
+// It is not any more. `service install` and `doctor --fix` reach install.sh in
+// that mode, both typed in a session routinely tunnelled through the gateway
+// they restart, so the restart went to the guard there too — and the sweep went
+// with it rather than being left behind: it deletes per-user binaries, and
+// until the daemon has actually restarted onto the loaded units a still-running
+// per-user process may still name one. On macOS the serve plist's
+// KeepAlive.PathState keys off the binary's existence, so unlinking it does not
+// stale a future restart, it stops the running daemon.
+//
+// SO THE PRODUCTION CALL SITE IS NOW guard.sh, and it is one line:
+//
+//	BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins' \
+//	    "$BIN_DIR/install.sh"
+//
+// (guard.sh's sweep_stale_bins_via_kept_installer — the ROOT-SECURE copy under
+// $BIN_DIR, never the operator-writable one under $GW_HOME, and never by
+// re-entering `service install`, which would arm a second guard inside the
+// first one's success path.)
+//
+// These tests drive that exact command. It is not a stand-in for the real call
+// — it IS the real call, with the same $0 steering that makes install.sh's own
+// `$(dirname "$0")/migrations` resolution find the library beside it. What the
+// tests own is unchanged: does install.sh find the library, load it, call it,
+// with the environment it resolved, and say so loudly when the bundle it was
+// handed cannot answer.
+//
+// THE ORDERING CLAIM DID NOT COME WITH IT, because it cannot: "after a verified
+// restart" is now a property of guard.sh's do_restart, and this suite's
+// launchctl/systemd-run stubs never spawn a guard. It is covered against the
+// real guard.sh in tools/guard-rollback.test.sh, per platform shape, from both
+// sides — t_guard_ok_sweeps_stale_bins (it runs on the verified branch) and
+// t_guard_does_not_sweep_when_the_restart_fails (it does NOT run on the
+// rollback branch). The half that stayed here is the negative that protects the
+// move: TestUnitsOnlyDoesNotSweepInItsOwnForeground below.
 package install_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,6 +114,26 @@ func stageSweepLib(t *testing.T, dir, recordPath, binList string) {
 	}
 }
 
+// runSweepViaGuardSeam invokes sweep_stale_user_bins exactly as guard.sh's
+// sweep_stale_bins_via_kept_installer does: BURROWEE_SOURCE_ONLY=1 (so the mode
+// dispatch returns before any mode is entered), `sh -c '. "$0"; …'` with the
+// installer's path as $0 (sh has no other portable way to steer $0, and
+// install.sh's own `$(dirname "$0")/migrations` resolution depends on it), and
+// a subshell rather than a dot-source (install.sh defines BIN_DIR and
+// SYS_DATA_DIR, which the guard also uses).
+//
+// script is the staged installer; the library must sit at
+// <dir of script>/migrations/lib_stale_user_bins.sh, which is the layout
+// ensure_root_exec_surface leaves under $BIN_DIR on a real host.
+func runSweepViaGuardSeam(t *testing.T, script, home, stubDir string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", `. "$0"; sweep_stale_user_bins`, script)
+	cmd.Dir = home
+	cmd.Env = append(installShEnv(home, stubDir), "BURROWEE_SOURCE_ONLY=1")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // TestInstallShLoadsTheSweepFromTheBundleAndCallsIt is the seam: the sweep is
 // not open-coded in this installer any more, so "it ran" means "the library
 // shipped beside me was sourced and its entry point was called".
@@ -97,9 +145,9 @@ func TestInstallShLoadsTheSweepFromTheBundleAndCallsIt(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "sweep-env")
 	stageSweepLib(t, staging, record, shippedSweepList)
 
-	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
+	out, err := runSweepViaGuardSeam(t, stageInstaller(t, staging), home, stub)
 	if err != nil {
-		t.Fatalf("install failed: %v\n%s", err, out)
+		t.Fatalf("the sweep seam guard.sh uses failed: %v\n%s", err, out)
 	}
 	assertContains(t, out, "fake sweep: called")
 
@@ -120,43 +168,59 @@ func TestInstallShLoadsTheSweepFromTheBundleAndCallsIt(t *testing.T) {
 	}
 }
 
-// TestInstallShSweepsAfterTheUnitsAreLoaded pins the ordering as a fact about
-// this run rather than a claim about where the call sits in the file.
+// TestUnitsOnlyDoesNotSweepInItsOwnForeground is the surviving half of
+// TestInstallShSweepsAfterTheUnitsAreLoaded, and it is a negative because the
+// positive it replaced can no longer be observed from here.
 //
-// It works because the staged library appends to the SAME log as the stubbed
-// init system; two streams cannot be ordered against each other, and an
-// ordering test that compares stdout to a call log is really asserting nothing.
-// Forced Linux so the load step is a single unambiguous systemctl line on any
-// host the suite runs on.
+// That test pinned an ORDERING — the sweep must run after the units are loaded
+// — by having the staged library append to the SAME log as the stubbed init
+// system, so the two could be compared in one stream. It was a safety property,
+// not tidiness: a host arriving at an install may still be running a unit whose
+// ExecStart names the per-user path, and on macOS the KeepAlive.PathState this
+// installer writes keys off the binary's existence, so unlinking it stops the
+// running daemon rather than staling its next restart.
 //
-// The ordering is a safety property: a host arriving here may still be running
-// a unit whose ExecStart names the per-user path, and on macOS the
-// KeepAlive.PathState this installer writes keys off the binary's existence, so
-// unlinking it stops the running daemon rather than staling its next restart.
-func TestInstallShSweepsAfterTheUnitsAreLoaded(t *testing.T) {
+// The two events are no longer in one process. The load is the guard's restart,
+// and the sweep is the guard's post-success work — both on the far side of a
+// handoff, in a child of launchd/systemd this suite's stubs deliberately never
+// spawn. Ordering them from here would mean asserting against a process that
+// does not run. tools/guard-rollback.test.sh owns that claim now, from both
+// sides, against the real guard.sh: t_guard_ok_sweeps_stale_bins (the sweep
+// runs on the verified-serving branch) and t_guard_does_not_sweep_when_the_-
+// restart_fails (it does not run on the rollback branch — which is the same
+// safety property stated as the failure it prevents).
+//
+// What is checkable here, and what protects that arrangement, is the negative:
+// install.sh's own foreground must not call the sweep on this path. A
+// regression that put it back — the natural "shouldn't the installer clean up
+// after itself?" edit — would delete per-user binaries while the daemon is
+// still the OLD process running from one of them, and it would do it before the
+// guard has restarted anything at all.
+func TestUnitsOnlyDoesNotSweepInItsOwnForeground(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystemFor(t, "linux")
 	staging := t.TempDir()
 	seedMigrateCapableCLI(t, home)
-	stageSweepLib(t, staging, filepath.Join(t.TempDir(), "sweep-env"), shippedSweepList)
+	record := filepath.Join(t.TempDir(), "sweep-env")
+	stageSweepLib(t, staging, record, shippedSweepList)
 
 	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
 	if err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
-	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
-	loaded := strings.Index(calls, "systemctl restart burrowee-gateway.service")
-	swept := strings.Index(calls, "sweep ran")
-	if loaded < 0 {
-		t.Fatalf("the units were never loaded; calls:\n%s", calls)
+	// Not vacuous: the library really is where install.sh would find it, so an
+	// absent call is a decision and not a missing fixture. The seam test above
+	// runs the identical staging through guard.sh's own invocation and gets
+	// "fake sweep: called" out of it.
+	if _, statErr := os.Stat(filepath.Join(staging, "migrations", "lib_stale_user_bins.sh")); statErr != nil {
+		t.Fatalf("fixture broken: no sweep library beside the staged installer: %v", statErr)
 	}
-	if swept < 0 {
-		t.Fatalf("the sweep was never called; calls:\n%s\noutput:\n%s", calls, out)
+	if strings.Contains(out, "fake sweep: called") {
+		t.Errorf("units-only ran the stale-binary sweep in its own foreground — the daemon has not restarted onto the new units yet, so a still-running per-user process may still name a binary this deletes, and on Darwin deleting it STOPS that daemon:\n%s", out)
 	}
-	if swept < loaded {
-		t.Errorf("the sweep ran BEFORE the units were loaded — a unit still naming the per-user "+
-			"path would have been executing that binary; calls:\n%s", calls)
+	if _, statErr := os.Stat(record); statErr == nil {
+		t.Errorf("the sweep recorded a call at %s — it must not run until the guard has verified the restart", record)
 	}
 }
 
@@ -176,15 +240,16 @@ func TestInstallShIsLoudWhenTheBundleCarriesNoSweepLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
+	out, err := runSweepViaGuardSeam(t, stageInstaller(t, staging), home, stub)
 	if err != nil {
-		t.Fatalf("a missing cleanup library must not fail the install: %v\n%s", err, out)
+		t.Fatalf("a missing cleanup library must not fail the sweep step: %v\n%s", err, out)
 	}
 	assertContains(t, out, "THIS RELEASE IS INCOMPLETE", "lib_stale_user_bins.sh")
-	// BURROWEE_UNITS_ONLY places no binaries of its own — seedMigrateCapableCLI
-	// put these there before the run. The claim is the same as ever (a missing
-	// cleanup library must not cost the binaries already on disk), just checked
-	// against binaries this run never touched instead of ones it placed.
+	// The claim is the same as ever — a missing cleanup library must not cost
+	// the binaries already on disk — checked against the ones
+	// seedMigrateCapableCLI put there, which is also what a real host has when
+	// the guard reaches this step: everything already placed, nothing left to
+	// place.
 	for _, b := range allBins {
 		assertPresent(t, filepath.Join(binDir(home), b), "a missing cleanup library must not disturb the binaries already on disk")
 	}
@@ -228,9 +293,9 @@ func TestInstallShReportsASweepListThatDisagreesWithWhatItInstalls(t *testing.T)
 	stageSweepLib(t, staging, filepath.Join(t.TempDir(), "sweep-env"),
 		"burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register")
 
-	out, err := runStaged(t, stageInstaller(t, staging), home, home, stub, "BURROWEE_UNITS_ONLY=1")
+	out, err := runSweepViaGuardSeam(t, stageInstaller(t, staging), home, stub)
 	if err != nil {
-		t.Fatalf("install failed: %v\n%s", err, out)
+		t.Fatalf("the sweep seam guard.sh uses failed: %v\n%s", err, out)
 	}
 	assertContains(t, out, "the two lists disagree", "burrowee-gateway-updater")
 	// It still runs the sweep: a disagreement is a warning about coverage, not

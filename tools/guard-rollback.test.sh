@@ -336,6 +336,125 @@ STUB
     rm -rf "$_r"
 }
 
+# THE SWEEP RUNS ONLY AFTER A VERIFIED RESTART — the negative half, and the
+# half that carries the safety property.
+#
+# sweep_stale_user_bins deletes per-user binaries. Until the daemon has
+# actually come up on the loaded units, a still-running per-user process may
+# still name one of them — and on macOS the serve plist's
+# KeepAlive.PathState keys off the binary's existence, so unlinking it does not
+# merely stale a future restart, it stops the running daemon. The sweep used to
+# be ordered after the restart by sitting on the next line of install.sh, in a
+# single synchronous process; now it is ordered by sitting on do_restart's
+# verify_serving SUCCESS branch, which is a weaker-looking guarantee expressed
+# in code that can be got wrong in a way a line order cannot.
+#
+# So this is the same fixture as t_guard_ok_sweeps_stale_bins with the
+# supervisor set to `dead`: the new build never reports its version, the guard
+# rolls back, and the sweep must not have run. Without it, moving the three
+# post-success calls above the `if verify_serving` would pass every other test
+# in this file.
+t_guard_does_not_sweep_when_the_restart_fails() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" dead
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+
+    mkdir -p "$_r/bin/migrations"
+    cp "$HERE/inner/gateway/install.sh" "$_r/bin/install.sh"
+    cat > "$_r/bin/migrations/lib_stale_user_bins.sh" <<STUB
+STALE_USER_BINS="\$BINS"
+remove_stale_user_bins() {
+    printf 'SWEEP_CALLED BIN_DIR=%s\n' "\$BIN_DIR" >> "$_r/sweep.calls"
+}
+STUB
+
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+
+    [ "$(cat "$_t/phase")" = rolled-back ] \
+        || fail "[$_plat] fixture broken: phase = $(cat "$_t/phase"), want rolled-back"
+    if [ -f "$_r/sweep.calls" ]; then
+        fail "[$_plat] the stale-binary sweep ran on a restart that was NOT verified — it deletes per-user binaries a still-running process may still name, and on Darwin the serve plist's KeepAlive.PathState turns that deletion into a stop: $(cat "$_r/sweep.calls")"
+    fi
+    # The updater advance is on the same success branch and carries the same
+    # claim in miniature: nothing post-success may run on a rollback.
+    if grep -q "$(updater_advance_call "$_plat")" "$(supervisor_calls "$_r" "$_plat")" 2>/dev/null; then
+        fail "[$_plat] the updater was advanced on a rollback — the post-success work ran on the failure branch"
+    fi
+    rm -rf "$_r"
+}
+
+# THE GUARD MUST NOT FLAP THE UNITS, and it is the only thing left that could:
+# the installer's foreground no longer touches either label on any path.
+#
+# The serve label is advanced with `kickstart -k` and NEVER booted out on the
+# unchanged-body path (a bootout unloads the job, and an unloaded job is
+# supervised by nothing). The updater label IS booted out first — nothing
+# routes through it, so unloading it strands nothing — and then bootstrapped,
+# in that order: bootstrap-then-bootout would start the unit and immediately
+# stop it.
+#
+# This claim used to live in the Go suite
+# (inner/gateway/install_test/render_test.go's TestInstallShDefaultPathDoesNotFlapUnits),
+# driven through BURROWEE_UNITS_ONLY because that mode still loaded units
+# synchronously. It cannot live there any more — the Go harness's launchctl
+# stub records calls and never spawns the guard, so the calls it would count
+# are no longer made in that process at all. Here they are made by the real
+# guard.sh against a real (fake) supervisor, which is where they now happen.
+t_guard_does_not_flap_the_units() {
+    _plat="$1"
+    _r="$(mktemp -d)"; setup_fake_host "$_r" "$_plat"; fake_supervisor "$_r" "$_plat" advance
+    _t="$(make_txn "$_r" "$_plat")"
+    write_fake_bin "$_r/bin/burrowee-gateway" "NEW BINARY v0.3.1" v0.3.1
+    printf 'handoff\n' > "$_t/phase"
+    run_guard "$_r" "$_t" "$_plat"
+
+    _calls="$(supervisor_calls "$_r" "$_plat")"
+    [ "$(cat "$_t/phase")" = ok ] || { fail "[$_plat] fixture broken: phase = $(cat "$_t/phase"), want ok"; rm -rf "$_r"; return; }
+
+    case "$_plat" in
+    Darwin)
+        # Exactly one bootstrap per label — two of the same is the flap.
+        for _lbl in com.burrowee.gateway com.burrowee.gateway.updater; do
+            _n="$(count_calls "$_calls" "^bootstrap system $_r/units/$_lbl\\.plist\$")"
+            [ "$_n" = 1 ] \
+                || fail "[$_plat] $_lbl bootstrapped $_n time(s), want exactly 1; calls:
+$(cat "$_calls")"
+        done
+        # The serve label is advanced, and never unloaded (the unit body is
+        # unchanged in this fixture, so there is no reload to justify one).
+        [ "$(count_calls "$_calls" '^kickstart -k system/com\.burrowee\.gateway$')" -ge 1 ] \
+            || fail "[$_plat] the serve label was never kickstarted — the unit is loaded but the running process is still the old one; calls:
+$(cat "$_calls")"
+        [ "$(count_calls "$_calls" '^bootout system/com\.burrowee\.gateway$')" = 0 ] \
+            || fail "[$_plat] the serve label was booted out — an unloaded job is supervised by nothing; calls:
+$(cat "$_calls")"
+        # The updater is unloaded BEFORE it is bootstrapped, not after.
+        _ub="$(grep -n '^bootout system/com\.burrowee\.gateway\.updater$' "$_calls" | head -1 | cut -d: -f1)"
+        _us="$(grep -n "^bootstrap system $_r/units/com\\.burrowee\\.gateway\\.updater\\.plist\$" "$_calls" | head -1 | cut -d: -f1)"
+        { [ -n "$_ub" ] && [ -n "$_us" ] && [ "$_ub" -lt "$_us" ]; } \
+            || fail "[$_plat] the updater was bootstrapped before it was booted out (bootout=$_ub bootstrap=$_us) — that starts the unit and then stops it; calls:
+$(cat "$_calls")"
+        ;;
+    Linux)
+        # systemd re-reads the unit on daemon-reload, so there is no
+        # bootout/bootstrap pair to sequence; what must hold is that each unit
+        # is restarted and neither is plainly stopped.
+        [ "$(count_calls "$_calls" '^restart burrowee-gateway\.service$')" -ge 1 ] \
+            || fail "[$_plat] the serve unit was never restarted; calls:
+$(cat "$_calls")"
+        [ "$(count_calls "$_calls" '^restart burrowee-gateway-updater\.service$')" -ge 1 ] \
+            || fail "[$_plat] the updater unit was never restarted; calls:
+$(cat "$_calls")"
+        [ "$(count_calls "$_calls" '^stop burrowee-gateway\.service$')" = 0 ] \
+            || fail "[$_plat] the serve unit was stopped; calls:
+$(cat "$_calls")"
+        ;;
+    esac
+    rm -rf "$_r"
+}
+
 # A restart the new build never survives (verify_serving times out on the new
 # version, forcing a deadline is unnecessary to prove that path — t_guard_ok
 # already covers it) is not what this checks. This is the THIRD way out of
@@ -823,45 +942,122 @@ $(cat "$_calls")"
 }
 
 # ---------------------------------------------------------------------------
-# snapshot_has_binaries is SHARED between guard.sh and install.sh, and pinned.
+# THE TWO READERS OF ONE SNAPSHOT MUST AGREE — re-scoped from a byte-identity
+# pin, and the re-scoping is the finding.
 #
-# The guard's rollback and the installer's own no-guard abort_install ask the
-# same question of the same directory — "is there a previous install behind
-# this snapshot at all" — and both answer `aborted` rather than `rolled-back`
-# when there is not. There is no shared shell library (see
-# tools/install-waits-for-daemon.test.sh, which pins the wait helpers across
-# the edge and gateway installers exactly this way), and giving the guard's
-# rollback path a second file it must find would be a new way for a rollback
-# to fail. So: one body, spelled identically in both files, and this is what
-# makes a change to one visibly break the other.
+# guard.sh's rollback and install.sh's no-guard abort_install ask the same
+# question of the same directory: "is there a previous install behind this
+# snapshot at all", answered `aborted` rather than `rolled-back` when there is
+# not. They used to be ONE BODY spelled identically in both files, and this
+# check compared the bytes.
 #
-# The pin is therefore also a CONSTRAINT, not just a safety net: the installer's
-# copy is privilege-blind against a root-owned 0700 transaction (it globs
-# directly instead of going through txn_list_dir), and the correction for that
-# would break byte-identity with a guard that runs as root and has no such
-# helper. Fixing it means re-scoping this pin or ending the duplication — not
-# editing one copy and re-running this check. See install.sh's own banner.
+# That pin was itself recorded, in both files, as standing in the way of a known
+# defect: the installer's copy was a bare `[ -d ]` and a glob, run from an
+# UNPRIVILEGED shell against a transaction txn_begin makes root-owned 0700. It
+# could therefore answer "no binaries" out of blindness, and abort_install's
+# prose asserted a fact about the operator's host — "this host had no previous
+# gateway install" — that the shell had not established. The guard has no such
+# problem (it is execed as root) and no elevated-read helper to correct it with,
+# so routing the installer's copy through txn_list_dir was a fix byte-identity
+# could not survive.
+#
+# So the duplication ended and the pin moved to the property that was actually
+# worth protecting. The two are now different predicates with different powers —
+# guard.sh: snapshot_has_binaries, two states; install.sh:
+# snapshot_binaries_state, three, because from there "I could not look" is a
+# real answer — and what must never differ is their VERDICT on a snapshot both
+# can read. A drift check on bytes would now fail on every honest edit; this one
+# fails on the edit that matters.
+#
+# THE BLIND CASE IS DRIVEN TOO, and it is the defect's own fixture: a snapshot
+# the reader cannot see must come back `unknown` from the installer, never
+# `none`. Without it, a "fix" that simply dropped the third state would look
+# green.
 # ---------------------------------------------------------------------------
-extract_snapshot_has_binaries() {
-    awk '
-        /^# snapshot_has_binaries <snapshot-dir>/ { on = 1 }
+
+# extract_fn <file> <name> — one function definition, from its `name() {` line
+# to the first line that is exactly `}`. Comments are deliberately not carried:
+# these bodies are SOURCED below, and the point is to run the shipped code
+# rather than to compare prose about it.
+extract_fn() {
+    awk -v n="$2" '
+        $0 == n "() {" { on = 1 }
         on { print }
         on && /^}$/ { exit }
     ' "$1"
 }
 
-t_snapshot_has_binaries_is_pinned_across_both_files() {
+# ask_guard / ask_install — each predicate's verdict on one directory, rendered
+# into the same vocabulary so they can be compared at all. The guard answers
+# with an exit status; the installer prints one of three words.
+#
+# A separate `sh -c` per call, sourcing only the extracted bodies: install.sh
+# and guard.sh both run work at source time (and define the same names), so
+# neither can be sourced whole here — which is the same reason the two files
+# duplicate this logic in the first place.
+ask_guard() {
+    sh -c ". '$1'; if snapshot_has_binaries \"\$1\"; then echo some; else echo none; fi" _ "$2"
+}
+
+ask_install() {
+    PATH="$3:$PATH" sh -c ". '$1'; snapshot_binaries_state \"\$1\"" _ "$2"
+}
+
+t_snapshot_binaries_predicates_agree() {
     _w="$(mktemp -d)"
-    extract_snapshot_has_binaries "$HERE/inner/gateway/guard.sh"   > "$_w/guard"
-    extract_snapshot_has_binaries "$HERE/inner/gateway/install.sh" > "$_w/install"
-    if [ ! -s "$_w/guard" ]; then
-        fail "no snapshot_has_binaries block found in inner/gateway/guard.sh"
-    elif [ ! -s "$_w/install" ]; then
-        fail "no snapshot_has_binaries block found in inner/gateway/install.sh"
-    elif ! cmp -s "$_w/guard" "$_w/install"; then
-        fail "snapshot_has_binaries has drifted between guard.sh and install.sh:
-$(diff "$_w/guard" "$_w/install" 2>&1 || true)"
+    extract_fn "$HERE/inner/gateway/guard.sh" snapshot_has_binaries > "$_w/guard_fn.sh"
+    extract_fn "$HERE/inner/gateway/install.sh" txn_list_dir              > "$_w/install_fn.sh"
+    extract_fn "$HERE/inner/gateway/install.sh" snapshot_binaries_state  >> "$_w/install_fn.sh"
+
+    grep -q '^snapshot_has_binaries() {' "$_w/guard_fn.sh" \
+        || { fail "no snapshot_has_binaries in inner/gateway/guard.sh — the guard's rollback lost the predicate that tells a fresh host from a rolled-back one"; rm -rf "$_w"; return; }
+    grep -q '^txn_list_dir() {' "$_w/install_fn.sh" \
+        || { fail "no txn_list_dir in inner/gateway/install.sh — the installer's copy has no elevated read, so it answers about a root-owned 0700 transaction from blindness"; rm -rf "$_w"; return; }
+    grep -q '^snapshot_binaries_state() {' "$_w/install_fn.sh" \
+        || { fail "no snapshot_binaries_state in inner/gateway/install.sh — abort_install has no three-valued predicate, so 'no previous install' and 'could not look' are one answer again"; rm -rf "$_w"; return; }
+
+    # A pass-through sudo, so the installer's `sudo -n` fallback behaves as it
+    # does on an ordinary host with a warm timestamp.
+    mkdir -p "$_w/binok"
+    printf '#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n' > "$_w/binok/sudo"
+    chmod 0755 "$_w/binok/sudo"
+
+    # The two shapes txn_begin can leave behind, both readable.
+    mkdir -p "$_w/populated/bin" "$_w/populated/units"
+    printf 'OLD BINARY\n' > "$_w/populated/bin/burrowee-gateway"
+    mkdir -p "$_w/fresh/bin" "$_w/fresh/units"
+
+    for _case in populated:some fresh:none; do
+        _dir="$_w/${_case%%:*}"; _want="${_case##*:}"
+        _g="$(ask_guard "$_w/guard_fn.sh" "$_dir")"
+        _i="$(ask_install "$_w/install_fn.sh" "$_dir" "$_w/binok")"
+        [ "$_g" = "$_want" ] \
+            || fail "guard.sh's snapshot_has_binaries answered '$_g' for a ${_case%%:*} snapshot, want $_want"
+        [ "$_i" = "$_want" ] \
+            || fail "install.sh's snapshot_binaries_state answered '$_i' for a ${_case%%:*} snapshot, want $_want"
+        [ "$_g" = "$_i" ] \
+            || fail "the two readers disagree about a snapshot BOTH can see (${_case%%:*}): guard.sh says '$_g', install.sh says '$_i' — abort_install and rollback would report opposite things about one host"
+    done
+
+    # THE BLIND READER. Not root, the directory unreadable, and a `sudo` that
+    # refuses exactly as a sudoers with timestamp_timeout=0 refuses every
+    # `sudo -n` in this file. The installer must say `unknown` — the answer that
+    # keeps abort_install from asserting "this host had no previous gateway
+    # install" about a host it could not look at.
+    #
+    # Skipped under uid 0, where mode bits do not apply and the state cannot
+    # exist (txn_list_dir short-circuits for root, correctly).
+    if [ "$(id -u)" != 0 ]; then
+        mkdir -p "$_w/binno"
+        printf '#!/bin/sh\nexit 1\n' > "$_w/binno/sudo"
+        chmod 0755 "$_w/binno/sudo"
+        chmod 000 "$_w/populated"
+        _b="$(ask_install "$_w/install_fn.sh" "$_w/populated" "$_w/binno")"
+        chmod 755 "$_w/populated"
+        [ "$_b" = unknown ] \
+            || fail "install.sh's snapshot_binaries_state answered '$_b' for a snapshot it could not read at all, want unknown — 'none' there is how abort_install came to tell an operator their host had no previous install when it had one it could not see"
     fi
+
     rm -rf "$_w"
 }
 
@@ -933,8 +1129,34 @@ $(cat "$_calls")"
 # re-read anything — the first version of the check below did exactly that, and
 # would have passed against the defect it was written to catch. Two restarts,
 # two bootouts; one bootout means the rollback did not reload.
+#
+# `grep -c` PRINTS ITS COUNT AND STILL EXITS 1 when the count is zero, so the
+# obvious `grep -c … || printf '0\n'` appends a SECOND zero to the one grep
+# already wrote: the caller's `$( )` collapses to "0\n0", every arithmetic and
+# string comparison against it is wrong, and a failure message reads "saw 0\n0".
+# Capture first, then substitute for the non-zero exit — the substitution
+# already holds grep's own "0", and the fallback only has to cover the cases
+# where grep printed nothing at all (an unreadable or missing file, exit 2).
 count_calls() {
-    grep -c "$2" "$1" 2>/dev/null || printf '0\n'
+    _cc="$(grep -c "$2" "$1" 2>/dev/null)" || _cc="${_cc:-0}"
+    printf '%s\n' "${_cc:-0}"
+}
+
+# The helper's own no-match answer, pinned. Every assertion below compares
+# count_calls's output to a literal, so a helper that answers "0\n0" turns a
+# real regression into an unreadable failure message and an equality test that
+# can never pass — including the `[ "$_boots" = 2 ]` pair above, whose whole
+# job is to tell one bootout from two.
+t_count_calls_answers_zero_once() {
+    _ccw="$(mktemp -d)"
+    printf 'alpha\nbeta\n' > "$_ccw/log"
+    [ "$(count_calls "$_ccw/log" '^alpha$')" = 1 ] \
+        || fail "count_calls miscounted a single match: $(count_calls "$_ccw/log" '^alpha$')"
+    [ "$(count_calls "$_ccw/log" '^gamma$')" = 0 ] \
+        || fail "count_calls answered $(count_calls "$_ccw/log" '^gamma$') for no match, want a single 0 — 'grep -c' prints its own 0 and exits 1"
+    [ "$(count_calls "$_ccw/nope" '^alpha$')" = 0 ] \
+        || fail "count_calls answered $(count_calls "$_ccw/nope" '^alpha$') for a missing file, want 0"
+    rm -rf "$_ccw"
 }
 
 # ---------------------------------------------------------------------------
@@ -1042,8 +1264,11 @@ $(cat "$_calls")"
 # nothing either way), but the phase file is the whole of what this mode leaves
 # behind and it is what an operator reads.
 # ---------------------------------------------------------------------------
+# <pre> is shell run after the transaction variables are set and before the
+# call. It exists for GUARD_ARMED, which is the branch selector and has three
+# values, not two — the default here is the 0 that BURROWEE_NO_RESTART leaves.
 run_abort_install() {
-    _r="$1"; _txn="$2"
+    _r="$1"; _txn="$2"; _pre="${3:-}"
     _stub="$(install_stub_dir "$_r")"
     (
         cd "$_r" && \
@@ -1054,7 +1279,7 @@ run_abort_install() {
         BURROWEE_SYSTEMD_DIR="$_r/units" \
         BURROWEE_SYSTEM_CONFIG_DIR="$_r/etc/gateway" \
         BURROWEE_SYSTEM_DATA_DIR="$_r/var/gateway" \
-        sh -c ". '$HERE/inner/gateway/install.sh'; TXN_DIR='$_txn'; TXN_STAMP=teststamp; abort_install 'verify_units failed'" 2>&1
+        sh -c ". '$HERE/inner/gateway/install.sh'; TXN_DIR='$_txn'; TXN_STAMP=teststamp; $_pre abort_install 'verify_units failed'" 2>&1
     )
 }
 
@@ -1099,6 +1324,143 @@ t_abort_install_without_a_guard_still_rolls_back_a_real_install() {
         || fail "abort_install recorded phase '$(cat "$_t/phase" 2>/dev/null)' with a real previous install in the snapshot, want rolled-back: $_out"
     grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
         || fail "abort_install's no-guard branch did not restore the previous binary: $_out"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# A BLIND READ IS NOT A HOST FACT.
+#
+# The no-guard branch used to ask a two-valued question — snapshot_has_binaries,
+# a bare `[ -d ]` and a glob — of a transaction txn_begin makes root-owned 0700,
+# from a shell that is routinely not root. On a host whose sudoers refuses every
+# `sudo -n` (timestamp_timeout=0) that glob sees nothing whatever is really
+# there, so a host WITH a previous install was told, in prose, "this host had no
+# previous gateway install, ... the host is as it was found" — an assertion
+# about their machine that this shell had not established and could not have,
+# and a `aborted` phase recording it for guard-status to repeat.
+#
+# The predicate now has three answers, and this drives the third end to end: the
+# real snapshot_binaries_state, against a real unreadable transaction, with a
+# `sudo` that refuses exactly as that sudoers does. What it must produce is
+# prose about what was OBSERVED and no terminal phase — because `aborted` is a
+# finding, and this run found nothing.
+#
+# The control is t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
+# above: a READABLE empty snapshot must still say "nothing to restore" and still
+# record `aborted`. A "fix" that merely stopped answering would fail it.
+#
+# Skipped under uid 0, where mode bits do not apply and the state cannot exist.
+# ---------------------------------------------------------------------------
+t_abort_install_without_a_guard_cannot_assert_what_it_cannot_read() {
+    if [ "$(id -u)" = 0 ]; then return 0; fi
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    # A transaction that DOES hold a previous install — the case the old prose
+    # was most wrong about.
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units"
+    printf 'OLD BINARY\n' > "$_t/snapshot/bin/burrowee-gateway"
+    printf 'replacing\n' > "$_t/phase"
+
+    # A sudo that refuses, and a snapshot this shell cannot read.
+    mkdir -p "$_r/nosudo"
+    printf '#!/bin/sh\nexit 1\n' > "$_r/nosudo/sudo"
+    chmod 0755 "$_r/nosudo/sudo"
+    chmod 000 "$_t/snapshot"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t" "PATH=\"$_r/nosudo:\$PATH\";")" || _rc=$?
+    chmod 755 "$_t/snapshot"
+
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc on an unreadable transaction, want 1: $_out"
+    printf '%s\n' "$_out" | grep -q 'had no previous gateway install' \
+        && fail "abort_install told the operator their host has no previous install after reading nothing at all — the snapshot it could not see holds one: $_out"
+    printf '%s\n' "$_out" | grep -q 'cannot read the transaction' \
+        || fail "abort_install did not say that the transaction could not be read: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = replacing ] \
+        || fail "abort_install recorded phase '$(cat "$_t/phase" 2>/dev/null)' after establishing nothing — a terminal phase is a finding, and guard-status repeats it: $_out"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# AN UNPROVEN GUARD MUST NOT BE HANDED THE UNDO.
+#
+# guard_prove_armed fails OPEN: on a host whose sudoers refuses every `sudo -n`
+# (timestamp_timeout=0) the root-owned 0700 transaction cannot be read, so
+# neither guard.pid nor guard.log can be seen and the guard is not proven either
+# way. Continuing is right — a blind read is not evidence of a dead guard, and
+# refusing would cost the operator an install over a fact nobody established.
+#
+# What was wrong is what it left behind: GUARD_ARMED=1, an assertion that a
+# guard EXISTS. abort_install branches on exactly that, so a later verification
+# failure on a host whose guard really had died printed "the guard is undoing
+# this install", restored nothing, restarted nothing, and exited — deferring the
+# whole undo to a process that was not there.
+#
+# The third state has to do the two things that are safe whichever way the
+# coin landed:
+#
+#   * RESTORE in the foreground. Dead guard: this is the only undo there is.
+#     Live guard: it restores the same files from the same snapshot moments
+#     later, and a file copied twice is a file copied.
+#   * write NO terminal phase. `rolled-back` and `aborted` are terminal, and a
+#     live guard that reads a terminal phase takes its "already terminal" arm
+#     and stops — trading a possible stranding for a certain one, since
+#     restarting is the half only the guard can do.
+#
+# The two controls are the tests above and below: GUARD_ARMED=1 must still defer
+# everything, and GUARD_ARMED=0 must still restore AND mark the phase.
+# ---------------------------------------------------------------------------
+t_abort_install_with_an_unproven_guard_restores_and_leaves_the_phase_open() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units" "$_t/snapshot/data"
+    printf 'OLD BINARY\n' > "$_t/snapshot/bin/burrowee-gateway"
+    chmod 755 "$_t/snapshot/bin/burrowee-gateway"
+    printf 'NEW BINARY\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+    printf 'replacing\n' > "$_t/phase"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t" "GUARD_ARMED=unproven;")" || _rc=$?
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc with an unproven guard, want 1: $_out"
+    grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "abort_install deferred the undo to a guard nobody proved exists — nothing was restored, and if that guard is dead nothing ever will be: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = replacing ] \
+        || fail "abort_install marked the transaction '$(cat "$_t/phase" 2>/dev/null)' with an unproven guard — a live guard reading a terminal phase stops without restarting, which is the half this shell cannot do: $_out"
+    printf '%s\n' "$_out" | grep -q 'may or may not' \
+        || fail "abort_install did not tell the operator the guard was never proven: $_out"
+    rm -rf "$_r"
+}
+
+# The control for the arm above: a guard that WAS proven still gets the whole
+# undo, and this shell still restores nothing and marks nothing. Without it, an
+# "unproven" arm that simply swallowed the proven one would look green.
+t_abort_install_with_a_proven_guard_still_defers_everything() {
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units" "$_t/snapshot/data"
+    printf 'OLD BINARY\n' > "$_t/snapshot/bin/burrowee-gateway"
+    chmod 755 "$_t/snapshot/bin/burrowee-gateway"
+    printf 'NEW BINARY\n' > "$_r/bin/burrowee-gateway"
+    chmod 755 "$_r/bin/burrowee-gateway"
+    printf 'replacing\n' > "$_t/phase"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t" "GUARD_ARMED=1;")" || _rc=$?
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc with a proven guard, want 1: $_out"
+    grep -q 'NEW BINARY' "$_r/bin/burrowee-gateway" \
+        || fail "abort_install restored in the foreground with a guard armed — snapshot_restore only copies files, it never restarts: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = replacing ] \
+        || fail "abort_install marked the transaction terminal with a guard armed — the guard then takes its 'already terminal' branch and does nothing: $_out"
     rm -rf "$_r"
 }
 
@@ -1269,18 +1631,85 @@ GATEWAY_BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-co
 t_verify_precedes_handoff() {
     _f="$HERE/inner/gateway/install.sh"
     # Leading whitespace is tolerated on the handoff anchor (and only there):
-    # `txn_phase handoff` now sits inside the `if [ "$GUARD_ARMED" = 1 ]` block
+    # `txn_phase handoff` now sits inside the `if [ "$GUARD_ARMED" != 0 ]` block
     # that honours BURROWEE_NO_RESTART. The claim is about order, not column,
     # and the anchor is still a whole line.
+    #
+    # THE LAST HANDOFF, NOT THE FIRST. This used to be `head -1` when the file
+    # held exactly one; BURROWEE_UNITS_ONLY now writes one of its own several
+    # hundred lines earlier, and against THAT one the fresh flow's column-0
+    # verify_placement reads as running after a handoff it has nothing to do
+    # with. The units-only flow's own Phase 2 is checked in
+    # t_units_only_verifies_what_it_actually_placed below.
     _phase1="$(grep -n '^txn_phase replacing$' "$_f" | head -1 | cut -d: -f1)"
     _v="$(grep -n '^verify_placement || abort_install ' "$_f" | head -1 | cut -d: -f1)"
-    _end="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+    _end="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | tail -1 | cut -d: -f1)"
 
     [ -n "$_phase1" ] || { fail "install.sh never reaches txn_phase replacing"; return; }
     [ -n "$_v" ]      || { fail "install.sh never calls verify_placement"; return; }
     [ -n "$_end" ]    || { fail "install.sh never reaches txn_phase handoff"; return; }
     [ "$_phase1" -lt "$_v" ] || fail "verify_placement (line $_v) runs before Phase 1 (line $_phase1)"
     [ "$_v" -lt "$_end" ]    || fail "verify_placement (line $_v) runs after txn_phase handoff (line $_end)"
+}
+
+# ---------------------------------------------------------------------------
+# BURROWEE_UNITS_ONLY's own Phase 2 — the one place the two guarded flows are
+# deliberately NOT the same, and the difference is worth an explicit test
+# because "skipped a verification step" is otherwise indistinguishable from
+# "forgot a verification step".
+#
+# That mode places no binaries. verify_placement walks $BINS — which includes
+# `burrowee` and `burrowee-register`, names nothing on this path ever places —
+# and its strongest check compares each one against the archive copy `./$b`,
+# which does not exist on a kept-installer run with no bundle beside it. Called
+# there it would fail installs that did nothing wrong, and where it did not
+# fail it would be walking files this run never touched: a green tick for work
+# that did not happen, which is worse than no tick.
+#
+# What the mode DOES place, it verifies where it places it: render_units calls
+# ensure_root_exec_surface, which ends in verify_root_exec_surface before a
+# single unit is written. verify_units applies unchanged — units really are
+# rendered here — and is called.
+#
+# So this asserts the split, both halves: verify_units inside the block and
+# before its handoff, verify_placement NOT inside the block, and the note that
+# says why present rather than the omission being silent.
+# ---------------------------------------------------------------------------
+units_only_range() {
+    _uor_f="$HERE/inner/gateway/install.sh"
+    _uor_a="$(grep -n '^if \[ -n "\${BURROWEE_UNITS_ONLY:-}" \]; then$' "$_uor_f" | head -1 | cut -d: -f1)"
+    [ -n "$_uor_a" ] || return 1
+    _uor_b="$(awk -v s="$_uor_a" 'NR > s && $0 == "fi" { print NR; exit }' "$_uor_f")"
+    [ -n "$_uor_b" ] || return 1
+    printf '%s %s\n' "$_uor_a" "$_uor_b"
+}
+
+uo_first_line() {
+    grep -n "$1" "$HERE/inner/gateway/install.sh" \
+        | awk -F: -v a="$2" -v b="$3" '$1 > a && $1 < b { print $1; exit }'
+}
+
+t_units_only_verifies_what_it_actually_placed() {
+    _f="$HERE/inner/gateway/install.sh"
+    _range="$(units_only_range)" || { fail "install.sh has no BURROWEE_UNITS_ONLY mode block"; return; }
+    _a="${_range% *}"; _b="${_range#* }"
+
+    _vu="$(uo_first_line '^[[:space:]]*verify_units || abort_install ' "$_a" "$_b")"
+    _ho="$(uo_first_line '^[[:space:]]*txn_phase handoff$' "$_a" "$_b")"
+    _vp="$(uo_first_line '^[[:space:]]*verify_placement' "$_a" "$_b")"
+
+    [ -n "$_vu" ] || { fail "units-only never runs verify_units — it renders units and hands the restart off without checking that the serve unit's ExecStart target is even executable"; return; }
+    [ -n "$_ho" ] || { fail "units-only never reaches txn_phase handoff"; return; }
+    [ "$_vu" -lt "$_ho" ] \
+        || fail "units-only: verify_units (line $_vu) runs after the handoff (line $_ho) — the cheap failure has been moved past the expensive one"
+    [ -z "$_vp" ] \
+        || fail "units-only calls verify_placement (line $_vp) — that mode places no binaries, so it walks names it never placed and compares them against an archive copy that does not exist"
+
+    # The inapplicability must be STATED, not silent. A future reader who finds
+    # verify_units alone and no explanation reads it as an oversight and
+    # "fixes" it.
+    sed -n "${_a},${_b}p" "$_f" | grep -q 'verify_placement IS DELIBERATELY NOT CALLED' \
+        || fail "units-only skips verify_placement with no comment saying so — the next reader cannot tell a decision from an omission"
 }
 
 # A non-interactive install must NOT block on a prompt: console pushes, CI and
@@ -1313,14 +1742,25 @@ t_consent_is_tty_gated() {
 # so a substring check "passes" against either one even with the actual
 # unconditional echo below deleted. Caught only by mutation while writing
 # this test; the exact-line anchor is what closes it.
+#
+# BOTH GUARDED FLOWS, PAIRED. There are two handoffs now (the fresh install's
+# and BURROWEE_UNITS_ONLY's) and two reconnect lines, and a check that took the
+# first of each would be satisfied by the units-only pair alone — the fresh
+# flow could lose its line entirely and this would stay green. First-with-first
+# and last-with-last is what makes each pair answerable on its own.
 t_reconnect_line_precedes_handoff() {
     _f="$HERE/inner/gateway/install.sh"
-    _r="$(grep -n '^[[:space:]]*echo "    burrowee gateway service guard-status"$' "$_f" | head -1 | cut -d: -f1)"
-    _h="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | head -1 | cut -d: -f1)"
+    _rn="$(grep -c '^[[:space:]]*echo "    burrowee gateway service guard-status"$' "$_f" || true)"
+    _hn="$(grep -c '^[[:space:]]*txn_phase handoff$' "$_f" || true)"
+    [ "$_rn" = 2 ] || { fail "install.sh prints the guard-status reconnect line $_rn time(s), expected 2 (one per guarded flow)"; return; }
+    [ "$_hn" = 2 ] || { fail "install.sh reaches txn_phase handoff $_hn time(s), expected 2 (one per guarded flow)"; return; }
 
-    [ -n "$_r" ] || { fail "install.sh never prints the unconditional guard-status reconnect line ahead of the handoff"; return; }
-    [ -n "$_h" ] || { fail "install.sh never reaches txn_phase handoff"; return; }
-    [ "$_r" -lt "$_h" ] || fail "the reconnect line (line $_r) is printed after the handoff (line $_h)"
+    for _which in head tail; do
+        _r="$(grep -n '^[[:space:]]*echo "    burrowee gateway service guard-status"$' "$_f" | $_which -1 | cut -d: -f1)"
+        _h="$(grep -n '^[[:space:]]*txn_phase handoff$' "$_f" | $_which -1 | cut -d: -f1)"
+        [ "$_r" -lt "$_h" ] \
+            || fail "the reconnect line (line $_r) is printed after the handoff (line $_h) — once the guard restarts the gateway this connection may already be gone, and a line printed into it reaches no one"
+    done
 }
 
 # A verification failure must abort rather than hand off — and it must abort
@@ -1755,6 +2195,8 @@ for _plat in Darwin Linux; do
     t_guard_rolls_back "$_plat"
     t_guard_ok_advances_updater "$_plat"
     t_guard_ok_sweeps_stale_bins "$_plat"
+    t_guard_does_not_sweep_when_the_restart_fails "$_plat"
+    t_guard_does_not_flap_the_units "$_plat"
     t_guard_deadline_exceeded "$_plat"
     t_abort_hands_the_undo_to_the_guard "$_plat"
     t_abort_does_not_bounce_a_live_daemon "$_plat"
@@ -1777,12 +2219,17 @@ t_guard_removes_its_own_plist dead rolled-back
 t_guard_reloads_a_changed_unit_body
 t_rollback_after_a_forward_restart_rereads_the_restored_unit
 t_rollback_still_reloads_when_the_snapshot_holds_no_unit
-t_snapshot_has_binaries_is_pinned_across_both_files
+t_count_calls_answers_zero_once
+t_snapshot_binaries_predicates_agree
 t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
 t_abort_install_without_a_guard_still_rolls_back_a_real_install
+t_abort_install_without_a_guard_cannot_assert_what_it_cannot_read
+t_abort_install_with_an_unproven_guard_restores_and_leaves_the_phase_open
+t_abort_install_with_a_proven_guard_still_defers_everything
 
 t_heartbeat_defers_the_deadline
 t_verify_precedes_handoff
+t_units_only_verifies_what_it_actually_placed
 
 t_consent_is_tty_gated
 t_reconnect_line_precedes_handoff
