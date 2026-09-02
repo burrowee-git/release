@@ -223,6 +223,10 @@ LINK_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
 # BURROWEE_LINK_DIR is a TEST-ONLY seam like BURROWEE_BIN_DIR: it redirects
 # the link directory so the suite never touches the real /usr/local/bin.
 LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
+# What link_operator_bins actually linked. The exec-root sweep leaves every
+# operator-typed name that is NOT in here alone: with no link at that path the
+# real 0.2 file is the only copy anything reaches by it.
+LINKED_OPERATOR_BINS=""
 # The 0.2 exec root the sweep reads is the SAME directory the links go into, so
 # it follows the link seam: a sandboxed run must never iterate the real
 # /usr/local/bin of the host it runs on (this workstation is a live 0.2 host).
@@ -594,8 +598,24 @@ dir_is_root_secure() {
     # /usr/local/bin -> /Users/x/bin link passes every check while the directory
     # a link would actually be written into is never examined — and root's own
     # links then land somewhere that user can rewrite.
-    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
-    [ -n "$_ds_d" ] || return 2
+    #
+    # RESOLVED THROUGH THE PARENT, never by entering the directory itself: this
+    # script runs UNPRIVILEGED and elevates per step, and the leaf it is asked
+    # about is routinely root-owned 0700 ($SYS_DATA_DIR). `cd` into that is
+    # EACCES for the operator, while stat'ing it from outside is not — an
+    # earlier form entered the leaf and refused every non-root install with a
+    # message about `stat` dialects. A symlinked leaf is still followed, since
+    # that is the substitution this resolution exists to catch.
+    _ds_p="$(cd "$(dirname "$_ds_d")" 2>/dev/null && pwd -P)" || return 2
+    [ -n "$_ds_p" ] || return 2
+    case "$_ds_d" in
+    /) ;;
+    *) _ds_d="${_ds_p%/}/$(basename "$_ds_d")" ;;
+    esac
+    if [ -L "$_ds_d" ]; then
+        _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
+        [ -n "$_ds_d" ] || return 2
+    fi
     while :; do
         [ -d "$_ds_d" ] || return 1
         _ds_v="$(stat_uid "$_ds_d")" || return 2
@@ -1023,6 +1043,13 @@ sweep_stale_exec_root() {
         echo "note: the 0.2 copies in $LEGACY_BIN_DIR were not swept. Re-run a complete release." >&2
         return 0
     fi
+    STALE_EXEC_ROOT_KEEP=""
+    for _ssk in $LINK_BINS; do
+        case " $LINKED_OPERATOR_BINS " in
+        *" $_ssk "*) ;;
+        *) STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:+$STALE_EXEC_ROOT_KEEP }$_ssk" ;;
+        esac
+    done
     remove_stale_exec_root_bins
 }
 
@@ -1289,6 +1316,7 @@ link_operator_bins() {
         fi
         _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
     done
+    LINKED_OPERATOR_BINS="$_lob_linked"
     [ -z "$_lob_linked" ] || echo "linked into $LINK_DIR: $_lob_linked"
 }
 
@@ -1301,7 +1329,7 @@ link_operator_bins() {
 # BEFORE render_units, while the on-disk units are still the loaded ones; a
 # fresh host has no such unit and links right away.
 links_deferred_to_guard() {
-    for _ldg_f in "$LAUNCHD_DIR"/*.plist "$SYSTEMD_DIR"/burrowee-gateway*.service; do
+    for _ldg_f in "$LAUNCHD_DIR"/*burrowee*gateway*.plist "$SYSTEMD_DIR"/burrowee-gateway*.service; do
         [ -f "$_ldg_f" ] || continue
         if grep -q "$LINK_DIR/burrowee" "$_ldg_f" 2>/dev/null; then return 0; fi
     done
@@ -3738,11 +3766,26 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     _uninstall_failed=""
     if [ -d "$BIN_DIR" ]; then
         decide_bin_place_elevated
+        # Everything but the dispatcher first: the `burrowee` decision below
+        # asks whether any OTHER component is still installed, and asking it
+        # while this component's own binaries are still on disk would always
+        # answer yes.
         for b in $BINS; do
+            [ "$b" = burrowee ] && continue
             if [ -e "$BIN_DIR/$b" ] && ! bin_place_run rm -f "$BIN_DIR/$b"; then
                 _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }$b"
             fi
         done
+        # The bare `burrowee` dispatcher is SHARED with every co-installed
+        # component (an edge or a relay on the same host), so it goes only when
+        # nothing else of ours is left in $BIN_DIR. Same rule, same order, as
+        # the edge uninstall — and what makes the "keep a live link" guard in
+        # unlink_operator_bins reachable at all.
+        if ls "$BIN_DIR"/burrowee-* >/dev/null 2>&1; then
+            echo "kept $BIN_DIR/burrowee (dispatcher) — other burrowee components remain installed"
+        elif [ -e "$BIN_DIR/burrowee" ] && ! bin_place_run rm -f "$BIN_DIR/burrowee"; then
+            _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }burrowee"
+        fi
         # This script's own kept copy + migrations/, placed here by
         # ensure_root_exec_surface (never by BINS) — an uninstall that leaves
         # them behind hands the next install a root-owned installer it never

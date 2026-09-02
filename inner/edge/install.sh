@@ -101,6 +101,10 @@ BIN_DIR="$SYS_BIN_DIR"
 # real copy of it. BURROWEE_LINK_DIR is a test-only seam like SYS_BIN_DIR.
 LINK_BINS="burrowee burrowee-edge burrowee-edge-cli"
 LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
+# What link_operator_bins actually linked. The exec-root sweep leaves every
+# operator-typed name that is NOT in here alone: with no link at that path the
+# real 0.2 file is the only copy anything reaches by it.
+LINKED_OPERATOR_BINS=""
 # The 0.2 exec root the sweep reads IS the link directory, so it follows the
 # same seam: a sandboxed run must never iterate the host's real /usr/local/bin.
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-$LINK_DIR}"
@@ -385,8 +389,24 @@ dir_is_root_secure() {
     # /usr/local/bin -> /Users/x/bin link passes every check while the directory
     # a link would actually be written into is never examined — and root's own
     # links then land somewhere that user can rewrite.
-    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
-    [ -n "$_ds_d" ] || return 2
+    #
+    # RESOLVED THROUGH THE PARENT, never by entering the directory itself: this
+    # script runs UNPRIVILEGED and elevates per step, and the leaf it is asked
+    # about is routinely root-owned 0700 ($SYS_DATA_DIR). `cd` into that is
+    # EACCES for the operator, while stat'ing it from outside is not — an
+    # earlier form entered the leaf and refused every non-root install with a
+    # message about `stat` dialects. A symlinked leaf is still followed, since
+    # that is the substitution this resolution exists to catch.
+    _ds_p="$(cd "$(dirname "$_ds_d")" 2>/dev/null && pwd -P)" || return 2
+    [ -n "$_ds_p" ] || return 2
+    case "$_ds_d" in
+    /) ;;
+    *) _ds_d="${_ds_p%/}/$(basename "$_ds_d")" ;;
+    esac
+    if [ -L "$_ds_d" ]; then
+        _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
+        [ -n "$_ds_d" ] || return 2
+    fi
     while :; do
         [ -d "$_ds_d" ] || return 1
         _ds_v="$(stat_uid "$_ds_d")" || return 2
@@ -527,6 +547,22 @@ sweep_stale_user_bins() {
 # after setup_root_service, is what actually clears the copies.
 sweep_stale_exec_root() {
     [ "$SWEEP_LIB_LOADED" = 1 ] || return 0
+    # The exec-root half lives OUTSIDE the byte-pinned SHARED SWEEP CONTRACT
+    # region, so a kit whose library predates it must say so — not abort under
+    # `set -eu` with "not found", which here would land AFTER the units are
+    # already re-rendered and loaded. Same guard, same wording, as the gateway.
+    if ! command -v remove_stale_exec_root_bins >/dev/null 2>&1; then
+        echo "note: the loaded sweep library has no remove_stale_exec_root_bins — THIS RELEASE IS" >&2
+        echo "note: INCOMPLETE: the 0.2 copies in $LEGACY_BIN_DIR were not swept." >&2
+        return 0
+    fi
+    STALE_EXEC_ROOT_KEEP=""
+    for _ssk in $LINK_BINS; do
+        case " $LINKED_OPERATOR_BINS " in
+        *" $_ssk "*) ;;
+        *) STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:+$STALE_EXEC_ROOT_KEEP }$_ssk" ;;
+        esac
+    done
     remove_stale_exec_root_bins
 }
 
@@ -972,6 +1008,7 @@ link_operator_bins() {
         fi
         _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
     done
+    LINKED_OPERATOR_BINS="$_lob_linked"
     [ -z "$_lob_linked" ] || echo "linked into $LINK_DIR: $_lob_linked"
 }
 
