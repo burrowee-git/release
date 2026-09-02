@@ -2587,7 +2587,7 @@ assert_contains "$OUT" "is not a regular file owned by nobody-such-user-37d" "an
 t37e="$TMP/t37e"; exec_sweep_kit "$t37e"; h37e="$t37e/home"; mkdir -p "$h37e/launchd"
 printf '<plist><dict><key>ProgramArguments</key><array><string>%s/old-bin/burrowee-edge-updater</string><string>run</string></array></dict></plist>\n' "$h37e" > "$h37e/launchd/com.burrowee.edge.updater.plist"
 EXEC_SWEEP_LAUNCHD_DIR="$h37e/launchd"; run_exec_sweep_rung "$t37e" "$h37e"; unset EXEC_SWEEP_LAUNCHD_DIR
-assert_eq "$RC" 0 "a unit-named file is a decline, not a failure"
+assert_eq "$RC" 3 "a unit-named file defers the rung (nothing recorded), never earns its receipt"
 assert_present "$h37e/old-bin/burrowee-edge-updater" "a file a unit still names must not be unlinked"
 assert_contains "$OUT" "$h37e/launchd/com.burrowee.edge.updater.plist still names $h37e/old-bin/burrowee-edge-updater" "and the unit must be named"
 assert_gone "$h37e/old-bin/burrowee-edge-cli" "while a name no unit mentions is still swept — per item, never per section"
@@ -2694,13 +2694,14 @@ assert_lacks "$OUT" "TRANSITIONAL" "the 0.2 anchor must not be consulted once th
 assert_contains "$OUT" "(read from $ch38b/installed-version)" "the anchor is read from the new root"
 assert_present "$h38b/old-bin/burrowee-edge-updater" "and nothing ran"
 
-# 38c. A NEW ROOT WITH RECEIPTS BUT NO ANCHOR is a 0.3 host whose anchor was
-#      withheld (a lost receipt), not a 0.2 host: today's behaviour — each
-#      rung is asked — and the 0.2 anchor is not read.
+# 38c. A NEW ROOT WITH RECEIPTS BUT NO ANCHOR is a 0.2 host whose first 0.3
+#      ladder run died after an earlier rung receipted (record_migration creates
+#      the directory; the anchor is written only at the end of the install).
+#      Keying the fallback off receipts made that host re-probe the 0.2.0 rows
+#      in fall-through mode and adopt a stale per-user tree over the copy.
 t38c="$TMP/t38c"; transitional_kit "$t38c"; h38c="$t38c/home"; ch38c="$h38c/sys/etc/edge"; mkdir -p "$ch38c/migration-receipts"
 run_transitional_ladder "$t38c" "$h38c"
-assert_lacks "$OUT" "TRANSITIONAL" "receipts in the new root mean the 0.2 anchor is not evidence about it"
-assert_contains "$OUT" "no installed version recorded ($ch38c/installed-version is absent)" "each rung is asked, from the new root"
+assert_contains "$OUT" "TRANSITIONAL" "receipts land before the anchor does: a new root with receipts and no anchor is a 0.2 host mid-crossing, and its 0.2 anchor is still the evidence"
 
 # 38d. A `user`-SCHEME COMPONENT IS UNAFFECTED, byte for byte: cli's tree
 #      never moved, so a legacy anchor beside it means nothing.

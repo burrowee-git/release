@@ -90,3 +90,17 @@ fi
 say "sweeping the 0.2 exec root $LEGACY_BIN_DIR of real copies replaced by $BIN_DIR"
 remove_stale_exec_root_bins
 say "sweep complete — anything removed, kept or left in place is named above"
+
+# A name kept because a unit still names it is work that REMAINS, not work
+# that is done: exit 3 is the runner's "nothing recorded, ladder stops here",
+# so no receipt closes this rung over copies it never reached. The installer
+# sweeps them itself once the units name $BIN_DIR.
+_sser_home="$(operator_home 2>/dev/null)"
+for _sser_b in $STALE_USER_BINS; do
+    case "$(stale_exec_root_decision "$_sser_b" "$_sser_home" 2>/dev/null)" in
+    unit:*)
+        warn "deferred: a unit still names $LEGACY_BIN_DIR/$_sser_b — the sweep is finished by the installer after the units move, and this rung stays pending"
+        exit 3
+        ;;
+    esac
+done

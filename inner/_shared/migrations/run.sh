@@ -371,7 +371,6 @@ LEGACY_COMP_HOME="$LEGACY_SYS_CONFIG_ROOT/$COMP"
 if [ "${COMP_HOME_SCHEME:-user}" = system ] \
     && [ "$COMP_HOME" = "$SYS_CONFIG_ROOT/$COMP" ] \
     && [ ! -f "$COMP_HOME/$VERSION_FILE" ] \
-    && [ ! -d "$COMP_HOME/migration-receipts" ] \
     && [ -f "$LEGACY_COMP_HOME/$VERSION_FILE" ]; then
     ANCHOR_HOME="$LEGACY_COMP_HOME"
     ANCHOR_IS_LEGACY=1
