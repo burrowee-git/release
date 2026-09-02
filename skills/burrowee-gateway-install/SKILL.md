@@ -6,11 +6,12 @@ description: Install the burrowee gateway (home-NAT tunnel endpoint) on this mac
 # burrowee-gateway-install
 
 You are an LLM coding agent (Claude Code, Cursor, Aider, …) tasked with putting the
-**burrowee gateway** on this machine. The install drops three binaries into PATH:
-the `burrowee` dispatcher, the `burrowee-gateway` component, and the
-`burrowee-register` registrar helper. The dispatcher execs the components, so
-`burrowee gateway …` / `burrowee register …` and the bare `burrowee-gateway …` /
-`burrowee-register …` are the same surface.
+**burrowee gateway** on this machine. The binaries live in
+`/usr/local/burrowee/bin`, which is not on PATH; what the installer links into
+`/usr/local/bin` — when that directory is root-secure — is the operator-typed
+set: the `burrowee` dispatcher, `burrowee-gateway` and `burrowee-gateway-cli`.
+`burrowee-register` is deliberately **not** linked, so reach the registrar as
+`burrowee register …` through the dispatcher rather than by its bare name.
 
 The job is narrow: install + verify. Do **not** configure or start the gateway —
 that belongs to the `burrowee-gateway-setup` skill the operator invokes next.
@@ -90,8 +91,10 @@ line prints.**
 > are equivalent — the dispatcher just execs the gateway component. Apart from
 > `version`, `burrowee-gateway` is configured entirely by environment variables
 > (covered in `burrowee-gateway-setup`) and starts running when invoked with no
-> subcommand, and `burrowee-register` takes `-sock`/`-name`/`-target` flags. Do not
-> run a bare `burrowee gateway` here (it would try to start with missing env).
+> subcommand, and the registrar — reached as `burrowee register …`, since the bare
+> `burrowee-register` is not linked onto PATH — takes `-sock`/`-name`/`-target`
+> flags. Do not run a bare `burrowee gateway` here (it would try to start with
+> missing env).
 
 The installer links `burrowee`, `burrowee-gateway` and `burrowee-gateway-cli` into
 `/usr/local/bin` — which is on the default PATH of every supported shell — but
@@ -112,7 +115,8 @@ error) means the install didn't land — surface the output and stop.
 Once `burrowee gateway version` succeeds, **stop**. Tell the operator:
 
 > burrowee gateway is installed at `/usr/local/burrowee/bin` (`burrowee` +
-> `burrowee-gateway` + `burrowee-register`). To configure its keys/PSK/relay and
+> `burrowee-gateway` + `burrowee-register`; the registrar is reached as
+> `burrowee register …`). To configure its keys/PSK/relay and
 > bring it up, run the **burrowee-gateway-setup** skill next (or paste
 > `https://release.burrowee.com/skills/burrowee-gateway-setup/SKILL.md` into your
 > coding agent).
