@@ -208,6 +208,20 @@ if [ -n "${PREFIX:-}" ]; then
     unset _prefix_bin _true_bin
 fi
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
+# LINK_BINS — the subset of $BINS an OPERATOR TYPES, and therefore the only
+# names symlinked from $LINK_DIR (/usr/local/bin) into $BIN_DIR so that
+# `burrowee-gateway-cli …` keeps working with no PATH change now that the exec
+# root is off PATH. Deliberately smaller than $BINS: burrowee-gateway-console
+# and burrowee-gateway-updater are spawned by a root parent that names the
+# real path, and burrowee-register is execed by the dispatcher the same way —
+# nothing a human types, so nothing to link (spec §6.1 rule 1: nothing root
+# execs ever names a link). $BINS \ $LINK_BINS is exactly the set the
+# 0.2→0.3 ladder rung sweeps out of /usr/local/bin, where 0.2 left real
+# copies of them.
+LINK_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
+# BURROWEE_LINK_DIR is a TEST-ONLY seam like BURROWEE_BIN_DIR: it redirects
+# the link directory so the suite never touches the real /usr/local/bin.
+LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
 # The per-user component tree. Identical to $GW_HOME for this component, spelled
@@ -1156,6 +1170,88 @@ assert_system_tree() {
             echo "hint: above it; each must be owned by root and not group- or world-writable." >&2
         fi
         return 1
+    done
+}
+
+# ---------------------------------------------------------------------------
+# THE /usr/local/bin SYMLINKS (spec §6.1). The exec root is
+# /usr/local/burrowee/bin, which is on nobody's PATH; the binaries an operator
+# types are linked from $LINK_DIR so `burrowee-gateway-cli …` still resolves.
+#
+# RULE 2 IS THE ONE THAT MATTERS: link ONLY into a root-secure directory. A
+# root-owned symlink is necessary but not sufficient — `unlink` is governed by
+# write permission on the CONTAINING directory, so in a Homebrew-owned
+# /usr/local/bin any user can delete root's link and drop their own file at
+# that name, and the operator's next `sudo burrowee-gateway-cli` runs it as
+# root. Root ownership of the link is not the protection; the directory's is.
+# So dir_is_root_secure is asked FIRST, and on anything but 0 no link is
+# created at all — the one line that adds the exec root to PATH is printed
+# instead. On the host this layout was written for (an Intel Mac whose
+# /usr/local/bin burrowee's own installer created under sudo before Homebrew
+# wanted it) it passes; on a Mac where brew got there first it declines.
+#
+# RULE 3: created as root, REPLACING whatever is there — `rm -f` then
+# `ln -sfn`, never a write through an existing link or file. Every 0.2 host
+# carries a real /usr/local/bin/burrowee-gateway-cli, and a stale regular
+# file left in place shadows the new install completely; a pre-existing
+# symlink pointing elsewhere would have ln's write land in that other file.
+#
+# RULE 1 is enforced by the renderers, not here: every unit, the updater's
+# ServeBin and the runner's cli path name $BIN_DIR. The links exist for
+# humans. RULE 4 is unlink_operator_bins below.
+#
+# NEVER FATAL. A link is a convenience; an install whose links could not be
+# made is a complete install with a PATH note.
+# ---------------------------------------------------------------------------
+link_operator_bins() {
+    _lob_rc=0
+    dir_is_root_secure "$LINK_DIR" || _lob_rc=$?
+    if [ "$_lob_rc" != 0 ]; then
+        case "$_lob_rc" in
+        3) echo "note: $LINK_DIR does not exist on this host, so no burrowee command was linked into it." ;;
+        2) echo "note: the ownership of $LINK_DIR could not be read ('stat' answered neither dialect), so no" ;
+           echo "note: burrowee command was linked into it — a link is only safe in a directory proven root-owned." ;;
+        *) echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
+           echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
+           echo "note: unlinked and replaced, and the next 'sudo burrowee-gateway-cli' would run that user's file as root." ;;
+        esac
+        echo "note: run the gateway's commands by their real path, or add the exec root to PATH:"
+        echo "    export PATH=\"$BIN_DIR:\$PATH\""
+        return 0
+    fi
+    _lob_linked=""
+    for _lob in $LINK_BINS; do
+        [ -f "$BIN_DIR/$_lob" ] || continue
+        # Already ours: a steady-state refresh needs no sudo at all.
+        if [ -L "$LINK_DIR/$_lob" ] && [ "$(readlink "$LINK_DIR/$_lob")" = "$BIN_DIR/$_lob" ]; then
+            _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
+            continue
+        fi
+        if ! run_root rm -f "$LINK_DIR/$_lob"; then
+            echo "note: could not remove what is at $LINK_DIR/$_lob — it still shadows $BIN_DIR/$_lob; remove it by hand." >&2
+            continue
+        fi
+        if ! run_root ln -sfn "$BIN_DIR/$_lob" "$LINK_DIR/$_lob"; then
+            echo "note: could not link $LINK_DIR/$_lob -> $BIN_DIR/$_lob; run it by its real path." >&2
+            continue
+        fi
+        _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
+    done
+    [ -z "$_lob_linked" ] || echo "linked into $LINK_DIR: $_lob_linked"
+}
+
+# unlink_operator_bins — RULE 4: removed on uninstall, and only when the link
+# still points into OUR tree. A regular file at one of these names is the
+# operator's; a symlink pointing anywhere else is somebody else's.
+unlink_operator_bins() {
+    for _uob in $LINK_BINS; do
+        _uob_p="$LINK_DIR/$_uob"
+        [ -L "$_uob_p" ] || continue
+        case "$(readlink "$_uob_p")" in
+        "$BIN_DIR"/*) ;;
+        *) continue ;;
+        esac
+        run_root rm -f "$_uob_p" || echo "note: could not remove the link $_uob_p (needs root) — remove it by hand" >&2
     done
 }
 
@@ -3323,6 +3419,9 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     migrate_from_legacy
     render_units
     load_units
+    # `service install` is the repair verb an operator is sent to, so it
+    # converges the operator-typed links as well as the units.
+    link_operator_bins
     # Only now: the units naming $BIN_DIR are not merely written, they are the
     # ones the supervisor is running. See sweep_stale_user_bins' header for why
     # this cannot move earlier.
@@ -3498,6 +3597,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         ROOT_BIN_PLACE_EXCLUDE="burrowee-gateway-updater"
         migrate_from_legacy
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
+        link_operator_bins
 
         # The version LAST, and only once everything above succeeded. Recording it
         # before the migration would mean a failed migration leaves the new version on
@@ -3577,6 +3677,12 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         [ -e "$BIN_DIR/guard.sh" ] && { bin_place_run rm -f "$BIN_DIR/guard.sh" || _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }guard.sh"; }
         [ -e "$BIN_DIR/.installed-version" ] && bin_place_run rm -f "$BIN_DIR/.installed-version"
     fi
+
+    # The operator-typed links, and only the ones that still point into
+    # $BIN_DIR (spec §6.1 rule 4). Before the binaries are reported gone so an
+    # operator reading the line does not still have a dangling `burrowee` on
+    # PATH.
+    unlink_operator_bins
 
     echo "removed from $BIN_DIR: $BINS"
     if [ -n "$_uninstall_failed" ]; then
@@ -3672,10 +3778,10 @@ txn_phase replacing
 
 place_all_bins
 
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
-esac
+# The exec root is on nobody's PATH by design; what puts `burrowee-gateway-cli`
+# on it is the set of links into $LINK_DIR — or, where that directory is not
+# root-secure, the PATH line this prints instead.
+link_operator_bins
 
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
