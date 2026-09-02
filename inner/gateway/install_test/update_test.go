@@ -327,6 +327,12 @@ func TestUpdateUnitWriteFailurePrintsSudoAdvisory(t *testing.T) {
 	stub := stubInitSystem(t)
 	binDir := binDir(home)
 
+	// An update runs on an INSTALLED host, whose machine-owned tree already
+	// exists at its stated modes; ensure_system_tree then needs no
+	// elevation, and the failing sudo below is reached only by the unit
+	// write it is about. Without the tree the run would refuse to create it
+	// unprivileged — correct, but a different claim from this test's.
+	seedStatedSystemTree(t, home)
 	seedInstalled(t, binDir, allBinsContent("v1-content"))
 	staged := allBinsContent("v1-content")
 	staged["burrowee-gateway"] = "gw-v2-content"

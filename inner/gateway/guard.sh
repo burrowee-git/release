@@ -67,9 +67,9 @@ TXN="${1:?usage: guard.sh <transaction-dir>}"
 LAUNCHCTL="${GUARD_LAUNCHCTL:-launchctl}"
 SYSTEMCTL="${GUARD_SYSTEMCTL:-systemctl}"
 UNAME="${GUARD_UNAME:-$(uname -s)}"
-BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
-SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
-SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
+BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
+SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/burrowee/var/gateway}"
+SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/burrowee/etc/gateway}"
 
 # The unit directories, resolved ONCE and by the same env-default spellings
 # install.sh uses for its own LAUNCHD_DIR/SYSTEMD_DIR (install.sh:204-206).

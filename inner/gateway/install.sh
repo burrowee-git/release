@@ -4,8 +4,8 @@
 # Ships at the ROOT of the verified release zip as `install.sh`. The outer
 # bootstrap verifies the zip (minisign + sha256) and ONLY THEN execs this with
 # cwd = the unzipped dir, so the binaries sit alongside this script. It installs
-# them into $BIN_DIR — /usr/local/bin, root-owned, ALWAYS — with the placement
-# elevated via run_root the same way a root-owned tree always required. As of
+# them into $BIN_DIR — /usr/local/burrowee/bin, root-owned, ALWAYS — with the
+# placement elevated via run_root the same way a root-owned tree always required. As of
 # 0.2.0 there is no per-user prefix flow at all: a PREFIX that would MISDIRECT
 # the install is REFUSED, loudly (see below), never silently redirected — while
 # one that merely names this same destination is honoured and then cleared. Set
@@ -26,26 +26,40 @@
 # controlling tty; with no tty and no cached credentials the unit step aborts
 # with guidance).
 #
-# ONE BINARY LOCATION. Every binary, including the ones something running AS
-# ROOT execs with nobody watching (the daemon, the console child it spawns, the
-# updater agent, the cli the migration shells to), lands in $BIN_DIR — the same
-# directory this script and its migrations/ are kept in too. This used to be
-# two directories: a per-user $BIN_DIR and a root-owned $LIBEXEC_DIR, kept apart
-# because $BIN_DIR's default was $HOME/.local/bin, and a root unit naming a
-# per-user path is a permanent uid-0 grant to that user (overwrite the binary,
-# wait for a reboot or a pushed update). Now that $BIN_DIR is always
-# root-owned, a root-owned $BIN_DIR/burrowee-gateway passes the identical
-# root-secure ancestor walk the separate tree existed to guarantee — the split
-# had no job left, and /usr/local/libexec/burrowee/gateway is retired: a
-# pre-existing one is simply never written to again and is left for an
-# operator to remove by hand — this script does not touch it.
+# ONE BINARY LOCATION, INSIDE ONE MACHINE-OWNED TREE. Every binary, including
+# the ones something running AS ROOT execs with nobody watching (the daemon,
+# the console child it spawns, the updater agent, the cli the migration shells
+# to), lands in $BIN_DIR — the same directory this script and its migrations/
+# are kept in too — and $BIN_DIR is one of three siblings under
+# /usr/local/burrowee: bin/ (the execution surface), etc/gateway (config, the
+# identity) and var/gateway (state). This script CREATES that tree, root-owned,
+# with every level's owner and mode stated (ensure_system_tree), and asserts
+# what it built before a unit may name any of it (assert_system_tree).
+#
+# HOW IT GOT HERE. The binaries used to live in two directories: a per-user
+# $BIN_DIR and a root-owned $LIBEXEC_DIR, kept apart because $BIN_DIR's default
+# was $HOME/.local/bin, and a root unit naming a per-user path is a permanent
+# uid-0 grant to that user. 0.2.0 collapsed them into /usr/local/bin on the
+# argument that a root-owned /usr/local/bin passes the identical root-secure
+# ancestor walk the separate tree existed to guarantee. THAT PREMISE IS FALSE
+# wherever Homebrew owns /usr/local/bin — on an Intel Mac brew creates and
+# chowns /usr/local/{bin,etc,var} to the console user long before burrowee is
+# installed, and 0.2's three independent roots then had two answers of "no" to
+# "is my state root-owned", with no way forward that did not take a directory
+# away from the package manager. 0.3 moves the exec root WITH the config/data
+# pair into one tree burrowee creates beside Homebrew's directories rather
+# than inside them: that restores the guarantee the libexec split gave without
+# restoring a second tree, because bin/ is inside the same tree as the state it
+# operates on and one ancestor chain answers for all three. The retired
+# /usr/local/libexec/burrowee/gateway is still left alone: never written, never
+# removed — an operator's call, by hand.
 #
 # THE SURVIVING INVARIANT (ensure_root_exec_surface / verify_root_exec_surface,
 # unchanged in kind): only a path that is root-owned and unwritable by non-root
-# ALL THE WAY TO / may be named in a unit or execed by the root updater. That
-# still refuses on a contested $BIN_DIR (an Intel Mac where Homebrew chowns
-# /usr/local, say) exactly as the old libexec check did — both paths share
-# /usr/local as an ancestor, so nothing about that refusal got weaker.
+# ALL THE WAY TO / may be named in a unit or execed by the root updater. On
+# every host that walk passes through /usr/local, which is root:wheel 755 on
+# macOS and root-owned on every Linux; what Homebrew chowns are its children,
+# and /usr/local/burrowee is not one of them.
 #
 # WHY THE DEFAULT MOVED AT ALL: something outside this component now execs
 # `burrowee` off PATH as root to find this gateway — a plain PATH binary a
@@ -88,7 +102,8 @@
 # writers fight, booting the daemon out on every refresh.
 set -eu
 
-# ONE DESTINATION, decided here and nowhere else: /usr/local/bin, root-owned.
+# ONE DESTINATION, decided here and nowhere else: /usr/local/burrowee/bin,
+# root-owned — the exec root of the machine-owned tree (see the header).
 # There is no branch left to take — every step below that treats $BIN_DIR as the
 # privileged surface (ensure_root_exec_surface, render_units, load_units,
 # migrate_from_legacy, record_installed_version) now runs on EVERY install,
@@ -96,15 +111,17 @@ set -eu
 #
 # BURROWEE_BIN_DIR is the surviving TEST-ONLY seam, and the only one: it
 # redirects this destination so the suite never writes into the real
-# /usr/local/bin. Never set it on a real host — nothing about the install's
-# meaning changes when it is set, which is exactly why it is safe for tests and
-# useless as a user-facing knob.
+# /usr/local/burrowee. Never set it on a real host — nothing about the
+# install's meaning changes when it is set, which is exactly why it is safe for
+# tests and useless as a user-facing knob. It must end in `bin`: $SYSTEM_ROOT
+# below is its parent, and the migration runner round-trips PREFIX=<that
+# parent> back through "${PREFIX}/bin".
 #
 # Resolved BEFORE the PREFIX gate below, because the gate's whole question is
 # "does this PREFIX name the destination we would have picked anyway?" — it
 # cannot ask that without $BIN_DIR. This is an assignment only: nothing is
 # created, placed or written until well after the gate.
-BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/bin}"
+BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
 
 # normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
 # '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
@@ -168,8 +185,8 @@ if [ -n "${PREFIX:-}" ]; then
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
-        # /usr/local/bin (production truth, and what the suite's static pins
-        # check) and the resolved $_true_bin. They differ only when the
+        # /usr/local/burrowee/bin (production truth, and what the suite's static
+        # pins check) and the resolved $_true_bin. They differ only when the
         # BURROWEE_BIN_DIR test seam is set, and an operator reading a refusal on
         # a real host must see the real path either way.
         #
@@ -179,10 +196,11 @@ if [ -n "${PREFIX:-}" ]; then
         # the offending value, hiding the component, the destination and the
         # "nothing has been installed" line all at once.
         printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of gateway 0.2.0 this installer" >&2
-        echo "install: has one destination: /usr/local/bin, root-owned. The per-user prefix" >&2
-        echo "install: flow is gone — the gateway's service units run as root and name the" >&2
-        echo "install: binaries absolutely, and other components resolve /usr/local/bin/burrowee" >&2
-        echo "install: by absolute path, so a per-user copy is invisible to both." >&2
+        echo "install: has one destination: /usr/local/burrowee/bin, root-owned. The per-user" >&2
+        echo "install: prefix flow is gone — the gateway's service units run as root and name" >&2
+        echo "install: the binaries absolutely, and other components resolve" >&2
+        echo "install: /usr/local/burrowee/bin/burrowee by absolute path, so a per-user copy" >&2
+        echo "install: is invisible to both." >&2
         printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
         echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
         exit 1
@@ -205,12 +223,25 @@ SERVICE_USER="$(id -un)"
 LAUNCHD_DIR="${BURROWEE_LAUNCHD_DIR:-/Library/LaunchDaemons}"
 SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 # The root daemon's config and data roots — the same two constants the Go side
-# holds as systemConfigDir/systemDataDir (internal/gateway/home.go). They are
-# written into the units, so they must not drift from that pair. Same test-seam
-# caveat as above.
-SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/etc/burrowee/gateway}"
-SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/var/burrowee/gateway}"
+# resolves through core's system_root (ConfigRoot/DataRoot + "gateway"). They
+# are written into the units, so they must not drift from that pair. Same
+# test-seam caveat as above.
+SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/burrowee/etc/gateway}"
+SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/burrowee/var/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
+# THE TREE ABOVE THE THREE ROOTS. In production all three parents are the one
+# directory /usr/local/burrowee, and the two intermediate levels are its etc/
+# and var/. They are DERIVED from the three seamed leaves rather than spelled
+# as a fourth seam so that a sandboxed run can never reach outside its
+# sandbox: a suite that redirects $BIN_DIR to <tmp>/bin has, by construction,
+# redirected the tree to <tmp> as well, and a seam it forgot to set would
+# otherwise default to the real /usr/local/burrowee — which on a Homebrew Mac
+# a pass-through `sudo` stub could actually create. Nothing above
+# $SYSTEM_ROOT is ever created or re-moded by this script (ensure_dir_stated
+# refuses a level whose parent is absent): /usr/local is not ours.
+SYSTEM_ROOT="$(dirname "$BIN_DIR")"
+SYS_ETC_ROOT="$(dirname "$SYS_CONFIG_DIR")"
+SYS_VAR_ROOT="$(dirname "$SYS_DATA_DIR")"
 
 # ---------------------------------------------------------------------------
 # UNREACHABLE FROM THE FRESH-INSTALL PATH, AND KEPT ON PURPOSE — read this
@@ -282,11 +313,11 @@ SERVE_UNIT_STARTED=0
 # gateway's alone — edge writes its version marker BEFORE setup_root_service, so
 # it has no anchor to strand.
 UPDATER_START_FAILED=0
-# THE PRIVILEGED EXECUTION SURFACE, collapsed into $BIN_DIR (formerly a separate
-# root-owned tree at /usr/local/libexec/burrowee/gateway, sibling of the system
-# config/data roots — retired now that $BIN_DIR's own default is root-owned; see
-# the header comment for why the split had no job left). A host that already
-# carries that tree keeps it, inert: nothing here ever writes to it again, and
+# THE PRIVILEGED EXECUTION SURFACE, $BIN_DIR — the bin/ of the machine-owned
+# tree, beside the config/data roots it serves (formerly a separate root-owned
+# tree at /usr/local/libexec/burrowee/gateway, then briefly /usr/local/bin; see
+# the header comment for why neither survived). A host that still carries the
+# libexec tree keeps it, inert: nothing here ever writes to it again, and
 # nothing here removes it either — that is an operator's call, by hand, not
 # this script's.
 #
@@ -601,12 +632,12 @@ root_bin_source() {
 # fallback — the cases where nothing upstream has placed anything yet.
 # ---------------------------------------------------------------------------
 ensure_root_exec_surface() {
-    run_root mkdir -p "$BIN_DIR" || return 1
-    # chown/chmod are best-effort: a tree root already established correctly
-    # needs neither, and re-tightening one somebody else owns is not this
-    # installer's call. The verification below is what decides, not these.
-    run_root chown 0:0 "$BIN_DIR" 2>/dev/null || true
-    run_root chmod 0755 "$BIN_DIR" 2>/dev/null || true
+    # The whole tree, not just $BIN_DIR — a units-only run may be the first
+    # thing to touch a host since its 0.2 install, and the units it is about
+    # to write name the config and data roots too. Every level is created with
+    # its owner and mode STATED and the result asserted before a unit may name
+    # it; see ensure_system_tree.
+    ensure_system_tree || return 1
 
     for _reb in $ROOT_BINS; do
         if [ -n "$ROOT_BIN_PLACE_EXCLUDE" ] && [ "$_reb" = "$ROOT_BIN_PLACE_EXCLUDE" ]; then
@@ -666,13 +697,14 @@ ensure_root_exec_surface() {
 #
 # This is the check that makes the placement above meaningful rather than
 # decorative — the SURVIVING invariant of the pre-collapse libexec design, now
-# aimed at $BIN_DIR instead of a separate tree (see the header comment for why
-# the tree itself had no job left once $BIN_DIR's default became root-owned).
-# /usr/local is root-owned on a modern macOS and on every Linux, but it is not
-# GUARANTEED to be: a host where a package manager chowned it (Homebrew on
-# Intel macOS) would otherwise get a root-scheme unit pointing into a path its
-# owner can rewrite. That refusal is UNCHANGED by the collapse: /usr/local was
-# already the ancestor both the old tree and the new one walk through.
+# aimed at the bin/ of the machine-owned tree (see the header comment for how
+# it got there). /usr/local is root-owned on a modern macOS and on every
+# Linux, but it is not GUARANTEED to be, and a host where a package manager
+# chowned it would otherwise get a root-scheme unit pointing into a path its
+# owner can rewrite. That refusal is UNCHANGED: /usr/local is the ancestor
+# every layout so far has walked through. What 0.3 removes is the case where
+# /usr/local is fine and its CHILDREN are not — Homebrew's bin/etc/var — by
+# never placing anything in them.
 # ---------------------------------------------------------------------------
 verify_root_exec_surface() {
     if ! have_real_root; then
@@ -973,35 +1005,158 @@ place_unit() {
 }
 
 # ---------------------------------------------------------------------------
-# ensure_system_log_dir — pre-create the units' log directory under the SYSTEM
-# data root, as root.
+# THE MACHINE-OWNED TREE: created level by level with the mode STATED, then
+# asserted with the same predicate the daemon applies.
 #
-# launchd applies StandardOutPath at exec, so a missing parent is not a log
-# that appears late — it is a daemon that fails to spawn. Creation goes through
-# run_root because a NON-ROOT process must never create the root daemon's data
-# root: on a host where /usr/local/var is writable by the installing user
-# (Intel macOS, where Homebrew chowns it) an unprivileged mkdir succeeds and
-# leaves the root daemon's gateway.db and register/console sockets inside a
-# directory that user fully controls.
+# Everything created inside the tree gets its ownership and mode stated
+# explicitly. Neither may arrive by inheritance, because all three sources of
+# inheritance are wrong:
 #
-# 0700 is set explicitly, and only on the directories this created: mkdir -p
-# applies the process umask (0755 on a typical host, which would leave the
-# store world-readable), and re-tightening a root somebody else already
-# established is not this installer's call. Never fatal — the daemon creates
-# the tree on first start, so a missing sudo costs a log file, not an install.
+#   * THE UMASK. `mkdir -p` under sudo creates root-owned directories at
+#     0777 &^ umask. An operator with `umask 002` gets 0775 — group-writable,
+#     and dir_is_root_secure refuses it. This is the shell half of the trap
+#     EnsureConfigRoot documents for os.MkdirAll (core config_root.go), whose
+#     mode argument is umask-masked too.
+#   * THE ARCHIVE. `unzip` restores the modes recorded in the payload, so a
+#     binary stored group-writable extracts group-writable. Every binary here
+#     is placed with `install -m 0755`, never `cp -p` (place_all_bins,
+#     ensure_root_exec_surface).
+#   * THE SOURCE FILE. `cp` takes the copy's mode from the source. Same answer.
+#
+# A NON-ROOT PROCESS MUST NEVER BE THE ONE TO CREATE ANY OF IT: on a host
+# where /usr/local is writable by the installing user (Intel macOS, where
+# Homebrew chowns it) an unprivileged mkdir succeeds and leaves the root
+# daemon's gateway.db, its register/console sockets and its identity inside a
+# directory that user fully controls. Every mkdir, chown and chmod here goes
+# through run_root, and the tree is ensured BEFORE the first write of every
+# mode — before decide_bin_place_elevated's unprivileged writability probe ever
+# looks at $BIN_DIR.
+#
+# The whole tree is OURS by construction: /usr/local/burrowee is created by
+# root, beside Homebrew's directories rather than inside them, so every level
+# is moded unconditionally — there is no "somebody else's parent" to leave
+# alone, which is what the 0.2 layout could never say about /usr/local/etc.
+# The one directory this never touches is the parent of $SYSTEM_ROOT
+# (/usr/local): a missing one is a refusal, not a mkdir.
+#
+# launchd applies StandardOutPath at exec, so $SYS_LOG_DIR is part of the tree
+# rather than something the daemon creates on first start: a missing log
+# directory is a daemon that fails to spawn.
 # ---------------------------------------------------------------------------
-ensure_system_log_dir() {
-    if [ -d "$SYS_LOG_DIR" ]; then return 0; fi
-    _data_root_existed=0
-    if [ -d "$SYS_DATA_DIR" ]; then _data_root_existed=1; fi
-    if ! run_root mkdir -p "$SYS_LOG_DIR"; then
-        echo "note: could not create $SYS_LOG_DIR (needs root) — the gateway creates it on first start" >&2
+
+# ensure_dir_stated <dir> <octal-mode> — one level: create it as root when
+# absent (plain mkdir — the caller states EVERY level, and a level whose parent
+# is missing is a level outside the tree this script owns), then own and mode
+# it. chmod is checked; chown is attempted only where elevation genuinely
+# yields uid 0 (have_real_root) and is best-effort even there, because the
+# assertion that follows (assert_system_tree) is what decides ownership — a
+# chown that "succeeded" proves nothing a stat does not, and a run that never
+# reached root cannot assert ownership at all. A steady-state re-run costs
+# stats and no sudo: nothing is written unless the stat disagrees.
+ensure_dir_stated() {
+    _eds_d="$1"; _eds_m="$2"
+    if [ ! -d "$_eds_d" ]; then
+        if [ ! -d "$(dirname "$_eds_d")" ]; then
+            echo "error: cannot create $_eds_d — its parent $(dirname "$_eds_d") does not exist," >&2
+            echo "error: and this installer creates nothing above $SYSTEM_ROOT." >&2
+            return 1
+        fi
+        if ! run_root mkdir "$_eds_d"; then
+            echo "error: could not create $_eds_d (needs root) — refusing to install a service" >&2
+            echo "error: whose state would have to be created by an unprivileged user." >&2
+            echo "error: nothing has been installed; no binary was placed." >&2
+            return 1
+        fi
+    fi
+    if have_real_root && [ "$(stat_uid "$_eds_d" 2>/dev/null || echo -)" != 0 ]; then
+        run_root chown 0:0 "$_eds_d" 2>/dev/null || true
+    fi
+    if [ "$(stat_mode "$_eds_d" 2>/dev/null || echo -)" != "${_eds_m#0}" ]; then
+        if ! run_root chmod "$_eds_m" "$_eds_d"; then
+            echo "error: could not chmod $_eds_m $_eds_d (needs root) — refusing to leave a level" >&2
+            echo "error: of the machine-owned tree at a mode this installer did not state." >&2
+            echo "error: nothing has been installed; no binary was placed." >&2
+            return 1
+        fi
+    fi
+}
+
+# ensure_system_tree — the whole tree, top-down, one level at a time, then
+# asserted. The three chains meet at $SYSTEM_ROOT in production (bin/, etc/
+# and var/ are siblings under /usr/local/burrowee); under the test seams each
+# leaf may hang off its own sandbox parent, which is why each chain names its
+# own parent rather than assuming the first one's.
+#
+# The mode column, and why it is not one value: the three parents and bin/
+# are 0755 traversal-only directories that hold no secret. etc/gateway is
+# 0755 because console.token is 0640 root:<admin-group> and a 0700 parent
+# would silently revoke that grant — a mode nobody reading the token could
+# detect (the Go side says the same, ConfigRootMode). var/gateway and its
+# logs/ are 0700: nothing under them is for a non-owner.
+ensure_system_tree() {
+    ensure_dir_stated "$SYSTEM_ROOT" 0755 || return 1
+    ensure_dir_stated "$BIN_DIR" 0755 || return 1
+    ensure_dir_stated "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
+    ensure_dir_stated "$SYS_ETC_ROOT" 0755 || return 1
+    ensure_dir_stated "$SYS_CONFIG_DIR" 0755 || return 1
+    ensure_dir_stated "$(dirname "$SYS_VAR_ROOT")" 0755 || return 1
+    ensure_dir_stated "$SYS_VAR_ROOT" 0755 || return 1
+    ensure_dir_stated "$SYS_DATA_DIR" 0700 || return 1
+    ensure_dir_stated "$SYS_LOG_DIR" 0700 || return 1
+    assert_system_tree
+}
+
+# assert_system_tree — refuse when any root of the tree is not root-owned and
+# unwritable by non-root all the way to /, with the same predicate the daemon
+# applies (dir_is_root_secure, the shell half of IsRootSecureDir).
+#
+# An invariant checked only at first daemon start is one the operator meets
+# as a broken service; checked here it is a failed install naming the
+# directory that caused it. The FILES on the surface are asserted separately
+# and already — verify_root_exec_surface for what a unit names,
+# verify_placement for every binary placed — so this is the directory half
+# only. Same gate as both of those: ownership can only be asserted where
+# elevation genuinely reached uid 0, and the sandboxed harness's pass-through
+# `sudo` never does.
+#
+# rc 1 (insecure), rc 2 (undecidable) and rc 3 (absent) are three refusals
+# with three different next steps, exactly as verify_root_exec_surface keeps
+# them apart, and for the same reason: "check your permissions" is a day
+# wasted on a tree that was right the first time when what actually happened
+# is that stat did not answer.
+assert_system_tree() {
+    if ! have_real_root; then
+        echo "note: this run never reached uid 0, so the ownership of $SYSTEM_ROOT" >&2
+        echo "note: cannot be asserted — skipping the root-secure check on the tree." >&2
         return 0
     fi
-    if [ "$_data_root_existed" = 0 ]; then
-        run_root chmod 0700 "$SYS_DATA_DIR" 2>/dev/null || true
-    fi
-    run_root chmod 0700 "$SYS_LOG_DIR" 2>/dev/null || true
+    for _ast in "$SYSTEM_ROOT" "$BIN_DIR" "$SYS_ETC_ROOT" "$SYS_CONFIG_DIR" "$SYS_VAR_ROOT" "$SYS_DATA_DIR"; do
+        _ast_rc=0
+        dir_is_root_secure "$_ast" || _ast_rc=$?
+        if [ "$_ast_rc" = 0 ]; then continue; fi
+        if [ "$_ast_rc" = 2 ]; then
+            echo "error: could not read the owner and mode of $_ast — this host's 'stat'" >&2
+            echo "error: answered neither the GNU form (stat -c '%u') nor the BSD form" >&2
+            echo "error: (stat -f '%u') with a plain number." >&2
+            echo "error: refusing to install — the gateway's state would sit in a directory" >&2
+            echo "error: whose ownership could not be established." >&2
+            echo "hint: the permissions of $_ast are NOT implicated — reading them is." >&2
+            echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
+            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+        elif [ "$_ast_rc" = 3 ]; then
+            echo "error: $_ast does not exist — refusing to install a service whose state" >&2
+            echo "error: would sit in a directory this run failed to create." >&2
+            echo "hint: re-run 'burrowee gateway service install' from an interactive terminal" >&2
+            echo "hint: so the directory can be created as root." >&2
+        else
+            echo "error: $_ast is not root-owned and unwritable all the way to /." >&2
+            echo "error: refusing to install — the gateway's state would sit in a directory a" >&2
+            echo "error: non-root user could rewrite." >&2
+            echo "hint: check the ownership and modes of that directory and every directory" >&2
+            echo "hint: above it; each must be owned by root and not group- or world-writable." >&2
+        fi
+        return 1
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -1197,20 +1352,20 @@ migration_sudo() {
 # version to decide whether an install is already current, and that home is now
 # $BIN_DIR. One writer for both keeps them from disagreeing.
 #
-# The $BIN_DIR copy is guarded on $SYS_CONFIG_DIR, which since the prefix flow
-# was removed is the whole question: $BIN_DIR is the system location on every
-# install, so what is left to ask is whether this host has actually been
-# converged to the root scheme yet. A host with no system config root has no
-# root-scheme updater reading that copy, and writing it would root-own a file in
-# a tree nothing on this host consults.
+# The $BIN_DIR copy used to be guarded on $SYS_CONFIG_DIR existing — "has this
+# host been converged to the root scheme yet". Since 0.3 every mode that
+# records a version has already established the whole machine-owned tree
+# (ensure_system_tree, before its first write), so the answer is always yes
+# and the guard would be dead: both anchors are written, unconditionally. The
+# $BIN_DIR copy moves WITH $BIN_DIR to /usr/local/burrowee/bin, and the root
+# updater reads it from there (core's local-update path, <exec dir>/
+# .installed-version); the uninstall block removes it from the same place.
 record_installed_version() {
     _ver="${1##*/}"
     if [ -z "$_ver" ]; then return 0; fi
     mkdir -p "$GW_HOME"
     printf '%s\n' "$_ver" > "$GW_HOME/.installed-version"
-    if [ -d "$SYS_CONFIG_DIR" ]; then
-        printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
-    fi
+    printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -1439,8 +1594,6 @@ render_units() {
     ensure_root_exec_surface || return 1
     case "$(uname -s)" in
     Darwin)
-        ensure_system_log_dir
-
         # Core unit. KeepAlive.PathState restarts the daemon after ANY exit
         # while the binary exists (a graceful SIGTERM exit is the
         # update-restart mechanism) and waits quietly when the volume holding
@@ -1487,8 +1640,6 @@ EOF
         ;;
 
     Linux)
-        ensure_system_log_dir
-
         # Core unit. Restart=always (not on-failure): a graceful SIGTERM exit
         # must still restart — that is the update-restart mechanism. No User=/
         # Group=/Environment=HOME=: the daemon runs as root and takes both path
@@ -2668,13 +2819,13 @@ guard_prove_armed() {
 #
 # Mirrors gateway/update.sh's PLACE_ELEVATED (see that script's header for the
 # full field history). $BIN_DIR was always writable under the old default
-# ($HOME/.local/bin); it is root-owned under the new one (/usr/local/bin), so
-# placing straight onto the final names with a bare `install` would die on the
-# first binary for anyone who is not already root. The elevation is decided
-# ONCE per mode, by a real create rather than assumed — a run already at uid 0,
-# or a host whose /usr/local is writable by the invoking user, never pays for a
-# sudo call it does not need — and every write of one placement goes through the
-# SAME decision, so a set can never end up half-elevated.
+# ($HOME/.local/bin); it is root-owned under the new one
+# (/usr/local/burrowee/bin), so placing straight onto the final names with a
+# bare `install` would die on the first binary for anyone who is not already
+# root. The elevation is decided ONCE per mode, by a real create rather than
+# assumed — a run already at uid 0 never pays for a sudo call it does not need
+# — and every write of one placement goes through the SAME decision, so a set
+# can never end up half-elevated.
 # ---------------------------------------------------------------------------
 BIN_PLACE_ELEVATED=0
 
@@ -2691,11 +2842,13 @@ bin_place_writable() {
     return 1
 }
 
-# decide_bin_place_elevated — the real-create probe, once. mkdir -p first so a
-# genuinely absent $BIN_DIR (fresh host, either default) does not read as
-# "unwritable" for the wrong reason.
+# decide_bin_place_elevated — the real-create probe, once. $BIN_DIR exists by
+# the time this is asked — ensure_system_tree created it AS ROOT ahead of the
+# first write of every mode — and it must not be created here: an unprivileged
+# `mkdir -p` succeeding on a host whose /usr/local the invoking user owns is
+# exactly how the exec surface would come to be owned by that user.
 decide_bin_place_elevated() {
-    if mkdir -p "$BIN_DIR" 2>/dev/null && bin_place_writable "$BIN_DIR"; then
+    if bin_place_writable "$BIN_DIR"; then
         BIN_PLACE_ELEVATED=0
     else
         BIN_PLACE_ELEVATED=1
@@ -3226,6 +3379,10 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     _own_slot=0
     if [ -z "$_slot_owner" ] || [ "$_slot_owner" = "$SERVICE_USER" ]; then _own_slot=1; fi
 
+    # The tree first, AS ROOT, before any probe looks at $BIN_DIR — see
+    # ensure_system_tree. A failure here is before Phase 2 backs anything up.
+    ensure_system_tree || exit 1
+
     # Decide elevation ONCE, before the first write — same rule place_all_bins
     # follows below, and update.sh's PLACE_ELEVATED: a real create, not an
     # assumption. Failing to even create $BIN_DIR is the FIRST write of this
@@ -3495,6 +3652,13 @@ fi
 # load_units ever restarts it, severing a tunnelled operator's session at the
 # migration, not the restart. snapshot_take runs first so the guard has a working point to
 # roll back to the moment it exists.
+#
+# THE TREE COMES FIRST, AS ROOT. The transaction lives under $SYS_DATA_DIR,
+# the guard is placed into $BIN_DIR, and decide_bin_place_elevated probes
+# $BIN_DIR's writability — every one of those needs the tree to exist already,
+# root-owned with its modes stated, or an unprivileged step creates it on a
+# host whose /usr/local the user owns. See ensure_system_tree.
+ensure_system_tree || exit 1
 txn_begin
 snapshot_take
 guard_arm

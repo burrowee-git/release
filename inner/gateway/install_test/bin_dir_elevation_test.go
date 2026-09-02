@@ -174,40 +174,52 @@ func TestInstallShElevatesPlacementIntoARootOwnedBinDir(t *testing.T) {
 	}
 }
 
-// TestInstallShDoesNotElevateAWritableBinDir: decide_bin_place_elevated must
-// ask whether THIS process can write $BIN_DIR, discovered by a real create, and
-// not assume elevation just because the destination is the system one. A host
-// whose /usr/local this user owns (a Homebrew Intel Mac, a container running as
-// its own user) is the ordinary case for that.
+// TestInstallShCreatesTheTreeAsRootEvenWhereTheUserCouldWriteIt is the 0.3
+// inversion of the test that stood here ("a writable $BIN_DIR is placed into
+// without elevation"). That property was correct for a destination somebody
+// else owned; it is wrong for a tree this installer OWNS. On a host whose
+// /usr/local the user can write (a Homebrew Intel Mac — the very host the
+// 0.3 layout exists for) an unprivileged mkdir would succeed and leave the
+// root daemon's exec surface, identity and store inside a directory that
+// user controls, and the root-secure assertion would then refuse the host
+// that was supposed to be fixed. So every level of the tree is created
+// through run_root, always, and this asserts that the sandbox parent being
+// writable by the test user changed nothing about that.
 //
-// The `sudo` on PATH here always refuses, which is what makes the assertion
-// able to fail: had placement elevated blindly, place_all_bins would have died
-// on its very first write — the staging mkdir — with "cannot write $BIN_DIR —
-// no binary was placed", and none of the six would exist.
+// decide_bin_place_elevated's own question — does THIS process need root to
+// write into an already-existing $BIN_DIR — is unchanged and still asked by a
+// real create; TestInstallShElevatesTheDefaultBinDir covers its elevating
+// half against a 0500 fixture.
 //
-// The run as a whole still fails, and that is correct rather than incidental:
-// past placement comes the privileged surface (ensure_root_exec_surface), which
-// genuinely cannot be established without root and refuses rather than writing
-// a unit it cannot back. Since the prefix collapse there is no install shape
-// that skips it, so "placed but not unit-installed" is the honest outcome for a
-// host with no elevation at all.
-func TestInstallShDoesNotElevateAWritableBinDir(t *testing.T) {
-	requireUnprivilegedForElevation(t)
+// Mutation that reddens it: create the tree's levels with a bare `mkdir`
+// instead of `run_root mkdir`.
+func TestInstallShCreatesTheTreeAsRootEvenWhereTheUserCouldWriteIt(t *testing.T) {
 	staging := t.TempDir()
 	seedDummyBins(t, staging)
 	home := t.TempDir()
 	stub := stubInitSystem(t)
-	installFailingSudoFor(t, stub, binDir(home))
 
 	out, err := runStaged(t, installShPath(t), staging, home, stub)
-	if err == nil {
-		t.Fatalf("install.sh succeeded with no elevation available; the unit surface cannot have been reached:\n%s", out)
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, out)
 	}
-	for _, b := range allBins {
-		if _, statErr := os.Stat(filepath.Join(binDir(home), b)); statErr != nil {
-			t.Errorf("%s missing from a WRITABLE $BIN_DIR: %v — placement elevated when it did not need to\n%s", b, statErr, out)
+	calls := readFile(t, filepath.Join(home, "stub-calls.log"))
+	for _, dir := range []string{systemRoot(home), binDir(home), sysConfigDir(home), sysDataDir(home)} {
+		if !elevatedCall(calls, "mkdir "+dir) {
+			t.Errorf("%s was created without elevation — a user who can write the parent would own the tree\n%s", dir, calls)
 		}
 	}
+}
+
+// elevatedCall reports whether the stub log records `sudo … <suffix>` — a
+// command that went through run_root rather than being run directly.
+func elevatedCall(log, suffix string) bool {
+	for _, line := range strings.Split(log, "\n") {
+		if strings.HasPrefix(line, "sudo ") && strings.HasSuffix(line, " "+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestInstallShPlacesNothingWhenBinDirCannotBeWrittenAtAll is the brief's

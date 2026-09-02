@@ -32,7 +32,7 @@ import (
 // (/usr/local/bin); changing either is still a deliberate, cross-repo
 // decision — update both pins in the same change, or an update and a fresh
 // install can silently resolve to two different directories.
-const wantBinDirDefault = "/usr/local/bin"
+const wantBinDirDefault = "/usr/local/burrowee/bin"
 
 // binDirDefaultRe matches install.sh's BIN_DIR assignment and captures the
 // ${BURROWEE_BIN_DIR:-<default>} fallback — the real destination a production
@@ -222,4 +222,67 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return b
+}
+
+// wantSystemConfigDirDefault / wantSystemDataDirDefault are the other two
+// roots of the machine-owned tree, pinned beside $BIN_DIR because the three
+// are siblings under ONE parent (/usr/local/burrowee) and the installer
+// derives that parent from them — a root that moved on its own would put the
+// exec surface in one tree and the state in another.
+const (
+	wantSystemRootDefault      = "/usr/local/burrowee"
+	wantSystemConfigDirDefault = wantSystemRootDefault + "/etc/gateway"
+	wantSystemDataDirDefault   = wantSystemRootDefault + "/var/gateway"
+)
+
+// seamDefault extracts the `${SEAM:-<default>}` fallback of the given
+// assignment from a script's source, failing when the assignment is not
+// there in that shape.
+func seamDefault(t *testing.T, src []byte, variable, seam string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^\s*` + variable + `="\$\{` + seam + `:-([^}"]+)\}"`)
+	m := re.FindSubmatch(src)
+	if m == nil {
+		t.Fatalf(`no %s="${%s:-...}" assignment found — the seam moved shape and this pin no longer covers it`, variable, seam)
+	}
+	return string(m[1])
+}
+
+// TestInstallShSystemRootsAreSiblingsUnderOneTree pins the config and data
+// roots and the fact that all three share the parent $BIN_DIR is derived
+// from. Every one of these is a real, fixed system path, asserted as source
+// text for the same reason the $BIN_DIR pin above is.
+func TestInstallShSystemRootsAreSiblingsUnderOneTree(t *testing.T) {
+	src := mustRead(t, installShPath(t))
+	if got := seamDefault(t, src, "SYS_CONFIG_DIR", "BURROWEE_SYSTEM_CONFIG_DIR"); got != wantSystemConfigDirDefault {
+		t.Errorf("install.sh's SYS_CONFIG_DIR default = %q, want %q", got, wantSystemConfigDirDefault)
+	}
+	if got := seamDefault(t, src, "SYS_DATA_DIR", "BURROWEE_SYSTEM_DATA_DIR"); got != wantSystemDataDirDefault {
+		t.Errorf("install.sh's SYS_DATA_DIR default = %q, want %q", got, wantSystemDataDirDefault)
+	}
+	if got := filepath.Dir(wantBinDirDefault); got != wantSystemRootDefault {
+		t.Errorf("the parent of $BIN_DIR (%s) is %q, want %q — the exec root must be inside the tree it serves", wantBinDirDefault, got, wantSystemRootDefault)
+	}
+	if !strings.Contains(string(src), `SYSTEM_ROOT="$(dirname "$BIN_DIR")"`) {
+		t.Errorf("install.sh no longer derives SYSTEM_ROOT from $BIN_DIR — a sandboxed run could then default the tree to the real %s", wantSystemRootDefault)
+	}
+}
+
+// TestGuardShDefaultsMatchInstallSh pins guard.sh to the same three roots.
+// The guard is execed as root by the supervisor with only a transaction
+// directory as argument; it reads $SYS_DATA_DIR for running.json and $BIN_DIR
+// for the binary it version-probes, so defaults that lagged install.sh's
+// would have it watch a tree the daemon no longer writes and report a
+// restart that never happened.
+func TestGuardShDefaultsMatchInstallSh(t *testing.T) {
+	src := mustRead(t, guardShPath(t))
+	for _, pin := range []struct{ variable, seam, want string }{
+		{"BIN_DIR", "BURROWEE_BIN_DIR", wantBinDirDefault},
+		{"SYS_CONFIG_DIR", "BURROWEE_SYSTEM_CONFIG_DIR", wantSystemConfigDirDefault},
+		{"SYS_DATA_DIR", "BURROWEE_SYSTEM_DATA_DIR", wantSystemDataDirDefault},
+	} {
+		if got := seamDefault(t, src, pin.variable, pin.seam); got != pin.want {
+			t.Errorf("guard.sh's %s default = %q, want %q (install.sh's)", pin.variable, got, pin.want)
+		}
+	}
 }
