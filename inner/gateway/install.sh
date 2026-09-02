@@ -3454,9 +3454,9 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # this path, and its own last check — that the serve unit's ExecStart
     # target is executable — is precisely the pairing between the unit just
     # written and the binary ensure_root_exec_surface just placed.
-    echo "note: this mode places no binaries, so there is no placement to verify" \
-         "against a bundle — the root-exec surface render_units placed was" \
-         "verified by verify_root_exec_surface before any unit was written." >&2
+    echo "note: this mode places no binaries, so there is no bundle to verify a" >&2
+    echo "note: placement against; the root-exec surface render_units did place was" >&2
+    echo "note: proved by verify_root_exec_surface before any unit was written." >&2
     verify_units || abort_install "unit verification failed"
 
     txn_phase verified
