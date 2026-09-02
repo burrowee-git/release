@@ -183,3 +183,47 @@ func TestDirIsRootSecureReportsUndecidableNotInsecure(t *testing.T) {
 		t.Errorf("dir_is_root_secure with an unreadable stat = %d, want 2 (undecidable, not insecure)\n%s", ee.ExitCode(), out)
 	}
 }
+
+// TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf — a symlinked leaf
+// has TWO ancestor chains and both decide. Walking only the target's ignores
+// the directory that holds the link: with a group-writable /usr/local and
+// /usr/local/bin -> a root-owned tree, the target walks clean while the owner
+// of /usr/local can repoint `bin` whenever they like, after which every root
+// symlink this installer made addresses their directory instead.
+//
+// Mutation that reddens it: drop the `dir_chain_is_root_secure "$_ds_p"` call
+// from the `[ -L ]` branch, so only the resolved target is walked.
+func TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf(t *testing.T) {
+	root := t.TempDir()
+	holder := filepath.Join(root, "holder")
+	target := filepath.Join(root, "target", "bin")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(holder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(holder, "bin")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]string{}
+
+	// Both chains sound: secure.
+	if rc := dirIsRootSecure(t, link, none, none); rc != 0 {
+		t.Errorf("a symlinked leaf with both chains root-owned: rc = %d, want 0", rc)
+	}
+	// The HOLDER is group-writable while the target is spotless — the case the
+	// resolution alone cannot see.
+	if rc := dirIsRootSecure(t, link, none, map[string]string{holder: "775"}); rc != 1 {
+		t.Errorf("a group-writable directory holding the link: rc = %d, want 1 — its owner can repoint the link", rc)
+	}
+	// And the mirror image: holder sound, target group-writable.
+	if rc := dirIsRootSecure(t, link, none, map[string]string{target: "775"}); rc != 1 {
+		t.Errorf("a group-writable symlink target: rc = %d, want 1", rc)
+	}
+	// A holder owned by someone other than root is refused on uid, not mode.
+	if rc := dirIsRootSecure(t, link, map[string]string{holder: "501"}, none); rc != 1 {
+		t.Errorf("a non-root-owned directory holding the link: rc = %d, want 1", rc)
+	}
+}

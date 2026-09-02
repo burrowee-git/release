@@ -113,11 +113,13 @@ LINKED_OPERATOR_BINS=""
 # the absolute path — the shared `burrowee` dispatcher above all. The
 # installer's own later call narrows this to what it actually linked.
 exec_root_keep_list() {
-    if dir_is_root_secure "$LINK_DIR"; then
-        echo ""
-    else
-        echo "$LINK_BINS"
-    fi
+    # EVERY operator-typed name, unconditionally. This is what the LADDER is
+    # handed, and the ladder runs before link_operator_bins has made a single
+    # link — so at that moment no link has replaced anything, and the real 0.2
+    # file at each of these names is still the only copy reachable by the
+    # absolute path. The installer's own sweep, which runs after linking,
+    # narrows this to the names it could not link (LINKED_OPERATOR_BINS).
+    echo "$LINK_BINS"
 }
 # The 0.2 exec root the sweep reads IS the link directory, so it follows the
 # same seam: a sandboxed run must never iterate the host's real /usr/local/bin.
@@ -417,19 +419,36 @@ dir_is_root_secure() {
     /) ;;
     *) _ds_d="${_ds_p%/}/$(basename "$_ds_d")" ;;
     esac
+    # A SYMLINKED LEAF MUST SATISFY BOTH CHAINS. Resolving to the target and
+    # walking only from there ignores the directory that HOLDS the link: with a
+    # group-writable /usr/local and /usr/local/bin -> a root-owned tree, the
+    # target walks clean while the owner of /usr/local can repoint `bin` at any
+    # moment — after which root's own links address someone else's directory.
+    # The holder's chain is checked first, then the resolved target's below.
     if [ -L "$_ds_d" ]; then
+        dir_chain_is_root_secure "$_ds_p" || return $?
         _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
         [ -n "$_ds_d" ] || return 2
     fi
+    dir_chain_is_root_secure "$_ds_d"
+}
+
+# dir_chain_is_root_secure DIR — the ownership walk itself, from DIR up to /:
+# every level root-owned and writable by nobody else. Split out of
+# dir_is_root_secure so a symlinked leaf can be judged by the chain that HOLDS
+# the link as well as the one that holds its target. Takes an already-resolved
+# path; nothing else calls it.
+dir_chain_is_root_secure() {
+    _dc_d="$1"
     while :; do
-        [ -d "$_ds_d" ] || return 1
-        _ds_v="$(stat_uid "$_ds_d")" || return 2
-        [ "$_ds_v" = 0 ] || return 1
-        _ds_v="$(stat_mode "$_ds_d")" || return 2
-        if mode_allows_nonroot_write "$_ds_v"; then return 1; fi
-        _ds_parent="$(dirname "$_ds_d")"
-        [ "$_ds_parent" != "$_ds_d" ] || break
-        _ds_d="$_ds_parent"
+        [ -d "$_dc_d" ] || return 1
+        _dc_v="$(stat_uid "$_dc_d")" || return 2
+        [ "$_dc_v" = 0 ] || return 1
+        _dc_v="$(stat_mode "$_dc_d")" || return 2
+        if mode_allows_nonroot_write "$_dc_v"; then return 1; fi
+        _dc_parent="$(dirname "$_dc_d")"
+        [ "$_dc_parent" != "$_dc_d" ] || break
+        _dc_d="$_dc_parent"
     done
     return 0
 }

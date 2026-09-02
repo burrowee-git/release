@@ -235,11 +235,13 @@ LINKED_OPERATOR_BINS=""
 # the absolute path — the shared `burrowee` dispatcher above all. The
 # installer's own later call narrows this to what it actually linked.
 exec_root_keep_list() {
-    if dir_is_root_secure "$LINK_DIR"; then
-        echo ""
-    else
-        echo "$LINK_BINS"
-    fi
+    # EVERY operator-typed name, unconditionally. This is what the LADDER is
+    # handed, and the ladder runs before link_operator_bins has made a single
+    # link — so at that moment no link has replaced anything, and the real 0.2
+    # file at each of these names is still the only copy reachable by the
+    # absolute path. The installer's own sweep, which runs after linking,
+    # narrows this to the names it could not link (LINKED_OPERATOR_BINS).
+    echo "$LINK_BINS"
 }
 # The 0.2 exec root the sweep reads is the SAME directory the links go into, so
 # it follows the link seam: a sandboxed run must never iterate the real
@@ -626,19 +628,36 @@ dir_is_root_secure() {
     /) ;;
     *) _ds_d="${_ds_p%/}/$(basename "$_ds_d")" ;;
     esac
+    # A SYMLINKED LEAF MUST SATISFY BOTH CHAINS. Resolving to the target and
+    # walking only from there ignores the directory that HOLDS the link: with a
+    # group-writable /usr/local and /usr/local/bin -> a root-owned tree, the
+    # target walks clean while the owner of /usr/local can repoint `bin` at any
+    # moment — after which root's own links address someone else's directory.
+    # The holder's chain is checked first, then the resolved target's below.
     if [ -L "$_ds_d" ]; then
+        dir_chain_is_root_secure "$_ds_p" || return $?
         _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
         [ -n "$_ds_d" ] || return 2
     fi
+    dir_chain_is_root_secure "$_ds_d"
+}
+
+# dir_chain_is_root_secure DIR — the ownership walk itself, from DIR up to /:
+# every level root-owned and writable by nobody else. Split out of
+# dir_is_root_secure so a symlinked leaf can be judged by the chain that HOLDS
+# the link as well as the one that holds its target. Takes an already-resolved
+# path; nothing else calls it.
+dir_chain_is_root_secure() {
+    _dc_d="$1"
     while :; do
-        [ -d "$_ds_d" ] || return 1
-        _ds_v="$(stat_uid "$_ds_d")" || return 2
-        [ "$_ds_v" = 0 ] || return 1
-        _ds_v="$(stat_mode "$_ds_d")" || return 2
-        if mode_allows_nonroot_write "$_ds_v"; then return 1; fi
-        _ds_parent="$(dirname "$_ds_d")"
-        [ "$_ds_parent" != "$_ds_d" ] || break
-        _ds_d="$_ds_parent"
+        [ -d "$_dc_d" ] || return 1
+        _dc_v="$(stat_uid "$_dc_d")" || return 2
+        [ "$_dc_v" = 0 ] || return 1
+        _dc_v="$(stat_mode "$_dc_d")" || return 2
+        if mode_allows_nonroot_write "$_dc_v"; then return 1; fi
+        _dc_parent="$(dirname "$_dc_d")"
+        [ "$_dc_parent" != "$_dc_d" ] || break
+        _dc_d="$_dc_parent"
     done
     return 0
 }
@@ -705,21 +724,44 @@ ensure_root_exec_surface() {
             # 0.2→0.3 crossing the new exec root has no copy of it at all, and
             # verify_root_exec_surface would refuse every unit. A copy of the
             # running binary from the 0.2 exec root is not a replacement of it.
-            if [ ! -f "$BIN_DIR/$_reb" ] && [ -f "$LEGACY_BIN_DIR/$_reb" ]; then
-                # ONLY from a root-secure source. $LEGACY_BIN_DIR is the
-                # directory this whole layout stopped trusting — on the Homebrew
-                # Intel Mac the 0.3 tree exists for, the console user owns it.
-                # Copying an unverified file from there into the root-secure
-                # exec root launders it: the destination check passes because it
-                # inspects the destination, and a root unit then execs it.
-                if ! path_is_root_secure "$LEGACY_BIN_DIR/$_reb"; then
-                    echo "error: $LEGACY_BIN_DIR/$_reb is not root-secure, so it will not be copied into" >&2
-                    echo "error: $BIN_DIR — re-run the installer with the release bundle, which carries a" >&2
-                    echo "error: verified $_reb, rather than adopting whatever sits in the 0.2 exec root." >&2
+            if [ ! -f "$BIN_DIR/$_reb" ]; then
+                # THE BUNDLE FIRST. Excluding this name from placement means
+                # "do not replace the RUNNING updater", and the running one is
+                # at $LEGACY_BIN_DIR — so putting the bundle's own verified copy
+                # at the new path replaces nothing. It is also the only source
+                # here that was signature-checked.
+                #
+                # $LEGACY_BIN_DIR is the fallback and only when root-secure: it
+                # is the directory this layout stopped trusting, console-user
+                # owned on the Homebrew Intel Mac the 0.3 tree exists for, and
+                # copying an unverified file from there into the root-secure
+                # exec root launders it — verify_root_exec_surface inspects the
+                # destination, and a root unit then execs it.
+                _reb_x="$(root_bin_source "$_reb")"
+                case "$_reb_x" in
+                "$LEGACY_BIN_DIR/"*) path_is_root_secure "$_reb_x" || _reb_x="" ;;
+                "") ;;
+                esac
+                if [ -z "$_reb_x" ] && [ -f "$LEGACY_BIN_DIR/$_reb" ] \
+                    && path_is_root_secure "$LEGACY_BIN_DIR/$_reb"; then
+                    _reb_x="$LEGACY_BIN_DIR/$_reb"
+                fi
+                if [ -z "$_reb_x" ] && [ -e "$LEGACY_BIN_DIR/$_reb" ]; then
+                    # A candidate EXISTS and was refused. Say that, rather than
+                    # letting verify_root_exec_surface report the destination as
+                    # merely absent — an operator told "missing" would go looking
+                    # for a placement bug instead of at the file that was skipped.
+                    echo "error: $LEGACY_BIN_DIR/$_reb is not root-secure, so it was not copied into $BIN_DIR." >&2
+                    echo "error: Re-run the full installer for this component, which carries a verified $_reb," >&2
+                    echo "error: rather than adopting whatever sits in the 0.2 exec root." >&2
                     return 1
                 fi
-                run_root /usr/bin/install -m 0755 "$LEGACY_BIN_DIR/$_reb" "$BIN_DIR/$_reb" || return 1
-                echo "placed $BIN_DIR/$_reb from the 0.2 exec root (the running updater, copied, not replaced)"
+                # Nothing anywhere: leave it to verify_root_exec_surface, whose
+                # refusal names the destination path and the converging verb.
+                if [ -n "$_reb_x" ]; then
+                    run_root /usr/bin/install -m 0755 "$_reb_x" "$BIN_DIR/$_reb" || return 1
+                    echo "placed $BIN_DIR/$_reb from $_reb_x (the running updater is not replaced)"
+                fi
             fi
             continue
         fi
@@ -1368,7 +1410,7 @@ link_operator_bins() {
 links_deferred_to_guard() {
     for _ldg_f in "$LAUNCHD_DIR"/*burrowee*gateway*.plist "$SYSTEMD_DIR"/burrowee-gateway*.service; do
         [ -f "$_ldg_f" ] || continue
-        if grep -q "$LINK_DIR/burrowee" "$_ldg_f" 2>/dev/null; then return 0; fi
+        if grep -qF "$LINK_DIR/burrowee" "$_ldg_f" 2>/dev/null; then return 0; fi
     done
     return 1
 }
