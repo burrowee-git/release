@@ -55,6 +55,23 @@ tools/                          build/version/bootstrap-generation scripts + the
 ops/                            nginx/systemd unit files for the hosting side (reference only)
 ```
 
+## Channel ruling — beta-only cuts while the 0.3 cycle is open (2026-09-01)
+
+The inner installers (`inner/gateway/install.sh`, `inner/edge/install.sh`, the two
+`updater.install.sh`) target the **0.3** system root, `/usr/local/burrowee/{etc,var,bin}`,
+and this repo has no per-channel installer: a stable cut from `main` would ship them under
+0.2 binaries whose daemons still write `/usr/local/var/burrowee/<comp>`. The operator's
+ruling: **only `beta` cuts are made until 0.3 graduates. No stable cut of gateway or edge
+unless the operator explicitly starts a stable-cut session** — and that session first
+resolves the installer split (the candidate design is relay's: the installer travels with
+the component source, so rkit picks it from the tree it is building).
+
+Consequence to expect and not "fix": `tools/install-waits-for-daemon.test.sh` is **red**
+while this ruling stands. It reads the daemons from the sibling `*/code/main` checkouts,
+which are 0.2 — the mismatch it reports is the exact hazard the ruling guards against, and
+it goes green by itself when 0.3 graduates to `main`. Every other suite is green or
+name-identical to `main`'s container baseline.
+
 ## Core principles
 
 See [`DEVELOPMENT.md`](https://github.com/burrowee-git/resources/blob/main/docs/guidelines/DEVELOPMENT.md)
