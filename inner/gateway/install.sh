@@ -2184,59 +2184,57 @@ snapshot_db() {
 }
 
 # ---------------------------------------------------------------------------
-# SHARED WITH guard.sh, BYTE FOR BYTE, and pinned by
-# tools/guard-rollback.test.sh so it cannot drift.
+# THE SAME QUESTION guard.sh's snapshot_has_binaries asks — "is there a
+# previous install behind this snapshot at all" — asked from the OTHER side of
+# a privilege boundary, and answered with one more state because from here
+# there is one more thing that can be true.
 #
-# The house idiom for install-time logic two scripts both need (there is no
-# shared shell library — see tools/install-waits-for-daemon.test.sh, which
-# pins wait_for_running_version and binary_version_stamp across the edge and
-# gateway installers the same way). A real library is the wrong shape HERE in
-# particular: guard.sh is execed as root by launchd/systemd out of $BIN_DIR
-# with the whole rollback path behind it, and giving that path a second file
-# it must find is a way for a rollback to fail that the current shape does not
-# have. install.sh cannot source guard.sh either — the sourcing that exists
-# runs the other way, and only in a subshell (guard.sh's
-# sweep_stale_bins_via_kept_installer), precisely because these two files
-# define the same names.
+# WHY NOT ONE BODY IN BOTH FILES. It was, byte for byte, and the pin that held
+# it there was itself recorded as standing in the way of this fix. The guard
+# runs as ROOT, execed by launchd/systemd: a bare `[ -d ]` and a glob are a
+# complete answer for it, and it has no elevated-read helper to reach for.
+# install.sh is routinely entered by an UNPRIVILEGED shell that elevates per
+# command, and txn_begin makes the transaction root-owned 0700 — which is the
+# whole reason txn_read_file / txn_list_dir / txn_file_exists exist. The shared
+# body used neither, so from here it could answer "no binaries" out of pure
+# blindness, and abort_install's prose then told the operator a fact about
+# their host ("this host had no previous gateway install") that this shell had
+# not established and could not have.
 #
-# So: one body, spelled identically in both files, and a test that fails the
-# build the moment they differ.
+# So the duplication ends rather than being re-pinned: two readers with
+# genuinely different powers get two predicates, and the test that used to
+# demand byte-identity now demands the thing that actually matters — that on a
+# snapshot BOTH can see, the two answer the same
+# (tools/guard-rollback.test.sh, t_snapshot_binaries_predicates_agree).
 #
-# AND THE PIN NOW STANDS IN THE WAY OF ONE KNOWN FIX, which is worth saying
-# here rather than being rediscovered at the point of failure. THIS copy runs
-# in the installer, which is routinely entered by an unprivileged shell, while
-# the transaction tree is root-owned 0700 — so its bare `[ -d ]` and glob are
-# blind in exactly the way txn_list_dir exists to correct, and abort_install's
-# no-guard branch can therefore read an empty snapshot on a host that has one.
-# The guard's copy has no such problem (it runs as root) and no such helper.
-# Routing this copy through txn_list_dir would fix the blindness and BREAK
-# byte-identity, so the pin would fail — correctly, since the two would no
-# longer be the same predicate. Fixing that finding therefore means re-scoping
-# the pin (or ending the duplication), not editing one copy and re-running the
-# test. Recorded, not fixed here.
+# THE THIRD STATE IS THE POINT. "No binaries" and "I could not look" are
+# different facts about a host, and only one of them licenses the sentence
+# "there was nothing to restore".
 # ---------------------------------------------------------------------------
-# snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
-# previous install's binaries, or is this directory the empty shell a fresh
-# host produces?
+# snapshot_binaries_state <snapshot-dir> — prints one of:
 #
-# snapshot_take copies only the names that were ALREADY in $BIN_DIR
-# (`[ -f "$BIN_DIR/$b" ]`), so on a host that has never had a gateway the
-# snapshot's bin/ is created and left empty — a distinction the rest of
-# rollback cannot make from the manifest alone, because `running_version` is
-# the placeholder `unknown` for BOTH "fresh host" and "the daemon was already
-# down".
+#   some     the snapshot holds at least one previous binary
+#   none     it was READ, and it holds none — the empty shell a fresh host
+#            produces, because snapshot_take copies only names that were
+#            already in $BIN_DIR (`[ -f "$BIN_DIR/$b" ]`)
+#   unknown  this shell cannot see into the transaction at all
 #
-# An `if` inside the loop, not `[ -e … ] && return 0`: an AND-list is the last
-# statement of the loop body, so on the final non-matching entry the `for`
-# itself returns 1 and `set -e` kills the guard mid-rollback. An `if` with no
-# `else` returns 0 whichever way it goes — the same shape, and the same
-# reason, as apply_retention's prune body below.
-snapshot_has_binaries() {
-    [ -d "$1/bin" ] || return 1
-    for _shb in "$1/bin"/*; do
-        if [ -e "$_shb" ]; then return 0; fi
-    done
-    return 1
+# `none` and `unknown` are told apart by the SNAPSHOT DIRECTORY ITSELF, and it
+# is a discriminator this script guarantees rather than hopes for: txn_begin
+# creates `snapshot/bin` and `snapshot/units` before anything else happens, so
+# a snapshot dir that lists as empty is not a fresh host — it is a shell that
+# cannot read the directory. That is the same shape guard_prove_armed uses
+# installer.pid for, for the same reason: a file that CERTAINLY exists is what
+# turns an empty answer into evidence.
+#
+# txn_list_dir and not a glob: it is the helper that degrades to `sudo -n`,
+# which is what makes the common unprivileged install answer `some`/`none`
+# instead of `unknown`. Its own header explains why the elevation is
+# non-interactive.
+snapshot_binaries_state() {
+    if [ -n "$(txn_list_dir "$1/bin")" ]; then printf 'some\n'; return 0; fi
+    if [ -n "$(txn_list_dir "$1")" ]; then printf 'none\n'; return 0; fi
+    printf 'unknown\n'
 }
 
 # snapshot_restore — put the last working point back. Every failure is
@@ -3071,15 +3069,27 @@ consent_to_sever() {
 # sentence names a build that never existed. `aborted` is the phase for
 # exactly that host ("there was no previous install to restore, so nothing was
 # started"), and it is true here in both halves: this mode restarted nothing by
-# construction. Same predicate the guard's own rollback uses on the same
-# directory, spelled the same way (snapshot_has_binaries above).
+# construction.
 #
 # Prose only, and knowingly so: nothing is started on this path either way, so
 # the phase file is the whole of what changes. But the phase file is what
 # guard-status reports to an operator, and it is the only record this mode
 # leaves.
 #
-# The exit status is 1 either way: an aborted install failed.
+# AND IT NEVER ASSERTS A HOST FACT IT DID NOT OBSERVE. The predicate is
+# snapshot_binaries_state, which has three answers and not two: this script is
+# routinely entered by an unprivileged shell and the transaction is root-owned
+# 0700, so "the snapshot holds no binaries" and "this shell cannot read the
+# snapshot" are both reachable — and the old two-valued predicate collapsed
+# them, printing "this host had no previous gateway install" out of blindness.
+# On `unknown` this branch says exactly what it saw, restores nothing (there is
+# nothing it could read to restore) and — the important half — writes NO
+# terminal phase. `aborted` there would record "there was no previous install"
+# as a finding, in the one direction that costs something: an operator who has
+# one, and now believes this run established they do not. A transaction left
+# un-finalised reads as unfinished, which is what it is.
+#
+# The exit status is 1 on every arm: an aborted install failed.
 # ---------------------------------------------------------------------------
 abort_install() {
     if [ "$GUARD_ARMED" = 1 ]; then
@@ -3106,19 +3116,37 @@ abort_install() {
         echo "install: if it never does, start the gateway by hand: sudo burrowee gateway service install" >&2
         exit 1
     fi
-    if snapshot_has_binaries "$TXN_DIR/snapshot"; then
+    case "$(snapshot_binaries_state "$TXN_DIR/snapshot")" in
+    some)
         echo "install: $1 — restoring the previous install." >&2
         echo "install: no guard was armed this run (BURROWEE_NO_RESTART), and nothing was" >&2
         echo "install: restarted, so the running gateway is the one this restores." >&2
         snapshot_restore || echo "install: the restore itself reported errors — see above" >&2
         txn_phase rolled-back
         exit 1
-    fi
-    echo "install: $1 — there is nothing to restore." >&2
-    echo "install: this host had no previous gateway install, and no guard was armed this" >&2
-    echo "install: run (BURROWEE_NO_RESTART), so nothing was started and nothing was undone." >&2
-    echo "install: the host is as it was found, apart from the files this run placed." >&2
-    txn_phase aborted
+        ;;
+    none)
+        echo "install: $1 — there is nothing to restore." >&2
+        echo "install: this host had no previous gateway install, and no guard was armed this" >&2
+        echo "install: run (BURROWEE_NO_RESTART), so nothing was started and nothing was undone." >&2
+        echo "install: the host is as it was found, apart from the files this run placed." >&2
+        txn_phase aborted
+        exit 1
+        ;;
+    esac
+    # unknown — and the message says what was OBSERVED, not what is true of the
+    # host. The transaction is root-owned 0700, this shell is not root, and its
+    # `sudo -n` fallback was refused, so nothing at all could be read out of it:
+    # a previous install may be sitting in that snapshot unrestored.
+    echo "install: $1 — and this shell cannot read the transaction, so whether there is a" >&2
+    echo "install: previous install to restore could not be established." >&2
+    echo "install: $TXN_DIR is root-owned and 0700; this install is running unprivileged and" >&2
+    echo "install: its non-interactive elevation ('sudo -n') was refused, which is what a" >&2
+    echo "install: sudoers with timestamp_timeout=0 does to every read here." >&2
+    echo "install: nothing was started (BURROWEE_NO_RESTART) and nothing was restored." >&2
+    echo "install: the transaction is deliberately left unfinished rather than recorded as" >&2
+    echo "install: 'nothing to restore', which this run did not observe." >&2
+    echo "install: inspect it as root: sudo ls -l $TXN_DIR/snapshot/bin" >&2
     exit 1
 }
 

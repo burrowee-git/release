@@ -823,45 +823,122 @@ $(cat "$_calls")"
 }
 
 # ---------------------------------------------------------------------------
-# snapshot_has_binaries is SHARED between guard.sh and install.sh, and pinned.
+# THE TWO READERS OF ONE SNAPSHOT MUST AGREE — re-scoped from a byte-identity
+# pin, and the re-scoping is the finding.
 #
-# The guard's rollback and the installer's own no-guard abort_install ask the
-# same question of the same directory — "is there a previous install behind
-# this snapshot at all" — and both answer `aborted` rather than `rolled-back`
-# when there is not. There is no shared shell library (see
-# tools/install-waits-for-daemon.test.sh, which pins the wait helpers across
-# the edge and gateway installers exactly this way), and giving the guard's
-# rollback path a second file it must find would be a new way for a rollback
-# to fail. So: one body, spelled identically in both files, and this is what
-# makes a change to one visibly break the other.
+# guard.sh's rollback and install.sh's no-guard abort_install ask the same
+# question of the same directory: "is there a previous install behind this
+# snapshot at all", answered `aborted` rather than `rolled-back` when there is
+# not. They used to be ONE BODY spelled identically in both files, and this
+# check compared the bytes.
 #
-# The pin is therefore also a CONSTRAINT, not just a safety net: the installer's
-# copy is privilege-blind against a root-owned 0700 transaction (it globs
-# directly instead of going through txn_list_dir), and the correction for that
-# would break byte-identity with a guard that runs as root and has no such
-# helper. Fixing it means re-scoping this pin or ending the duplication — not
-# editing one copy and re-running this check. See install.sh's own banner.
+# That pin was itself recorded, in both files, as standing in the way of a known
+# defect: the installer's copy was a bare `[ -d ]` and a glob, run from an
+# UNPRIVILEGED shell against a transaction txn_begin makes root-owned 0700. It
+# could therefore answer "no binaries" out of blindness, and abort_install's
+# prose asserted a fact about the operator's host — "this host had no previous
+# gateway install" — that the shell had not established. The guard has no such
+# problem (it is execed as root) and no elevated-read helper to correct it with,
+# so routing the installer's copy through txn_list_dir was a fix byte-identity
+# could not survive.
+#
+# So the duplication ended and the pin moved to the property that was actually
+# worth protecting. The two are now different predicates with different powers —
+# guard.sh: snapshot_has_binaries, two states; install.sh:
+# snapshot_binaries_state, three, because from there "I could not look" is a
+# real answer — and what must never differ is their VERDICT on a snapshot both
+# can read. A drift check on bytes would now fail on every honest edit; this one
+# fails on the edit that matters.
+#
+# THE BLIND CASE IS DRIVEN TOO, and it is the defect's own fixture: a snapshot
+# the reader cannot see must come back `unknown` from the installer, never
+# `none`. Without it, a "fix" that simply dropped the third state would look
+# green.
 # ---------------------------------------------------------------------------
-extract_snapshot_has_binaries() {
-    awk '
-        /^# snapshot_has_binaries <snapshot-dir>/ { on = 1 }
+
+# extract_fn <file> <name> — one function definition, from its `name() {` line
+# to the first line that is exactly `}`. Comments are deliberately not carried:
+# these bodies are SOURCED below, and the point is to run the shipped code
+# rather than to compare prose about it.
+extract_fn() {
+    awk -v n="$2" '
+        $0 == n "() {" { on = 1 }
         on { print }
         on && /^}$/ { exit }
     ' "$1"
 }
 
-t_snapshot_has_binaries_is_pinned_across_both_files() {
+# ask_guard / ask_install — each predicate's verdict on one directory, rendered
+# into the same vocabulary so they can be compared at all. The guard answers
+# with an exit status; the installer prints one of three words.
+#
+# A separate `sh -c` per call, sourcing only the extracted bodies: install.sh
+# and guard.sh both run work at source time (and define the same names), so
+# neither can be sourced whole here — which is the same reason the two files
+# duplicate this logic in the first place.
+ask_guard() {
+    sh -c ". '$1'; if snapshot_has_binaries \"\$1\"; then echo some; else echo none; fi" _ "$2"
+}
+
+ask_install() {
+    PATH="$3:$PATH" sh -c ". '$1'; snapshot_binaries_state \"\$1\"" _ "$2"
+}
+
+t_snapshot_binaries_predicates_agree() {
     _w="$(mktemp -d)"
-    extract_snapshot_has_binaries "$HERE/inner/gateway/guard.sh"   > "$_w/guard"
-    extract_snapshot_has_binaries "$HERE/inner/gateway/install.sh" > "$_w/install"
-    if [ ! -s "$_w/guard" ]; then
-        fail "no snapshot_has_binaries block found in inner/gateway/guard.sh"
-    elif [ ! -s "$_w/install" ]; then
-        fail "no snapshot_has_binaries block found in inner/gateway/install.sh"
-    elif ! cmp -s "$_w/guard" "$_w/install"; then
-        fail "snapshot_has_binaries has drifted between guard.sh and install.sh:
-$(diff "$_w/guard" "$_w/install" 2>&1 || true)"
+    extract_fn "$HERE/inner/gateway/guard.sh" snapshot_has_binaries > "$_w/guard_fn.sh"
+    extract_fn "$HERE/inner/gateway/install.sh" txn_list_dir              > "$_w/install_fn.sh"
+    extract_fn "$HERE/inner/gateway/install.sh" snapshot_binaries_state  >> "$_w/install_fn.sh"
+
+    grep -q '^snapshot_has_binaries() {' "$_w/guard_fn.sh" \
+        || { fail "no snapshot_has_binaries in inner/gateway/guard.sh — the guard's rollback lost the predicate that tells a fresh host from a rolled-back one"; rm -rf "$_w"; return; }
+    grep -q '^txn_list_dir() {' "$_w/install_fn.sh" \
+        || { fail "no txn_list_dir in inner/gateway/install.sh — the installer's copy has no elevated read, so it answers about a root-owned 0700 transaction from blindness"; rm -rf "$_w"; return; }
+    grep -q '^snapshot_binaries_state() {' "$_w/install_fn.sh" \
+        || { fail "no snapshot_binaries_state in inner/gateway/install.sh — abort_install has no three-valued predicate, so 'no previous install' and 'could not look' are one answer again"; rm -rf "$_w"; return; }
+
+    # A pass-through sudo, so the installer's `sudo -n` fallback behaves as it
+    # does on an ordinary host with a warm timestamp.
+    mkdir -p "$_w/binok"
+    printf '#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n' > "$_w/binok/sudo"
+    chmod 0755 "$_w/binok/sudo"
+
+    # The two shapes txn_begin can leave behind, both readable.
+    mkdir -p "$_w/populated/bin" "$_w/populated/units"
+    printf 'OLD BINARY\n' > "$_w/populated/bin/burrowee-gateway"
+    mkdir -p "$_w/fresh/bin" "$_w/fresh/units"
+
+    for _case in populated:some fresh:none; do
+        _dir="$_w/${_case%%:*}"; _want="${_case##*:}"
+        _g="$(ask_guard "$_w/guard_fn.sh" "$_dir")"
+        _i="$(ask_install "$_w/install_fn.sh" "$_dir" "$_w/binok")"
+        [ "$_g" = "$_want" ] \
+            || fail "guard.sh's snapshot_has_binaries answered '$_g' for a ${_case%%:*} snapshot, want $_want"
+        [ "$_i" = "$_want" ] \
+            || fail "install.sh's snapshot_binaries_state answered '$_i' for a ${_case%%:*} snapshot, want $_want"
+        [ "$_g" = "$_i" ] \
+            || fail "the two readers disagree about a snapshot BOTH can see (${_case%%:*}): guard.sh says '$_g', install.sh says '$_i' — abort_install and rollback would report opposite things about one host"
+    done
+
+    # THE BLIND READER. Not root, the directory unreadable, and a `sudo` that
+    # refuses exactly as a sudoers with timestamp_timeout=0 refuses every
+    # `sudo -n` in this file. The installer must say `unknown` — the answer that
+    # keeps abort_install from asserting "this host had no previous gateway
+    # install" about a host it could not look at.
+    #
+    # Skipped under uid 0, where mode bits do not apply and the state cannot
+    # exist (txn_list_dir short-circuits for root, correctly).
+    if [ "$(id -u)" != 0 ]; then
+        mkdir -p "$_w/binno"
+        printf '#!/bin/sh\nexit 1\n' > "$_w/binno/sudo"
+        chmod 0755 "$_w/binno/sudo"
+        chmod 000 "$_w/populated"
+        _b="$(ask_install "$_w/install_fn.sh" "$_w/populated" "$_w/binno")"
+        chmod 755 "$_w/populated"
+        [ "$_b" = unknown ] \
+            || fail "install.sh's snapshot_binaries_state answered '$_b' for a snapshot it could not read at all, want unknown — 'none' there is how abort_install came to tell an operator their host had no previous install when it had one it could not see"
     fi
+
     rm -rf "$_w"
 }
 
@@ -1128,6 +1205,63 @@ t_abort_install_without_a_guard_still_rolls_back_a_real_install() {
         || fail "abort_install recorded phase '$(cat "$_t/phase" 2>/dev/null)' with a real previous install in the snapshot, want rolled-back: $_out"
     grep -q 'OLD BINARY' "$_r/bin/burrowee-gateway" \
         || fail "abort_install's no-guard branch did not restore the previous binary: $_out"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# A BLIND READ IS NOT A HOST FACT.
+#
+# The no-guard branch used to ask a two-valued question — snapshot_has_binaries,
+# a bare `[ -d ]` and a glob — of a transaction txn_begin makes root-owned 0700,
+# from a shell that is routinely not root. On a host whose sudoers refuses every
+# `sudo -n` (timestamp_timeout=0) that glob sees nothing whatever is really
+# there, so a host WITH a previous install was told, in prose, "this host had no
+# previous gateway install, ... the host is as it was found" — an assertion
+# about their machine that this shell had not established and could not have,
+# and a `aborted` phase recording it for guard-status to repeat.
+#
+# The predicate now has three answers, and this drives the third end to end: the
+# real snapshot_binaries_state, against a real unreadable transaction, with a
+# `sudo` that refuses exactly as that sudoers does. What it must produce is
+# prose about what was OBSERVED and no terminal phase — because `aborted` is a
+# finding, and this run found nothing.
+#
+# The control is t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
+# above: a READABLE empty snapshot must still say "nothing to restore" and still
+# record `aborted`. A "fix" that merely stopped answering would fail it.
+#
+# Skipped under uid 0, where mode bits do not apply and the state cannot exist.
+# ---------------------------------------------------------------------------
+t_abort_install_without_a_guard_cannot_assert_what_it_cannot_read() {
+    if [ "$(id -u)" = 0 ]; then return 0; fi
+    _r="$(mktemp -d)"
+    setup_install_stubs "$_r" Linux
+    mkdir -p "$_r/bin" "$_r/units" "$_r/etc/gateway" "$_r/var/gateway"
+
+    # A transaction that DOES hold a previous install — the case the old prose
+    # was most wrong about.
+    _t="$_r/var/gateway/install/20260901T000000Z"
+    mkdir -p "$_t/snapshot/bin" "$_t/snapshot/units"
+    printf 'OLD BINARY\n' > "$_t/snapshot/bin/burrowee-gateway"
+    printf 'replacing\n' > "$_t/phase"
+
+    # A sudo that refuses, and a snapshot this shell cannot read.
+    mkdir -p "$_r/nosudo"
+    printf '#!/bin/sh\nexit 1\n' > "$_r/nosudo/sudo"
+    chmod 0755 "$_r/nosudo/sudo"
+    chmod 000 "$_t/snapshot"
+
+    _rc=0
+    _out="$(run_abort_install "$_r" "$_t" "PATH=\"$_r/nosudo:\$PATH\";")" || _rc=$?
+    chmod 755 "$_t/snapshot"
+
+    [ "$_rc" -eq 1 ] || fail "abort_install exited $_rc on an unreadable transaction, want 1: $_out"
+    printf '%s\n' "$_out" | grep -q 'had no previous gateway install' \
+        && fail "abort_install told the operator their host has no previous install after reading nothing at all — the snapshot it could not see holds one: $_out"
+    printf '%s\n' "$_out" | grep -q 'cannot read the transaction' \
+        || fail "abort_install did not say that the transaction could not be read: $_out"
+    [ "$(cat "$_t/phase" 2>/dev/null)" = replacing ] \
+        || fail "abort_install recorded phase '$(cat "$_t/phase" 2>/dev/null)' after establishing nothing — a terminal phase is a finding, and guard-status repeats it: $_out"
     rm -rf "$_r"
 }
 
@@ -1887,9 +2021,10 @@ t_guard_reloads_a_changed_unit_body
 t_rollback_after_a_forward_restart_rereads_the_restored_unit
 t_rollback_still_reloads_when_the_snapshot_holds_no_unit
 t_count_calls_answers_zero_once
-t_snapshot_has_binaries_is_pinned_across_both_files
+t_snapshot_binaries_predicates_agree
 t_abort_install_without_a_guard_records_aborted_on_a_virgin_host
 t_abort_install_without_a_guard_still_rolls_back_a_real_install
+t_abort_install_without_a_guard_cannot_assert_what_it_cannot_read
 t_abort_install_with_an_unproven_guard_restores_and_leaves_the_phase_open
 t_abort_install_with_a_proven_guard_still_defers_everything
 

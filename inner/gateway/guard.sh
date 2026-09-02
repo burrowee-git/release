@@ -447,12 +447,25 @@ verify_serving() {
 }
 
 # ---------------------------------------------------------------------------
-# SHARED WITH install.sh, BYTE FOR BYTE, and pinned by
-# tools/guard-rollback.test.sh so it cannot drift. install.sh's abort_install
-# asks the same question this file's rollback does — "is there a previous
-# install behind this snapshot at all" — and answers `aborted` rather than
-# `rolled-back` when there is not. See that file's copy for why the duplication
-# is deliberate here rather than a shared library.
+# THE ROOT-SIDE READER of the question install.sh's abort_install also asks —
+# "is there a previous install behind this snapshot at all" — which it answers
+# `aborted` rather than `rolled-back` when there is not.
+#
+# THE TWO ARE NO LONGER ONE BODY, and that is deliberate rather than drift.
+# This file is execed AS ROOT by launchd/systemd, so a bare `[ -d ]` and a glob
+# are a complete answer here and there is nothing better to reach for — the
+# elevated-read helpers are install.sh's, and giving the rollback path a second
+# file it must find is a way for a rollback to fail that this shape does not
+# have. install.sh runs from an unprivileged shell against a root-owned 0700
+# transaction, where the same two lines could answer "no binaries" out of
+# blindness, so its copy is a THREE-state reader over txn_list_dir
+# (snapshot_binaries_state). They were pinned byte-for-byte until that
+# difference had to be admitted.
+#
+# What is pinned now is the thing worth pinning: on a snapshot both readers can
+# see, they must reach the same verdict — tools/guard-rollback.test.sh,
+# t_snapshot_binaries_predicates_agree, which extracts both bodies and runs
+# them against one set of fixtures.
 # ---------------------------------------------------------------------------
 # snapshot_has_binaries <snapshot-dir> — did snapshot_take actually capture a
 # previous install's binaries, or is this directory the empty shell a fresh
