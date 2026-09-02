@@ -2376,5 +2376,55 @@ assert_eq "$RC" 2 "an unknown argument must exit 2, like the other shared rungs"
 assert_contains "$OUT" "unknown argument" "and say so"
 
 # ---------------------------------------------------------------------------
+# 36. THE 0.3 ROOTS. A `system`-scheme component's two trees hang off ONE
+#     machine-owned parent since 0.3 — /usr/local/burrowee/{etc,var}/<comp> —
+#     and the 0.2 pair (/usr/local/{etc,var}/burrowee/<comp>) survives only as
+#     the LEGACY seam the transitional anchor read and the 0.2→0.3 rungs
+#     consume. These are real, fixed system paths, so they are pinned as
+#     SOURCE TEXT — exactly as the Go harnesses pin the installers'
+#     destinations — and never resolved by running the runner with nothing
+#     exported, which would aim it at the real host.
+#
+#     Both files carry the pair: run.sh resolves it for every ladder run, and
+#     adopt_user_tree.sh re-resolves it for a direct invocation. A default
+#     that moved in one and not the other is a run that reads config out of
+#     one install and writes state into another.
+# ---------------------------------------------------------------------------
+for _f36 in run.sh adopt_user_tree.sh; do
+    assert_contains "$(cat "$SHARED/$_f36")" 'SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/burrowee/etc}"' "$_f36 must default the config root to the 0.3 tree"
+    assert_contains "$(cat "$SHARED/$_f36")" 'SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"' "$_f36 must default the data root to the 0.3 tree"
+    assert_lacks "$(cat "$SHARED/$_f36")" 'SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"' "$_f36 must not default the config root to the 0.2 tree"
+    assert_lacks "$(cat "$SHARED/$_f36")" 'SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/var/burrowee}"' "$_f36 must not default the data root to the 0.2 tree"
+done
+assert_contains "$(cat "$SHARED/run.sh")" 'LEGACY_SYS_CONFIG_ROOT="${LEGACY_SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"' "run.sh must keep the 0.2 config root as the LEGACY seam"
+assert_contains "$(cat "$SHARED/run.sh")" 'LEGACY_SYS_DATA_ROOT="${LEGACY_SYS_DATA_ROOT:-/usr/local/var/burrowee}"' "run.sh must keep the 0.2 data root as the LEGACY seam"
+assert_contains "$(cat "$SHARED/run.sh")" 'LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"' "run.sh must keep the 0.2 exec root as the LEGACY seam"
+# 36b. THE RUNNER HANDS THE LEGACY TRIPLE TO EVERY RUNG, the way it hands
+#      $COMP_HOME. Nothing is exported by this case on purpose: the values the
+#      rung sees can only have come through run_migration's own invocation
+#      line, so a runner that stopped naming them there shows up as "unset".
+#      The rung only WRITES the strings it was handed — the real 0.2 paths are
+#      never opened.
+t36="$TMP/t36"; kit "$t36" edge system installed-version $EDGE_BINS
+cat > "$t36/migrations/echo_env.sh" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--applies" ]; then exit 0; fi
+printf 'LEGACY_SYS_CONFIG_ROOT=%s\nLEGACY_SYS_DATA_ROOT=%s\nLEGACY_BIN_DIR=%s\n' \
+    "${LEGACY_SYS_CONFIG_ROOT:-unset}" "${LEGACY_SYS_DATA_ROOT:-unset}" "${LEGACY_BIN_DIR:-unset}" > "$COMP_HOME/env.seen"
+exit 0
+EOF
+chmod 0755 "$t36/migrations/echo_env.sh"
+printf '# ledger\n0.3.0 echo_env.sh\n' > "$t36/migrations/ledger"
+h36="$t36/home"; ch36="$h36/sys/etc/edge"; cd36="$h36/sys/var/edge"; mkdir -p "$ch36" "$cd36"
+OUT="$(HOME="$h36" COMP_HOME="$ch36" COMP_DATA="$cd36" BIN_DIR="$h36/sys/bin" \
+    LAUNCHD_DIR="$h36/no-launchd" SYSTEMD_DIR="$h36/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h36/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t36/migrations/run.sh" 2>&1)"; RC=$?
+assert_eq "$RC" 2 "the env-echo rung must run"
+assert_contains "$(cat "$ch36/env.seen" 2>/dev/null)" "LEGACY_SYS_CONFIG_ROOT=/usr/local/etc/burrowee" "run_migration must hand the rung the legacy config root it resolved"
+assert_contains "$(cat "$ch36/env.seen" 2>/dev/null)" "LEGACY_SYS_DATA_ROOT=/usr/local/var/burrowee" "run_migration must hand the rung the legacy data root it resolved"
+assert_contains "$(cat "$ch36/env.seen" 2>/dev/null)" "LEGACY_BIN_DIR=/usr/local/bin" "run_migration must hand the rung the legacy exec root it resolved"
+
+# ---------------------------------------------------------------------------
 echo "== $CASES checks, $FAILED failed =="
 [ "$FAILED" = 0 ] || exit 1

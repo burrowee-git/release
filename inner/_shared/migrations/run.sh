@@ -203,6 +203,13 @@
 #   ROOT_HOME                   root's home (the `root` COMP_HOME scheme)
 #   SUDO                        elevation command (default "sudo")
 #   BURROWEE_LEGACY_HOME_PARENTS  where to look for an account's home
+#   SYS_CONFIG_ROOT / SYS_DATA_ROOT  the `system` scheme's parents (0.3:
+#                                /usr/local/burrowee/{etc,var})
+#   LEGACY_SYS_CONFIG_ROOT / LEGACY_SYS_DATA_ROOT / LEGACY_BIN_DIR
+#                               the 0.2 layout (/usr/local/{etc,var}/burrowee,
+#                                /usr/local/bin) — read by the transitional
+#                                anchor fallback and handed to every rung, for
+#                                the 0.2→0.3 rungs that copy and sweep from it
 #   LEDGER_FILE                 which ladder to walk (default $HERE/ledger — the
 #                                serve ladder; the updater track points this at
 #                                $HERE/updater-ledger instead)
@@ -242,11 +249,23 @@ fi
 
 # ---------------------------------------------------------------------------
 # SYS_CONFIG_ROOT / SYS_DATA_ROOT — the machine-owned parents a `system`-scheme
-# component's two trees hang off. Seams for the test harness only; nothing on a
-# real host sets them, and no component that is not `system` reads them.
+# component's two trees hang off. Since 0.3 both sit under ONE tree burrowee
+# creates itself, /usr/local/burrowee — beside Homebrew's directories rather
+# than inside them — so a host has one ancestor chain to verify instead of
+# three. Seams for the test harness only; nothing on a real host sets them,
+# and no component that is not `system` reads them.
+#
+# LEGACY_SYS_CONFIG_ROOT / LEGACY_SYS_DATA_ROOT / LEGACY_BIN_DIR — the 0.2
+# layout, kept as a seam of its own: /usr/local/{etc,var}/burrowee held the
+# trees and /usr/local/bin the binaries. The transitional anchor fallback
+# below READS the 0.2 config tree once, and the 0.2→0.3 rungs copy and sweep
+# FROM these; nothing on this runner ever writes to them.
 # ---------------------------------------------------------------------------
-SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
-SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/var/burrowee}"
+SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/burrowee/etc}"
+SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"
+LEGACY_SYS_CONFIG_ROOT="${LEGACY_SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
+LEGACY_SYS_DATA_ROOT="${LEGACY_SYS_DATA_ROOT:-/usr/local/var/burrowee}"
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
 
 # ---------------------------------------------------------------------------
 # $COMP_HOME / $COMP_DATA — the tree(s) this ladder is about.
@@ -879,6 +898,9 @@ run_migration() {
         COMP_HOME="$COMP_HOME" \
         COMP_DATA="$COMP_DATA" \
         BIN_DIR="$BIN_DIR" \
+        LEGACY_SYS_CONFIG_ROOT="$LEGACY_SYS_CONFIG_ROOT" \
+        LEGACY_SYS_DATA_ROOT="$LEGACY_SYS_DATA_ROOT" \
+        LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
         STALE_USER_BINS="${STALE_USER_BINS:-}" \
         MIGRATION_FORCED="$RERUN_RECORDED" \
         SUDO="$SUDO" \
