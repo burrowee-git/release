@@ -101,6 +101,9 @@ BIN_DIR="$SYS_BIN_DIR"
 # real copy of it. BURROWEE_LINK_DIR is a test-only seam like SYS_BIN_DIR.
 LINK_BINS="burrowee burrowee-edge burrowee-edge-cli"
 LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
+# The 0.2 exec root the sweep reads IS the link directory, so it follows the
+# same seam: a sandboxed run must never iterate the host's real /usr/local/bin.
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-$LINK_DIR}"
 
 # normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
 # '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
@@ -569,6 +572,7 @@ run_migration_ladder() {
         SYS_CONFIG_ROOT="$SYS_CONFIG_ROOT" \
         SYS_DATA_ROOT="$SYS_DATA_ROOT" \
         BIN_DIR="$BIN_DIR" \
+        LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
         LAUNCHD_DIR="$LAUNCHD_PLIST_DIR" \
         SYSTEMD_DIR="$SYSTEMD_UNIT_DIR" \
         sh "$MIGRATIONS_DIR/run.sh"
@@ -966,6 +970,10 @@ unlink_operator_bins() {
         "$BIN_DIR"/*) ;;
         *) continue ;;
         esac
+        # A link whose target still exists is still serving someone: the shared
+        # `burrowee` dispatcher stays in $BIN_DIR while a sibling component is
+        # installed, and its link must stay with it.
+        [ -e "$_uob_p" ] && continue
         rm -f "$_uob_p" || echo "note: could not remove the link $_uob_p — remove it by hand" >&2
     done
 }
@@ -1369,6 +1377,12 @@ ensure_system_tree
 # ---------------------------------------------------------------------------
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     setup_root_service
+    # The updater track reaches 0.3 through here (LocalReinstall), never through
+    # the full path below: the ladder it ran earlier found the 0.2 units still
+    # naming /usr/local/bin/<name> and correctly kept every copy, so the links
+    # and the exec-root sweep have to happen here, after the units moved.
+    link_operator_bins
+    sweep_stale_exec_root
     echo "edge units-only reinstall: service units re-rendered + reloaded."
     exit 0
 fi
