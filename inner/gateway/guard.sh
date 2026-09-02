@@ -55,10 +55,20 @@
 # version, that fourth path lands in the same empty-snapshot arm — and there
 # the sentence is false twice over: the new unit IS loaded, and it is probably
 # crash-looping. RESTART_ATTEMPTED below is what tells the two apart, and that
-# path reports `failed` ("this host needs hands"), which is what it is: the
-# host is not serving, and nothing could be put back because there was nothing
-# to put back. No new phase token for it — `failed` already means exactly that
-# and the gateway cli already renders it.
+# path reports `failed`, which is what it is: the host is not serving, and
+# nothing could be put back because there was nothing to put back. No new phase
+# token for it — `failed` already means exactly that and the gateway cli
+# already renders it.
+#
+# THE CLI'S SUMMARY FOR `failed` HAD TO BE REWORDED FOR THIS, and the two repos
+# are in step deliberately. It used to read "the rollback itself did not come up
+# — this host needs hands", which is right about the OTHER `failed` writer (the
+# tail of rollback(), where a previous install really was restored and really
+# did not come back) and false here, where nothing was restored because there
+# was nothing to restore. It now says the one thing true of both writers — "the
+# host is not serving and the guard could not get it serving — this needs
+# hands" — and guard-status prints the guard log tail directly beneath it, where
+# each of the two FAILED lines below says in full which door this was.
 set -eu
 
 
@@ -548,11 +558,11 @@ rollback() {
     #     "the previous one was restored and is serving" about a host that has
     #     no previous one and is serving nothing.
     #
-    # `failed` would be no better: that phase means "the rollback did not come
-    # up either — this host needs hands", and a virgin host with no gateway
-    # running needs no hands at all. It is in exactly the state it was found
-    # in, which is the thing the operator has to be told. Hence a phase of its
-    # own.
+    # `failed` would be no better: that phase means "the host is not serving and
+    # the guard could not get it serving — this needs hands", and a virgin host
+    # with no gateway running needs no hands at all. It is in exactly the state
+    # it was found in, which is the thing the operator has to be told. Hence a
+    # phase of its own.
     #
     # The binaries this run placed are left on disk. Removing them is not an
     # undo this guard can make safely (it does not know which of them the host

@@ -3099,7 +3099,16 @@ reattach() {
             echo "install: Details: burrowee gateway service guard-status" >&2
             return 1 ;;
         failed)
-            echo "install: the rollback did not come up either — this host needs hands." >&2
+            # NOT "the rollback did not come up either". Two guard paths write
+            # `failed`, and only one of them rolled anything back: the other is
+            # a host with no previous install to restore, whose new build was
+            # started and never reported its version. This line is read by an
+            # operator who may be on either, so it says the half that is true of
+            # both and leaves the which-door to the guard log guard-status
+            # prints. Same sentence the cli's own guardPhaseSummary renders —
+            # the two are kept in step on purpose.
+            echo "install: the host is not serving and the guard could not get it serving —" >&2
+            echo "install: this needs hands." >&2
             echo "install: burrowee gateway service guard-status $TXN_STAMP" >&2
             return 2 ;;
         esac
