@@ -370,6 +370,28 @@ have_real_root() {
     [ "$HAVE_REAL_ROOT" = yes ]
 }
 
+# === ROOT-SECURE CONTRACT BEGIN ===
+# Everything between this line and the matching END line is BYTE-IDENTICAL in
+# every inner installer that creates or verifies a machine-owned tree:
+#
+#   burrowee-git/release  inner/gateway/install.sh   (this copy is the reference)
+#   burrowee-git/release  inner/edge/install.sh
+#   burrowee-git/relay    install.sh                  (relay's inner installer
+#                                                      lives in its own repo)
+#
+# It is duplicated rather than sourced because it must run even when a bundle
+# carries no migrations/ directory at all (BURROWEE_UNITS_ONLY re-runs a kept
+# self-copy that may predate one), and because the gateway does not take the
+# shared ladder — inner/_shared is not in a gateway kit. The drift is guarded
+# instead of prevented: tools/shelllint/root_secure_contract_test.go compares
+# the two copies in this repo byte for byte, and the relay repo pins its copy
+# against this one. Edit one, edit all; nothing outside the sentinels is
+# compared, so the callers may differ freely.
+#
+# The functions below are the WHOLE predicate — the shell half of
+# core/binary's IsRootSecure (files) and IsRootSecureDir (directories).
+# Anything that changes what "root-secure" means belongs in here.
+
 # ---------------------------------------------------------------------------
 # The stat dialect, decided once.
 #
@@ -464,13 +486,13 @@ mode_allows_nonroot_write() {
 #   1  not secure — a real answer about a real path that EXISTS
 #   2  undecidable — stat did not answer, so nothing is known either way
 #   3  the leaf does not exist at all — a different question than 1, and one
-#      that must not be answered with 1's message. It is reachable, since
-#      ROOT_BIN_PLACE_EXCLUDE (BURROWEE_UPDATE mode) deliberately leaves
-#      burrowee-gateway-updater unplaced this run, verify_root_exec_surface
-#      checks it anyway (a unit is about to name it either way), and a host
-#      converging off the pre-collapse layout has never had one at $BIN_DIR —
-#      "not root-owned" would blame ownership on a path that was never
-#      created, sending an operator to check permissions on nothing.
+#      that must not be answered with 1's message. It is reachable: an update
+#      mode may deliberately leave one name unplaced this run (the gateway's
+#      ROOT_BIN_PLACE_EXCLUDE skips its own running updater) while the
+#      verification still checks it, because a unit is about to name it
+#      either way — and a host converging off an older layout has never had
+#      one at $BIN_DIR. "Not root-owned" would blame ownership on a path that
+#      was never created, sending an operator to check permissions on nothing.
 #
 # 1 and 2 are separated because they send an operator to completely different
 # places, and collapsing them is what the dialect bug above actually cost: a
@@ -499,6 +521,37 @@ path_is_root_secure() {
     done
     return 0
 }
+
+# dir_is_root_secure <path> — the directory form of the predicate above, and
+# the shell half of core/binary's IsRootSecureDir. Same four codes; the leaf is
+# a DIRECTORY, so 3 means "no such directory" rather than "no such file". The
+# leaf and every ancestor up to / must be owned by uid 0 and carry no group or
+# other write bit — the leaf is walked exactly like an ancestor, because a
+# directory is where root's STATE is about to be created and a group-writable
+# one lets that group replace what root wrote.
+#
+# It is a separate function rather than a flag on path_is_root_secure because
+# the two are asked in different places for different reasons: one gates a
+# root EXEC, the other gates where root's state is about to be created, and a
+# shared flag would let a caller ask the wrong question with a one-character
+# typo — a directory passed to the file form answers 3 ("absent"), which reads
+# as "nothing to check" rather than as the wrong question.
+dir_is_root_secure() {
+    _ds_d="$1"
+    [ -d "$_ds_d" ] || return 3
+    while :; do
+        [ -d "$_ds_d" ] || return 1
+        _ds_v="$(stat_uid "$_ds_d")" || return 2
+        [ "$_ds_v" = 0 ] || return 1
+        _ds_v="$(stat_mode "$_ds_d")" || return 2
+        if mode_allows_nonroot_write "$_ds_v"; then return 1; fi
+        _ds_parent="$(dirname "$_ds_d")"
+        [ "$_ds_parent" != "$_ds_d" ] || break
+        _ds_d="$_ds_parent"
+    done
+    return 0
+}
+# === ROOT-SECURE CONTRACT END ===
 
 # ---------------------------------------------------------------------------
 # root_bin_source <name> — where this run's copy of a root-execed binary comes

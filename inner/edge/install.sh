@@ -188,6 +188,189 @@ remove_legacy_launchd_units() {
 
 is_root() { [ "$(id -u)" = 0 ]; }
 
+# === ROOT-SECURE CONTRACT BEGIN ===
+# Everything between this line and the matching END line is BYTE-IDENTICAL in
+# every inner installer that creates or verifies a machine-owned tree:
+#
+#   burrowee-git/release  inner/gateway/install.sh   (this copy is the reference)
+#   burrowee-git/release  inner/edge/install.sh
+#   burrowee-git/relay    install.sh                  (relay's inner installer
+#                                                      lives in its own repo)
+#
+# It is duplicated rather than sourced because it must run even when a bundle
+# carries no migrations/ directory at all (BURROWEE_UNITS_ONLY re-runs a kept
+# self-copy that may predate one), and because the gateway does not take the
+# shared ladder — inner/_shared is not in a gateway kit. The drift is guarded
+# instead of prevented: tools/shelllint/root_secure_contract_test.go compares
+# the two copies in this repo byte for byte, and the relay repo pins its copy
+# against this one. Edit one, edit all; nothing outside the sentinels is
+# compared, so the callers may differ freely.
+#
+# The functions below are the WHOLE predicate — the shell half of
+# core/binary's IsRootSecure (files) and IsRootSecureDir (directories).
+# Anything that changes what "root-secure" means belongs in here.
+
+# ---------------------------------------------------------------------------
+# The stat dialect, decided once.
+#
+# `stat` has two incompatible dialects, and the same letter means different
+# things in each: GNU coreutils takes the format as `-c FORMAT`, BSD/macOS as
+# `-f FORMAT` — and on GNU, `-f` is `--file-system`. So `stat -f '%u' PATH` on
+# Linux does not fail cleanly. It reads '%u' as a SECOND PATH: dumps PATH's
+# filesystem geometry to STDOUT, complains about '%u' on stderr, and exits 1.
+# A `stat -f … || stat -c …` chain therefore prints that dump CONCATENATED with
+# the real answer, so `[ "$(stat_uid p)" = 0 ]` is false for a file owned by
+# root. That shipped, and it made path_is_root_secure below answer "not secure"
+# for every path on every Linux host — refusing the install of a tree that was
+# already correct, and pointing the operator at permissions as the cause.
+#
+# Hence: probe ONCE against a path that certainly exists, then always use the
+# flag that was proved to work. Ordering `-c` first would also work today (BSD
+# stat rejects `-c` with a usage error on stderr and NOTHING on stdout — this is
+# verified by the suite, not assumed), but it leaves every call a speculative
+# failing exec whose correctness rests on that stdout/stderr split holding for
+# every stat any host might carry. Probing does not rest on anything.
+# ---------------------------------------------------------------------------
+
+# is_digits <s> — true when s is one or more decimal digits and nothing else.
+# Rejecting a MULTI-LINE blob is the entire point: every newline and every word
+# of a filesystem dump is a non-digit, so a concatenated answer can never be
+# mistaken for a value.
+is_digits() {
+    case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+STAT_FLAVOR=none
+if is_digits "$(stat -c '%u' / 2>/dev/null)"; then
+    STAT_FLAVOR=gnu
+elif is_digits "$(stat -f '%u' / 2>/dev/null)"; then
+    STAT_FLAVOR=bsd
+fi
+
+# stat_field <gnu-format> <bsd-format> <path> — one numeric field of one file,
+# in whichever dialect this host speaks.
+#
+# It prints exactly one line of digits, or it prints NOTHING and returns
+# non-zero. There is no third outcome, and callers depend on that: a helper that
+# can put junk on stdout turns every `[ "$(…)" = 0 ]` into a silent false, which
+# reads to an operator as "your permissions are wrong" rather than "I could not
+# look" — two problems with nothing in common.
+stat_field() {
+    case "$STAT_FLAVOR" in
+    gnu) _sf_v="$(stat -c "$1" "$3" 2>/dev/null)" || return 1 ;;
+    bsd) _sf_v="$(stat -f "$2" "$3" 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
+    esac
+    is_digits "$_sf_v" || return 1
+    printf '%s\n' "$_sf_v"
+}
+
+# stat_uid / stat_mode <path> — owner uid (decimal) and permission bits
+# (octal). No output and non-zero on any failure — never a partial answer.
+stat_uid() {
+    stat_field '%u' '%u' "$1"
+}
+stat_mode() {
+    stat_field '%a' '%Lp' "$1"
+}
+
+# mode_allows_nonroot_write <octal> — true when the group or other digit carries
+# the write bit. The last two characters are those two digits for every width
+# stat emits ("755", "1777"), so no zero-padding assumption is needed.
+mode_allows_nonroot_write() {
+    _mm="$1"
+    [ "${#_mm}" -ge 2 ] || return 0    # unreadable mode: assume the worst
+    _mg=$(printf '%s' "$_mm" | cut -c "$((${#_mm} - 1))")
+    _mo=$(printf '%s' "$_mm" | cut -c "${#_mm}")
+    case "$_mg" in 2 | 3 | 6 | 7) return 0 ;; esac
+    case "$_mo" in 2 | 3 | 6 | 7) return 0 ;; esac
+    return 1
+}
+
+# path_is_root_secure <path> — the shell half of the same predicate the Go side
+# applies (internal/gateway/system_tool.IsRootSecure): a regular file owned by
+# uid 0, not group- or world-writable, reachable only through directories that
+# are themselves root-owned and unwritable by non-root, all the way to /.
+#
+# The ancestor walk is the load-bearing half. A root-owned binary inside a
+# user-writable directory can be unlinked and replaced by that user, after which
+# root execs their file — so checking the leaf alone proves nothing.
+#
+# FOUR return codes, not two:
+#   0  secure
+#   1  not secure — a real answer about a real path that EXISTS
+#   2  undecidable — stat did not answer, so nothing is known either way
+#   3  the leaf does not exist at all — a different question than 1, and one
+#      that must not be answered with 1's message. It is reachable: an update
+#      mode may deliberately leave one name unplaced this run (the gateway's
+#      ROOT_BIN_PLACE_EXCLUDE skips its own running updater) while the
+#      verification still checks it, because a unit is about to name it
+#      either way — and a host converging off an older layout has never had
+#      one at $BIN_DIR. "Not root-owned" would blame ownership on a path that
+#      was never created, sending an operator to check permissions on nothing.
+#
+# 1 and 2 are separated because they send an operator to completely different
+# places, and collapsing them is what the dialect bug above actually cost: a
+# host whose tree was already root:root 755 was told to go and check its
+# permissions. A predicate guarding a root exec must still REFUSE on 2 — but it
+# must refuse saying it could not look. 3 is separated from 1 for the same
+# reason: "insecure" and "absent" are different facts, and only one of them is
+# fixed by permissions.
+path_is_root_secure() {
+    _rs_p="$1"
+    [ -f "$_rs_p" ] || return 3
+    _rs_v="$(stat_uid "$_rs_p")" || return 2
+    [ "$_rs_v" = 0 ] || return 1
+    _rs_v="$(stat_mode "$_rs_p")" || return 2
+    if mode_allows_nonroot_write "$_rs_v"; then return 1; fi
+    _rs_d="$(dirname "$_rs_p")"
+    while :; do
+        [ -d "$_rs_d" ] || return 1
+        _rs_v="$(stat_uid "$_rs_d")" || return 2
+        [ "$_rs_v" = 0 ] || return 1
+        _rs_v="$(stat_mode "$_rs_d")" || return 2
+        if mode_allows_nonroot_write "$_rs_v"; then return 1; fi
+        _rs_parent="$(dirname "$_rs_d")"
+        [ "$_rs_parent" != "$_rs_d" ] || break
+        _rs_d="$_rs_parent"
+    done
+    return 0
+}
+
+# dir_is_root_secure <path> — the directory form of the predicate above, and
+# the shell half of core/binary's IsRootSecureDir. Same four codes; the leaf is
+# a DIRECTORY, so 3 means "no such directory" rather than "no such file". The
+# leaf and every ancestor up to / must be owned by uid 0 and carry no group or
+# other write bit — the leaf is walked exactly like an ancestor, because a
+# directory is where root's STATE is about to be created and a group-writable
+# one lets that group replace what root wrote.
+#
+# It is a separate function rather than a flag on path_is_root_secure because
+# the two are asked in different places for different reasons: one gates a
+# root EXEC, the other gates where root's state is about to be created, and a
+# shared flag would let a caller ask the wrong question with a one-character
+# typo — a directory passed to the file form answers 3 ("absent"), which reads
+# as "nothing to check" rather than as the wrong question.
+dir_is_root_secure() {
+    _ds_d="$1"
+    [ -d "$_ds_d" ] || return 3
+    while :; do
+        [ -d "$_ds_d" ] || return 1
+        _ds_v="$(stat_uid "$_ds_d")" || return 2
+        [ "$_ds_v" = 0 ] || return 1
+        _ds_v="$(stat_mode "$_ds_d")" || return 2
+        if mode_allows_nonroot_write "$_ds_v"; then return 1; fi
+        _ds_parent="$(dirname "$_ds_d")"
+        [ "$_ds_parent" != "$_ds_d" ] || break
+        _ds_d="$_ds_parent"
+    done
+    return 0
+}
+# === ROOT-SECURE CONTRACT END ===
+
 # ---------------------------------------------------------------------------
 # THE STALE PER-USER BINARY SWEEP, AND THE MIGRATION LADDER IT NOW ALSO RIDES ON
 #
