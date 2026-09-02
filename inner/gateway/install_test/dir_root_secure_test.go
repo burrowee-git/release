@@ -301,7 +301,11 @@ func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
 		{filepath.Join(root, "target") + "/./bin", "an interior . does not touch the leaf"},
 		{filepath.Join(root, "target") + "//bin", "an interior // does not touch the leaf"},
 		{plain, "a real directory beside the link"},
-		{"/", "the root directory, which the normalizer must not empty"},
+		{"/", "the root directory"},
+		{"/.", "the root, spelled with a dot — the normalizer EMPTIES this one, and must put / back"},
+		{"/./", "the same, with a separator"},
+		{"//.", "and with a doubled separator"},
+		{"//", "the root, doubled"},
 	} {
 		if rc := dirIsRootSecure(t, tc.spelling, none, none); rc != 0 {
 			t.Errorf("dir_is_root_secure(%q) = %d, want 0 — %s", tc.spelling, rc, tc.why)
@@ -362,8 +366,23 @@ func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
 // way there is for the never-enters rule, so this is stated rather than
 // papered over.
 //
-// Mutations that redden it: restore `[ -d "$1" ] || return 1` in
-// dir_level_is_root_secure, or `[ -d "$_ds_in" ] || return 3` at the entry.
+// Mutation that reddens it: restore `[ -d "$_ds_in" ] || return 3` at the
+// entry of dir_is_root_secure — the answer becomes 3, "this directory does not
+// exist", about a directory that does.
+//
+// WHERE THIS ACTUALLY BITES, stated precisely, because the review's mechanism
+// was one step off. The ENTRY test is the reachable instance: `[ -d ]` on the
+// leaf is EACCES when an ancestor is unsearchable, and the code answered 3
+// there, not 1 — "no such directory" about one that exists. The copy of the
+// same split inside dir_level_is_root_secure is NOT reachable in a
+// single-threaded run: if the entry `[ -d ]` succeeded, the kernel resolved the
+// whole path, so every directory the walk then judges is searchable by
+// construction. It is kept as a guard on the window BETWEEN the entry test and
+// the walk — separate syscalls, and a directory can be chmod'ed between them —
+// and no deterministic test can reach it, exactly like the hop bound. It is
+// documented rather than covered; restoring `[ -d "$1" ] || return 1` there
+// leaves this suite green, and that is a statement about reachability, not a
+// hole in the test.
 func TestDirIsRootSecureSaysUndecidableWhenItCannotTraverse(t *testing.T) {
 	root := canonicalTempDir(t)
 	sealed := filepath.Join(root, "sealed")
