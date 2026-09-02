@@ -37,12 +37,12 @@
 #                                is a refusal before anything is placed.
 #
 # NO PREFIX. As of relay 0.2.2 the inner installer is root-only with ONE
-# destination (/usr/local/bin), and it REFUSES a PREFIX that would MISDIRECT the
+# destination — /usr/local/burrowee/bin as of 0.3, /usr/local/bin through 0.2 — and it REFUSES a PREFIX that would MISDIRECT the
 # install rather than honouring or silently overriding it. One that resolves to
-# that same /usr/local/bin misdirects nothing: it is honoured with a line saying
+# that same destination misdirects nothing: it is honoured with a line saying
 # so, then cleared. This bootstrap therefore never manufactures one — the old
 # `PREFIX=$HOME/.local` default sent a root install to /root/.local/bin while
-# the fleet's units named /usr/local/bin, which is exactly the split the refusal
+# the fleet's units named the system exec root, which is exactly the split the refusal
 # makes loud. An operator-exported PREFIX still reaches the inner installer
 # through the environment, so the refusal is reachable, not silent.
 
@@ -80,7 +80,7 @@ ok()   { printf '  ✓ %s\n' "$*"; }
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
-# install to /usr/local/bin and manage a system service; they cannot install any
+# install to /usr/local/burrowee/bin and manage a system service; they cannot install any
 # other way. So the bootstrap elevates rather than printing a one-liner for the
 # operator to retype.
 #
@@ -91,7 +91,7 @@ ok()   { printf '  ✓ %s\n' "$*"; }
 # for no gain, and would put the preflight's brew path (Homebrew refuses to run
 # as root) on the wrong side of the boundary. Do not reorder this.
 needs_root_comp() {
-    # relay is root-only as of 0.2.2 -- one destination, /usr/local/bin.
+    # relay is root-only as of 0.2.2 -- one destination, /usr/local/burrowee/bin (0.3; /usr/local/bin through 0.2).
     return 0
 }
 
@@ -131,7 +131,7 @@ resolve_elevate() {
     needs_root_comp || return 0
     [ "$(id -u)" != 0 ] || return 0
     if ! command -v sudo >/dev/null 2>&1; then
-        fail "$COMP installs to /usr/local/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
+        fail "$COMP installs to /usr/local/burrowee/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
     fi
     if ! has_tty && ! sudo -n true 2>/dev/null; then
         fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
@@ -351,7 +351,7 @@ ok "verified — running inner installer"
 # run_inner — exec the verified inner installer with cwd = the unzipped dir, so
 # it resolves the binaries relative to its own location. PREFIX is deliberately
 # NOT resolved or defaulted here: the 0.2.2 root-only installer has one
-# destination (/usr/local/bin) and refuses, loudly, any PREFIX that names
+# destination (/usr/local/burrowee/bin) and refuses, loudly, any PREFIX that names
 # somewhere else; one that resolves to that same destination is honoured as the
 # no-op it is. An operator-exported PREFIX must still reach the inner installer
 # for that refusal to be reachable rather than silently dropped — and now that
@@ -359,11 +359,13 @@ ok "verified — running inner installer"
 # carries it (sudo scrubs the environment), so it is forwarded explicitly as a
 # command-prefix assignment on the `env` invocation, the same boundary-crossing
 # pattern tools/bootstrap.template.sh uses for its own PREFIX. No PATH
-# persistence either: /usr/local/bin is on every default PATH, so there is no
-# rc file to edit.
+# persistence either: the inner installer links burrowee-relay-cli into
+# /usr/local/bin when that directory is root-secure and prints the one
+# `export PATH=…` line itself when it declines, so there is no rc file for
+# this script to edit.
 run_inner() {
     if [ -n "$ELEVATE" ]; then
-        info "$COMP installs to /usr/local/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
+        info "$COMP installs to /usr/local/burrowee/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
     fi
     if [ -n "${PREFIX:-}" ]; then
         ( cd "$TMP/x" && $ELEVATE env PREFIX="$PREFIX" \

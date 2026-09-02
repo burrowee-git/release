@@ -88,11 +88,11 @@
 #                                (<COMP> = the component name upper-cased, e.g. BURROWEE_CLI_VERSION)
 #   PREFIX                       install root (bins at PREFIX/bin). cli/agent: default
 #                                $HOME/.local. GATEWAY and EDGE: not defaulted — they
-#                                install only to the root-owned /usr/local/bin (gateway
+#                                install only to the root-owned /usr/local/burrowee/bin (gateway
 #                                since 0.2.0, edge since 0.2.0). Their inner installers
 #                                REFUSE a PREFIX that would MISDIRECT the install rather
 #                                than quietly overriding it; one that resolves to that
-#                                same /usr/local/bin misdirects nothing and is honoured.
+#                                same /usr/local/burrowee/bin misdirects nothing and is honoured.
 #   (elevation)                  gateway/edge/relay need root: the bootstrap runs the
 #                                VERIFIED inner installer under sudo and says so.
 #                                Resolution, download and signature checks stay at the
@@ -104,7 +104,7 @@
 #   BURROWEE_SKIP_NGINX=1        (edge) skip nginx + stream module in the preflight
 #   BURROWEE_NO_PATH_EDIT=1      do not persist PREFIX/bin to your shell rc (no effect for
 #                                the gateway or the edge, which edit no rc —
-#                                /usr/local/bin is on PATH already)
+#                                their inner installer links into /usr/local/bin or prints the PATH line)
 #   BURROWEE_CHANNEL_BASE        base URL for the static channel (preflight.sh lives here)
 #   BURROWEE_DL_BASE             (test hook) download assets from this base instead of GitHub
 #   CONSOLE_URL                  Burrowee console base URL; used by the R2 fallback when
@@ -169,14 +169,16 @@ REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 # resolve_prefix — the install root this bootstrap hands the inner installer.
 #
 # PER COMPONENT, because this template is shared and they no longer agree. The
-# gateway and the edge install to /usr/local/bin, root-owned, and nowhere else:
-# their inner installers REFUSE a PREFIX that names anywhere else, so
-# manufacturing a per-user one here would make every `curl … | sh` fail — and,
-# before that refusal existed, manufacturing one is precisely what sent every
-# bootstrap install down the per-user branch, which also switched off unit
-# rendering, migration and version recording. Their PREFIX therefore stays EMPTY
-# unless the operator set one, and an operator who did set one gets either the
-# refusal they earned or, if it resolves to /usr/local/bin anyway, a line saying
+# gateway and the edge install to /usr/local/burrowee/bin, root-owned, and
+# nowhere else (the operator-typed binaries are then LINKED into /usr/local/bin
+# when that directory is root-secure — a link, not a second destination): their
+# inner installers REFUSE a PREFIX that names anywhere else, so manufacturing a
+# per-user one here would make every `curl … | sh` fail — and, before that
+# refusal existed, manufacturing one is precisely what sent every bootstrap
+# install down the per-user branch, which also switched off unit rendering,
+# migration and version recording. Their PREFIX therefore stays EMPTY unless the
+# operator set one, and an operator who did set one gets either the refusal
+# they earned or, if it resolves to /usr/local/burrowee/bin anyway, a line saying
 # so — never a silent override. cli/agent keep the per-user default until that
 # is decided separately. $COMP is a literal baked at render time.
 #
@@ -255,7 +257,7 @@ ok()   { printf '  ✓ %s\n' "$*"; }
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
-# install to /usr/local/bin and manage a system service; they cannot install any
+# install to /usr/local/burrowee/bin and manage a system service; they cannot install any
 # other way. So the bootstrap elevates rather than printing a one-liner for the
 # operator to retype.
 #
@@ -301,7 +303,7 @@ resolve_elevate() {
     needs_root_comp || return 0
     [ "$(id -u)" != 0 ] || return 0
     if ! command -v sudo >/dev/null 2>&1; then
-        fail "$COMP installs to /usr/local/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
+        fail "$COMP installs to /usr/local/burrowee/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
     fi
     if ! has_tty && ! sudo -n true 2>/dev/null; then
         fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
@@ -1252,7 +1254,7 @@ run_inner() {
     # unset and read as "the operator set nothing", turning a deliberate
     # PREFIX=/usr/local into a silent default.
     if [ -n "$ELEVATE" ]; then
-        info "$COMP installs to /usr/local/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
+        info "$COMP installs to /usr/local/burrowee/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
     fi
     if [ -n "$PREFIX" ]; then
         ( cd "$TMP/x" && $ELEVATE env PREFIX="$PREFIX" \
@@ -1400,10 +1402,13 @@ fi
 # over ssh. An unset/unknown $SHELL defaults to the bash files. Fault-tolerant:
 # an unwritable rc must never abort the script (the bins are already installed).
 #
-# SKIPPED ENTIRELY FOR THE GATEWAY AND THE EDGE: they install to /usr/local/bin,
-# which is already on every PATH, and $PREFIX is empty for them — "$PREFIX/bin"
-# would expand to "/bin", a directory this script has no business writing into
-# anyone's rc.
+# SKIPPED ENTIRELY FOR THE GATEWAY AND THE EDGE: they install to
+# /usr/local/burrowee/bin and their INNER installer owns the PATH question —
+# it links the operator-typed binaries into /usr/local/bin when that directory
+# is root-secure, and prints the one `export PATH=…` line itself when it
+# declines to link. Only it knows which happened, so this script cannot say
+# anything useful, and $PREFIX is empty for them — "$PREFIX/bin" would expand
+# to "/bin", a directory this script has no business writing into anyone's rc.
 #
 # Skipped as root, for all components: this script does not edit root's shell
 # rc. Note what that means for cli/agent and is not papered over here — a root
