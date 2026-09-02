@@ -1100,17 +1100,36 @@ prior_install_present() {
 }
 
 # ---------------------------------------------------------------------------
-# migration_sudo — the elevation command handed to the runner, following THIS
-# script's own root policy (run_root): a prompting `sudo` only when there is a
-# controlling tty to prompt on, `sudo -n` otherwise. An explicit SUDO from the
-# caller wins, so the updater's own seam still reaches the runner.
+# migration_sudo [probe] — the elevation command handed to the runner, following
+# THIS script's own root policy (run_root): a prompting `sudo` only when there is
+# a controlling tty to prompt on, `sudo -n` otherwise. An explicit SUDO from the
+# caller wins in either mode, so the updater's own seam still reaches the runner.
 #
 # The documented install flow is `curl … | sh`, where stdin is the pipe. A bare
 # `sudo` there fails with "no tty present and no askpass program" — and it fails
 # AFTER the runner has stopped the gateway, with none of run_root's hint text.
+#
+# `probe` IS THE READ-ONLY CALLER, AND IT NEVER PROMPTS, tty or no tty.
+# should_ask_before_migration forks the runner with BOTH streams discarded
+# (`>/dev/null 2>&1`), because the only thing it wants from that run is the exit
+# code. A prompting `sudo` inside it is therefore a bare `Password:` on the
+# operator's terminal with every line that would explain it thrown away — the
+# runner's `receipt_state` reads a 0600 root-owned receipt through $SUDO, so it
+# is a real read on a real host and not a hypothetical. Worse, it is a prompt
+# for a decision the operator has not been shown yet: the probe runs BEFORE the
+# consent prompt it exists to decide whether to ask.
+#
+# The cost of `-n` here is nil in the normal case and small in the worst one.
+# The identical read happens seconds later in the real run — with a warm sudo
+# timestamp on essentially every host, and with run_root's own prose around it
+# when it is not — and a probe that cannot read a receipt answers 12, which
+# should_ask_before_migration already treats as "cannot tell, proceed exactly as
+# today". Losing a warning is what a blind probe costs. It is a much better
+# trade than an unexplained password prompt.
 # ---------------------------------------------------------------------------
 migration_sudo() {
     if [ -n "${SUDO:-}" ]; then echo "$SUDO"; return 0; fi
+    if [ "${1:-}" = probe ]; then echo "sudo -n"; return 0; fi
     if has_tty; then echo "sudo"; else echo "sudo -n"; fi
 }
 
@@ -1213,7 +1232,10 @@ should_ask_before_migration() {
     # resolved a different $GW_HOME, a different config root or a different
     # $BIN_DIR would be answering about a different host than the run it speaks
     # for — see that function's header for what each of these values is.
-    GW_HOME="$GW_HOME"         PREFIX="$(dirname "$BIN_DIR")"         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR"         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR"         SUDO="$(migration_sudo)"         sh "$_probe_runner" --probe-pending >/dev/null 2>&1
+    # `migration_sudo probe`, not `migration_sudo`: this fork discards both
+    # streams, so a prompting sudo inside it is a naked `Password:` with its
+    # own explanation thrown away. See migration_sudo's header.
+    GW_HOME="$GW_HOME"         PREFIX="$(dirname "$BIN_DIR")"         BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR"         BURROWEE_SYSTEM_DATA_DIR="$SYS_DATA_DIR"         SUDO="$(migration_sudo probe)"         sh "$_probe_runner" --probe-pending >/dev/null 2>&1
     _probe_rc=$?
     set -e
     # 10 and nothing else. Every other code — 11, 12, an old runner's 64, or

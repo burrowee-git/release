@@ -69,6 +69,7 @@ stage_runner() {
         echo "echo \"CONFIG=\$BURROWEE_SYSTEM_CONFIG_DIR\" >> '$_sr_root/runner.log'"
         echo "echo \"DATA=\$BURROWEE_SYSTEM_DATA_DIR\" >> '$_sr_root/runner.log'"
         echo "echo \"PREFIX=\$PREFIX\" >> '$_sr_root/runner.log'"
+        echo "echo \"SUDO=\$SUDO\" >> '$_sr_root/runner.log'"
         if [ -z "$_sr_omit" ]; then
             # The token install.sh reads the file for. Spelled in a comment so
             # the stub carries it without having to implement the mode.
@@ -128,6 +129,50 @@ t_pending_asks() {
     [ "$_rc" = 0 ] || fail "a pending migration (probe 10) did not reach the consent prompt (rc=$_rc)"
     grep -q -- '--probe-pending' "$_r/runner.log" 2>/dev/null \
         || fail "install.sh never asked the runner: $(cat "$_r/runner.log" 2>/dev/null || echo '<no log>')"
+    rm -rf "$_r"
+}
+
+# ---------------------------------------------------------------------------
+# THE PROBE MUST NOT BE ABLE TO PROMPT, on the one host where it could.
+#
+# The probe is forked with both streams discarded — the exit code is the whole
+# of what it is for — so anything it writes to the terminal arrives without the
+# line that would explain it. It is also handed $SUDO, and it really does use
+# it: the runner's receipt_state reads root-owned 0600 receipts through that
+# command. So on the interactive host (the only one migration_sudo would ever
+# answer a bare `sudo` for) a cold sudo timestamp meant a bare `Password:`
+# appearing under an install that had not yet asked the operator anything —
+# the consent prompt this probe DECIDES is still ahead of it.
+#
+# `-n` costs at most the warning: a probe that cannot read a receipt exits 12,
+# and 12 is already "cannot tell, proceed exactly as today" (t_cannot_evaluate_
+# is_silent below). The same read happens seconds later in the real run, where
+# a prompt is expected and explained.
+#
+# tty_yes, deliberately — under tty_no migration_sudo already answers `sudo -n`
+# and the check would pass against the defect.
+# ---------------------------------------------------------------------------
+t_probe_elevation_never_prompts() {
+    _r="$(new_root)"
+    stage_runner "$_r" 10
+    _rc="$(ask "$_r" "$tty_yes")"
+    [ "$_rc" = 0 ] || fail "fixture broken: the probe path was not taken (rc=$_rc)"
+    grep -q '^SUDO=sudo -n$' "$_r/runner.log" 2>/dev/null \
+        || fail "the probe was handed a prompting elevation on an interactive host — its output is discarded, so a password prompt there has nothing to explain it: $(grep '^SUDO=' "$_r/runner.log" 2>/dev/null || echo '<no SUDO line>')"
+    rm -rf "$_r"
+}
+
+# An explicit SUDO from the caller still wins, in the probe as everywhere else:
+# it is the seam the updater and this suite reach the runner through, and a
+# probe that ignored it would be elevating differently from the run it speaks
+# for.
+t_probe_honours_an_explicit_sudo() {
+    _r="$(new_root)"
+    stage_runner "$_r" 10
+    _rc="$(SUDO='/bin/true' ask "$_r" "$tty_yes")"
+    [ "$_rc" = 0 ] || fail "fixture broken: the probe path was not taken (rc=$_rc)"
+    grep -q '^SUDO=/bin/true$' "$_r/runner.log" 2>/dev/null \
+        || fail "the probe overrode the caller's explicit SUDO: $(grep '^SUDO=' "$_r/runner.log" 2>/dev/null || echo '<no SUDO line>')"
     rm -rf "$_r"
 }
 
@@ -376,6 +421,8 @@ t_absent_runner_does_not_ask
 t_no_tty_never_probes
 t_assume_yes_never_probes
 t_probe_env_matches_the_real_run
+t_probe_elevation_never_prompts
+t_probe_honours_an_explicit_sudo
 t_gate_reads_has_tty
 t_gate_runs_before_the_migration_and_after_the_guard
 t_gate_names_the_migration_cause
