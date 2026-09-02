@@ -615,6 +615,26 @@ remove_stale_user_bins() {
 #     this again after they have re-rendered the units to the new tree.
 # ---------------------------------------------------------------------------
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
+
+# STALE_EXEC_ROOT_KEEP — names the sweep must leave in $LEGACY_BIN_DIR no matter
+# what it decides about them. The installer sets it to the operator-typed names
+# it did NOT link: on a host whose /usr/local/bin is not root-secure,
+# link_operator_bins creates nothing and prints the PATH line instead, and the
+# real 0.2 file at that name is then the ONLY copy anything reaches by the
+# absolute path — the shared `burrowee` dispatcher above all, which every
+# co-installed component and every consumer resolves as /usr/local/bin/burrowee.
+# Removing it there would leave that path empty on exactly the host class this
+# whole change exists for. Empty on a host where the links WERE made: the link
+# replaced the file, so nothing is stranded.
+STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
+
+# stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
+stale_exec_root_is_kept() {
+    for _serik in $STALE_EXEC_ROOT_KEEP; do
+        [ "$_serik" = "$1" ] && return 0
+    done
+    return 1
+}
 STALE_EXEC_ROOT_TWIN_OWNER="${STALE_EXEC_ROOT_TWIN_OWNER:-root}"
 
 # stale_exec_root_twin_ok <bin> — $BIN_DIR/<bin> is a regular file owned by
@@ -658,6 +678,7 @@ stale_exec_root_bins_pending() {
     [ -r "$_serp_dir" ] && [ -x "$_serp_dir" ] || return 0
     _serp_home="$(operator_home 2>/dev/null)"
     for _serp_b in $STALE_USER_BINS; do
+        stale_exec_root_is_kept "$_serp_b" && continue
         if [ "$(stale_exec_root_decision "$_serp_b" "$_serp_home" 2>/dev/null)" = remove ]; then
             return 0
         fi
@@ -685,6 +706,10 @@ remove_stale_exec_root_bins() {
     _rser_home="$(operator_home 2>/dev/null)"
     for _rser_b in $STALE_USER_BINS; do
         _rser_p="$LEGACY_BIN_DIR/$_rser_b"
+        if stale_exec_root_is_kept "$_rser_b"; then
+            [ -e "$_rser_p" ] && echo "kept $_rser_p — no link was made at that name, so this is the only copy anything reaches there"
+            continue
+        fi
         _rser_d="$(stale_exec_root_decision "$_rser_b" "$_rser_home")"
         case "$_rser_d" in
         absent) ;;
