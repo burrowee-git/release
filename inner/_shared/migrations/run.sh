@@ -338,6 +338,43 @@ esac
 # Renaming either would orphan every anchor already on a host in the field.
 VERSION_FILE="${VERSION_FILE:-.installed-version}"
 
+# ---------------------------------------------------------------------------
+# TRANSITIONAL — 0.2 → 0.3 only. WHERE THE ANCHOR IS READ FROM.
+#
+# For a `system`-scheme component the anchor and the receipts live INSIDE the
+# config tree that 0.3 moves (spec §9.2). On the first 0.3 run against a 0.2
+# host $COMP_HOME is the new, EMPTY root: no anchor, no receipts. The runner's
+# documented behaviour with no anchor is "each rung's probe decides", so the
+# ladder would re-evaluate every shipped 0.2.0 rung against a host they no
+# longer describe — and an adoption rung whose probe finds an empty
+# destination and a surviving pre-0.2 per-user tree answers YES, publishes
+# that stale tree into the new root, and because the copy never overwrites
+# the 0.2→0.3 copy then loses. A silent config and identity rollback.
+#
+# So the anchor — and ONLY the anchor — is read from the 0.2 tree when the
+# new root holds neither an anchor nor a receipts directory and the 0.2 tree
+# holds an anchor. A 0.2 host then reports the version it really recorded,
+# the numeric gate retires the 0.2.0 rows on the evidence they were always
+# meant to be judged on, and only the 0.3.0 rows apply. It is a READ: nothing
+# is ever written to the legacy tree, and receipts are never looked for
+# there — a receipt keyed to the old tree says nothing about this one. Once a
+# 0.3 install records the anchor at the new root the old path is never
+# consulted again, which is what makes it transitional by construction. A new
+# root that holds receipts but no anchor is a 0.3 host whose anchor was
+# withheld (a lost receipt, exit 3) and keeps today's behaviour: the rungs
+# are asked. Remove this block once 0.3 is the floor.
+# ---------------------------------------------------------------------------
+ANCHOR_HOME="$COMP_HOME"
+ANCHOR_IS_LEGACY=0
+LEGACY_COMP_HOME="$LEGACY_SYS_CONFIG_ROOT/$COMP"
+if [ "${COMP_HOME_SCHEME:-user}" = system ] \
+    && [ ! -f "$COMP_HOME/$VERSION_FILE" ] \
+    && [ ! -d "$COMP_HOME/migration-receipts" ] \
+    && [ -f "$LEGACY_COMP_HOME/$VERSION_FILE" ]; then
+    ANCHOR_HOME="$LEGACY_COMP_HOME"
+    ANCHOR_IS_LEGACY=1
+fi
+
 BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
 SUDO="${SUDO:-sudo}"
 # Resolved HERE and exported to every rung by run_migration, for the same reason
@@ -667,11 +704,12 @@ done
 # ---------------------------------------------------------------------------
 # installed_version — the recorded version of the component currently
 # installed, or empty. The installer writes it as the first line of
-# $COMP_HOME/$VERSION_FILE.
+# $COMP_HOME/$VERSION_FILE; $ANCHOR_HOME is that tree, or — transitionally,
+# see its definition — the 0.2 tree the new root has not been filled from yet.
 # ---------------------------------------------------------------------------
 installed_version() {
-    if [ ! -f "$COMP_HOME/$VERSION_FILE" ]; then echo ""; return 0; fi
-    head -n 1 "$COMP_HOME/$VERSION_FILE" 2>/dev/null | tr -d ' \t\r' || echo ""
+    if [ ! -f "$ANCHOR_HOME/$VERSION_FILE" ]; then echo ""; return 0; fi
+    head -n 1 "$ANCHOR_HOME/$VERSION_FILE" 2>/dev/null | tr -d ' \t\r' || echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1029,14 @@ elif [ "$VERSION_NAMED" = 1 ]; then
     say "using --installed-version $_version; $COMP_HOME/$VERSION_FILE is NOT read"
 else
     _version="$(installed_version)"
+    # SAID BEFORE THE VERSION, because it changes what the version means: an
+    # operator reading "installed version 0.2.11" must know it was read out of
+    # the tree this ladder is about to migrate FROM.
+    if [ "$ANCHOR_IS_LEGACY" = 1 ]; then
+        say "TRANSITIONAL: $COMP_HOME holds no anchor and no receipts yet, so the recorded"
+        say "version is read from the 0.2 tree at $ANCHOR_HOME/$VERSION_FILE (read-only —"
+        say "receipts and the new anchor go to $COMP_HOME; the 0.2 tree is never written)"
+    fi
     # SAY WHICH INPUT THE LADDER IS ABOUT TO DECIDE ON. Every skip below is a
     # function of this one value, and "0.2.0 was recorded" and "nothing was
     # recorded, so each rung was asked" lead to opposite reasoning about the
@@ -1000,17 +1046,17 @@ else
         # holds is a release stamp, what the gate uses is its first three
         # fields, and a reader who cannot see the second has no way to know the
         # date/sha tail was ignored rather than parsed into the comparison.
-        say "installed version $_version — compared as $(version_field "$_version" 1).$(version_field "$_version" 2).$(version_field "$_version" 3) (read from $COMP_HOME/$VERSION_FILE)"
+        say "installed version $_version — compared as $(version_field "$_version" 1).$(version_field "$_version" 2).$(version_field "$_version" 3) (read from $ANCHOR_HOME/$VERSION_FILE)"
     else
         # ABSENT and PRESENT-BUT-EMPTY are different facts and lead to different
         # next questions. "Absent" says nothing is wrong; a zero-byte anchor says
         # a writer got as far as creating the file and wrote no version into it,
         # which is a bug in whatever wrote it.
-        if [ -f "$COMP_HOME/$VERSION_FILE" ]; then
-            say "no installed version recorded ($COMP_HOME/$VERSION_FILE exists but"
+        if [ -f "$ANCHOR_HOME/$VERSION_FILE" ]; then
+            say "no installed version recorded ($ANCHOR_HOME/$VERSION_FILE exists but"
             say "holds no version) — each migration is asked directly whether it applies"
         else
-            say "no installed version recorded ($COMP_HOME/$VERSION_FILE is absent) —"
+            say "no installed version recorded ($ANCHOR_HOME/$VERSION_FILE is absent) —"
             say "each migration is asked directly whether it applies"
         fi
     fi
