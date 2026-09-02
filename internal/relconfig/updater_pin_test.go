@@ -188,3 +188,26 @@ func TestUpdaterPinUsesLiteralDatePrefixNotUTC(t *testing.T) {
 		t.Fatalf("UpdaterPin = %q, want %q (literal date prefix, not UTC-shifted)", got, want)
 	}
 }
+
+// TestCleanTagAcceptsPreReleaseAndRefusesPseudoVersions pins the Go twin to
+// tools/updater_pin.sh: a semver pre-release is a tag (the whole of a beta
+// cycle pins core/updater at core/vX.Y.0-beta.N), a pseudo-version is not,
+// whichever base it was minted on. Mutation that reddens it: the plain-only
+// cleanTag, or dropping the pseudoVersion check.
+func TestCleanTagAcceptsPreReleaseAndRefusesPseudoVersions(t *testing.T) {
+	for _, v := range []string{"v0.2.3", "v0.3.0-beta.1", "v1.0.0-rc.2"} {
+		if !cleanTag.MatchString(v) || pseudoVersion.MatchString(v) {
+			t.Errorf("%s: a tag must be accepted", v)
+		}
+	}
+	for _, v := range []string{"v0.3.1-0.20260830120000-0123456789ab", "v0.3.0-beta.1.0.20260830120000-0123456789ab", "v0.0.0-20260830120000-0123456789ab"} {
+		if !pseudoVersion.MatchString(v) {
+			t.Errorf("%s: a pseudo-version must be refused", v)
+		}
+	}
+	for _, v := range []string{"v0.3.0+build.7", "0.3.0", "v0.3", "main"} {
+		if cleanTag.MatchString(v) {
+			t.Errorf("%s: not a tag, must be refused", v)
+		}
+	}
+}
