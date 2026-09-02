@@ -2587,7 +2587,7 @@ assert_contains "$OUT" "is not a regular file owned by nobody-such-user-37d" "an
 t37e="$TMP/t37e"; exec_sweep_kit "$t37e"; h37e="$t37e/home"; mkdir -p "$h37e/launchd"
 printf '<plist><dict><key>ProgramArguments</key><array><string>%s/old-bin/burrowee-edge-updater</string><string>run</string></array></dict></plist>\n' "$h37e" > "$h37e/launchd/com.burrowee.edge.updater.plist"
 EXEC_SWEEP_LAUNCHD_DIR="$h37e/launchd"; run_exec_sweep_rung "$t37e" "$h37e"; unset EXEC_SWEEP_LAUNCHD_DIR
-assert_eq "$RC" 3 "a unit-named file defers the rung (nothing recorded), never earns its receipt"
+assert_eq "$RC" 0 "a unit-named file is a decline, not a failure: halting here would strand every row ordered after this one"
 assert_present "$h37e/old-bin/burrowee-edge-updater" "a file a unit still names must not be unlinked"
 assert_contains "$OUT" "$h37e/launchd/com.burrowee.edge.updater.plist still names $h37e/old-bin/burrowee-edge-updater" "and the unit must be named"
 assert_gone "$h37e/old-bin/burrowee-edge-cli" "while a name no unit mentions is still swept — per item, never per section"

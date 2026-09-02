@@ -30,9 +30,16 @@
 # not redundant: on the first 0.3 install this rung runs BEFORE the units are
 # re-rendered, and while a 0.2 unit still names /usr/local/bin/<name> the
 # library correctly refuses to unlink a file a supervisor may be running — so
-# the rung reports that and the installer's later call does the removal. On a
-# host reached only by the updater, which never runs the installer, this rung
-# is what reaches the copies once the units have moved.
+# the rung reports that and the installer's later call does the removal.
+#
+# SO THIS RUNG NEVER FINISHES THE JOB ON A CROSSING HOST, and must not pretend
+# to: on the first 0.3 install every name is unit-blocked, and the copies are
+# reached by the installer's own post-render call — inner/edge/install.sh's
+# sweep_stale_exec_root, the gateway's units-only reinstall, relay's equivalent.
+# What this rung is for is the host that reaches 0.3 with its units ALREADY
+# naming the new root, where nothing else would sweep. It exits 0 either way:
+# a decline is not a failure, and halting the ladder here would strand every
+# row ordered after it — including the component's own 0.2→0.3 copy rung.
 #
 # PER ITEM, NEVER PER SECTION. Every name re-tests its own applicability where
 # it runs: a symlink (ours or anyone's) is never touched, a file with no
@@ -91,16 +98,3 @@ say "sweeping the 0.2 exec root $LEGACY_BIN_DIR of real copies replaced by $BIN_
 remove_stale_exec_root_bins
 say "sweep complete — anything removed, kept or left in place is named above"
 
-# A name kept because a unit still names it is work that REMAINS, not work
-# that is done: exit 3 is the runner's "nothing recorded, ladder stops here",
-# so no receipt closes this rung over copies it never reached. The installer
-# sweeps them itself once the units name $BIN_DIR.
-_sser_home="$(operator_home 2>/dev/null)"
-for _sser_b in $STALE_USER_BINS; do
-    case "$(stale_exec_root_decision "$_sser_b" "$_sser_home" 2>/dev/null)" in
-    unit:*)
-        warn "deferred: a unit still names $LEGACY_BIN_DIR/$_sser_b — the sweep is finished by the installer after the units move, and this rung stays pending"
-        exit 3
-        ;;
-    esac
-done
