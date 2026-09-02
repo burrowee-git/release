@@ -4,7 +4,11 @@
 
 # updater_pin <mod-dir> — resolve the github.com/burrowee-git/core/updater pin from
 # the given module dir (relay's updater build_dir is the nested `cli` module) and
-# return the updater's full stamp: <semver>.<YYYY.MM.DD>.<sha8>.
+# return the updater's full stamp: <semver>.<YYYY.MM.DD>.<sha8>. A pre-release
+# tag's hyphen is rendered as a dot (v0.3.0-beta.1 → v0.3.0.beta.1.<date>.<sha8>),
+# because every shipped stamp uses the dotted infix (versions/*.beta.stamp's
+# v0.2.17.beta.…) and the ladder's parser reads dot-separated fields — a hyphen
+# would be a shape nothing downstream has ever parsed.
 #
 # All three parts come from the PIN's own module metadata, never from this cut, so
 # the stamp is FROZEN while the pin is unchanged — the property this function has
@@ -30,9 +34,19 @@ updater_pin() {
         v[0-9]*.[0-9]*.[0-9]*) : ;;   # clean tag
         *) echo "✗ core/updater pinned to non-tag '${v}' in ${mod_dir} — repin to a tag before cut" >&2; exit 1 ;;
     esac
-    case "${v}" in
-        *-*) echo "✗ core/updater pin '${v}' is a pseudo-version — repin to a tag before cut" >&2; exit 1 ;;
-    esac
+    # A PSEUDO-VERSION is refused; a semver PRE-RELEASE tag is not. The two
+    # share the hyphen — core/updater sits on core/vX.Y.0-beta.N for the whole
+    # of a beta cycle, and the blanket `*-*` refusal made every beta cut die
+    # here — but only the pseudo-version means "this pin is not a tag at all".
+    # What identifies one is its machine-minted tail: a 14-digit UTC timestamp
+    # and a 12-hex-digit commit prefix, with or without the canonical `.0.`
+    # rung before it (vX.Y.Z-0.<ts>-<hash>, vX.Y.Z-pre.0.<ts>-<hash>). A tail
+    # of that shape that go would not mint is still refused — fail closed: no
+    # human tags a timestamp-and-hash, and a cut must not freeze the updater
+    # to an untagged commit.
+    if printf '%s' "${v}" | grep -Eq -- '[.-]([0-9A-Za-z.-]*\.)?[0-9]{14}-[0-9a-f]{12}$'; then
+        echo "✗ core/updater pin '${v}' is a pseudo-version — repin to a tag before cut" >&2; exit 1
+    fi
 
     info="$(cd "${mod_dir}" && "${GO_BIN:-go}" mod download -json github.com/burrowee-git/core/updater \
             | sed -n 's/.*"Info"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
@@ -51,5 +65,7 @@ updater_pin() {
         *) echo "✗ core/updater ${v}: no usable Origin.Hash in ${info} (got '${hash}') — refusing to ship a malformed updater stamp" >&2; exit 1 ;;
     esac
 
-    printf '%s.%s.%s' "${v}" "${date}" "${fp}"
+    # The dotted infix: a pre-release tag's hyphen becomes a dot in the stamp
+    # (see the header). A clean tag passes through tr unchanged.
+    printf '%s.%s.%s' "$(printf '%s' "${v}" | tr - .)" "${date}" "${fp}"
 }

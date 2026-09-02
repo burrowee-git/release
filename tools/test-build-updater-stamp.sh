@@ -6,6 +6,66 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; repo="$(cd "$here/.." && pwd)"
 
+# ── the pin's own contract, hermetically ─────────────────────────────────────
+# updater_pin's classification and rendering, driven through its GO_BIN seam
+# against a fake `go` answering from two env-fed values — no build, no module
+# cache, no worktree. The build half below proves the stamp reaches the
+# binary; this half proves what the stamp IS, both ways:
+#
+#   * a clean tag renders <tag>.<date>.<sha8>;
+#   * a semver PRE-RELEASE tag (core/updater is pinned at core/vX.Y.0-beta.N
+#     for the whole of a beta cycle — the Burrowee manual's own rule for a
+#     surface-changing core tag) is ACCEPTED, and renders with the dotted
+#     infix every shipped stamp uses (v0.3.0.beta.1.<date>.<sha8>, matching
+#     versions/*.beta.stamp's v0.2.17.beta.… shape) — a hyphen in the stamp
+#     would be a shape nothing downstream has ever parsed;
+#   * a true PSEUDO-VERSION (…-0.yyyymmddhhmmss-<12 hex>, tagless or based on
+#     either kind of tag) is still REFUSED: it means the pin is not a tag at
+#     all, and a cut must not freeze the updater to an untagged commit.
+fakego="$(mktemp -d)"
+cat > "${fakego}/go" <<'FAKEGO'
+#!/bin/sh
+case "$1 $2" in
+"list -m") printf '%s
+' "${FAKE_PIN_VERSION}" ;;
+"mod download") printf '{"Info": "%s"}
+' "${FAKE_PIN_INFO}" ;;
+*) echo "fake go: unexpected argv: $*" >&2; exit 1 ;;
+esac
+FAKEGO
+chmod 0755 "${fakego}/go"
+info="${fakego}/pin.info"
+printf '{"Version":"x","Time":"2026-08-30T12:34:56Z","Origin":{"VCS":"git","Hash":"0123456789abcdef01234567"}}
+' > "${info}"
+
+# pin_case <version> <want-stamp|REFUSE> <label> — updater_pin in a subshell
+# (it exits the shell on refusal), against the fake go.
+pin_case() {
+    local v="$1" want="$2" label="$3" got rc
+    set +e
+    got="$(FAKE_PIN_VERSION="${v}" FAKE_PIN_INFO="${info}" GO_BIN="${fakego}/go" updater_pin "${fakego}" 2>&1)"
+    rc=$?
+    set -e
+    if [ "${want}" = REFUSE ]; then
+        [ "${rc}" -ne 0 ] || { echo "FAIL ${label}: '${v}' was accepted with stamp '${got}', want a refusal"; exit 1; }
+        case "${got}" in *"pseudo-version"*|*"non-tag"*) : ;; *) echo "FAIL ${label}: the refusal does not say why: ${got}"; exit 1 ;; esac
+    else
+        [ "${rc}" -eq 0 ] || { echo "FAIL ${label}: '${v}' was refused: ${got}"; exit 1; }
+        [ "${got}" = "${want}" ] || { echo "FAIL ${label}: got '${got}' want '${want}'"; exit 1; }
+    fi
+    echo "PASS ${label}"
+}
+
+# shellcheck source=tools/updater_pin.sh
+source "$(cd "$(dirname "$0")" && pwd)/updater_pin.sh"
+pin_case v0.1.12 "v0.1.12.2026.08.30.01234567" "clean tag renders <tag>.<date>.<sha8>"
+pin_case v0.3.0-beta.1 "v0.3.0.beta.1.2026.08.30.01234567" "a pre-release tag is accepted and rendered with the dotted infix"
+pin_case v0.3.1-0.20260830120000-0123456789ab REFUSE "a tagless pseudo-version is refused"
+pin_case v0.3.0-beta.1.0.20260830120000-0123456789ab REFUSE "a pseudo-version based on a pre-release tag is refused"
+pin_case v0.3.0-20260830120000-0123456789ab REFUSE "a pseudo-version missing the .0. rung is still not a tag"
+rm -rf "${fakego}"
+
+# ── the build half: the stamp reaches the binary ─────────────────────────────
 src="${EDGE_SRC:?set EDGE_SRC to the edge worktree}"
 GO_BIN="${GO_BIN:-go}"
 command -v "${GO_BIN}" >/dev/null 2>&1 || GO_BIN=/opt/homebrew/bin/go
