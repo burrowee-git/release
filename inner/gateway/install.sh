@@ -1,3 +1,7 @@
+    # Walk the RESOLVED directory, never the lexical spelling: a symlink
+    # component would be judged by the link inode while its target — the
+    # directory a link is actually written into — was never examined.
+    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
 #!/bin/sh
 # Burrowee inner installer — gateway (POSIX sh).
 #
@@ -660,6 +664,14 @@ ensure_root_exec_surface() {
 
     for _reb in $ROOT_BINS; do
         if [ -n "$ROOT_BIN_PLACE_EXCLUDE" ] && [ "$_reb" = "$ROOT_BIN_PLACE_EXCLUDE" ]; then
+            # The RUNNING updater is never replaced from the bundle — but on the
+            # 0.2→0.3 crossing the new exec root has no copy of it at all, and
+            # verify_root_exec_surface would refuse every unit. A copy of the
+            # running binary from the 0.2 exec root is not a replacement of it.
+            if [ ! -f "$BIN_DIR/$_reb" ] && [ -f "$LEGACY_BIN_DIR/$_reb" ]; then
+                run_root /usr/bin/install -m 0755 "$LEGACY_BIN_DIR/$_reb" "$BIN_DIR/$_reb" || return 1
+                echo "placed $BIN_DIR/$_reb from the 0.2 exec root (the running updater, copied, not replaced)"
+            fi
             continue
         fi
         _reb_src="$(root_bin_source "$_reb")"
@@ -999,6 +1011,14 @@ sweep_stale_exec_root() {
         # shellcheck source=/dev/null
         . "$_sser_lib"
         STALE_SWEEP_LOADED=1
+    fi
+    # The exec-root half lives OUTSIDE the byte-pinned SHARED SWEEP CONTRACT
+    # region, and the gateway kit ships the gateway repo's copy of the library:
+    # a kit whose library predates it must say so, not die with "not found".
+    if ! command -v remove_stale_exec_root_bins >/dev/null 2>&1; then
+        echo "note: $_sser_lib has no remove_stale_exec_root_bins — THIS RELEASE IS INCOMPLETE:" >&2
+        echo "note: the 0.2 copies in $LEGACY_BIN_DIR were not swept. Re-run a complete release." >&2
+        return 0
     fi
     remove_stale_exec_root_bins
 }
@@ -3471,6 +3491,7 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # ones the supervisor is running. See sweep_stale_user_bins' header for why
     # this cannot move earlier.
     sweep_stale_user_bins
+    sweep_stale_exec_root
     report_unrecorded_migration
     # The anchor, from the fourth and last entry point. Its absence here is a
     # large part of why the ledger is effectively unwritten in the field: the
@@ -3640,17 +3661,15 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         # silently overwritten from the bundle here, one function past the
         # exclusion meant to stop exactly that.
         ROOT_BIN_PLACE_EXCLUDE="burrowee-gateway-updater"
-        if links_deferred_to_guard; then LINKS_DEFERRED=1; else LINKS_DEFERRED=0; fi
         migrate_from_legacy
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
-        # Links now on a host whose loaded units never named the link path; after
-        # the verified restart (guard) where they still do. The exec-root sweep
-        # always follows the restart.
-        if [ "$LINKS_DEFERRED" = 1 ]; then
-            echo "note: the operator links into $LINK_DIR follow the restart (a loaded unit still names that path)"
-        else
-            link_operator_bins
-        fi
+        # The links are made HERE on the update path: this path arms no guard —
+        # the updater restarts the service itself right after this script exits —
+        # so there is no later step to defer them to. The exec-root sweep still
+        # has to wait until the loaded units name $BIN_DIR: the units-only
+        # reinstall (`burrowee gateway service install`) does it after load_units.
+        link_operator_bins
+        echo "note: once the service has restarted onto the new units, 'sudo burrowee gateway service install' sweeps the 0.2 copies out of $LEGACY_BIN_DIR"
 
         # The version LAST, and only once everything above succeeded. Recording it
         # before the migration would mean a failed migration leaves the new version on

@@ -1,3 +1,7 @@
+    # Walk the RESOLVED directory, never the lexical spelling: a symlink
+    # component would be judged by the link inode while its target — the
+    # directory a link is actually written into — was never examined.
+    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
 #!/bin/sh
 # Burrowee inner installer — edge (POSIX sh, macOS + Linux).
 #
@@ -1368,7 +1372,9 @@ fi
 # ladder is asked about it. Deliberately AFTER the source-only seam above:
 # sourcing this file defines functions and creates nothing, which is what lets
 # tools/test-config-migrate.sh drive them as an ordinary user.
-ensure_system_tree
+# ensure_system_tree is called below, AFTER the uninstall branch: an uninstall
+# must neither create the 0.3 tree on a 0.2 host nor be refused by a tree
+# assertion — the 0.2 edge had no such step and its removal path must survive.
 
 # ---------------------------------------------------------------------------
 # Units-only mode (BURROWEE_UNITS_ONLY=1): the offline reinstall entrypoint run
@@ -1376,6 +1382,7 @@ ensure_system_tree
 # placing binaries or touching the network.
 # ---------------------------------------------------------------------------
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
+    ensure_system_tree
     setup_root_service
     # The updater track reaches 0.3 through here (LocalReinstall), never through
     # the full path below: the ladder it ran earlier found the 0.2 units still
@@ -1423,6 +1430,8 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     echo "removed from $BIN_DIR:$removed"
     exit 0
 fi
+
+ensure_system_tree
 
 for b in $BINS; do
     [ -f "./$b" ] || { echo "missing $b in archive" >&2; exit 1; }
