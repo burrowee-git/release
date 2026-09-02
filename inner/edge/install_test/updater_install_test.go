@@ -184,6 +184,7 @@ func (f *updaterFixture) env(stub string, extra ...string) []string {
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + f.stubLog,
 		"SYS_BIN_DIR=" + f.sysBinDir,
+		"BURROWEE_LINK_DIR=" + filepath.Join(f.home, "usr-local-bin"),
 		"SYSTEMD_UNIT_DIR=" + f.unitDir,
 		"LAUNCHD_PLIST_DIR=" + f.launchdDir,
 		"SYS_CONFIG_ROOT=" + filepath.Dir(f.compHomeDir),

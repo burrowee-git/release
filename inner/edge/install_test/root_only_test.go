@@ -23,7 +23,7 @@ import (
 // gateway's sibling pin (inner/gateway/install_test/bin_dir_default_test.go)
 // names the same directory; they moved together and must keep moving together —
 // the dispatcher resolves both components there by absolute path.
-const wantBinDirDefault = "/usr/local/bin"
+const wantBinDirDefault = "/usr/local/burrowee/bin"
 
 // collapseVersion is the release this collapse ships in, as the refusals name it
 // to the operator. Pinned here so the two messages and this expectation cannot
@@ -121,6 +121,7 @@ func (sb sandbox) env(stub string, extra ...string) []string {
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(sb.home, "stub-calls.log"),
 		"SYS_BIN_DIR=" + sb.sysBinDir,
+		"BURROWEE_LINK_DIR=" + filepath.Join(sb.home, "usr-local-bin"),
 		"SYSTEMD_UNIT_DIR=" + sb.unitDir,
 		"LAUNCHD_PLIST_DIR=" + filepath.Join(sb.home, "LaunchDaemons"),
 		"ROOT_HOME=" + sb.rootHome,

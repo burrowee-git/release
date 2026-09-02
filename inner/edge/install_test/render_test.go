@@ -143,6 +143,7 @@ func runRootInstall(t *testing.T, home, staging string, extraEnv ...string) (str
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
 		"SYS_BIN_DIR=" + sysBinDir,
+		"BURROWEE_LINK_DIR=" + filepath.Join(home, "usr-local-bin"),
 		"SYSTEMD_UNIT_DIR=" + unitDir,
 		// Sandbox root's config home (COMP_HOME) so the self-copy + version
 		// marker land under the test HOME instead of the real /root.
@@ -276,6 +277,7 @@ func TestEdgeRootInstallDarwin(t *testing.T) {
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
 		"SYS_BIN_DIR=" + sysBinDir,
+		"BURROWEE_LINK_DIR=" + filepath.Join(home, "usr-local-bin"),
 		"LAUNCHD_PLIST_DIR=" + launchdDir,
 		"ROOT_HOME=" + rootHome,
 		"SYS_CONFIG_ROOT=" + filepath.Join(filepath.Dir(rootHome), "sys-etc", "burrowee"),
@@ -374,6 +376,7 @@ func TestEdgeRootUninstallRemovesUpdaterUnit(t *testing.T) {
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(home, "uninstall-calls.log"),
 		"SYS_BIN_DIR=" + sysBinDir,
+		"BURROWEE_LINK_DIR=" + filepath.Join(home, "usr-local-bin"),
 		"SYSTEMD_UNIT_DIR=" + unitDir,
 		"SYS_CONFIG_ROOT=" + filepath.Join(home, "sys-etc", "burrowee"),
 		"SYS_DATA_ROOT=" + filepath.Join(home, "sys-var", "burrowee"),
@@ -446,6 +449,7 @@ func TestEdgeRootInstallDarwinRestartsOptedInUpdater(t *testing.T) {
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(home, "stub-calls.log"),
 		"SYS_BIN_DIR=" + sysBinDir,
+		"BURROWEE_LINK_DIR=" + filepath.Join(home, "usr-local-bin"),
 		"LAUNCHD_PLIST_DIR=" + launchdDir,
 		"ROOT_HOME=" + rootHome,
 		"SYS_CONFIG_ROOT=" + filepath.Join(filepath.Dir(rootHome), "sys-etc", "burrowee"),
