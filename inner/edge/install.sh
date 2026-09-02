@@ -105,6 +105,20 @@ LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
 # operator-typed name that is NOT in here alone: with no link at that path the
 # real 0.2 file is the only copy anything reaches by it.
 LINKED_OPERATOR_BINS=""
+
+# exec_root_keep_list — the operator-typed names no link will replace on this
+# host, resolved BEFORE anything runs so the ladder rung can be handed it too.
+# When $LINK_DIR is not root-secure link_operator_bins creates nothing, and the
+# real 0.2 file at each of those names stays the only copy anything reaches by
+# the absolute path — the shared `burrowee` dispatcher above all. The
+# installer's own later call narrows this to what it actually linked.
+exec_root_keep_list() {
+    if dir_is_root_secure "$LINK_DIR"; then
+        echo ""
+    else
+        echo "$LINK_BINS"
+    fi
+}
 # The 0.2 exec root the sweep reads IS the link directory, so it follows the
 # same seam: a sandboxed run must never iterate the host's real /usr/local/bin.
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-$LINK_DIR}"
@@ -616,6 +630,7 @@ run_migration_ladder() {
         SYS_DATA_ROOT="$SYS_DATA_ROOT" \
         BIN_DIR="$BIN_DIR" \
         LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
+        STALE_EXEC_ROOT_KEEP="$(exec_root_keep_list)" \
         LEGACY_SYS_CONFIG_ROOT="$LEGACY_SYS_CONFIG_ROOT" \
         LEGACY_SYS_DATA_ROOT="$LEGACY_SYS_DATA_ROOT" \
         LAUNCHD_DIR="$LAUNCHD_PLIST_DIR" \
@@ -998,12 +1013,23 @@ link_operator_bins() {
             _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
             continue
         fi
-        if ! rm -f "$LINK_DIR/$_lob"; then
-            echo "note: could not remove what is at $LINK_DIR/$_lob — it still shadows $BIN_DIR/$_lob; remove it by hand." >&2
+        # ATOMIC, never unlink-then-relink. A 0.2 macOS plist holds
+        # KeepAlive.PathState on $LINK_DIR/burrowee-<comp>; an `rm -f` there
+        # makes launchd observe the watched path vanish and SIGTERM the running
+        # daemon — the one the operator may be tunnelled through — which it then
+        # restarts from the OLD in-memory job definition now resolving through
+        # the new link. Building the link beside its name and renaming it over
+        # closes that window: rename(2) within one directory is atomic, so the
+        # path is never absent. rule 3's "replace, never write through" still
+        # holds — a real file at the name is replaced, not followed.
+        _lob_tmp="$LINK_DIR/.burrowee-link.$$.$_lob"
+        if ! ln -sfn "$BIN_DIR/$_lob" "$_lob_tmp" 2>/dev/null; then
+            echo "note: could not stage a link in $LINK_DIR for $_lob; run it by its real path." >&2
             continue
         fi
-        if ! ln -sfn "$BIN_DIR/$_lob" "$LINK_DIR/$_lob"; then
-            echo "note: could not link $LINK_DIR/$_lob -> $BIN_DIR/$_lob; run it by its real path." >&2
+        if ! mv -f "$_lob_tmp" "$LINK_DIR/$_lob"; then
+            rm -f "$_lob_tmp" 2>/dev/null || true
+            echo "note: could not put $LINK_DIR/$_lob in place — it still shadows $BIN_DIR/$_lob; remove it by hand." >&2
             continue
         fi
         _lob_linked="${_lob_linked:+$_lob_linked }$_lob"

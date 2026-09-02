@@ -227,6 +227,20 @@ LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
 # operator-typed name that is NOT in here alone: with no link at that path the
 # real 0.2 file is the only copy anything reaches by it.
 LINKED_OPERATOR_BINS=""
+
+# exec_root_keep_list — the operator-typed names no link will replace on this
+# host, resolved BEFORE anything runs so the ladder rung can be handed it too.
+# When $LINK_DIR is not root-secure link_operator_bins creates nothing, and the
+# real 0.2 file at each of those names stays the only copy anything reaches by
+# the absolute path — the shared `burrowee` dispatcher above all. The
+# installer's own later call narrows this to what it actually linked.
+exec_root_keep_list() {
+    if dir_is_root_secure "$LINK_DIR"; then
+        echo ""
+    else
+        echo "$LINK_BINS"
+    fi
+}
 # The 0.2 exec root the sweep reads is the SAME directory the links go into, so
 # it follows the link seam: a sandboxed run must never iterate the real
 # /usr/local/bin of the host it runs on (this workstation is a live 0.2 host).
@@ -692,6 +706,18 @@ ensure_root_exec_surface() {
             # verify_root_exec_surface would refuse every unit. A copy of the
             # running binary from the 0.2 exec root is not a replacement of it.
             if [ ! -f "$BIN_DIR/$_reb" ] && [ -f "$LEGACY_BIN_DIR/$_reb" ]; then
+                # ONLY from a root-secure source. $LEGACY_BIN_DIR is the
+                # directory this whole layout stopped trusting — on the Homebrew
+                # Intel Mac the 0.3 tree exists for, the console user owns it.
+                # Copying an unverified file from there into the root-secure
+                # exec root launders it: the destination check passes because it
+                # inspects the destination, and a root unit then execs it.
+                if ! path_is_root_secure "$LEGACY_BIN_DIR/$_reb"; then
+                    echo "error: $LEGACY_BIN_DIR/$_reb is not root-secure, so it will not be copied into" >&2
+                    echo "error: $BIN_DIR — re-run the installer with the release bundle, which carries a" >&2
+                    echo "error: verified $_reb, rather than adopting whatever sits in the 0.2 exec root." >&2
+                    return 1
+                fi
                 run_root /usr/bin/install -m 0755 "$LEGACY_BIN_DIR/$_reb" "$BIN_DIR/$_reb" || return 1
                 echo "placed $BIN_DIR/$_reb from the 0.2 exec root (the running updater, copied, not replaced)"
             fi
@@ -1306,12 +1332,23 @@ link_operator_bins() {
             _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
             continue
         fi
-        if ! run_root rm -f "$LINK_DIR/$_lob"; then
-            echo "note: could not remove what is at $LINK_DIR/$_lob — it still shadows $BIN_DIR/$_lob; remove it by hand." >&2
+        # ATOMIC, never unlink-then-relink. A 0.2 macOS plist holds
+        # KeepAlive.PathState on $LINK_DIR/burrowee-gateway; an `rm -f` there
+        # makes launchd observe the watched path vanish and SIGTERM the running
+        # gateway — the one the operator may be tunnelled through — which it
+        # then restarts from the OLD in-memory job definition now resolving
+        # through the new link. Building the link beside its name and renaming
+        # it over closes that window: rename(2) within one directory is atomic,
+        # so the path is never absent. Rule 3's "replace, never write through"
+        # still holds — a real file at the name is replaced, not followed.
+        _lob_tmp="$LINK_DIR/.burrowee-link.$$.$_lob"
+        if ! run_root ln -sfn "$BIN_DIR/$_lob" "$_lob_tmp"; then
+            echo "note: could not stage a link in $LINK_DIR for $_lob; run it by its real path." >&2
             continue
         fi
-        if ! run_root ln -sfn "$BIN_DIR/$_lob" "$LINK_DIR/$_lob"; then
-            echo "note: could not link $LINK_DIR/$_lob -> $BIN_DIR/$_lob; run it by its real path." >&2
+        if ! run_root mv -f "$_lob_tmp" "$LINK_DIR/$_lob"; then
+            run_root rm -f "$_lob_tmp" || true
+            echo "note: could not put $LINK_DIR/$_lob in place — it still shadows $BIN_DIR/$_lob; remove it by hand." >&2
             continue
         fi
         _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
