@@ -149,6 +149,10 @@ func stubInitSystem(t *testing.T) string {
 	// reports) because every other test in this package wants the honest
 	// "nothing ever ran" outcome REATTACH_CEILING=0 gives it.
 	//
+	// The severed-session half of the same fixture is NOT here — it is in
+	// writeSudoStub (STUB_GUARD_SEVER), because it has to be synchronous with
+	// the handoff and a poll cannot be. See that function's header.
+	//
 	// tmp-then-mv, like install.sh's own txn_phase: reattach reads this file on a
 	// poll, and a plain truncate-and-write is readable empty in between.
 	guardVerdictFn := "guard_verdict() {\n" +
@@ -286,9 +290,45 @@ func stubUname(t *testing.T, dir, goos string) {
 
 // writeSudoStub drops a pass-through `sudo` into dir: it records the call,
 // strips a leading -n, and executes the rest.
+//
+// STUB_GUARD_SEVER=1 adds one thing, and it is the only way to reproduce the
+// failure this whole design exists for: when the command it is about to run is
+// the `mv` that installs phase=handoff, it performs the mv and then KILLS the
+// installer, before returning. That is what the restart does to an operator
+// whose session is tunnelled through the gateway — the shell does not get to
+// run another line.
+//
+// IT HAS TO BE HERE AND NOT IN A WATCHER. A background watcher polling the
+// phase file is a second later, and a second is thousands of statements: an
+// installer that is still alive executes whatever sits below the handoff, so a
+// state write MOVED below it still lands and the assertion passes on the
+// defect. Verified by mutation — with the kill in the watcher, moving
+// record_installed_version below `txn_phase handoff` left the severed-session
+// test green. Killing from inside the elevation the handoff itself runs
+// through is synchronous with the handoff by construction.
+//
+// The pid comes from the transaction's own installer.pid ($$ as install.sh
+// wrote it at txn_begin), which is the same file guard.sh's watch loop polls to
+// detect exactly this event on a real host — not $PPID, which is whichever
+// subshell happened to invoke this stub.
 func writeSudoStub(t *testing.T, dir string) {
 	t.Helper()
-	content := "#!/bin/sh\necho \"sudo $*\" >> \"$STUB_LOG\"\n[ \"$1\" = \"-n\" ] && shift\nexec \"$@\"\n"
+	content := "#!/bin/sh\n" +
+		"echo \"sudo $*\" >> \"$STUB_LOG\"\n" +
+		"[ \"$1\" = \"-n\" ] && shift\n" +
+		"if [ -n \"${STUB_GUARD_SEVER:-}\" ] && [ \"$1\" = mv ]; then\n" +
+		"    case \"$3\" in\n" +
+		"    */.phase.tmp)\n" +
+		"        if [ \"$(cat \"$3\" 2>/dev/null)\" = handoff ]; then\n" +
+		"            \"$@\"\n" +
+		"            _sev_txn=\"$(dirname \"$4\")\"\n" +
+		"            kill -9 \"$(cat \"$_sev_txn/installer.pid\" 2>/dev/null)\" 2>/dev/null\n" +
+		"            exit 0\n" +
+		"        fi\n" +
+		"        ;;\n" +
+		"    esac\n" +
+		"fi\n" +
+		"exec \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(content), 0o755); err != nil {
 		t.Fatalf("write stub sudo: %v", err)
 	}

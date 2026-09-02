@@ -339,6 +339,70 @@ func TestUnitsOnlyReportsAFailedRestartAndStillBanksTheAnchor(t *testing.T) {
 	}
 }
 
+// TestUnitsOnlySeveredAtTheHandoffStillLeftTheAnchor is the whole defect,
+// reproduced and then asserted against.
+//
+// `burrowee gateway service install` and `doctor --fix` are typed by an
+// operator whose session reaches the host THROUGH the gateway. The restart
+// severs that session, so the installer stops executing at the handoff — not
+// gracefully, not with a chance to finish up: the shell is gone. Everything
+// that used to sit after the restart therefore never ran, and the worst of it
+// was record_installed_version, which is what the NEXT run's migration gate
+// reads. A host cut off here kept its migrated state and its new units under an
+// anchor still naming the OLD release, which fed the wrong floor into every run
+// after it — silently, because the run that caused it had already vanished.
+//
+// STUB_GUARD_SEVER=1 kills the installer from inside the elevated `mv` that
+// installs phase=handoff (writeSudoStub), so the death is synchronous with the
+// handoff rather than a poll behind it. That distinction is the test: with the
+// installer still alive for even a moment, a state write MOVED below the
+// handoff lands anyway and an assertion that reads the anchor at the end of the
+// run passes on the defect. Verified by mutation both ways — moving
+// record_installed_version below `txn_phase handoff` leaves
+// TestUnitsOnlyReportsAFailedRestartAndStillBanksTheAnchor green (it never
+// claimed an order) and, with the kill in a 1s watcher, left this test green
+// too; with the kill inside the handoff's own elevation it goes red.
+func TestUnitsOnlySeveredAtTheHandoffStillLeftTheAnchor(t *testing.T) {
+	for _, goos := range forcedOSes {
+		t.Run(goos, func(t *testing.T) {
+			home := t.TempDir()
+			stub := stubInitSystemFor(t, goos)
+			seedMigrateCapableCLI(t, home)
+
+			cmd := exec.Command("sh", installShPath(t))
+			cmd.Dir = home
+			cmd.Env = installShEnv(home, stub,
+				"BURROWEE_UNITS_ONLY=1",
+				"BURROWEE_VERSION=v0.9.9.2026.09.02",
+				"STUB_GUARD_SEVER=1",
+				// No STUB_GUARD_VERDICT: this installer never reaches
+				// reattach, so there is nothing for a verdict to be read by.
+				"REATTACH_CEILING=0",
+			)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("%s: fixture broken — the installer was supposed to be killed at the handoff and it exited normally:\n%s", goos, out)
+			}
+
+			// Precondition: it really was severed AT the handoff, not earlier.
+			// An installer that died during render_units would satisfy nothing
+			// the assertion below is about.
+			if !strings.Contains(string(out), "handing the restart to the guard") {
+				t.Fatalf("%s: the run never reached the handoff, so it was not severed there:\n%s", goos, out)
+			}
+
+			anchor := filepath.Join(home, ".burrowee", "gateway", ".installed-version")
+			b, readErr := os.ReadFile(anchor)
+			if readErr != nil {
+				t.Fatalf("%s: a session severed at the handoff left NO version anchor — this host keeps its migrated state and new units while the ladder still thinks it is on the old release, and every later run gates off the wrong floor: %v\n%s", goos, readErr, out)
+			}
+			if got := strings.TrimSpace(string(b)); got != "v0.9.9.2026.09.02" {
+				t.Errorf("%s: anchor = %q, want the version this run was handed", goos, got)
+			}
+		})
+	}
+}
+
 // TestBothPlatformsHandTheRestartToTheGuard is the test the original defect
 // needed and no assertion could provide: the two branches must offer the SAME
 // guarantee, checked side by side in one run, on one host.
