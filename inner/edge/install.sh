@@ -1,7 +1,3 @@
-    # Walk the RESOLVED directory, never the lexical spelling: a symlink
-    # component would be judged by the link inode while its target — the
-    # directory a link is actually written into — was never examined.
-    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
 #!/bin/sh
 # Burrowee inner installer — edge (POSIX sh, macOS + Linux).
 #
@@ -384,6 +380,13 @@ path_is_root_secure() {
 dir_is_root_secure() {
     _ds_d="$1"
     [ -d "$_ds_d" ] || return 3
+    # Walk the RESOLVED directory, never the lexical spelling. stat does not
+    # dereference a symlink and a macOS symlink is itself root-owned 0755, so a
+    # /usr/local/bin -> /Users/x/bin link passes every check while the directory
+    # a link would actually be written into is never examined — and root's own
+    # links then land somewhere that user can rewrite.
+    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
+    [ -n "$_ds_d" ] || return 2
     while :; do
         [ -d "$_ds_d" ] || return 1
         _ds_v="$(stat_uid "$_ds_d")" || return 2
@@ -577,6 +580,8 @@ run_migration_ladder() {
         SYS_DATA_ROOT="$SYS_DATA_ROOT" \
         BIN_DIR="$BIN_DIR" \
         LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
+        LEGACY_SYS_CONFIG_ROOT="$LEGACY_SYS_CONFIG_ROOT" \
+        LEGACY_SYS_DATA_ROOT="$LEGACY_SYS_DATA_ROOT" \
         LAUNCHD_DIR="$LAUNCHD_PLIST_DIR" \
         SYSTEMD_DIR="$SYSTEMD_UNIT_DIR" \
         sh "$MIGRATIONS_DIR/run.sh"
@@ -691,6 +696,13 @@ note_orphaned_user_state() {
 # shipped unit names anything derived from them but these two paths.
 SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/burrowee/etc}"
 SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"
+# The 0.2 roots, handed to the ladder so its transitional anchor read stays
+# inside whatever tree this run was pointed at. Left to default there, the
+# runner would resolve the REAL /usr/local/etc/burrowee/edge on a sandboxed
+# run and drive the version gate off the host's own anchor — the same leak
+# LEGACY_BIN_DIR was fixed for.
+LEGACY_SYS_CONFIG_ROOT="${LEGACY_SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
+LEGACY_SYS_DATA_ROOT="${LEGACY_SYS_DATA_ROOT:-/usr/local/var/burrowee}"
 COMP_HOME="$SYS_CONFIG_ROOT/$COMP"
 COMP_DATA="$SYS_DATA_ROOT/$COMP"
 VERSION_MARKER="$COMP_HOME/installed-version"

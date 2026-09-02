@@ -1,7 +1,3 @@
-    # Walk the RESOLVED directory, never the lexical spelling: a symlink
-    # component would be judged by the link inode while its target — the
-    # directory a link is actually written into — was never examined.
-    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
 #!/bin/sh
 # Burrowee inner installer — gateway (POSIX sh).
 #
@@ -593,6 +589,13 @@ path_is_root_secure() {
 dir_is_root_secure() {
     _ds_d="$1"
     [ -d "$_ds_d" ] || return 3
+    # Walk the RESOLVED directory, never the lexical spelling. stat does not
+    # dereference a symlink and a macOS symlink is itself root-owned 0755, so a
+    # /usr/local/bin -> /Users/x/bin link passes every check while the directory
+    # a link would actually be written into is never examined — and root's own
+    # links then land somewhere that user can rewrite.
+    _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
+    [ -n "$_ds_d" ] || return 2
     while :; do
         [ -d "$_ds_d" ] || return 1
         _ds_v="$(stat_uid "$_ds_d")" || return 2
@@ -1316,6 +1319,10 @@ unlink_operator_bins() {
         "$BIN_DIR"/*) ;;
         *) continue ;;
         esac
+        # A link whose target still exists is still serving someone: the shared
+        # `burrowee` dispatcher stays in $BIN_DIR while a sibling component is
+        # installed, and its link must stay with it. Same rule as the edge's.
+        [ -e "$_uob_p" ] && continue
         run_root rm -f "$_uob_p" || echo "note: could not remove the link $_uob_p (needs root) — remove it by hand" >&2
     done
 }
