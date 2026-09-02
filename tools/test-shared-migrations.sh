@@ -2505,6 +2505,30 @@ assert_contains "$OUT" "$h37/old-bin/burrowee carries no burrowee build stamp" "
 assert_present "$h37/sys/etc/edge/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "the receipt must land in the NEW config root"
 for b in $EDGE_BINS; do assert_present "$h37/sys/bin/$b" "the 0.3 tree must be untouched ($b)"; done
 
+# 37a2. BIN_DIR UNSET (the updater track exports none). The runner must default a
+#       `system` component's exec root to the 0.3 one, never to
+#       ${PREFIX:-/usr/local}/bin — that equals $LEGACY_BIN_DIR, the library then
+#       bails as "nothing replaced anything", the rung earns a receipt for a sweep
+#       it never made, and the copies are stranded forever. Same fixture as 37a,
+#       BIN_DIR and PREFIX deliberately absent, SYS_BIN_DIR seam pointing at the
+#       0.3 tree. Mutation that reddens it: run.sh's BIN_DIR back to the PREFIX form.
+t37a2="$TMP/t37a2"; exec_sweep_kit "$t37a2"; h37a2="$t37a2/home"
+OUT="$(
+    HOME="$h37a2" \
+    COMP_HOME="$h37a2/sys/etc/edge" COMP_DATA="$h37a2/sys/var/edge" \
+    SYS_CONFIG_ROOT="$h37a2/sys/etc" SYS_DATA_ROOT="$h37a2/sys/var" SYS_BIN_DIR="$h37a2/sys/bin" \
+    LEGACY_SYS_CONFIG_ROOT="$h37a2/old-etc" LEGACY_SYS_DATA_ROOT="$h37a2/old-var" \
+    LEGACY_BIN_DIR="$h37a2/old-bin" \
+    STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+    LAUNCHD_DIR="$h37a2/no-launchd" SYSTEMD_DIR="$h37a2/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h37a2/nowhere" SUDO=/nonexistent-sudo \
+    env -u BIN_DIR -u PREFIX sh "$t37a2/migrations/run.sh" 2>&1
+)"; RC=$?
+assert_eq "$RC" 2 "with BIN_DIR unset the runner must still resolve the 0.3 exec root and sweep"
+assert_gone "$h37a2/old-bin/burrowee-edge-updater" "the stale 0.2 copy must be swept when BIN_DIR was never exported"
+assert_present "$h37a2/old-bin/burrowee-edge" "the installer's symlink still survives"
+assert_present "$h37a2/sys/etc/edge/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "and the receipt records a sweep that actually happened"
+
 # 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"

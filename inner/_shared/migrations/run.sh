@@ -266,6 +266,7 @@ SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"
 LEGACY_SYS_CONFIG_ROOT="${LEGACY_SYS_CONFIG_ROOT:-/usr/local/etc/burrowee}"
 LEGACY_SYS_DATA_ROOT="${LEGACY_SYS_DATA_ROOT:-/usr/local/var/burrowee}"
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
+SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/burrowee/bin}"
 
 # ---------------------------------------------------------------------------
 # $COMP_HOME / $COMP_DATA — the tree(s) this ladder is about.
@@ -375,7 +376,16 @@ if [ "${COMP_HOME_SCHEME:-user}" = system ] \
     ANCHOR_IS_LEGACY=1
 fi
 
-BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
+# A `system` component's binaries live at the 0.3 exec root and nowhere else, so
+# an unset BIN_DIR means THAT — never ${PREFIX:-/usr/local}/bin, which equals
+# $LEGACY_BIN_DIR and makes the exec-root sweep bail as "nothing replaced" on
+# every track that does not export BIN_DIR (the updater's). Other schemes keep
+# the PREFIX derivation their per-user installs round-trip through.
+if [ "${COMP_HOME_SCHEME:-user}" = system ]; then
+    BIN_DIR="${BIN_DIR:-$SYS_BIN_DIR}"
+else
+    BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
+fi
 SUDO="${SUDO:-sudo}"
 # Resolved HERE and exported to every rung by run_migration, for the same reason
 # $SUDO is: a rung that inherited a different supervisor than the runner probed

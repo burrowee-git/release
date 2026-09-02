@@ -50,7 +50,11 @@
 # IDEMPOTENT. A second run finds the files gone and says so per name.
 set -eu
 
-BIN_DIR="${BIN_DIR:-${PREFIX:-/usr/local}/bin}"
+# The 0.3 exec root, never derived from PREFIX: ${PREFIX:-/usr/local}/bin would
+# equal $LEGACY_BIN_DIR, and the library then bails ("nothing replaced anything")
+# — a rung that evaluates nothing earns a receipt and is gated off forever. The
+# runner exports BIN_DIR; this default covers a direct invocation only.
+BIN_DIR="${BIN_DIR:-/usr/local/burrowee/bin}"
 
 HERE="$(dirname "$0")"
 
