@@ -82,12 +82,30 @@ line prints.**
 > subcommands are `connect`, `ssh`, `pair`, `daemon`, `relays` (covered in
 > `burrowee-cli-setup`).
 
-If the bin dir isn't on PATH, tell the operator to add this to their shell rc
-(`~/.zshrc`, `~/.bashrc`, …) and open a new shell:
+If the bin dir isn't on PATH, **read the block the install printed** rather
+than reciting one. It ends with a "Next steps" section rendered for the
+operator's own login shell — the line to run now, and the profile file that
+makes it permanent:
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
 ```
+==> Next steps
+burrowee's commands are in /Users/<u>/.local/bin, which is not on your PATH.
+
+  Add it to this shell now:
+    export PATH="/Users/<u>/.local/bin:$PATH"
+
+  Make it permanent:
+    echo 'export PATH="/Users/<u>/.local/bin:$PATH"' >> /Users/<u>/.zprofile
+
+  Then:  burrowee help
+```
+
+The file named varies by shell and platform — `.zprofile` for zsh,
+`.bash_profile` for bash on macOS, `.profile` for bash on Linux, and fish is
+told `fish_add_path` because `export` is not a fish builtin at all. A shell the
+installer cannot identify is given the export line and **no** file name, and
+guessing one for the operator is how they end up editing a file their shell
+never reads. Nothing is written to any profile for them: they run the line.
 
 Anything else (missing binary, "command not found" even by full path, wrong-arch
 error) means the install didn't land — surface the output and stop.
