@@ -44,6 +44,17 @@ type adviceSubject struct {
 func passwdStubDir(t *testing.T, subj adviceSubject, uid, goos string) string {
 	t.Helper()
 	stub := t.TempDir()
+	addPasswdStubs(t, stub, subj)
+	stubBin(t, stub, "id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo "+uid+"; else /usr/bin/id \"$@\"; fi\n")
+	stubBin(t, stub, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo "+goos+"; else /usr/bin/uname \"$@\"; fi\n")
+	return stub
+}
+
+// addPasswdStubs writes just the passwd-database half into an EXISTING stub
+// PATH dir, so a full-install fixture can keep its own id/uname/systemctl stubs
+// and still resolve one seamed account.
+func addPasswdStubs(t *testing.T, stub string, subj adviceSubject) {
+	t.Helper()
 	getent := "#!/bin/sh\n" +
 		"[ \"$1\" = passwd ] || exit 2\n" +
 		"case \"$2\" in\n" +
@@ -55,9 +66,6 @@ func passwdStubDir(t *testing.T, subj adviceSubject, uid, goos string) string {
 	// a real account and the test would silently measure that machine's passwd
 	// database instead of the fixture.
 	stubBin(t, stub, "dscl", "#!/bin/sh\nexit 1\n")
-	stubBin(t, stub, "id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo "+uid+"; else /usr/bin/id \"$@\"; fi\n")
-	stubBin(t, stub, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo "+goos+"; else /usr/bin/uname \"$@\"; fi\n")
-	return stub
 }
 
 // renderAdvice sources the shared library exactly as an installer does and
@@ -223,4 +231,64 @@ func TestPathAdviceUsesTheProcessOwnShellWhenUnprivileged(t *testing.T) {
 		filepath.Join(home, ".config", "fish", "config.fish"),
 	)
 	assertLacks(t, out, adviceDecoyHome)
+}
+
+// TestEdgeInstallPrintsThePathAdvice — the OTHER half: that a full sandboxed
+// edge install actually makes the call, on the success path, with its own
+// $BIN_DIR. What the block SAYS is the library's claim, proved above; what this
+// asserts is that an install ends by saying it at all.
+//
+// The subject is a seamed passwd entry named by $SUDO_USER — the shape a real
+// `curl … | sudo sh` has — and the sandbox's $HOME is root's stand-in, so an
+// implementation reading $HOME would name a directory this assertion rejects.
+//
+// Mutation that reddens it: drop the print_path_advice call from install.sh.
+func TestEdgeInstallPrintsThePathAdvice(t *testing.T) {
+	sb := newSandbox(t)
+	subj := adviceSubject{
+		user:  "edge-operator",
+		home:  filepath.Join(sb.home, "operator"),
+		shell: "/bin/zsh",
+	}
+	stub := stubRootEnv(t)
+	addPasswdStubs(t, stub, subj)
+
+	out, err := sb.run(t, "sh", stub, "STUB_UPDATER_OPTED_IN=1", "SUDO_USER="+subj.user)
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	assertContains(t, out,
+		"==> Next steps",
+		"burrowee's commands are in "+sb.sysBinDir+", which is not on your PATH.",
+		"    export PATH=\""+sb.sysBinDir+":$PATH\"",
+		"    echo 'export PATH=\""+sb.sysBinDir+":$PATH\"' >> "+filepath.Join(subj.home, ".zprofile"),
+		"  Then:  burrowee help",
+	)
+}
+
+// TestEdgeUpdaterInstallPrintsThePathAdvice — the recovery installer ends the
+// same way. It places only burrowee-edge-updater, which nobody types, but it is
+// still an install that leaves an operator at a prompt with an exec root that is
+// on nobody's PATH — and it is the entry point reached precisely when the
+// component's normal channel is broken.
+//
+// Mutation that reddens it: drop the print_path_advice call from
+// updater.install.sh.
+func TestEdgeUpdaterInstallPrintsThePathAdvice(t *testing.T) {
+	f := newUpdaterFixture(t)
+	stageMigrations(t, f.staging)
+	operatorHome := filepath.Join(f.home, "operator")
+	stub := stubRootEnv(t)
+	addPasswdStubs(t, stub, adviceSubject{user: "edge-operator", home: operatorHome, shell: "/bin/zsh"})
+
+	out, err := f.run(t, stub, "SUDO_USER=edge-operator", "STUB_UPDATER_OPTED_IN=1")
+	if err != nil {
+		t.Fatalf("updater.install.sh failed: %v\n%s", err, out)
+	}
+	assertContains(t, out,
+		"==> Next steps",
+		"burrowee's commands are in "+f.sysBinDir+", which is not on your PATH.",
+		"    echo 'export PATH=\""+f.sysBinDir+":$PATH\"' >> "+filepath.Join(operatorHome, ".zprofile"),
+	)
+	assertLacks(t, out, "has no render_path_advice")
 }

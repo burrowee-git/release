@@ -1155,6 +1155,51 @@ sweep_stale_exec_root() {
 }
 
 # ---------------------------------------------------------------------------
+# print_path_advice — the "Next steps" block this install ends with, rendered
+# for the INVOKING operator's login shell by the same shared library the sweeps
+# come from (render_path_advice, inside the byte-pinned SHARED SWEEP CONTRACT
+# region, so the gateway's copy of that library carries the identical function).
+#
+# IT IS WHAT REPLACED THE /usr/local/bin SYMLINKS. The exec root is $BIN_DIR,
+# which is on nobody's PATH; the operator-typed names used to be linked back
+# into /usr/local/bin to compensate, and on a clean modern Mac that directory
+# does not exist — so nothing was linked and the install ended with no command
+# the operator could type.
+#
+# NEVER FATAL, AND NEVER SILENT. This runs as the last thing on the success
+# path, past every write; dying under `set -eu` with "not found" would report a
+# complete install as a failure. A kit whose library predates the renderer still
+# owes the operator the one line that makes these commands reachable — that is
+# the entire point of this change — so the fallback prints it by hand rather
+# than saying nothing.
+# ---------------------------------------------------------------------------
+print_path_advice() {
+    if ! command -v render_path_advice >/dev/null 2>&1; then
+        _ppa_lib="$(stale_sweep_lib)"
+        if [ -n "$_ppa_lib" ] && [ "$STALE_SWEEP_LOADED" != 1 ]; then
+            # shellcheck source=/dev/null
+            . "$_ppa_lib"
+            STALE_SWEEP_LOADED=1
+        fi
+    fi
+    if command -v render_path_advice >/dev/null 2>&1; then
+        render_path_advice "$BIN_DIR"
+        return 0
+    fi
+    echo "note: the loaded sweep library has no render_path_advice — this kit predates the" >&2
+    echo "note: shell-aware PATH advice, so here is the one line it would have rendered." >&2
+    echo ""
+    echo "==> Next steps"
+    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo ""
+    echo "  Add it to this shell now:"
+    echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    echo ""
+    echo "  Then:  burrowee help"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # place_unit <rendered-temp-file> <dst> — install a rendered unit at its
 # system path as root, only when content differs (a no-op refresh never needs
 # sudo). Must stay content-identical with the Go side's unit writers.
@@ -4629,6 +4674,21 @@ fi
 # privileged work through run_root. Only `--fix` remediates or prompts, and this
 # is the read-only verb.
 "$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
+
+# ---- the last thing printed on a SUCCESSFUL install ------------------------
+# The operator's own next step: how to reach $BIN_DIR from the shell they
+# actually use. Printed unconditionally on success, including on a re-install
+# that changed nothing — under `sudo` this process sees root's secure_path and
+# cannot observe the operator's interactive PATH, so "is it already on PATH?"
+# is a question it must not pretend to have answered.
+#
+# ON SUCCESS ONLY. A non-zero verdict means the guard rolled the host back to
+# the build it was already running, and telling that operator how to reach a
+# tree this run just reverted would be advice about an install that did not
+# happen.
+if [ "$_verdict" = 0 ]; then
+    print_path_advice
+fi
 
 # reattach's verdict, and nothing after it: 0 served / handed off unreported,
 # 1 rolled back or aborted with nothing started, 2 rollback itself failed (see

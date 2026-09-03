@@ -600,6 +600,43 @@ sweep_stale_exec_root() {
 }
 
 # ---------------------------------------------------------------------------
+# print_path_advice — the "Next steps" block this install ends with, rendered
+# for the INVOKING operator's login shell by the same shared library the sweeps
+# come from (render_path_advice, inside the byte-pinned SHARED SWEEP CONTRACT
+# region so the gateway's copy carries the identical function).
+#
+# IT IS WHAT REPLACED THE /usr/local/bin SYMLINKS. The exec root is
+# $BIN_DIR, which is on nobody's PATH; the operator-typed names used to be
+# linked back into /usr/local/bin to compensate, and on a clean modern Mac that
+# directory does not exist, so nothing was linked and the install ended with no
+# command the operator could type.
+#
+# NEVER FATAL, AND NEVER SILENT. A kit whose library predates the renderer
+# still owes the operator the one line that makes these commands reachable —
+# that is the entire point of this change — so the fallback prints it by hand
+# rather than saying nothing. It is the same tolerance sweep_stale_exec_root
+# shows for the same reason: this runs AFTER the units are loaded, where dying
+# under `set -eu` with "not found" would report a complete install as a failure.
+# ---------------------------------------------------------------------------
+print_path_advice() {
+    if command -v render_path_advice >/dev/null 2>&1; then
+        render_path_advice "$BIN_DIR"
+        return 0
+    fi
+    echo "note: the loaded sweep library has no render_path_advice — this kit predates the" >&2
+    echo "note: shell-aware PATH advice, so here is the one line it would have rendered." >&2
+    echo ""
+    echo "==> Next steps"
+    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo ""
+    echo "  Add it to this shell now:"
+    echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    echo ""
+    echo "  Then:  burrowee help"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # run_migration_ladder — walk migrations/run.sh, which runs every migration in
 # migrations/ledger this host has not reached yet, oldest first.
 #
@@ -1676,3 +1713,11 @@ fi
 # what makes that structural rather than incidental. Only `--fix` remediates or
 # prompts, and this is the read-only verb.
 "$SYS_BIN_DIR/burrowee-edge-cli" doctor < /dev/null || true
+
+# ---- the last thing printed on the success path ----------------------------
+# After the units are loaded, after the sweeps, after doctor: the operator's own
+# next step. Printed unconditionally, including on a re-install that changed
+# nothing — under `sudo` this process sees root's secure_path and cannot
+# observe the operator's interactive PATH, so "is it already on PATH?" is a
+# question it must not pretend to have answered.
+print_path_advice

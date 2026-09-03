@@ -449,4 +449,61 @@ else
     start_unit_linux burrowee-edge-updater
 fi
 
+
+# ---------------------------------------------------------------------------
+# print_path_advice — the "Next steps" block this install ends with, rendered
+# for the INVOKING operator's login shell by render_path_advice, which lives
+# inside the byte-pinned SHARED SWEEP CONTRACT region of the shared sweep
+# library beside this script.
+#
+# IT IS WHAT REPLACED THE /usr/local/bin SYMLINKS. The exec root is $BIN_DIR,
+# which is on nobody's PATH; the operator-typed names used to be linked back
+# into /usr/local/bin to compensate, and on a clean modern Mac that directory
+# does not exist — so nothing was linked and the install ended with no command
+# the operator could type.
+#
+# THIS SCRIPT PLACES ONLY THE UPDATER, which nobody types, and prints the block
+# anyway: it is the recovery entry point, reached exactly when the component's
+# normal channel is broken, and the operator standing at that prompt still has
+# an exec root nothing on their PATH can see.
+#
+# NEVER FATAL, AND NEVER SILENT. It runs past every write; dying under `set -eu`
+# with "not found" would report a complete install as a failure. A kit whose
+# library predates the renderer still owes the operator the one line that makes
+# these commands reachable, so the fallback prints it by hand.
+# ---------------------------------------------------------------------------
+print_path_advice() {
+    if ! command -v render_path_advice >/dev/null 2>&1; then
+        if [ -n "${MIGRATIONS_DIR:-}" ] && [ -f "$MIGRATIONS_DIR/lib_stale_user_bins.sh" ]; then
+            # LIB_STALE_USER_BINS_DIR pins where the library finds its siblings:
+            # sourced from here $0 is the BUNDLE ROOT, not migrations/.
+            LIB_STALE_USER_BINS_DIR="$MIGRATIONS_DIR"
+            export LIB_STALE_USER_BINS_DIR
+            # shellcheck source=/dev/null
+            . "$MIGRATIONS_DIR/lib_stale_user_bins.sh"
+        fi
+    fi
+    if command -v render_path_advice >/dev/null 2>&1; then
+        render_path_advice "$BIN_DIR"
+        return 0
+    fi
+    echo "note: the loaded sweep library has no render_path_advice — this kit predates the" >&2
+    echo "note: shell-aware PATH advice, so here is the one line it would have rendered." >&2
+    echo ""
+    echo "==> Next steps"
+    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo ""
+    echo "  Add it to this shell now:"
+    echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    echo ""
+    echo "  Then:  burrowee help"
+    return 0
+}
+
 echo "updater.install.sh: updater install complete."
+
+# The last thing printed: the operator's own next step. Unconditional on the
+# success path — under `sudo` this process sees root's secure_path and cannot
+# observe the operator's interactive PATH, so "is it already on PATH?" is a
+# question it must not pretend to have answered.
+print_path_advice
