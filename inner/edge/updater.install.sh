@@ -67,14 +67,17 @@ SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/burrowee/bin}"
 # destination, and a library sourced before the value was decided would have
 # taken the production default while this run installed somewhere else.
 BIN_DIR="$SYS_BIN_DIR"
-# The 0.2 exec root and the operator-typed names, for the ladder invocation
-# below. This track never links anything itself, so it hands the rung the full
-# set as "keep": with no link replacing them, the real 0.2 file at each of those
-# names is the only copy anything reaches by the absolute path. Left unset, the
-# runner would default LEGACY_BIN_DIR to the REAL /usr/local/bin even under a
-# fully seamed test, and sweep with an empty keep-list.
-LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-${BURROWEE_LINK_DIR:-/usr/local/bin}}"
-LINK_BINS="burrowee burrowee-edge burrowee-edge-cli"
+# The 0.2 exec root, for the ladder invocation below. Left unset, the runner
+# would default it to the REAL /usr/local/bin even under a fully seamed test,
+# so BURROWEE_LEGACY_BIN_DIR is load-bearing rather than decorative. It used to
+# chain through BURROWEE_LINK_DIR; that seam is gone with the link step.
+#
+# NO KEEP-LIST GOES WITH IT ANY MORE. This track handed the rung every
+# operator-typed name as "keep", because nothing had linked over them and the
+# real 0.2 file at each was then the only copy anything reached by the absolute
+# path. Nothing resolves by that path now: no install links there, and $BIN_DIR
+# is what every unit, every root exec and the printed PATH advice name.
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-${BURROWEE_LEGACY_BIN_DIR:-/usr/local/bin}}"
 
 # normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
 # '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
@@ -323,7 +326,6 @@ if [ -n "$MIGRATIONS_DIR" ] && [ -f "$MIGRATIONS_DIR/run.sh" ] && [ -f "$MIGRATI
 			COMP_DATA="$_ul_home" \
 			BIN_DIR="$BIN_DIR" \
 			LEGACY_BIN_DIR="$LEGACY_BIN_DIR" \
-			STALE_EXEC_ROOT_KEEP="$LINK_BINS" \
 			SUDO="$SUDO" \
 			SYSTEMCTL="$SYSTEMCTL" \
 			sh "$MIGRATIONS_DIR/run.sh"

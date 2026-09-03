@@ -105,11 +105,12 @@ func binDir(home string) string {
 	return filepath.Join(systemRoot(home), "bin")
 }
 
-// linkDir is the sandboxed stand-in for /usr/local/bin — where the
-// operator-typed binaries are SYMLINKED from (spec §6.1), via the
-// BURROWEE_LINK_DIR seam. Never the real directory: the machines this suite
-// runs on carry live burrowee links there.
-func linkDir(home string) string { return filepath.Join(home, "usr-local-bin") }
+// legacyBinDir is the sandboxed stand-in for /usr/local/bin — the 0.2 exec
+// root the sweep reads — via the BURROWEE_LEGACY_BIN_DIR seam. Never the real
+// directory: the machines this suite runs on are live 0.2 hosts, and nothing
+// this installer does writes here any more (the link step of spec §6.1 is
+// superseded and gone).
+func legacyBinDir(home string) string { return filepath.Join(home, "usr-local-bin") }
 
 // devBinDir is the HISTORICAL per-user bin dir ($HOME/.local/bin) — where
 // pre-collapse installs put everything, and so where a host arriving at a
@@ -374,7 +375,7 @@ func installShEnv(home, stubDir string, extraEnv ...string) []string {
 		"BURROWEE_SYSTEM_CONFIG_DIR=" + sysConfigDir(home),
 		"BURROWEE_SYSTEM_DATA_DIR=" + sysDataDir(home),
 		"BURROWEE_LIBEXEC_DIR=" + libexecDir(home),
-		"BURROWEE_LINK_DIR=" + linkDir(home),
+		"BURROWEE_LEGACY_BIN_DIR=" + legacyBinDir(home),
 		// REATTACH_CEILING=0 (Task 9): the fresh-install path now ends by
 		// polling the transaction's phase file for the guard's verdict
 		// (install.sh's reattach). This suite's systemd-run/launchctl stubs
