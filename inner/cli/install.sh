@@ -66,11 +66,6 @@ for b in $BINS; do
 done
 echo "installed to $BIN_DIR: $BINS"
 
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
-esac
-
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
 # ---- first-run bootstrap (interactive only, fresh installs) -------------------
@@ -241,4 +236,39 @@ if [ -n "$MIGRATIONS_DIR" ] && [ "$MIGRATIONS_DIR" != "$COMP_HOME/migrations" ];
     mkdir -p "$COMP_HOME/migrations" 2>/dev/null || true
     cp "$MIGRATIONS_DIR"/* "$COMP_HOME/migrations/" 2>/dev/null \
         || echo "note: could not keep a copy of migrations/ at $COMP_HOME" >&2
+fi
+
+# ---- the last thing printed: how to reach these commands --------------------
+# It REPLACED a one-line note that said "$BIN_DIR is not on PATH — add: export
+# PATH=…", wrapped in a `case ":$PATH:"` test. Two things were wrong with it.
+# It named no shell and no profile file, so an operator whose login shell is
+# fish was handed a line that is a syntax error there; and the PATH test reads
+# the PATH of whatever ran the installer, which for a piped `curl … | sh` is
+# not necessarily the shell they will type the command in. The block is printed
+# unconditionally now, exactly as the root installers print it, and for the
+# same reason: advice that is occasionally redundant beats advice suppressed by
+# a measurement that does not answer the question.
+#
+# THE RENDERER IS THE SHARED LIBRARY'S, sourced above by the sweep block. This
+# installer runs UNPRIVILEGED and carries no elevation record, so
+# render_path_advice resolves the subject from $SHELL and $HOME — which here
+# are the operator's own and exact — instead of looking $SUDO_USER up in the
+# passwd database. One renderer, two ways of learning who is asking.
+#
+# It is printed at the very END rather than beside the "installed to" line
+# because the library is sourced further down, with the sweep, and because a
+# next step reads better last. A bundle carrying no migrations/ at all (a
+# $COMP_HOME self-copy predating the directory) still owes the operator the
+# line, so the fallback prints it by hand.
+if command -v render_path_advice >/dev/null 2>&1; then
+    render_path_advice "$BIN_DIR"
+else
+    echo ""
+    echo "==> Next steps"
+    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo ""
+    echo "  Add it to this shell now:"
+    echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    echo ""
+    echo "  Then:  burrowee help"
 fi

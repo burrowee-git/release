@@ -28,11 +28,6 @@ for b in $BINS; do
 done
 echo "installed to $BIN_DIR: $BINS"
 
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
-esac
-
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
 # ---- first-run next step (fresh installs) -------------------------------------
@@ -47,3 +42,103 @@ else
     echo "next: burrowee-agent bootstrap   (new account; GitHub OAuth)"
     echo "  or: burrowee-agent bind        (bind to an existing account)"
 fi
+
+# ---------------------------------------------------------------------------
+# render_path_advice <bin-dir> — the "Next steps" block every burrowee
+# installer ends with: how to reach <bin-dir> from the operator's own shell, in
+# that shell's syntax, naming the profile file that makes it permanent.
+#
+# IT IS VENDORED HERE, and that is a property of the KIT rather than a
+# preference. Every other component sources this function out of
+# migrations/lib_stale_user_bins.sh, inside the byte-pinned SHARED SWEEP
+# CONTRACT region — but tools/payload.sh stages migrations/ only for the
+# components takes_shared_ladder names (edge, cli, relay), and the agent is not
+# one of them: it runs no ladder and its kit carries no migrations/ directory
+# at all, so there is nothing beside this script to source. The copy is driven
+# by inner/cli/install_test/path_advice_test.go so it cannot drift unnoticed.
+#
+# IT IS SMALLER THAN THE SHARED ONE, deliberately. This installer is
+# UNPRIVILEGED — it writes into ${PREFIX:-$HOME/.local}/bin and is never run
+# under `curl … | sudo sh` — so the process IS the operator and $SHELL/$HOME
+# are exact. There is no passwd lookup because there is no elevation record to
+# resolve: a run that somehow arrives with $SUDO_USER set, or at euid 0, has no
+# subject this script can name and gets the generic block rather than a guess.
+#
+# IT REPLACED a one-line note ("$BIN_DIR is not on PATH — add: export PATH=…")
+# wrapped in a `case ":$PATH:"` test. That note named no shell and no profile
+# file, so an operator whose login shell is fish was handed a line that is a
+# syntax error there.
+#
+# PRINTED, NEVER APPLIED: nothing here writes, sources or evals anything in the
+# operator's shell.
+# ---------------------------------------------------------------------------
+render_path_advice() {
+    _rpa_dir="$1"
+    [ -n "$_rpa_dir" ] || return 0
+
+    _rpa_shell=""
+    _rpa_home=""
+    case "${SUDO_USER:-}" in
+    '' | root)
+        if [ "$(id -u)" != 0 ]; then
+            _rpa_shell="${SHELL:-}"
+            _rpa_home="${HOME:-}"
+        fi
+        ;;
+    esac
+
+    _rpa_now="export PATH=\"$_rpa_dir:\$PATH\""
+    _rpa_profile=""
+    _rpa_permanent=""
+    if [ -n "$_rpa_home" ]; then
+        case "${_rpa_shell##*/}" in
+        zsh)
+            _rpa_profile="$_rpa_home/.zprofile"
+            ;;
+        bash)
+            # A macOS login shell reads .bash_profile and never .profile; a
+            # Linux one reads .profile. Naming the wrong one is advice that
+            # silently does nothing at the next login.
+            if [ "$(uname -s)" = "Darwin" ]; then
+                _rpa_profile="$_rpa_home/.bash_profile"
+            else
+                _rpa_profile="$_rpa_home/.profile"
+            fi
+            ;;
+        fish)
+            _rpa_profile="$_rpa_home/.config/fish/config.fish"
+            _rpa_now="set -gx PATH $_rpa_dir \$PATH"
+            _rpa_permanent="fish_add_path $_rpa_dir"
+            ;;
+        esac
+    fi
+    if [ -n "$_rpa_profile" ] && [ -z "$_rpa_permanent" ]; then
+        _rpa_permanent="echo '$_rpa_now' >> $_rpa_profile"
+    fi
+
+    echo ""
+    echo "==> Next steps"
+    echo "burrowee's commands are in $_rpa_dir, which is not on your PATH."
+    echo ""
+    echo "  Add it to this shell now:"
+    echo "    $_rpa_now"
+    echo ""
+    if [ -n "$_rpa_profile" ]; then
+        echo "  Make it permanent:"
+        echo "    $_rpa_permanent"
+        case "${_rpa_shell##*/}" in
+        fish) echo "    (that records it for every fish session; $_rpa_profile works too)" ;;
+        esac
+    else
+        echo "  Make it permanent by adding the line above to your shell's startup file."
+    fi
+    echo ""
+    echo "  Then:  burrowee help"
+    return 0
+}
+
+# The last thing printed: the operator's own next step. Unconditional — the old
+# `case ":$PATH:"` test read the PATH of whatever ran the installer, which for
+# a piped `curl … | sh` is not necessarily the shell they will type the command
+# in.
+render_path_advice "$BIN_DIR"
