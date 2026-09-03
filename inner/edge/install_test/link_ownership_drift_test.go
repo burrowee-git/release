@@ -22,6 +22,7 @@ package install_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,37 +77,184 @@ func TestLinkOwnershipCopiesAreIdentical(t *testing.T) {
 	}
 }
 
-// TestNoPrefixCompareSurvivesAnywhere — the shape the fix replaced, pinned as
-// GONE. It is one line and it reads as harmless, which is exactly why it needs
-// naming: `case "$(readlink …)" in "$BIN_DIR"/*)` accepts a target that walks
-// back out of $BIN_DIR with "..".
-//
-// Mutation that reddens it: reintroduce the prefix compare at any of the three
-// sites.
-func TestNoPrefixCompareSurvivesAnywhere(t *testing.T) {
+// linkOwnershipPaths is the three files that carry a copy of the block.
+func linkOwnershipPaths(t *testing.T) []string {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{
+	return []string{
 		filepath.Join(root, "_shared", "migrations", "lib_stale_user_bins.sh"),
 		filepath.Join(root, "gateway", "install.sh"),
 		filepath.Join(root, "edge", "install.sh"),
-	} {
-		b, readErr := os.ReadFile(p)
-		if readErr != nil {
-			t.Fatal(readErr)
+	}
+}
+
+// TestEveryReadlinkRoutesThroughLinkOwnership — there is ONE place that reads a
+// symlink to decide whose it is, and it is the block.
+//
+// THIS REPLACED A GUARD THAT DID NOT GUARD. It used to grep for the literal
+// string `"$BIN_DIR"/*)`, which is one spelling of the old prefix compare and
+// not the construct: `case "$(readlink "$p")" in "$BIN_DIR/"*)` — the same bug
+// with the slash inside the quotes — sailed straight past it. A check named
+// "no prefix compare survives anywhere" that passes while a prefix compare
+// survives is worse than no check at all, because the next reader trusts it.
+//
+// The claim is now positive and spelling-independent: every occurrence of
+// `readlink` in these files, outside comments, must lie inside the block. A
+// second site cannot decide link ownership without reading the link, so it
+// cannot be added without failing this — however it spells its pattern, and
+// whether it uses `case`, `test`, or a parameter expansion.
+//
+// WHAT THIS DOES NOT COVER, said out loud: it says nothing about what the
+// block itself does. Three things together do.
+//
+//	1. TestEveryCopyOfLinkOwnershipRefusesAnEscapingTarget (below) drives the
+//	   extracted block from all three files against every target shape.
+//	2. TestLinkOwnershipCopiesAreIdentical proves those three are one text.
+//	3. TestEdgeInstallSparesALinkEscapingBinDirWithDotDot proves the library's
+//	   copy is actually WIRED IN — a correct function nothing calls is not a
+//	   guard either.
+//
+// Mutation that reddens it: put a readlink-based compare back at any decision
+// site, in any spelling.
+func TestEveryReadlinkRoutesThroughLinkOwnership(t *testing.T) {
+	for _, p := range linkOwnershipPaths(t) {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			trimmed := strings.TrimSpace(line)
-			// The block's own header quotes the old form to explain it; only
-			// CODE counts.
-			if strings.HasPrefix(trimmed, "#") {
+		block := linkOwnershipBlock(t, p)
+		for n, line := range strings.Split(string(b), "\n") {
+			// The block's own header quotes the old form to explain it, and so
+			// do other comments; only CODE counts.
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
 				continue
 			}
-			if strings.Contains(line, `"$BIN_DIR"/*)`) {
-				t.Errorf("%s still decides link ownership with a prefix compare: %s", p, trimmed)
+			if !strings.Contains(line, "readlink") {
+				continue
+			}
+			if !strings.Contains(block, line) {
+				t.Errorf("%s:%d decides link ownership outside the link-ownership block: %s",
+					p, n+1, strings.TrimSpace(line))
 			}
 		}
+	}
+}
+
+// escapingTargetCase is one symlink shape and the verdict every copy owes it.
+type escapingTargetCase struct {
+	name   string
+	target func(binDir, home string) string
+	ours   bool
+	why    string
+}
+
+// TestEveryCopyOfLinkOwnershipRefusesAnEscapingTarget — the CONSTRUCT, driven
+// against all three copies rather than inferred from one.
+//
+// The block is extracted by its own sentinels and sourced on its own, which is
+// what makes this possible for the two installers: neither can be run to reach
+// unlink_operator_bins without performing an install, and only the gateway has
+// a BURROWEE_SOURCE_ONLY seam. Extraction is honest here precisely because
+// TestLinkOwnershipCopiesAreIdentical pins the extracted text to the file it
+// came from.
+//
+// Mutation that reddens it: any prefix compare, in any spelling, in any copy.
+func TestEveryCopyOfLinkOwnershipRefusesAnEscapingTarget(t *testing.T) {
+	cases := []escapingTargetCase{
+		{
+			name:   "ours",
+			target: func(binDir, _ string) string { return filepath.Join(binDir, "burrowee") },
+			ours:   true,
+			why:    "a clean absolute target directly inside $BIN_DIR is exactly what the installers wrote",
+		},
+		{
+			name:   "escapes-with-dotdot",
+			target: func(binDir, home string) string { return binDir + "/../outside/wrapper" },
+			ours:   false,
+			why:    "it begins with $BIN_DIR/ and resolves outside it — the whole bug",
+		},
+		{
+			name:   "dot-component",
+			target: func(binDir, _ string) string { return binDir + "/./burrowee" },
+			ours:   false,
+			why:    "refused rather than folded: no install ever wrote it",
+		},
+		{
+			name:   "doubled-slash",
+			target: func(binDir, _ string) string { return binDir + "//burrowee" },
+			ours:   false,
+			why:    "same argument as the dot component",
+		},
+		{
+			name:   "trailing-slash",
+			target: func(binDir, _ string) string { return filepath.Join(binDir, "burrowee") + "/" },
+			ours:   false,
+			why:    "names a directory, not a file this installer placed",
+		},
+		{
+			name:   "relative",
+			target: func(_, _ string) string { return "burrowee" },
+			ours:   false,
+			why:    "every link this project made was absolute",
+		},
+		{
+			name:   "one-level-deeper",
+			target: func(binDir, _ string) string { return filepath.Join(binDir, "sub", "burrowee") },
+			ours:   false,
+			why:    "the directory must be $BIN_DIR exactly, not a prefix of the target",
+		},
+		{
+			name:   "sibling-directory",
+			target: func(binDir, _ string) string { return binDir + "-old/burrowee" },
+			ours:   false,
+			why:    "never a hole in the prefix form either, but now it is the RULE that says so",
+		},
+		{
+			name:   "bin-dir-itself",
+			target: func(binDir, _ string) string { return binDir },
+			ours:   false,
+			why:    "$BIN_DIR names no file",
+		},
+	}
+
+	for _, p := range linkOwnershipPaths(t) {
+		t.Run(filepath.Base(filepath.Dir(p))+"/"+filepath.Base(p), func(t *testing.T) {
+			script := filepath.Join(t.TempDir(), "block.sh")
+			if err := os.WriteFile(script, []byte(linkOwnershipBlock(t, p)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					home := t.TempDir()
+					binDir := filepath.Join(home, "bin")
+					if err := os.MkdirAll(binDir, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					link := filepath.Join(home, "legacy-burrowee")
+					if err := os.Symlink(tc.target(binDir, home), link); err != nil {
+						t.Fatal(err)
+					}
+					cmd := exec.Command("sh", "-c",
+						`. "$1"; if link_target_is_ours "$2"; then echo ours; else echo foreign; fi`,
+						"sh", script, link)
+					cmd.Env = []string{"PATH=/usr/bin:/bin", "BIN_DIR=" + binDir}
+					out, err := cmd.CombinedOutput()
+					if err != nil {
+						t.Fatalf("driving the block failed: %v\n%s", err, out)
+					}
+					got := strings.TrimSpace(string(out))
+					want := "foreign"
+					if tc.ours {
+						want = "ours"
+					}
+					if got != want {
+						t.Errorf("target %q → %s, want %s (%s)", tc.target(binDir, home), got, want, tc.why)
+					}
+				})
+			}
+		})
 	}
 }
