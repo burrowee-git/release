@@ -2684,6 +2684,38 @@ for _s37 in dot dotdot relative symlink-alias; do
     assert_eq "$RC" 1 "--applies must answer no for a $_s37 spelling of the destination"
 done
 
+# 37a8. THE FALLBACK IS PER SIDE, AND THE DESTINATION'S FAILURE IS THE DANGEROUS
+#       ONE. When neither side will `cd`, nothing has been proved about whether
+#       they name the same place — and the text fallback answers "different" for
+#       exactly the spellings 37a7 exists to close, arming the destructive sweep
+#       against the install destination. The guard answers SAME and refuses;
+#       failing toward not-deleting is the only safe direction for a delete
+#       guard, and a wrong "same" costs one skipped no-op run.
+#       Mutation that reddens it: delete `[ -n "$_sersd_rb" ] || return 0` from
+#       stale_exec_root_same_dir, so both sides fall through to the sed compare
+#       and --applies answers 0 (a sweep is authorised) instead of 1.
+#       VACUOUS UNDER A ROOT RUNNER: root searches a 0000 directory, both sides
+#       resolve, and the case passes by the ordinary equal-paths route. CI runs
+#       as an ordinary uid.
+if [ "$(id -u)" -eq 0 ]; then
+    echo "-- case 37a8 skipped: running as root, which can search a 0000 directory, so the fixture cannot stage an unresolvable destination"
+else
+    t37a8="$TMP/t37a8"; exec_sweep_kit "$t37a8"; h37a8="$t37a8/home"
+    chmod 0000 "$h37a8/sys"
+    OUT="$(
+        HOME="$h37a8" COMP=edge \
+        COMP_HOME="$h37a8/sys/etc/edge" COMP_DATA="$h37a8/sys/var/edge" \
+        BIN_DIR="$h37a8/sys/bin" LEGACY_BIN_DIR="$h37a8/sys/bin/" \
+        STALE_USER_BINS="$EDGE_BINS" \
+        STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+        LAUNCHD_DIR="$h37a8/no-launchd" SYSTEMD_DIR="$h37a8/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$h37a8/nowhere" SUDO=/nonexistent-sudo \
+        sh "$t37a8/migrations/sweep_stale_exec_root.sh" --applies 2>&1
+    )"; RC=$?
+    chmod 0755 "$h37a8/sys"
+    assert_eq "$RC" 1 "--applies must answer no when the DESTINATION cannot be resolved — a sweep must never be authorised against a destination this run could not identify"
+fi
+
 # 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"

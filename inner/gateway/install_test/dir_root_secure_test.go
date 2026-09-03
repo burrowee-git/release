@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -353,6 +354,76 @@ func TestDirLeafIsSymlinkAnswersEverySpelling(t *testing.T) {
 // neither of them testable, so the rule lives where it fixes the source — in
 // the normalizer, for every caller of it in all three repos, not only for this
 // predicate.
+// TestDirIsRootSecureSeparatesAbsentFromUnresolvable is the other half of the
+// 3-vs-2 boundary, and the half that needs no euid: 3 says "there is no
+// directory here", 2 says "I could not establish anything". Confusing them
+// sends an operator to the wrong place in BOTH directions, and both directions
+// were wrong at once.
+//
+//	MISSING ANCESTOR → 3. The predicate tested only the LEXICAL parent, so
+//	/nonexistent-top/x answered 2: an operator setting BURROWEE_LINK_DIR on a
+//	host with no /opt/burrowee was told the ownership could not be established
+//	and sent to `command -v stat`, and assert_system_tree's rc 3 branch — the
+//	one that says "re-run from an interactive terminal so the directory can be
+//	created as root" — became unreachable for any root whose parent is missing.
+//
+//	PRESENT BUT UNRESOLVABLE → 2. A symlink loop, a dangling link, or a root
+//	parked on an unmounted volume is a name that is OCCUPIED. Answering 3
+//	there tells an operator to create a directory where something already sits.
+//
+// One observable settles each: walking UP to the nearest ancestor that exists
+// separates absent from unreachable, and `[ -L ]` — which does not follow —
+// separates unresolvable from absent. dir_probe_reason owns both.
+//
+// Mutations that redden it:
+//   - drop the `[ -L "$_dpr_p" ]` test from dir_probe_reason: the dangling and
+//     ELOOP cases answer 3;
+//   - replace dir_probe_reason's ancestor loop with a single lexical parent
+//     test: the two missing-ancestor cases answer 2.
+func TestDirIsRootSecureSeparatesAbsentFromUnresolvable(t *testing.T) {
+	root := canonicalTempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "a", "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "afile"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "no-such-tree"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	// A chain longer than either kernel's SYMLOOP_MAX: present at its name,
+	// and resolvable by nobody.
+	prev := filepath.Join(root, "a", "real")
+	var loop string
+	for i := 0; i < 70; i++ {
+		loop = filepath.Join(root, "loop"+strconv.Itoa(i))
+		if err := os.Symlink(prev, loop); err != nil {
+			t.Fatal(err)
+		}
+		prev = loop
+	}
+	none := map[string]string{}
+	for _, tc := range []struct {
+		name, target string
+		want         int
+	}{
+		{"a missing top-level ancestor", "/nonexistent-top/x", 3},
+		{"a missing ancestor further down", filepath.Join(root, "a", "nodir", "deeper"), 3},
+		{"a plain missing leaf", filepath.Join(root, "a", "nodir"), 3},
+		{"a regular file — no directory is there", filepath.Join(root, "a", "afile"), 3},
+		{"a dangling symlink — the name is occupied", dangling, 2},
+		{"a chain past SYMLOOP_MAX — present, unresolvable", loop, 2},
+		{"a real directory, for contrast", filepath.Join(root, "a", "real"), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dirIsRootSecure(t, tc.target, none, none); got != tc.want {
+				t.Errorf("dir_is_root_secure(%s) = %d, want %d", tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDirIsRootSecureRefusesAnEmptyOperand(t *testing.T) {
 	none := map[string]string{}
 	if rc := dirIsRootSecure(t, "", none, none); rc != 3 {
@@ -387,9 +458,9 @@ func TestDirIsRootSecureRefusesAnEmptyOperand(t *testing.T) {
 // uid, where it is a real assertion. There is no euid-independent structural
 // half available here the way there is for the never-enters rule.
 //
-// Mutation that reddens it: restore `[ -d "$_ds_in" ] || return 3` at the
-// entry of dir_is_root_secure — the answer becomes 3, "this directory does not
-// exist", about a directory that does.
+// Mutation that reddens it: make dir_probe_reason answer `absent` instead of
+// `unreachable` when the nearest existing ancestor is not searchable — the
+// answer becomes 3, "this directory does not exist", about one that does.
 //
 // WHERE THIS ACTUALLY BITES, stated precisely, because the review's mechanism
 // was one step off. The ENTRY test is the reachable instance: `[ -d ]` on the
@@ -635,7 +706,7 @@ func TestDirIsRootSecureNeverEntersTheDirectoryItJudges(t *testing.T) {
 		t.Errorf("a root-owned 0700 leaf probed by an unprivileged operator: rc = %d, want 0 — the predicate entered the directory instead of stat'ing it from outside", rc)
 	}
 	region := rootSecureContractRegion(t)
-	for _, fn := range []string{"dir_is_root_secure", "dir_level_is_root_secure", "dir_spelling_normalize", "dir_leaf_is_symlink", "dir_absence_is_real"} {
+	for _, fn := range []string{"dir_is_root_secure", "dir_level_is_root_secure", "dir_spelling_normalize", "dir_leaf_is_symlink", "dir_probe_reason"} {
 		for i, line := range strings.Split(shellFuncBody(t, region, fn), "\n") {
 			code := strings.TrimSpace(line)
 			if code == "" || strings.HasPrefix(code, "#") {

@@ -651,11 +651,25 @@ STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 # installer's own working directory never moves. CDPATH is cleared because a
 # relative operand would otherwise be resolved against it.
 #
-# Falling back to the text compare when a side will not resolve is safe for the
-# one reason that matters: `cd` fails exactly when the directory cannot be
-# entered, and a legacy directory that cannot be entered is one this sweep can
-# unlink nothing out of. A non-existent legacy directory never reaches here at
-# all — both callers test `[ -d "$LEGACY_BIN_DIR" ]` first.
+# THE TWO SIDES ARE NOT INTERCHANGEABLE, and the fallback is written per side.
+# Both callers pass (LEGACY, DESTINATION) in that order, and the failure
+# directions are opposite:
+#
+#   the DESTINATION will not resolve — an unsearchable ancestor, or it is not
+#   created yet at `--applies` probe time. Nothing has been proved about
+#   whether the two name the same place, and a text compare will happily answer
+#   "different" for a symlink alias, a `/.`, a `/..` or a relative spelling —
+#   arming the destructive sweep against the install destination, which is the
+#   whole thing 37a7 exists to close. So: answer SAME and refuse to sweep.
+#   Failing toward not-deleting is the only safe direction for a delete guard;
+#   a wrong "same" costs one skipped no-op run.
+#
+#   only the LEGACY side will not resolve — `cd` fails exactly when a directory
+#   cannot be entered, and a legacy directory that cannot be entered is one
+#   this sweep can unlink nothing out of. The text compare is safe there, and
+#   it preserves the probe's documented fail-open. A non-existent legacy
+#   directory never reaches here at all: both callers test
+#   `[ -d "$LEGACY_BIN_DIR" ]` first.
 #
 # Deliberately NOT named normalize_dir: inner/*/install.sh defines one and
 # sources this library from inside a function, so a second definition of that
@@ -667,6 +681,8 @@ stale_exec_root_same_dir() {
         [ "$_sersd_ra" = "$_sersd_rb" ]
         return $?
     fi
+    # The DESTINATION is the side whose failure is dangerous: see above.
+    [ -n "$_sersd_rb" ] || return 0
     _sersd_a="$(printf '%s' "$1" | sed -e 's|//*|/|g' -e 's|/*$||')"
     _sersd_b="$(printf '%s' "$2" | sed -e 's|//*|/|g' -e 's|/*$||')"
     [ "${_sersd_a:-/}" = "${_sersd_b:-/}" ]

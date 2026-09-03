@@ -707,25 +707,73 @@ dir_leaf_is_symlink() {
     [ -L "$_dsn_out" ]
 }
 
-# dir_absence_is_real <path> — true when a false `[ -d <path> ]` is a FACT
-# about <path> rather than a permission on the way to it. `[ -d ]` answers
-# false both when the path is not a directory and when this process cannot
-# SEARCH the parent to find out, and those are the file's 1-vs-2 split in
-# miniature. The second is ORDINARY here, not exotic: this walk descends
-# through directories it has just judged root-owned, and a root-owned 0700
-# one — $SYS_DATA_DIR's own shape — passes that judgement and is then
-# unsearchable by the unprivileged operator this installer runs as. Answering
-# "not secure" there sends them to check permissions that are exactly right.
-dir_absence_is_real() {
-    _dar_p="$1"
-    case "$_dar_p" in
-    */*)
-        _dar_p="${_dar_p%/*}"
-        [ -n "$_dar_p" ] || _dar_p=/
-        ;;
-    *) _dar_p=. ;;
-    esac
-    [ -x "$_dar_p" ]
+# dir_probe_reason <path> — sets $_dpr_out to WHY `[ -d <path> ]` answers as it
+# does, in one word. ONE function owns this boundary, because `[ -d ]` is false
+# for four different facts and they do not map to one code:
+#
+#   directory     a real, reachable directory.
+#   notdir        something is at the name and it is not a directory. No
+#                 directory is here — which is what code 3 says.
+#   absent        nothing is at the name, AND this process could see that: the
+#                 nearest ancestor that exists is a directory it can search.
+#                 Code 3.
+#   unreachable   it could not look. The nearest ancestor that exists is a
+#                 directory this process cannot SEARCH, so nothing below it is
+#                 observable. Code 2 — "it is not there" is a claim this
+#                 process is not entitled to make.
+#   unresolvable  something IS at the name — lstat sees a symlink — but it
+#                 resolves to nothing: a loop, a dangling target, a volume that
+#                 is not mounted. Code 2. Never 3: the name is occupied, and
+#                 "does not exist" sends an operator to create a directory
+#                 where something already sits.
+#
+# The observables, in the order they are asked, and what each one settles:
+#
+#   [ -d p ]   follows symlinks — true only for a real, reachable directory.
+#   [ -L p ]   does NOT follow — true for a symlink even when its target is
+#              missing, looping, or on an unmounted volume. This is the only
+#              thing that separates UNRESOLVABLE from ABSENT, and without it a
+#              70-link chain or a config root parked on an unmounted volume was
+#              reported as "does not exist — re-run so it can be created".
+#   [ -e p ]   follows — true for a non-directory that is really there.
+#   then, only when the name itself answered nothing, WALK UP to the nearest
+#   ancestor that exists and ask whether it is searchable. That is what
+#   separates UNREACHABLE from ABSENT, and testing only the LEXICAL parent is
+#   not enough: a missing grandparent makes the parent unreadable too, so
+#   /nonexistent-top/x and <tmp>/a/nodir/deeper both answered "unreachable" —
+#   sending an operator to check `command -v stat` about a tree that is simply
+#   not there.
+#
+# The two directions are one defect and one fix: this function distinguishes
+# "cannot reach it" from "it is not there" from "it is there and will not
+# resolve", and its callers do nothing but map those words onto their codes.
+dir_probe_reason() {
+    _dpr_p="$1"
+    if [ -d "$_dpr_p" ]; then _dpr_out=directory; return 0; fi
+    if [ -L "$_dpr_p" ]; then _dpr_out=unresolvable; return 0; fi
+    if [ -e "$_dpr_p" ]; then _dpr_out=notdir; return 0; fi
+    _dpr_a="$_dpr_p"
+    while :; do
+        case "$_dpr_a" in
+        */*)
+            _dpr_a="${_dpr_a%/*}"
+            [ -n "$_dpr_a" ] || _dpr_a=/
+            ;;
+        *) _dpr_a=. ;;
+        esac
+        if [ -d "$_dpr_a" ]; then
+            if [ -x "$_dpr_a" ]; then _dpr_out=absent; else _dpr_out=unreachable; fi
+            return 0
+        fi
+        if [ -L "$_dpr_a" ]; then _dpr_out=unresolvable; return 0; fi
+        if [ -e "$_dpr_a" ]; then _dpr_out=absent; return 0; fi
+        # / and . both exist and are directories, so the loop above returns on
+        # them; reaching here at all means the filesystem answered nothing for
+        # anything, and there is nothing left to walk up to.
+        case "$_dpr_a" in
+        / | .) _dpr_out=absent; return 0 ;;
+        esac
+    done
 }
 
 # dir_is_root_secure <path> — the directory form of the predicate above, and
@@ -780,10 +828,16 @@ dir_absence_is_real() {
 # IsRootSecureDir applies belongs to ONE caller, not to this predicate, and the
 # difference is the whole of an operator ruling:
 #
-#   IsRootSecureDir is wired at exactly one place, internal/gateway's config
-#   root. Its reason is specific to that: "a config root that is a symlink is
-#   not a packaging fact, it is somebody redirecting where the daemon writes
-#   its secrets" (root_secure_unix.go). A briefly-shipped form of this function
+#   Each component's daemon refuses a symlinked config root itself, at exactly
+#   one place, and this mirrors that place and no other:
+#     gateway  internal/gateway/system_tool.IsRootSecureDir (root_secure_unix.go),
+#              wired at internal/gateway/config_root.go:27
+#     edge     internal/edgeroot, root_secure_unix.go:26 — os.Lstat, refusing a
+#              symlink outright, reached through guardSystemRoot /
+#              systemRootSecure at ensure.go:153
+#   Both give the same directory-specific reason: "a config or data root that
+#   is a symlink is not a packaging fact, it is somebody redirecting where the
+#   daemon writes its secrets, so it is refused outright". A briefly-shipped form of this function
 #   refused a symlinked leaf for EVERY root the installer asserts —
 #   $SYSTEM_ROOT, $BIN_DIR, the etc/var roots and $SYS_DATA_DIR as well as the
 #   config root — and "put var on the big disk" is an ordinary supported
@@ -818,10 +872,12 @@ dir_is_root_secure() {
     # dir_spelling_normalize owns which spellings name the same directory.
     dir_spelling_normalize "$1"
     _ds_in="$_dsn_out"
-    if [ ! -d "$_ds_in" ]; then
-        if dir_absence_is_real "$_ds_in"; then return 3; fi
-        return 2
-    fi
+    dir_probe_reason "$_ds_in"
+    case "$_dpr_out" in
+    directory) ;;
+    absent | notdir) return 3 ;;
+    *) return 2 ;;
+    esac
     case "$_ds_in" in
     /*) _ds_rest="$_ds_in" ;;
     *)
@@ -919,15 +975,20 @@ dir_is_root_secure() {
 # only the leaf can legitimately be absent, and that is settled before the walk
 # starts. A component that has stopped being a directory mid-walk is 1 — the
 # path no longer denotes what it was asked about — but a component this process
-# cannot even reach is 2, per dir_absence_is_real: the walk descends through
+# cannot even reach is 2, per dir_probe_reason: the walk descends through
 # root-owned directories, a root-owned 0700 one passes and is unsearchable by
 # an unprivileged operator, and reporting that as "not secure" is the exact
 # misdirection the 1-vs-2 split exists to prevent.
 dir_level_is_root_secure() {
-    if [ ! -d "$1" ]; then
-        if dir_absence_is_real "$1"; then return 1; fi
-        return 2
-    fi
+    dir_probe_reason "$1"
+    case "$_dpr_out" in
+    directory) ;;
+    # Only the LEAF can legitimately be absent, and that was settled before the
+    # walk began, so here "nothing there" is 1 — the path stopped denoting what
+    # it was asked about — while "could not look" and "will not resolve" stay 2.
+    absent | notdir) return 1 ;;
+    *) return 2 ;;
+    esac
     _dl_v="$(stat_uid "$1")" || return 2
     [ "$_dl_v" = 0 ] || return 1
     _dl_v="$(stat_mode "$1")" || return 2
