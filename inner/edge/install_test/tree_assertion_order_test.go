@@ -52,6 +52,16 @@ func TestTreeAssertionsRefuseBeforeTheyTouchTheHost(t *testing.T) {
 			why:    "ensure_dir_stated chowns and chmods THROUGH a symlink (no -h), so a refusal that comes after it has already changed a directory the operator owns",
 		},
 		{
+			fn:    "ensure_dir_stated",
+			first: "dir_leaf_is_symlink",
+			// `mkdir` is the first thing here that changes the host, and it
+			// is spelled the same in both installers (gateway wraps it in
+			// run_root; edge already runs as root), so it is the marker that
+			// works for both without either test knowing the other's shape.
+			second: "mkdir",
+			why:    "chown and chmod here are spelled without -h, so they state the link's TARGET — a directory outside this installer's tree — and a level whose target chain will be refused anyway must be refused before the first write, not after it",
+		},
+		{
 			fn:     "assert_system_tree",
 			first:  "assert_roots_not_symlinked",
 			second: "have_real_root",

@@ -102,6 +102,13 @@ func dirLeafIsSymlink(t *testing.T, target string) bool {
 	return rootSecureProbe(t, "", "dir_leaf_is_symlink "+shQuote(target), none, none) == 0
 }
 
+// dirLeafIsNotdir runs the region's dir_leaf_is_notdir.
+func dirLeafIsNotdir(t *testing.T, target string) bool {
+	t.Helper()
+	none := map[string]string{}
+	return rootSecureProbe(t, "", "dir_leaf_is_notdir "+shQuote(target), none, none) == 0
+}
+
 // rootSecureProbe runs one shell call against the shipped contract region with
 // the stat stub's tables set as given, from working directory cwd ("" inherits
 // the test process's), and returns its exit code.
@@ -416,6 +423,52 @@ func TestDirIsRootSecureSeparatesAbsentFromUnresolvable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := dirIsRootSecure(t, tc.target, none, none); got != tc.want {
 				t.Errorf("dir_is_root_secure(%s) = %d, want %d", tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDirLeafIsNotdirSeparatesATakenNameFromAMissingOne — the caller-facing
+// half of a distinction dir_probe_reason draws and the call sites used to throw
+// away. `notdir` and `absent` both answer code 3, correctly: 3 says "there is
+// no DIRECTORY here". But an operator reading "does not exist on this host"
+// about a regular file sitting right there at $LINK_DIR is being told
+// something false, and separating those two is the whole reason
+// dir_probe_reason asks `[ -e ]` before `[ -L ]`.
+//
+// Mutations that redden it: drop the `[ -e ]` test from dir_probe_reason, or
+// put it back after `[ -L ]` — the symlink-onto-a-file case stops being
+// notdir; or change dir_leaf_is_notdir to compare against `absent`.
+func TestDirLeafIsNotdirSeparatesATakenNameFromAMissingOne(t *testing.T) {
+	root := canonicalTempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "afile")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkToFile := filepath.Join(root, "link-to-file")
+	if err := os.Symlink(file, linkToFile); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "no-such"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, target string
+		want         bool
+	}{
+		{"a regular file — the name is taken", file, true},
+		{"a symlink onto a regular file — still taken", linkToFile, true},
+		{"a directory", filepath.Join(root, "adir"), false},
+		{"nothing at all — absent, not taken", filepath.Join(root, "no-such"), false},
+		{"a dangling symlink — unresolvable, not taken", dangling, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dirLeafIsNotdir(t, tc.target); got != tc.want {
+				t.Errorf("dir_leaf_is_notdir(%s) = %v, want %v", tc.target, got, tc.want)
 			}
 		})
 	}

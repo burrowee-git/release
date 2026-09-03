@@ -474,6 +474,23 @@ have_real_root() {
 #   burrowee-git/relay    install.sh                  (relay's inner installer
 #                                                      lives in its own repo)
 #
+# THE PIN IS NOT THE WHOLE CONTRACT. Three things this region's correctness
+# depends on live OUTSIDE these sentinels, so a re-sync that copies the region
+# alone brings none of them and no test in any repo notices:
+#
+#   assert_roots_not_symlinked   the config root may not be a symlink, checked
+#                                before anything is created
+#   ensure_dir_stated's guard    a symlinked level whose target's chain is bad
+#                                is refused BEFORE chown/chmod follow the link
+#   stale_exec_root_same_dir     in inner/_shared/migrations/lib_stale_user_bins.sh,
+#                                and outside that file's own SHARED SWEEP
+#                                CONTRACT sentinels as well
+#
+# They are outside deliberately: each one names variables that differ per
+# component ($SYS_CONFIG_DIR here, $COMP_HOME in edge) or lives in the sweep
+# library, so none of them can be byte-identical text. A repo re-syncing this
+# region must take them as named changes, not assume the pin covered them.
+#
 # It is duplicated rather than sourced because it must run even when a bundle
 # carries no migrations/ directory at all (BURROWEE_UNITS_ONLY re-runs a kept
 # self-copy that may predate one), and because the gateway does not take the
@@ -705,6 +722,19 @@ dir_spelling_normalize() {
 dir_leaf_is_symlink() {
     dir_spelling_normalize "$1"
     [ -L "$_dsn_out" ]
+}
+
+# dir_leaf_is_notdir <path> — true when something IS at <path> and it is not a
+# directory. The caller-facing half of a distinction dir_probe_reason already
+# draws: `notdir` and `absent` both map to code 3, because 3 says "there is no
+# DIRECTORY here" and that is true of both — but they are not the same sentence
+# to an operator. Without this the code was computed and then discarded at the
+# call site, so a $LINK_DIR that is a regular file printed "does not exist on
+# this host" about a file sitting right there. Separating them is the entire
+# reason dir_probe_reason asks -e before -L.
+dir_leaf_is_notdir() {
+    dir_probe_reason "$1"
+    [ "$_dpr_out" = notdir ]
 }
 
 # dir_probe_reason <path> — sets $_dpr_out to WHY `[ -d <path> ]` answers as it
@@ -1565,6 +1595,43 @@ place_unit() {
 # stats and no sudo: nothing is written unless the stat disagrees.
 ensure_dir_stated() {
     _eds_d="$1"; _eds_m="$2"
+    # REFUSE BEFORE TOUCHING, AT THE SITE THAT TOUCHES. Everything below
+    # follows symlinks — `chown 0:0` and `chmod` are spelled without -h — so a
+    # symlinked level is not what gets stated: its TARGET is, and that target
+    # is a directory outside the tree this installer owns. Where the assertion
+    # afterwards would refuse the install anyway, that write is pure damage:
+    # the operator's directory is taken to root:root and the install fails
+    # regardless of it. Hoisting one lstat over the config root was not enough;
+    # the rule belongs here, where every level passes through.
+    #
+    # WHAT IS JUDGED IS THE TARGET'S CHAIN, NOT THE TARGET. `$_eds_d/..` walks
+    # the resolved parent and everything above it — the part ensure_dir_stated
+    # can never repair. Judging the target itself would break a supported
+    # path: an operator who creates the directory, points a data root at it and
+    # runs the installer is meant to have it chowned to root, and that is
+    # exactly what the two lines below are for. A bad ANCESTOR is different —
+    # no chown of ours fixes it, so the install is already lost and the write
+    # buys nothing.
+    #
+    # A symlinked level whose chain is sound falls straight through and is
+    # stated as before: pointing a var or data root at another volume is the
+    # ordinary layout and must keep working.
+    if dir_leaf_is_symlink "$_eds_d"; then
+        _eds_rc=0
+        dir_is_root_secure "$_eds_d/.." || _eds_rc=$?
+        if [ "$_eds_rc" != 0 ]; then
+            echo "error: $_eds_d is a symlink, and the directory it points into is not one" >&2
+            echo "error: only root can rewrite — see the chain above its target." >&2
+            echo "error: refusing before anything is written: stating this level would" >&2
+            echo "error: chown and chmod THROUGH the link, changing a directory outside this" >&2
+            echo "error: installer's tree, and the install would then be refused anyway." >&2
+            echo "hint: nothing on this host has been created or changed by this run." >&2
+            echo "hint: check the ownership and modes of every directory above the link's" >&2
+            echo "hint: target; each must be owned by root and not group- or world-writable." >&2
+            echo "hint: or point $_eds_d at a directory inside a root-owned tree." >&2
+            return 1
+        fi
+    fi
     if [ ! -d "$_eds_d" ]; then
         if [ ! -d "$(dirname "$_eds_d")" ]; then
             echo "error: cannot create $_eds_d — its parent $(dirname "$_eds_d") does not exist," >&2
@@ -1723,6 +1790,13 @@ assert_system_tree() {
             echo "hint: followed, which is what a path rewritten while it is walked looks" >&2
             echo "hint: like, and a re-run settles that one." >&2
             echo "hint: then re-run 'burrowee gateway service install'." >&2
+        elif [ "$_ast_rc" = 3 ] && dir_leaf_is_notdir "$_ast"; then
+            echo "error: $_ast is not a directory — something else is at that name." >&2
+            echo "error: refusing to install a service whose state would have to sit inside" >&2
+            echo "error: it. This is not a permission problem and not a missing directory:" >&2
+            echo "error: the name is taken." >&2
+            echo "hint: move or remove whatever is at $_ast, or point the setting at a" >&2
+            echo "hint: directory; then re-run 'burrowee gateway service install'." >&2
         elif [ "$_ast_rc" = 3 ]; then
             echo "error: $_ast does not exist — refusing to install a service whose state" >&2
             echo "error: would sit in a directory this run failed to create." >&2
@@ -1774,7 +1848,12 @@ link_operator_bins() {
     dir_is_root_secure "$LINK_DIR" || _lob_rc=$?
     if [ "$_lob_rc" != 0 ]; then
         case "$_lob_rc" in
-        3) echo "note: $LINK_DIR does not exist on this host, so no burrowee command was linked into it." ;;
+        3) if dir_leaf_is_notdir "$LINK_DIR"; then
+               echo "note: $LINK_DIR is not a directory — something else is at that name — so no burrowee" ;
+               echo "note: command was linked into it. The name is taken; this is not a missing directory." ;
+           else
+               echo "note: $LINK_DIR does not exist on this host, so no burrowee command was linked into it." ;
+           fi ;;
         2) echo "note: the ownership of $LINK_DIR could not be established — either 'stat' answered neither" ;
            echo "note: dialect, or a symlink on the way could not be followed — so no burrowee command was linked" ;
            echo "note: into it: a link is only safe in a directory proven root-owned." ;;

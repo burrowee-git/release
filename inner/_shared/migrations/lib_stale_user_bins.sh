@@ -647,6 +647,19 @@ STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 # One spelling was fixed and the class was left open; `cd`+`pwd -P` closes the
 # class, because the kernel does the folding, the anchoring and the resolution.
 #
+# `cd -P`, NOT a bare `cd`, and that is the same logical-versus-physical
+# distinction the root-secure walk beside this was rewritten to respect — left
+# unapplied here for three rounds. A bare `cd` is LOGICAL: the shell folds a
+# `..` textually against the path it was given instead of letting the kernel
+# resolve it, so `<legacy>/link/../bin`, where `link` is a symlink, is folded
+# to `<legacy>/bin`, which does not exist, and the `cd` FAILS. That side then
+# resolves to nothing, the destination guard below does not fire because the
+# DESTINATION resolved fine, and the text compare answers "different" for a
+# path that IS the install destination — arming the sweep to delete the
+# binaries the installer has just placed, which is exactly what case 37a7
+# exists to prevent. `-P` hands the resolution to the kernel, which is the
+# only thing that agrees with what the sweep will actually open.
+#
 # The `cd` runs in a command substitution, so it is a SUBSHELL and the sourcing
 # installer's own working directory never moves. CDPATH is cleared because a
 # relative operand would otherwise be resolved against it.
@@ -675,8 +688,8 @@ STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 # sources this library from inside a function, so a second definition of that
 # name would silently take over for the rest of that shell.
 stale_exec_root_same_dir() {
-    _sersd_ra="$(CDPATH= cd -- "$1" 2>/dev/null && pwd -P)" || _sersd_ra=''
-    _sersd_rb="$(CDPATH= cd -- "$2" 2>/dev/null && pwd -P)" || _sersd_rb=''
+    _sersd_ra="$(CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P)" || _sersd_ra=''
+    _sersd_rb="$(CDPATH= cd -P -- "$2" 2>/dev/null && pwd -P)" || _sersd_rb=''
     if [ -n "$_sersd_ra" ] && [ -n "$_sersd_rb" ]; then
         [ "$_sersd_ra" = "$_sersd_rb" ]
         return $?

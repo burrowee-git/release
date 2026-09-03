@@ -2640,10 +2640,15 @@ assert_eq "$RC" 1 "--applies must answer no when the legacy dir IS the destinati
 #       destination, and every name it then decides `remove` for is a binary
 #       the installer just placed. Each spelling below folds, anchors or
 #       resolves to $BIN_DIR and answers "different" to a text compare.
-#       Mutation that reddens all four: put the textual body back as the whole
+#       Mutation that reddens all five: put the textual body back as the whole
 #       of stale_exec_root_same_dir (the two sed lines and the compare) — the
-#       run then removes all four binaries out of the destination.
-for _s37 in dot dotdot relative symlink-alias; do
+#       run then removes all four binaries out of the destination. The
+#       symlink-dotdot spelling has a second, narrower mutation of its own:
+#       drop the `-P` from both `cd`s, so the shell folds `..` textually
+#       instead of letting the kernel resolve it. That is the same
+#       logical-versus-physical distinction the root-secure walk beside this
+#       was rewritten to respect, and it went unapplied here for three rounds.
+for _s37 in dot dotdot relative symlink-alias symlink-dotdot; do
     t37a7="$TMP/t37a7-$_s37"; exec_sweep_kit "$t37a7"; h37a7="$t37a7/home"
     _cwd37="$PWD"
     case "$_s37" in
@@ -2653,6 +2658,17 @@ for _s37 in dot dotdot relative symlink-alias; do
     symlink-alias)
         ln -s "$h37a7/sys/bin" "$h37a7/sys/binlink"
         _leg37="$h37a7/sys/binlink"
+        ;;
+    # A `..` AFTER A SYMLINK, which only the kernel folds correctly. The link
+    # sits in leg/ and points at sys/etc, so physically link/../bin IS
+    # sys/bin — the destination — while a LOGICAL fold gives sys/leg/bin,
+    # which does not exist. A bare `cd` folds logically, fails, resolves that
+    # side to nothing, and the text compare then answers "different" about the
+    # install destination itself.
+    symlink-dotdot)
+        mkdir -p "$h37a7/sys/leg"
+        ln -s "$h37a7/sys/etc" "$h37a7/sys/leg/link"
+        _leg37="$h37a7/sys/leg/link/../bin"
         ;;
     esac
     OUT="$(
