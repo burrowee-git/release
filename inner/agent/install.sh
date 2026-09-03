@@ -137,8 +137,22 @@ render_path_advice() {
     return 0
 }
 
-# The last thing printed: the operator's own next step. Unconditional — the old
-# `case ":$PATH:"` test read the PATH of whatever ran the installer, which for
-# a piped `curl … | sh` is not necessarily the shell they will type the command
-# in.
-render_path_advice "$BIN_DIR"
+# ---- the last thing printed: how to reach these commands --------------------
+# THE `case ":$PATH:"` GUARD IS BACK, and only here. The root installers print
+# unconditionally because under `sudo` they see root's secure_path and cannot
+# observe the operator's interactive PATH — the question is unanswerable there,
+# so it must not be guessed. THIS installer runs UNPRIVILEGED: the process IS
+# the operator's shell, $PATH is theirs, and the answer is exact. Printing "not
+# on your PATH" at a directory that demonstrably is on it would be telling them
+# something false, which is worse than saying nothing.
+#
+# So: silent when $BIN_DIR is already reachable, the full shell-aware block
+# when it is not.
+#
+# Nothing else owns this any more either: the outer bootstrap's rc-editing
+# block, which used to run after this script returned, is deleted — see
+# tools/bootstrap.template.sh for the three reasons.
+case ":$PATH:" in
+*":$BIN_DIR:"*) ;;
+*) render_path_advice "$BIN_DIR" ;;
+esac

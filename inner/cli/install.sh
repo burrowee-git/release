@@ -239,36 +239,54 @@ if [ -n "$MIGRATIONS_DIR" ] && [ "$MIGRATIONS_DIR" != "$COMP_HOME/migrations" ];
 fi
 
 # ---- the last thing printed: how to reach these commands --------------------
-# It REPLACED a one-line note that said "$BIN_DIR is not on PATH — add: export
-# PATH=…", wrapped in a `case ":$PATH:"` test. Two things were wrong with it.
-# It named no shell and no profile file, so an operator whose login shell is
-# fish was handed a line that is a syntax error there; and the PATH test reads
-# the PATH of whatever ran the installer, which for a piped `curl … | sh` is
-# not necessarily the shell they will type the command in. The block is printed
-# unconditionally now, exactly as the root installers print it, and for the
-# same reason: advice that is occasionally redundant beats advice suppressed by
-# a measurement that does not answer the question.
+# THE `case ":$PATH:"` GUARD IS BACK, and only here. The root installers print
+# unconditionally because under `sudo` they see root's secure_path and cannot
+# observe the operator's interactive PATH — the question is unanswerable there,
+# so it must not be guessed. THIS installer runs UNPRIVILEGED: the process IS
+# the operator's shell, $PATH is theirs, and the answer is exact. Printing "not
+# on your PATH" at a directory that demonstrably is on it would be telling them
+# something false, which is worse than saying nothing.
 #
-# THE RENDERER IS THE SHARED LIBRARY'S, sourced above by the sweep block. This
-# installer runs UNPRIVILEGED and carries no elevation record, so
-# render_path_advice resolves the subject from $SHELL and $HOME — which here
-# are the operator's own and exact — instead of looking $SUDO_USER up in the
-# passwd database. One renderer, two ways of learning who is asking.
+# So: silent when $BIN_DIR is already reachable, the full shell-aware block
+# when it is not.
+#
+# WHAT IT REPLACED was a one-line note — "$BIN_DIR is not on PATH — add: export
+# PATH=…" — under the same guard. The guard was right; the note was not. It
+# named no shell and no profile file, so an operator whose login shell is fish
+# was handed a line that is a syntax error there.
+#
+# NOTHING ELSE OWNS THIS ANY MORE. The outer bootstrap used to append a marked
+# block to the operator's rc files after this script returned, which both
+# duplicated the "Make it permanent" line and wrote bash syntax into a fish
+# operator's ~/.bashrc. That block is deleted; see tools/bootstrap.template.sh.
+#
+# THE RENDERER IS THE SHARED LIBRARY'S, sourced above by the sweep block, and
+# it resolves the subject from $SHELL and $HOME — which here are the operator's
+# own and exact — instead of looking $SUDO_USER up in the passwd database. One
+# renderer, two ways of learning who is asking.
 #
 # It is printed at the very END rather than beside the "installed to" line
 # because the library is sourced further down, with the sweep, and because a
 # next step reads better last. A bundle carrying no migrations/ at all (a
 # $COMP_HOME self-copy predating the directory) still owes the operator the
-# line, so the fallback prints it by hand.
-if command -v render_path_advice >/dev/null 2>&1; then
-    render_path_advice "$BIN_DIR"
-else
-    echo ""
-    echo "==> Next steps"
-    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
-    echo ""
-    echo "  Add it to this shell now:"
-    echo "    export PATH=\"$BIN_DIR:\$PATH\""
-    echo ""
-    echo "  Then:  burrowee help"
-fi
+# line, so the fallback prints it by hand — including the permanent half, which
+# it used to drop.
+case ":$PATH:" in
+*":$BIN_DIR:"*) ;;
+*)
+    if command -v render_path_advice >/dev/null 2>&1; then
+        render_path_advice "$BIN_DIR"
+    else
+        echo ""
+        echo "==> Next steps"
+        echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+        echo ""
+        echo "  Add it to this shell now:"
+        echo "    export PATH=\"$BIN_DIR:\$PATH\""
+        echo ""
+        echo "  Make it permanent by adding the line above to your shell's startup file."
+        echo ""
+        echo "  Then:  burrowee help"
+    fi
+    ;;
+esac

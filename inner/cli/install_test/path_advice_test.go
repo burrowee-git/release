@@ -91,7 +91,7 @@ func TestCliInstallPrintsThePathAdviceForTheOperatorsOwnShell(t *testing.T) {
 	cmd.Env = []string{
 		"HOME=" + home,
 		"PREFIX=" + filepath.Join(home, ".local"),
-		"PATH=/usr/bin:/bin",
+		"PATH=" + unprivilegedStubDir(t) + ":/usr/bin:/bin",
 		"SHELL=/opt/homebrew/bin/fish",
 		"LAUNCHD_DIR=" + filepath.Join(home, "no-launchd"),
 		"SYSTEMD_DIR=" + filepath.Join(home, "no-systemd"),
@@ -116,17 +116,23 @@ func TestCliInstallPrintsThePathAdviceForTheOperatorsOwnShell(t *testing.T) {
 	}
 }
 
-// TestCliInstallPrintsThePathAdviceEvenWhenTheDirIsAlreadyOnPath — the
-// suppression that had to go. The old note was wrapped in a `case ":$PATH:"`
-// test, which reads the PATH of whatever ran the installer; the block is
-// printed unconditionally now. For the cli that condition is at least
-// answerable, but the same renderer serves the root installers where it is
-// not (under sudo the process sees root's secure_path), and one component
-// whose output depends on the caller's PATH is one component whose output
-// nobody can predict.
+// TestCliInstallIsSilentWhenTheDirIsAlreadyOnPath — the `case ":$PATH:"` guard
+// is BACK for the two unprivileged installers, and only for them.
 //
-// Mutation that reddens it: wrap print_path_advice in the old PATH test.
-func TestCliInstallPrintsThePathAdviceEvenWhenTheDirIsAlreadyOnPath(t *testing.T) {
+// The root installers print unconditionally because under `sudo` they see
+// root's secure_path and cannot observe the operator's interactive PATH: the
+// question is unanswerable there, so it must not be guessed. THIS installer
+// runs as the operator — the process IS their shell and $PATH is theirs — so
+// the answer is exact, and printing "which is not on your PATH" at a directory
+// that demonstrably is on it tells them something false.
+//
+// Dropping the guard here was a real regression in the first cut of this
+// change: the justification written into the comment ("under sudo this process
+// sees root's secure_path") is true of the installers it was copied FROM and
+// false of this one.
+//
+// Mutation that reddens it: remove the guard again.
+func TestCliInstallIsSilentWhenTheDirIsAlreadyOnPath(t *testing.T) {
 	home := t.TempDir()
 	staging := t.TempDir()
 	seedCliBins(t, staging)
@@ -141,7 +147,7 @@ func TestCliInstallPrintsThePathAdviceEvenWhenTheDirIsAlreadyOnPath(t *testing.T
 	cmd.Env = []string{
 		"HOME=" + home,
 		"PREFIX=" + filepath.Join(home, ".local"),
-		"PATH=" + binDir + ":/usr/bin:/bin",
+		"PATH=" + binDir + ":" + unprivilegedStubDir(t) + ":/usr/bin:/bin",
 		"SHELL=/bin/zsh",
 		"LAUNCHD_DIR=" + filepath.Join(home, "no-launchd"),
 		"SYSTEMD_DIR=" + filepath.Join(home, "no-systemd"),
@@ -150,11 +156,12 @@ func TestCliInstallPrintsThePathAdviceEvenWhenTheDirIsAlreadyOnPath(t *testing.T
 	if err != nil {
 		t.Fatalf("install.sh failed: %v\n%s", err, out)
 	}
-	assertContainsAll(t, string(out),
-		"==> Next steps",
-		"    export PATH=\""+binDir+":$PATH\"",
-		"    echo 'export PATH=\""+binDir+":$PATH\"' >> "+filepath.Join(home, ".zprofile"),
-	)
+	if strings.Contains(string(out), "==> Next steps") {
+		t.Errorf("the advice was printed although %s is already on this shell's PATH:\n%s", binDir, out)
+	}
+	if strings.Contains(string(out), "which is not on your PATH") {
+		t.Errorf("the install told the operator a directory on their PATH is not on it:\n%s", out)
+	}
 }
 
 // TestAgentInstallPrintsThePathAdvice — the agent's vendored copy of the
@@ -174,7 +181,7 @@ func TestAgentInstallPrintsThePathAdvice(t *testing.T) {
 	cmd.Env = []string{
 		"HOME=" + home,
 		"PREFIX=" + filepath.Join(home, ".local"),
-		"PATH=/usr/bin:/bin",
+		"PATH=" + unprivilegedStubDir(t) + ":/usr/bin:/bin",
 		"SHELL=/bin/bash",
 	}
 	out, err := cmd.CombinedOutput()
@@ -208,8 +215,40 @@ func nextStepsBlock(t *testing.T, out string) string {
 	return rest[:j+len("  Then:  burrowee help")]
 }
 
-// unameStubDir returns a PATH dir whose `uname -s` answers goos and which
-// passes everything else through.
+// unprivilegedStubDir returns a PATH dir whose `id -u` reports a NON-root uid.
+//
+// THE SUITE MUST NOT SELF-SELECT ON THE RUNNER'S EUID. render_path_advice
+// resolves the subject from $SHELL/$HOME only when there is no elevation
+// record AND the process is not root; at euid 0 with no $SUDO_USER it refuses,
+// because a root login has no operator to advise. Run as root — which is how
+// inner/edge and inner/gateway must run — every assertion below would silently
+// measure the generic block instead of the shell-aware one, and would keep
+// passing with the whole subject resolution reverted. That is the shape
+// privilege.md calls "not a test".
+//
+// So the euid goes behind a seam and this suite drives the unprivileged value,
+// exactly as the edge and gateway suites drive the privileged one with
+// fakeRootUID. `go test ./inner/...` is then green in ONE environment rather
+// than needing two.
+func unprivilegedStubDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeUIDStub(t, dir, "501")
+	return dir
+}
+
+// writeUIDStub drops an `id` reporting uid into dir, passing everything else
+// through to the real one.
+func writeUIDStub(t *testing.T, dir, uid string) {
+	t.Helper()
+	body := "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo " + uid + "; else /usr/bin/id \"$@\"; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "id"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// unameStubDir returns a PATH dir whose `uname -s` answers goos and whose
+// `id -u` reports a non-root uid, and which passes everything else through.
 //
 // THE BASH ARM IS THE ONLY ONE THAT BRANCHES ON THE PLATFORM: a macOS login
 // shell reads .bash_profile and never .profile, a Linux one reads .profile.
@@ -226,6 +265,7 @@ func unameStubDir(t *testing.T, goos string) string {
 	if err := os.WriteFile(filepath.Join(dir, "uname"), []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeUIDStub(t, dir, "501")
 	return dir
 }
 
