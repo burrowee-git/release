@@ -1037,7 +1037,7 @@ assert_contains "$OUT" "hash -r" "and the POSIX form"
 #     noticed. A guard that answers for claims it never made is exactly the
 #     defect this suite exists to catch, so it only speaks for the checked-in
 #     file.
-SWEEP_CONTRACT_DIGEST="21acf3f0498ef4b53a2c836c85d978e319d944f8e03487666ff8432345bcb7c0"
+SWEEP_CONTRACT_DIGEST="5079d006947432d94e68d07a91f10c338ddfb4775476db8a58ac14983bf74c4e"
 
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -2691,6 +2691,60 @@ CASES=$((CASES + 1))
 assert_contains "$OUT" "removed stale 0.3 exec-root link: $h37i/old-bin/burrowee-edge" "and the rung names the one it removed"
 assert_contains "$OUT" "kept $h37i/old-bin/burrowee — a symlink pointing outside" "and says why it kept the foreign one"
 assert_contains "$OUT" "kept $h37i/old-bin/burrowee-edge-cli — a symlink whose target does not resolve" "and why it kept the dangling one"
+
+# 37i2. LINK OWNERSHIP IS A RESOLUTION, NOT A PREFIX. The compare used to be
+#       `case "$(readlink "$p")" in "$BIN_DIR"/*)`, which accepts a target that
+#       walks back OUT of $BIN_DIR with ".." — it still begins with "$BIN_DIR/".
+#       Such a link read as ours and was removed. Removing a symlink unlinks
+#       the LINK and never its target, and the name must already be in
+#       $STALE_USER_BINS, so this was a false-positive removal of somebody
+#       else's link rather than a traversal write — but it was decided on a
+#       string that did not mean what the comparison assumed.
+#
+#       Refused outright rather than folded, along with "." components,
+#       doubled slashes, trailing slashes and relative targets: folding would
+#       be claiming to know where a path LANDS, and every shape refused is one
+#       no install ever wrote (each link was `ln -sfn "$BIN_DIR/<name>"`).
+#       Mutation that reddens it: put the prefix compare back in
+#       link_target_is_ours.
+t37i2="$TMP/t37i2"; exec_sweep_kit "$t37i2"; h37i2="$t37i2/home"
+mkdir -p "$h37i2/operator-tree"
+: > "$h37i2/operator-tree/wrapper"
+rm -f "$h37i2/old-bin/burrowee" "$h37i2/old-bin/burrowee-edge" "$h37i2/old-bin/burrowee-edge-cli"
+# Escapes with "..", and RESOLVES — a dangling link is kept for another reason
+# and would pass this without the fix.
+ln -s "$h37i2/sys/bin/../../operator-tree/wrapper" "$h37i2/old-bin/burrowee"
+# A "." component, which is merely noise a real install never emitted.
+ln -s "$h37i2/sys/bin/./burrowee-edge" "$h37i2/old-bin/burrowee-edge"
+# A doubled slash, same argument.
+ln -s "$h37i2/sys/bin//burrowee-edge-cli" "$h37i2/old-bin/burrowee-edge-cli"
+run_exec_sweep_rung "$t37i2" "$h37i2"
+assert_eq "$RC" 0 "an unrecognised link shape is a decision, never a failure"
+# assert_present FOLLOWS the link, so it is used here only because this link
+# deliberately RESOLVES — a dangling one is kept for a different reason and
+# would pass this case without the fix.
+assert_present "$h37i2/operator-tree/wrapper" "the escaping link must actually resolve, or this case proves nothing"
+assert_present "$h37i2/old-bin/burrowee" "a link that walks back out of \$BIN_DIR with '..' is NOT ours"
+assert_present "$h37i2/old-bin/burrowee-edge" "a target carrying a '.' component is refused rather than folded"
+assert_present "$h37i2/old-bin/burrowee-edge-cli" "and so is one carrying a doubled slash"
+assert_contains "$OUT" "kept $h37i2/old-bin/burrowee — a symlink pointing outside" "and each is reported as pointing outside"
+
+# 37i3. THE EXACT-DIRECTORY RULE. A target one level DEEPER than $BIN_DIR, and
+#       one in a SIBLING directory whose name merely begins with $BIN_DIR, are
+#       both refused. The sibling was never accepted by the prefix form either
+#       (its glob carries an explicit "/"), but what keeps it refused now is
+#       the rule rather than the accident of a separator in a pattern.
+t37i3="$TMP/t37i3"; exec_sweep_kit "$t37i3"; h37i3="$t37i3/home"
+mkdir -p "$h37i3/sys/bin/sub" "$h37i3/sys/bin-old"
+: > "$h37i3/sys/bin/sub/burrowee"
+: > "$h37i3/sys/bin-old/burrowee-edge"
+rm -f "$h37i3/old-bin/burrowee" "$h37i3/old-bin/burrowee-edge"
+ln -s "$h37i3/sys/bin/sub/burrowee" "$h37i3/old-bin/burrowee"
+ln -s "$h37i3/sys/bin-old/burrowee-edge" "$h37i3/old-bin/burrowee-edge"
+run_exec_sweep_rung "$t37i3" "$h37i3"
+assert_eq "$RC" 0 "the exact-directory rule decides, it does not fail"
+assert_present "$h37i3/old-bin/burrowee" "a target one level deeper than \$BIN_DIR is not a file this installer placed"
+assert_present "$h37i3/old-bin/burrowee-edge" "nor is one in a sibling directory whose name merely begins with \$BIN_DIR"
 
 # 37j. A UNIT STILL NAMES THE LINK. On macOS a 0.2 plist's KeepAlive.PathState
 #      keys off the EXISTENCE of the path it names, so unlinking a link a

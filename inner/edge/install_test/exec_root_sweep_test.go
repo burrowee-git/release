@@ -165,3 +165,81 @@ func TestEdgeInstallSweepsARealOperatorTypedCopyOnTheFirstRun(t *testing.T) {
 	}
 	assertContains(t, out, "removed stale 0.2 exec-root copy: "+stale)
 }
+
+// TestEdgeInstallSparesALinkEscapingBinDirWithDotDot — the compare is a
+// RESOLUTION question, and it used to be answered with a prefix match.
+//
+// `case "$(readlink "$p")" in "$BIN_DIR"/*)` accepts a shape no install ever
+// created: a target that walks back out with "..". It begins with "$BIN_DIR/",
+// so it read as ours and was removed. Removing a symlink unlinks the link and
+// never its target, and the name has to be an operator-typed one already, so
+// this is a false-positive removal rather than a traversal write — but it is a
+// removal decided on a string that does not mean what the comparison assumed.
+//
+// It is now refused outright rather than folded: folding would be claiming to
+// know where a path LANDS, and every shape refused is one no install ever
+// wrote.
+//
+// THE SIBLING CASE BELOW ALREADY PASSED under the prefix form — the glob
+// carries an explicit "/" after $BIN_DIR, so "$BIN_DIR-old/burrowee" never
+// matched it. It is asserted anyway, because what keeps it true now is the
+// exact-directory rule rather than the accident of a separator in a pattern.
+//
+// Mutation that reddens it: put the prefix compare back.
+func TestEdgeInstallSparesALinkEscapingBinDirWithDotDot(t *testing.T) {
+	sb := newSandbox(t)
+	legacy := filepath.Join(sb.home, "old-usr-local-bin")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A real file the escaping link resolves to, so the link is not merely
+	// dangling — a dangling one is spared for a different reason and would
+	// pass this test without the fix.
+	outside := filepath.Join(sb.home, "operator-tree")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "wrapper"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// $BIN_DIR/../operator-tree/wrapper — prefix-matches "$BIN_DIR/", resolves
+	// outside it.
+	escaping := filepath.Join(legacy, "burrowee")
+	if err := os.Symlink(sb.sysBinDir+"/../operator-tree/wrapper", escaping); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling directory whose name merely begins with $BIN_DIR.
+	sibling := sb.sysBinDir + "-old"
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "burrowee-edge"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	siblingLink := filepath.Join(legacy, "burrowee-edge")
+	if err := os.Symlink(filepath.Join(sibling, "burrowee-edge"), siblingLink); err != nil {
+		t.Fatal(err)
+	}
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := sb.run(t, "sh", stubRootEnv(t),
+		"STUB_UPDATER_OPTED_IN=1",
+		"LEGACY_BIN_DIR="+legacy,
+		"STALE_EXEC_ROOT_TWIN_OWNER="+me.Username)
+	if runErr != nil {
+		t.Fatalf("install failed: %v\n%s", runErr, out)
+	}
+	if _, statErr := os.Lstat(escaping); statErr != nil {
+		t.Errorf("a link that walks back out of %s with \"..\" was removed — the compare is a prefix match, not a resolution: %v\n%s", sb.sysBinDir, statErr, out)
+	}
+	if _, statErr := os.Lstat(siblingLink); statErr != nil {
+		t.Errorf("a link into the sibling directory %s was removed — its name merely begins with $BIN_DIR: %v\n%s", sibling, statErr, out)
+	}
+	assertContains(t, out,
+		"kept "+escaping+" — a symlink pointing outside",
+		"kept "+siblingLink+" — a symlink pointing outside",
+	)
+}

@@ -1419,6 +1419,74 @@ assert_system_tree() {
 # still has work to do there.
 # ---------------------------------------------------------------------------
 
+# --- LINK OWNERSHIP · BYTE-IDENTICAL COPY · do not edit one copy -------------
+# This block exists three times in the release repo — in
+# _shared/migrations/lib_stale_user_bins.sh (inside the SHARED SWEEP CONTRACT
+# region, so it travels to the gateway repo's copy of that library too) and in
+# inner/gateway/install.sh and inner/edge/install.sh beside
+# unlink_operator_bins. The sweep and the uninstall must not disagree about
+# which links are ours, and the uninstall path cannot depend on the library
+# being loaded: the gateway sources it lazily, from inside its sweep functions.
+# The copies are pinned byte-identical by TestLinkOwnershipCopiesAreIdentical,
+# the same way the PREFIX gate's four copies are pinned by
+# tools/prefix-gate-drift.test.sh.
+#
+# link_target_is_ours <link-path> — whether <link-path> is a symlink this
+# project placed: one whose target names a file DIRECTLY inside $BIN_DIR.
+#
+# IT USED TO BE A PREFIX MATCH — `case "$(readlink "$p")" in "$BIN_DIR"/*)` —
+# and that accepted a shape no install ever created: a target of
+# "$BIN_DIR/../../etc/foo" begins with "$BIN_DIR/" and so read as ours, and a
+# foreign link at a burrowee-typed name was removed on that evidence. The blast
+# radius was bounded — removing a symlink unlinks the LINK and never its
+# target, and the name has to be in the candidate list already — so this was a
+# false-positive removal rather than a traversal write. It was still a decision
+# made on a string that did not mean what the comparison assumed.
+#
+# WHAT THE PREFIX FORM DID GET RIGHT, so nobody "fixes" it back the other way:
+# a SIBLING directory was never a hole. The pattern carries an explicit "/"
+# after $BIN_DIR, so "$BIN_DIR-old/burrowee" did not match it. That case is
+# asserted below anyway, because the exact-directory rule is what keeps it
+# true rather than the accident of a trailing slash in a glob.
+#
+# NO PATH ARITHMETIC, AND THAT IS THE POINT. A target carrying a "." or ".."
+# component is REFUSED outright rather than folded, and so is one carrying a
+# doubled or trailing slash. Folding would be claiming to know where a path
+# LANDS, which is a different and racy question from the one being asked —
+# normalize_dir's header makes the same argument about the PREFIX gate — and
+# every shape refused here is one no install ever wrote: each link was
+# `ln -sfn "$BIN_DIR/<name>"`, absolute and clean. So the refusal costs nothing
+# real and fails toward KEEP, the direction every guard here fails in.
+#
+# THE DIRECTORY MUST BE $BIN_DIR EXACTLY, not merely a prefix of the target.
+link_target_is_ours() {
+    _ltio_t="$(readlink "$1" 2>/dev/null)"
+    [ -n "$_ltio_t" ] || return 1
+    # Absolute only: every link this project created was an absolute
+    # "$BIN_DIR/<name>". A relative target is somebody else's by construction.
+    case "$_ltio_t" in
+    /*) ;;
+    *) return 1 ;;
+    esac
+    # The trailing slash makes the LAST component testable the same way as
+    # every other one; an absolute path's FIRST component can never be "." or
+    # "..", so no leading guard is needed.
+    case "$_ltio_t/" in
+    */./* | */../* | *//*) return 1 ;;
+    esac
+    _ltio_b="${BIN_DIR:-}"
+    [ -n "$_ltio_b" ] || return 1
+    # One trailing slash tolerated on $BIN_DIR, which is caller-supplied.
+    # Nothing else about it is normalised: every other reader uses it raw, and
+    # a second spelling here would be a second answer to "where is the install".
+    _ltio_b="${_ltio_b%/}"
+    [ "${_ltio_t%/*}" = "$_ltio_b" ] || return 1
+    # Something must remain after the directory: "$BIN_DIR" itself names no file.
+    [ -n "${_ltio_t##*/}" ] || return 1
+    return 0
+}
+# --- end LINK OWNERSHIP ------------------------------------------------------
+
 # unlink_operator_bins — an uninstall clears a link a PREVIOUS release left in
 # the 0.2 exec root, and only when it still points into OUR tree. A regular
 # file at one of these names is the operator's; a symlink pointing anywhere
@@ -1434,10 +1502,7 @@ unlink_operator_bins() {
     for _uob in $OPERATOR_BINS; do
         _uob_p="$LEGACY_BIN_DIR/$_uob"
         [ -L "$_uob_p" ] || continue
-        case "$(readlink "$_uob_p")" in
-        "$BIN_DIR"/*) ;;
-        *) continue ;;
-        esac
+        link_target_is_ours "$_uob_p" || continue
         # A link whose target still exists is still serving someone: the shared
         # `burrowee` dispatcher stays in $BIN_DIR while a sibling component is
         # installed, and its link must stay with it. Same rule as the edge's.
