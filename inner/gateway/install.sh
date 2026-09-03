@@ -731,11 +731,15 @@ dir_leaf_is_symlink() {
 #
 #   [ -d p ]   follows symlinks — true only for a real, reachable directory.
 #   [ -L p ]   does NOT follow — true for a symlink even when its target is
-#              missing, looping, or on an unmounted volume. This is the only
-#              thing that separates UNRESOLVABLE from ABSENT, and without it a
-#              70-link chain or a config root parked on an unmounted volume was
+#              missing, looping, or on an unmounted volume. Reached only after
+#              -e has said the name lands on nothing, and it is the only thing
+#              that separates UNRESOLVABLE from ABSENT: without it a 70-link
+#              chain or a config root parked on an unmounted volume was
 #              reported as "does not exist — re-run so it can be created".
-#   [ -e p ]   follows — true for a non-directory that is really there.
+#   [ -e p ]   follows — true whenever the name lands on something that
+#              exists, symlink or not. Asked BEFORE -L, because that order is
+#              what separates a link onto a regular file (notdir, 3) from a
+#              link onto nothing at all (unresolvable, 2).
 #   then, only when the name itself answered nothing, WALK UP to the nearest
 #   ancestor that exists and ask whether it is searchable. That is what
 #   separates UNREACHABLE from ABSENT, and testing only the LEXICAL parent is
@@ -750,8 +754,17 @@ dir_leaf_is_symlink() {
 dir_probe_reason() {
     _dpr_p="$1"
     if [ -d "$_dpr_p" ]; then _dpr_out=directory; return 0; fi
-    if [ -L "$_dpr_p" ]; then _dpr_out=unresolvable; return 0; fi
+    # `[ -e ]` BEFORE `[ -L ]`, and the order is the whole distinction: -e
+    # FOLLOWS the link, so it is true exactly when the name lands on something
+    # that exists. A symlink to a regular file is therefore `notdir` — there is
+    # no directory here, code 3 — and only a link that lands on NOTHING (a
+    # dangling target, a loop, an unmounted volume) falls through to -L and
+    # `unresolvable`. Asking -L first called every symlinked non-directory
+    # unresolvable, so $LINK_DIR pointed at a file printed "the ownership could
+    # not be established … check which stat is on PATH": the misdirection the
+    # 1/2/3 split exists to stop, inside the function that owns the split.
     if [ -e "$_dpr_p" ]; then _dpr_out=notdir; return 0; fi
+    if [ -L "$_dpr_p" ]; then _dpr_out=unresolvable; return 0; fi
     _dpr_a="$_dpr_p"
     while :; do
         case "$_dpr_a" in
@@ -765,8 +778,8 @@ dir_probe_reason() {
             if [ -x "$_dpr_a" ]; then _dpr_out=absent; else _dpr_out=unreachable; fi
             return 0
         fi
-        if [ -L "$_dpr_a" ]; then _dpr_out=unresolvable; return 0; fi
         if [ -e "$_dpr_a" ]; then _dpr_out=absent; return 0; fi
+        if [ -L "$_dpr_a" ]; then _dpr_out=unresolvable; return 0; fi
         # / and . both exist and are directories, so the loop above returns on
         # them; reaching here at all means the filesystem answered nothing for
         # anything, and there is nothing left to walk up to.
@@ -1584,6 +1597,58 @@ ensure_dir_stated() {
     fi
 }
 
+# assert_roots_not_symlinked — the CHEAP, PRIVILEGE-FREE half of the tree
+# assertion, and it runs BEFORE anything on the host is created or modified.
+#
+# THE ORDERING RULE, stated here because it has now been got wrong twice in one
+# function: A CHECK THAT CAN REFUSE THE INSTALL RUNS BEFORE ANY STEP THAT
+# TOUCHES THE HOST, and a check that needs no privilege does not sit behind a
+# gate that does. This one is a pure lstat — no uid 0, no write, no stat
+# dialect — and it decides the whole run, so nothing may happen before it.
+#
+# What running it late cost: it used to sit at the END of assert_system_tree,
+# which runs after ensure_system_tree has walked the tree calling
+# ensure_dir_stated — and ensure_dir_stated does `run_root chown 0:0` and
+# `run_root chmod 0755`, NEITHER with -h, so both follow a symlink. An operator
+# who pointed $SYS_CONFIG_DIR at a directory they owned had that directory taken
+# to root:root 0755 and was then handed a refusal saying ownership was not the
+# problem. The install was doomed from the moment the link was seen, so the
+# mutation bought nothing; it only damaged a tree that was none of this
+# installer's business.
+#
+# And it sat below assert_system_tree's `have_real_root` gate. That gate exists
+# because OWNERSHIP cannot be asserted without uid 0, which says nothing about
+# an lstat. On a re-run over an already-correct tree where run_root never
+# reaches root — the sandboxed harness, or a failing sudo — the modes already
+# match, nothing is written, the assert returns 0 early, and a symlinked config
+# root was silently accepted. The daemon then refused at first start, which is
+# the outcome this check exists to move earlier.
+#
+# THE CONFIG ROOT ALONE MAY NOT BE A SYMLINK, mirroring exactly what the
+# component's daemon refuses and no more. Every other root keeps the
+# both-chains judgement in assert_system_tree, which is what protects them; a
+# symlinked $SYSTEM_ROOT or data root is the ordinary "put var on the big disk"
+# layout, it installed cleanly before, and the daemon never rejects it.
+assert_roots_not_symlinked() {
+    if dir_leaf_is_symlink "$SYS_CONFIG_DIR"; then
+        echo "error: $SYS_CONFIG_DIR is a SYMLINK, and the machine-owned CONFIG root must" >&2
+        echo "error: be a real directory — whatever the link points at, and however well" >&2
+        echo "error: owned that target is." >&2
+        echo "error: refusing to install — the daemon mints its console token and identity" >&2
+        echo "error: into this directory, a link is a redirection of where those are written," >&2
+        echo "error: and nothing about its target's ownership records that it moved or stops" >&2
+        echo "error: it moving again. The daemon refuses it at first start; refusing here" >&2
+        echo "error: is that same answer, given while the install can still be fixed." >&2
+        echo "hint: ownership and modes are not what refused this run, and nothing on this" >&2
+        echo "hint: host has been created or changed by it — this check runs first for that" >&2
+        echo "hint: reason." >&2
+        echo "hint: point the setting at the real directory, or replace the link with the" >&2
+        echo "hint: directory itself; then re-run 'burrowee gateway service install'." >&2
+        return 1
+    fi
+    return 0
+}
+
 # ensure_system_tree — the whole tree, top-down, one level at a time, then
 # asserted. The three chains meet at $SYSTEM_ROOT in production (bin/, etc/
 # and var/ are siblings under /usr/local/burrowee); under the test seams each
@@ -1597,6 +1662,7 @@ ensure_dir_stated() {
 # detect (the Go side says the same, ConfigRootMode). var/gateway and its
 # logs/ are 0700: nothing under them is for a non-owner.
 ensure_system_tree() {
+    assert_roots_not_symlinked || return 1
     ensure_dir_stated "$SYSTEM_ROOT" 0755 || return 1
     ensure_dir_stated "$BIN_DIR" 0755 || return 1
     ensure_dir_stated "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
@@ -1628,6 +1694,7 @@ ensure_system_tree() {
 # wasted on a tree that was right the first time when what actually happened
 # is that stat did not answer.
 assert_system_tree() {
+    assert_roots_not_symlinked || return 1
     if ! have_real_root; then
         echo "note: this run never reached uid 0, so the ownership of $SYSTEM_ROOT" >&2
         echo "note: cannot be asserted — skipping the root-secure check on the tree." >&2
@@ -1670,33 +1737,6 @@ assert_system_tree() {
         fi
         return 1
     done
-    # THE CONFIG ROOT ALONE MAY NOT BE A SYMLINK, mirroring exactly what
-    # core/binary's IsRootSecureDir refuses and no more. Every root above keeps
-    # the both-chains judgement, which is what protects them; a symlinked
-    # $SYS_DATA_DIR or $SYSTEM_ROOT is the ordinary "put var on the big disk"
-    # layout, it installed cleanly before, and the daemon never rejects it.
-    #
-    # Checked AFTER the loop, deliberately: by here every directory on the way
-    # to it has been judged, so the line below saying ownership is not what
-    # refused this run is a statement this function has actually established
-    # rather than one it asserts on the way past. A tree with both problems
-    # gets the ownership refusal first, fixes it, and then gets this one —
-    # each message true when it is given.
-    if dir_leaf_is_symlink "$SYS_CONFIG_DIR"; then
-        echo "error: $SYS_CONFIG_DIR is a SYMLINK, and the machine-owned CONFIG root must" >&2
-        echo "error: be a real directory — whatever the link points at, and however well" >&2
-        echo "error: owned that target is." >&2
-        echo "error: refusing to install — the daemon mints its console token and identity" >&2
-        echo "error: into this directory, a link is a redirection of where those are written," >&2
-        echo "error: and nothing about its target's ownership records that it moved or stops" >&2
-        echo "error: it moving again. The daemon refuses it at first start; refusing here" >&2
-        echo "error: is that same answer, given while the install can still be fixed." >&2
-        echo "hint: ownership and modes are not what refused this run — every directory on" >&2
-        echo "hint: the way to it was checked and passed." >&2
-        echo "hint: point the setting at the real directory, or replace the link with the" >&2
-        echo "hint: directory itself; then re-run 'burrowee gateway service install'." >&2
-        return 1
-    fi
 }
 
 # ---------------------------------------------------------------------------

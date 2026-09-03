@@ -333,27 +333,6 @@ func TestDirLeafIsSymlinkAnswersEverySpelling(t *testing.T) {
 	}
 }
 
-// TestDirIsRootSecureRefusesAnEmptyOperand — an unset variable must never come
-// back "root-secure".
-//
-// dir_spelling_normalize restores "/" after a spelling like "/." empties it,
-// and that restoration fired for an EMPTY INPUT too: `dir_is_root_secure ""`
-// answered 0. A rule written for one input shape firing on another, for the
-// third time in this change. The in-tree callers all pass ${VAR:-default}, but
-// this region is copied byte-for-byte into two other repos and its own header
-// says the callers may differ freely, so a caller with an unset variable got a
-// pass instead of a refusal.
-//
-// Mutation that reddens it: drop the `case "$1" in /*)` guard around the
-// restoration — "" then normalizes to "/" and answers 0.
-//
-// There is deliberately only ONE guard. An explicit `[ -n "$1" ] || return 3`
-// in dir_is_root_secure was written first and removed: with the normalizer
-// guarded, deleting it left this test green, and with it present, deleting the
-// normalizer's guard left this test green too. Two statements of one rule make
-// neither of them testable, so the rule lives where it fixes the source — in
-// the normalizer, for every caller of it in all three repos, not only for this
-// predicate.
 // TestDirIsRootSecureSeparatesAbsentFromUnresolvable is the other half of the
 // 3-vs-2 boundary, and the half that needs no euid: 3 says "there is no
 // directory here", 2 says "I could not establish anything". Confusing them
@@ -378,6 +357,9 @@ func TestDirLeafIsSymlinkAnswersEverySpelling(t *testing.T) {
 // Mutations that redden it:
 //   - drop the `[ -L "$_dpr_p" ]` test from dir_probe_reason: the dangling and
 //     ELOOP cases answer 3;
+//   - put `[ -L ]` back BEFORE `[ -e ]`, at the leaf or in the ancestor walk:
+//     the symlink-onto-a-file cases answer 2, which is the stat-dialect block
+//     printed about a path whose only problem is that it is a file;
 //   - replace dir_probe_reason's ancestor loop with a single lexical parent
 //     test: the two missing-ancestor cases answer 2.
 func TestDirIsRootSecureSeparatesAbsentFromUnresolvable(t *testing.T) {
@@ -390,6 +372,18 @@ func TestDirIsRootSecureSeparatesAbsentFromUnresolvable(t *testing.T) {
 	}
 	dangling := filepath.Join(root, "dangling")
 	if err := os.Symlink(filepath.Join(root, "no-such-tree"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	// A link that LANDS ON SOMETHING, just not a directory. `[ -e ]` follows,
+	// so it is what separates this from the dangling case above — and asking
+	// `[ -L ]` first called it unresolvable, printing the whole stat-dialect
+	// block about a path whose only problem is that it is a file.
+	linkToFile := filepath.Join(root, "link-to-file")
+	if err := os.Symlink(filepath.Join(root, "a", "afile"), linkToFile); err != nil {
+		t.Fatal(err)
+	}
+	ancLink := filepath.Join(root, "anclink")
+	if err := os.Symlink(filepath.Join(root, "a", "afile"), ancLink); err != nil {
 		t.Fatal(err)
 	}
 	// A chain longer than either kernel's SYMLOOP_MAX: present at its name,
@@ -412,6 +406,9 @@ func TestDirIsRootSecureSeparatesAbsentFromUnresolvable(t *testing.T) {
 		{"a missing ancestor further down", filepath.Join(root, "a", "nodir", "deeper"), 3},
 		{"a plain missing leaf", filepath.Join(root, "a", "nodir"), 3},
 		{"a regular file — no directory is there", filepath.Join(root, "a", "afile"), 3},
+		{"a symlink onto a regular file — it lands on something", linkToFile, 3},
+		{"an ancestor that is a symlink onto a regular file", filepath.Join(ancLink, "below"), 3},
+		{"an ancestor that is a plain regular file", filepath.Join(root, "a", "afile", "below"), 3},
 		{"a dangling symlink — the name is occupied", dangling, 2},
 		{"a chain past SYMLOOP_MAX — present, unresolvable", loop, 2},
 		{"a real directory, for contrast", filepath.Join(root, "a", "real"), 0},
@@ -424,6 +421,27 @@ func TestDirIsRootSecureSeparatesAbsentFromUnresolvable(t *testing.T) {
 	}
 }
 
+// TestDirIsRootSecureRefusesAnEmptyOperand — an unset variable must never come
+// back "root-secure".
+//
+// dir_spelling_normalize restores "/" after a spelling like "/." empties it,
+// and that restoration fired for an EMPTY INPUT too: `dir_is_root_secure ""`
+// answered 0. A rule written for one input shape firing on another, for the
+// third time in this change. The in-tree callers all pass ${VAR:-default}, but
+// this region is copied byte-for-byte into two other repos and its own header
+// says the callers may differ freely, so a caller with an unset variable got a
+// pass instead of a refusal.
+//
+// Mutation that reddens it: drop the `case "$1" in /*)` guard around the
+// restoration — "" then normalizes to "/" and answers 0.
+//
+// There is deliberately only ONE guard. An explicit `[ -n "$1" ] || return 3`
+// in dir_is_root_secure was written first and removed: with the normalizer
+// guarded, deleting it left this test green, and with it present, deleting the
+// normalizer's guard left this test green too. Two statements of one rule make
+// neither of them testable, so the rule lives where it fixes the source — in
+// the normalizer, for every caller of it in all three repos, not only for this
+// predicate.
 func TestDirIsRootSecureRefusesAnEmptyOperand(t *testing.T) {
 	none := map[string]string{}
 	if rc := dirIsRootSecure(t, "", none, none); rc != 3 {
