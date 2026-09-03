@@ -438,7 +438,9 @@ func TestDirIsRootSecureSeparatesAbsentFromUnresolvable(t *testing.T) {
 //
 // Mutations that redden it: drop the `[ -e ]` test from dir_probe_reason, or
 // put it back after `[ -L ]` — the symlink-onto-a-file case stops being
-// notdir; or change dir_leaf_is_notdir to compare against `absent`.
+// notdir; change dir_leaf_is_notdir to compare against `absent`; or remove
+// the dir_spelling_normalize call from dir_probe_reason — the `X/` and `X/.`
+// spellings then answer false, which is the defect this test grew for.
 func TestDirLeafIsNotdirSeparatesATakenNameFromAMissingOne(t *testing.T) {
 	root := canonicalTempDir(t)
 	if err := os.MkdirAll(filepath.Join(root, "adir"), 0o755); err != nil {
@@ -462,6 +464,16 @@ func TestDirLeafIsNotdirSeparatesATakenNameFromAMissingOne(t *testing.T) {
 	}{
 		{"a regular file — the name is taken", file, true},
 		{"a symlink onto a regular file — still taken", linkToFile, true},
+		// EVERY SPELLING OF THE SAME NAME. This predicate did not normalize
+		// its argument, one round after dir_spelling_normalize was written so
+		// that nobody would have to remember to — so `X/` and `X/.` answered
+		// "absent" and link_operator_bins printed "does not exist on this
+		// host" about a file sitting right there. The normalization now lives
+		// inside dir_probe_reason, where a caller cannot skip it.
+		{"a regular file with a trailing separator", file + "/", true},
+		{"a regular file spelled with a dot", file + "/.", true},
+		{"a regular file, separators and dots interleaved", file + "/.//.", true},
+		{"a symlink onto a file, spelled with a dot", linkToFile + "/.", true},
 		{"a directory", filepath.Join(root, "adir"), false},
 		{"nothing at all — absent, not taken", filepath.Join(root, "no-such"), false},
 		{"a dangling symlink — unresolvable, not taken", dangling, false},
