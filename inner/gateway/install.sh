@@ -671,8 +671,10 @@ path_is_root_secure() {
 #                     like any other ancestor.
 #
 # It sets a variable rather than printing one because a command substitution
-# would strip a trailing newline from a path entitled to carry one, and because
-# every caller here is inside `set -eu`.
+# would strip a trailing newline from the ARGUMENT it is handed, and because
+# every caller here is inside `set -eu`. That is a statement about this
+# function only — the readlink in the walk below does go through a command
+# substitution, and says at its own site what that costs and why it stands.
 dir_spelling_normalize() {
     _dsn_out="$1"
     while :; do
@@ -683,8 +685,15 @@ dir_spelling_normalize() {
         *) break ;;
         esac
     done
-    # "/." and "/" both name the root, and the loop above empties the first.
-    [ -n "$_dsn_out" ] || _dsn_out=/
+    # "/." and "/" both name the root, and the loop above empties the first —
+    # but ONLY a rooted input can empty, so the restoration is guarded on that.
+    # Unguarded it also fired for an EMPTY OPERAND, turning "" into "/" and
+    # answering "root-secure" for an unset variable: a rule written for one
+    # input shape firing on another, which is the third time in this change.
+    # The caller's own guard is below, in dir_is_root_secure.
+    case "$1" in
+    /*) [ -n "$_dsn_out" ] || _dsn_out=/ ;;
+    esac
 }
 
 # dir_leaf_is_symlink <path> — true when the directory <path> names is reached
@@ -766,22 +775,28 @@ dir_absence_is_real() {
 # one platform and none on the other, which is a dialect bug wearing a security
 # check's clothes.
 #
-# A SYMLINKED LEAF IS REFUSED OUTRIGHT, and that is a deliberate match with
-# core/binary's IsRootSecureDir rather than a property of the walk. The Go
-# half states the reason and it is a directory-specific one: IsRootSecure
-# accepts a symlinked leaf because distros ship /bin/rm that way, but "a config
-# root that is a symlink is not a packaging fact, it is somebody redirecting
-# where the daemon writes its secrets, so it is refused outright"
-# (root_secure_unix.go). This shell half used to FOLLOW such a leaf and accept
-# it when both chains were sound, which meant an operator who symlinked
-# $SYS_CONFIG_DIR into a root-owned tree got a clean install, a passing
-# assert_system_tree, and a daemon that refused at first start — precisely the
-# outcome assert_system_tree exists to convert into a failed install naming the
-# directory. Two halves of one predicate disagreeing about the same tree is the
-# defect; the stricter half wins, because the looser one cannot be made to
-# accept anything the daemon will then reject.
+# A SYMLINKED LEAF IS FOLLOWED AND JUDGED ON BOTH CHAINS — the holder's and the
+# target's — and it is NOT refused here. The refusal core/binary's
+# IsRootSecureDir applies belongs to ONE caller, not to this predicate, and the
+# difference is the whole of an operator ruling:
 #
-# A symlinked ANCESTOR is still followed and judged — that is the substitution
+#   IsRootSecureDir is wired at exactly one place, internal/gateway's config
+#   root. Its reason is specific to that: "a config root that is a symlink is
+#   not a packaging fact, it is somebody redirecting where the daemon writes
+#   its secrets" (root_secure_unix.go). A briefly-shipped form of this function
+#   refused a symlinked leaf for EVERY root the installer asserts —
+#   $SYSTEM_ROOT, $BIN_DIR, the etc/var roots and $SYS_DATA_DIR as well as the
+#   config root — and "put var on the big disk" is an ordinary supported
+#   layout: those installs worked before, are never rejected by the daemon, and
+#   would have started failing hard. A refusal that breaks a working layout is
+#   a worse outcome than the one it prevents there.
+#
+# So the rule is applied where its justification reaches and no further:
+# dir_leaf_is_symlink is what a caller asks, and only the CONFIG root's caller
+# asks it. Every other root keeps the both-chains judgement below, which is
+# what actually protects them.
+#
+# A symlinked ANCESTOR is always followed and judged — that is the substitution
 # this walk exists to catch, and Go accepts it too (too readily: see the region
 # header).
 #
@@ -793,14 +808,16 @@ dir_absence_is_real() {
 # a path all need search permission on its PARENT only, and every parent this
 # walk touches must be 0755-and-root-owned to pass at all.
 dir_is_root_secure() {
+    # An EMPTY operand answers 3: it names no directory, `[ -d "" ]` is false
+    # for it by specification, and dir_spelling_normalize is what makes sure it
+    # still is — see the guard there. It must never answer 0, which it did
+    # while that guard was missing. A second check here would state the same
+    # rule twice and leave neither one testable: delete either and the suite
+    # stays green, so the rule lives in exactly one place.
     # ONE normalization, here, before anything looks at the spelling —
     # dir_spelling_normalize owns which spellings name the same directory.
     dir_spelling_normalize "$1"
     _ds_in="$_dsn_out"
-    # Refused before the existence test, exactly as IsRootSecureDir refuses on
-    # its Lstat before asking anything else: a dangling symlink at this path is
-    # "somebody put a link here", not "the directory is missing".
-    if [ -L "$_ds_in" ]; then return 1; fi
     if [ ! -d "$_ds_in" ]; then
         if dir_absence_is_real "$_ds_in"; then return 3; fi
         return 2
@@ -858,6 +875,28 @@ dir_is_root_secure() {
             # that this stops, and "I could not follow it" is undecidable,
             # not insecure.
             [ "$_ds_hops" -le 64 ] || return 2
+            # KNOWN LIMIT, stated because the region asserts the opposite
+            # invariant one function up and a reader is entitled to see them
+            # reconciled: `$( )` strips every trailing newline, so a link whose
+            # TARGET's last component ends in one is resolved here one
+            # character short of what the kernel follows, and the walk then
+            # judges a different directory than the one asked about.
+            #
+            # It is left as it is, deliberately. Recovering the bytes needs the
+            # `&& printf X` guard plus removal of readlink's own terminator,
+            # and whether readlink writes that terminator is a DIALECT question
+            # of the same kind that cost this file the stat bug — so the
+            # recovery would need its own probe, and a probe that is wrong
+            # truncates every target instead of one. Against that: creating
+            # such a link requires write access to the directory holding it,
+            # and this walk refuses any chain a non-root account can write, so
+            # the only account that can set one up is the one the predicate
+            # exists to trust. A wrong answer here is root's about root's.
+            #
+            # dir_spelling_normalize's comment says it avoids a command
+            # substitution to keep a path entitled to a trailing newline; that
+            # is true of the ARGUMENT it is handed and is not a claim about
+            # this line.
             _ds_t="$(readlink "$_ds_cur" 2>/dev/null)" || return 2
             [ -n "$_ds_t" ] || return 2
             case "$_ds_t" in
@@ -1561,24 +1600,6 @@ assert_system_tree() {
             echo "error: would sit in a directory this run failed to create." >&2
             echo "hint: re-run 'burrowee gateway service install' from an interactive terminal" >&2
             echo "hint: so the directory can be created as root." >&2
-        elif dir_leaf_is_symlink "$_ast"; then
-            # rc 1 has TWO causes since the leaf rule matched the Go half, and
-            # the ownership text is a lie about this one: every directory on
-            # the way can be flawless and the answer is still 1. An operator
-            # who pointed a root at a link onto a root-owned data volume —
-            # an install that SUCCEEDED before — must not be sent to audit
-            # modes that are already correct. Same misdirection as rc 2's, one
-            # code over. dir_leaf_is_symlink is the predicate's own spelling
-            # rule, so this branch cannot drift from the refusal it explains.
-            echo "error: $_ast is a SYMLINK, and a machine-owned root must be a real" >&2
-            echo "error: directory — whatever the link points at, and however well owned" >&2
-            echo "error: that target is." >&2
-            echo "error: refusing to install — a link is a redirection of where root writes," >&2
-            echo "error: and nothing about its target's ownership records that it moved or" >&2
-            echo "error: stops it moving again." >&2
-            echo "hint: the ownership and modes on the way to $_ast are NOT implicated." >&2
-            echo "hint: point the setting at the real directory, or replace the link with the" >&2
-            echo "hint: directory itself; then re-run 'burrowee gateway service install'." >&2
         else
             echo "error: $_ast is not root-owned and unwritable all the way to /." >&2
             echo "error: refusing to install — the gateway's state would sit in a directory a" >&2
@@ -1588,6 +1609,33 @@ assert_system_tree() {
         fi
         return 1
     done
+    # THE CONFIG ROOT ALONE MAY NOT BE A SYMLINK, mirroring exactly what
+    # core/binary's IsRootSecureDir refuses and no more. Every root above keeps
+    # the both-chains judgement, which is what protects them; a symlinked
+    # $SYS_DATA_DIR or $SYSTEM_ROOT is the ordinary "put var on the big disk"
+    # layout, it installed cleanly before, and the daemon never rejects it.
+    #
+    # Checked AFTER the loop, deliberately: by here every directory on the way
+    # to it has been judged, so the line below saying ownership is not what
+    # refused this run is a statement this function has actually established
+    # rather than one it asserts on the way past. A tree with both problems
+    # gets the ownership refusal first, fixes it, and then gets this one —
+    # each message true when it is given.
+    if dir_leaf_is_symlink "$SYS_CONFIG_DIR"; then
+        echo "error: $SYS_CONFIG_DIR is a SYMLINK, and the machine-owned CONFIG root must" >&2
+        echo "error: be a real directory — whatever the link points at, and however well" >&2
+        echo "error: owned that target is." >&2
+        echo "error: refusing to install — the daemon mints its console token and identity" >&2
+        echo "error: into this directory, a link is a redirection of where those are written," >&2
+        echo "error: and nothing about its target's ownership records that it moved or stops" >&2
+        echo "error: it moving again. The daemon refuses it at first start; refusing here" >&2
+        echo "error: is that same answer, given while the install can still be fixed." >&2
+        echo "hint: ownership and modes are not what refused this run — every directory on" >&2
+        echo "hint: the way to it was checked and passed." >&2
+        echo "hint: point the setting at the real directory, or replace the link with the" >&2
+        echo "hint: directory itself; then re-run 'burrowee gateway service install'." >&2
+        return 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1629,16 +1677,9 @@ link_operator_bins() {
         2) echo "note: the ownership of $LINK_DIR could not be established — either 'stat' answered neither" ;
            echo "note: dialect, or a symlink on the way could not be followed — so no burrowee command was linked" ;
            echo "note: into it: a link is only safe in a directory proven root-owned." ;;
-        *) if dir_leaf_is_symlink "$LINK_DIR"; then
-               echo "note: $LINK_DIR is a SYMLINK, so no burrowee command was linked into it — a machine-owned" ;
-               echo "note: link directory must be a real directory, whatever it points at: its target's ownership" ;
-               echo "note: records nothing about the link being repointed. The ownership and modes on the way to" ;
-               echo "note: it are NOT implicated." ;
-           else
-               echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
-               echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
-               echo "note: unlinked and replaced, and the next 'sudo burrowee-gateway-cli' would run that user's file as root." ;
-           fi ;;
+        *) echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
+           echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
+           echo "note: unlinked and replaced, and the next 'sudo burrowee-gateway-cli' would run that user's file as root." ;;
         esac
         echo "note: run the gateway's commands by their real path, or add the exec root to PATH:"
         echo "    export PATH=\"$BIN_DIR:\$PATH\""

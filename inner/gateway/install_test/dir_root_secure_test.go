@@ -89,12 +89,12 @@ func dirIsRootSecureFrom(t *testing.T, cwd, target string, uids, modes map[strin
 	return rootSecureProbe(t, cwd, "dir_is_root_secure "+shQuote(target), uids, modes)
 }
 
-// dirLeafIsSymlink runs the region's dir_leaf_is_symlink — the CALLER-facing
-// half of the same spelling rule dir_is_root_secure refuses on. The two must
-// never disagree: assert_system_tree and link_operator_bins pick which cause
-// they name for rc 1 by asking it, so a spelling where the predicate refuses
-// and this answers false is an operator told to audit ownership that is
-// already correct.
+// dirLeafIsSymlink runs the region's dir_leaf_is_symlink — the caller-facing
+// rule, and the ONLY thing that refuses a symlinked leaf anywhere. The
+// predicate itself follows one; assert_system_tree asks this about the CONFIG
+// root alone, mirroring the single place Go wires IsRootSecureDir. So this
+// function is what has to be right for every spelling: it is the whole
+// refusal, not a hint about one.
 func dirLeafIsSymlink(t *testing.T, target string) bool {
 	t.Helper()
 	none := map[string]string{}
@@ -220,36 +220,70 @@ func TestDirIsRootSecureReportsUndecidableNotInsecure(t *testing.T) {
 	}
 }
 
-// TestDirIsRootSecureRefusesASymlinkedLeaf pins the shell half to the Go half
-// it declares itself the shell half OF — for EVERY SPELLING, which is the part
-// that has now been got wrong three times in this change's history.
+// TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf — a symlinked leaf
+// has TWO ancestor chains and both decide. The predicate FOLLOWS it: refusing
+// one outright is a rule that belongs to a single caller, not to this
+// predicate, and the scope is an operator ruling recorded in the region header
+// — a symlinked $SYS_DATA_DIR or $SYSTEM_ROOT is the ordinary "put var on the
+// big disk" layout, it installed cleanly before this branch and the daemon
+// never rejects it, so a hard refusal here would have broken a supported
+// layout. Only the CONFIG root's caller refuses, mirroring the one place Go
+// wires IsRootSecureDir.
 //
-// core/binary's IsRootSecureDir refuses a symlinked leaf on its Lstat, and says
-// why in a directory-specific way: IsRootSecure (the FILE form) accepts one
-// because distros ship /bin/rm as a symlink, but "a config root that is a
-// symlink is not a packaging fact, it is somebody redirecting where the daemon
-// writes its secrets, so it is refused outright" (root_secure_unix.go). This
-// predicate used to FOLLOW such a leaf, so a symlinked $SYS_CONFIG_DIR
-// installed cleanly and the daemon then refused at first start — the outcome
-// assert_system_tree exists to turn into a failed install naming the directory.
+// What protects every root, including the config root, is this: both chains
+// are judged, so the directory that HOLDS the link is judged as well as the
+// tree it points into.
 //
-// THE SPELLINGS ARE THE TEST. A refusal that a caller can step around by adding
-// one character is not a refusal, and the first form of this rule stripped only
-// trailing slashes: `…/link/.` walked straight through it and answered 0.
-// $BIN_DIR, the $SYS_* roots and $LINK_DIR all arrive from operator
-// environment, so every spelling below is reachable. dir_spelling_normalize is
-// the one home for which spellings name the same directory; these cases are its
-// contract, and the negative half matters as much — a rule that refuses
-// `X/..` or an interior `.` would break real paths.
+// Mutations that redden it: delete the `[ -L "$_ds_cur" ]` branch, so the link
+// is judged by its own uid and mode instead of being followed; or delete the
+// `|| return $?` from the walk's dir_level_is_root_secure call.
+func TestDirIsRootSecureJudgesTheChainThatHoldsASymlinkedLeaf(t *testing.T) {
+	root := canonicalTempDir(t)
+	holder := filepath.Join(root, "holder")
+	target := filepath.Join(root, "target", "bin")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(holder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(holder, "bin")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]string{}
+
+	if rc := dirIsRootSecure(t, link, none, none); rc != 0 {
+		t.Errorf("a symlinked leaf with both chains root-owned: rc = %d, want 0 — this predicate follows it; the config root's own refusal is the caller's", rc)
+	}
+	if rc := dirIsRootSecure(t, link, none, map[string]string{holder: "775"}); rc != 1 {
+		t.Errorf("a group-writable directory holding the link: rc = %d, want 1 — its owner can repoint the link", rc)
+	}
+	if rc := dirIsRootSecure(t, link, none, map[string]string{target: "775"}); rc != 1 {
+		t.Errorf("a group-writable symlink target: rc = %d, want 1", rc)
+	}
+	if rc := dirIsRootSecure(t, link, map[string]string{holder: "501"}, none); rc != 1 {
+		t.Errorf("a non-root-owned directory holding the link: rc = %d, want 1", rc)
+	}
+}
+
+// TestDirLeafIsSymlinkAnswersEverySpelling is the caller-facing half of the
+// rule, and the spellings ARE the test.
+//
+// dir_leaf_is_symlink is what assert_system_tree asks about the CONFIG root
+// alone. A rule a caller can step around by adding one character is not a
+// rule, and the first form of this one stripped only trailing slashes:
+// `…/link/.` walked straight past it. $BIN_DIR, the $SYS_* roots and $LINK_DIR
+// all arrive from operator environment, so every spelling below is reachable.
+// The negative half matters as much: a rule that swallowed `X/..` or an
+// interior `.` would refuse real directories.
 //
 // Mutations that redden it:
-//   - delete `if [ -L "$_ds_in" ]; then return 1; fi`: every positive case;
-//   - delete the `*/) … %/}` arm of dir_spelling_normalize: the trailing-slash
-//     spellings;
-//   - delete its `*/.) … %/.}` arm: the /. spellings — this is the exact
-//     regression, and it is what the earlier form shipped;
-//   - delete `[ -n "$_dsn_out" ] || _dsn_out=/`: the "/." root case.
-func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
+//   - delete the `*/) … %/}` arm of dir_spelling_normalize: the trailing
+//     separator spellings;
+//   - delete its `*/.) … %/.}` arm: the /. spellings — the exact regression;
+//   - delete the `dir_spelling_normalize` call: all of them but the first.
+func TestDirLeafIsSymlinkAnswersEverySpelling(t *testing.T) {
 	root := canonicalTempDir(t)
 	holder := filepath.Join(root, "holder")
 	target := filepath.Join(root, "target", "bin")
@@ -267,14 +301,6 @@ func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "no-such-tree"), dangling); err != nil {
 		t.Fatal(err)
 	}
-	plain := filepath.Join(holder, "real")
-	if err := os.MkdirAll(plain, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	none := map[string]string{}
-
-	// REFUSED — every legal spelling of the same symlinked directory, with
-	// both chains spotless, because the leaf being a link is the whole finding.
 	for _, spelling := range []string{
 		link,             // as spelled
 		link + "/",       // trailing separator
@@ -282,68 +308,61 @@ func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
 		link + "/.",      // the spelling that walked through the first form
 		link + "/./",     // and with a separator after it
 		link + "/.//.",   // and interleaved
-		holder + "//bin", // doubled separator above the leaf
+		holder + "//bin", // a doubled separator above the leaf
 		dangling,         // a link whose target does not exist is still a link
 	} {
-		if rc := dirIsRootSecure(t, spelling, none, none); rc != 1 {
-			t.Errorf("dir_is_root_secure(%q) = %d, want 1 — a symlinked leaf is refused in every spelling that names it, or the refusal is one character from being stepped around", spelling, rc)
+		if !dirLeafIsSymlink(t, spelling) {
+			t.Errorf("dir_leaf_is_symlink(%q) = false, want true — one character must not step around the rule", spelling)
 		}
 	}
-
-	// NOT REFUSED for that reason — the negative half. A rule that swallowed
-	// these would refuse real paths.
-	for _, tc := range []struct {
-		spelling string
-		why      string
-	}{
-		{link + "/..", "/.. names the link target's PARENT, a real directory — .. from anywhere yields a real directory"},
+	for _, tc := range []struct{ spelling, why string }{
+		{link + "/..", "/.. names the target's PARENT, a real directory — .. from anywhere yields one"},
 		{target, "a real leaf"},
 		{filepath.Join(root, "target") + "/./bin", "an interior . does not touch the leaf"},
 		{filepath.Join(root, "target") + "//bin", "an interior // does not touch the leaf"},
-		{plain, "a real directory beside the link"},
+		{root, "a plain directory"},
 		{"/", "the root directory"},
-		{"/.", "the root, spelled with a dot — the normalizer EMPTIES this one, and must put / back"},
+		{"/.", "the root, spelled with a dot — the normalizer empties this one and must put / back"},
 		{"/./", "the same, with a separator"},
-		{"//.", "and with a doubled separator"},
-		{"//", "the root, doubled"},
+		{"", "an empty operand names nothing at all"},
 	} {
-		if rc := dirIsRootSecure(t, tc.spelling, none, none); rc != 0 {
-			t.Errorf("dir_is_root_secure(%q) = %d, want 0 — %s", tc.spelling, rc, tc.why)
+		if dirLeafIsSymlink(t, tc.spelling) {
+			t.Errorf("dir_leaf_is_symlink(%q) = true, want false — %s", tc.spelling, tc.why)
 		}
 	}
+}
 
-	// Relative spellings reach the same rule, anchored at the working
-	// directory rather than at /.
-	for _, arg := range []string{"bin", "./bin", "bin/.", "./bin/./"} {
-		if rc := dirIsRootSecureFrom(t, holder, arg, none, none); rc != 1 {
-			t.Errorf("dir_is_root_secure(%q) from the holder = %d, want 1", arg, rc)
-		}
+// TestDirIsRootSecureRefusesAnEmptyOperand — an unset variable must never come
+// back "root-secure".
+//
+// dir_spelling_normalize restores "/" after a spelling like "/." empties it,
+// and that restoration fired for an EMPTY INPUT too: `dir_is_root_secure ""`
+// answered 0. A rule written for one input shape firing on another, for the
+// third time in this change. The in-tree callers all pass ${VAR:-default}, but
+// this region is copied byte-for-byte into two other repos and its own header
+// says the callers may differ freely, so a caller with an unset variable got a
+// pass instead of a refusal.
+//
+// Mutation that reddens it: drop the `case "$1" in /*)` guard around the
+// restoration — "" then normalizes to "/" and answers 0.
+//
+// There is deliberately only ONE guard. An explicit `[ -n "$1" ] || return 3`
+// in dir_is_root_secure was written first and removed: with the normalizer
+// guarded, deleting it left this test green, and with it present, deleting the
+// normalizer's guard left this test green too. Two statements of one rule make
+// neither of them testable, so the rule lives where it fixes the source — in
+// the normalizer, for every caller of it in all three repos, not only for this
+// predicate.
+func TestDirIsRootSecureRefusesAnEmptyOperand(t *testing.T) {
+	none := map[string]string{}
+	if rc := dirIsRootSecure(t, "", none, none); rc != 3 {
+		t.Errorf("dir_is_root_secure(\"\") = %d, want 3 — an unset operand names no directory, and 0 is the one answer it must never get", rc)
 	}
-
-	// THE CALLER'S DISCRIMINATOR MUST NEVER DISAGREE WITH THE REFUSAL. rc 1 has
-	// two causes, and assert_system_tree / link_operator_bins choose which one
-	// to name by asking dir_leaf_is_symlink. If it answered false for a
-	// spelling the predicate refuses, the operator would be sent to audit
-	// ownership and modes that are already correct — the misdirection this
-	// round of review was about. Both read dir_spelling_normalize, so this
-	// asserts they still do.
-	// Mutation that reddens it: drop the dir_spelling_normalize call from
-	// dir_leaf_is_symlink and test `[ -L "$1" ]` directly.
-	for _, spelling := range []string{link, link + "/", link + "//", link + "/.", link + "/./", link + "/.//.", dangling} {
-		if rc := dirIsRootSecure(t, spelling, none, none); rc == 1 && !dirLeafIsSymlink(t, spelling) {
-			t.Errorf("dir_is_root_secure(%q) refuses but dir_leaf_is_symlink says no — the caller would blame ownership for a symlink", spelling)
+	// The restoration it was guarding still works: "/." names the root.
+	for _, spelling := range []string{"/", "/.", "/./", "//", "//."} {
+		if rc := dirIsRootSecure(t, spelling, none, none); rc != 0 {
+			t.Errorf("dir_is_root_secure(%q) = %d, want 0 — the guard must not cost the root spellings it exists for", spelling, rc)
 		}
-	}
-	for _, spelling := range []string{target, plain, link + "/..", "/"} {
-		if dirLeafIsSymlink(t, spelling) {
-			t.Errorf("dir_leaf_is_symlink(%q) is true for a real directory — the caller would blame a symlink for an ownership refusal", spelling)
-		}
-	}
-
-	// And the holder still decides for a real leaf, so the refusal above is
-	// about the link and not about the fixture.
-	if rc := dirIsRootSecure(t, plain, none, map[string]string{holder: "775"}); rc != 1 {
-		t.Errorf("a group-writable directory holding a real leaf: rc = %d, want 1", rc)
 	}
 }
 
@@ -361,10 +380,12 @@ func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
 // that are exactly right, which is the misdirection the whole 1-vs-2 contract
 // exists to prevent. link_operator_bins reaches it without any root gate.
 //
-// This test is REAL only below root — root searches a 0000 directory anyway.
-// CI runs as an ordinary uid. There is no structural half available here the
-// way there is for the never-enters rule, so this is stated rather than
-// papered over.
+// This test is REAL only below root — root searches a 0000 directory anyway,
+// the entry `[ -d ]` then succeeds and the walk answers 0 from stub defaults.
+// So it SKIPS under a root runner rather than failing there: a red test that
+// is not a defect trains a reader to ignore the colour. CI runs as an ordinary
+// uid, where it is a real assertion. There is no euid-independent structural
+// half available here the way there is for the never-enters rule.
 //
 // Mutation that reddens it: restore `[ -d "$_ds_in" ] || return 3` at the
 // entry of dir_is_root_secure — the answer becomes 3, "this directory does not
@@ -384,6 +405,9 @@ func TestDirIsRootSecureRefusesASymlinkedLeaf(t *testing.T) {
 // leaves this suite green, and that is a statement about reachability, not a
 // hole in the test.
 func TestDirIsRootSecureSaysUndecidableWhenItCannotTraverse(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: no chmod can make a directory unsearchable for this process, so the fixture cannot stage the condition under test")
+	}
 	root := canonicalTempDir(t)
 	sealed := filepath.Join(root, "sealed")
 	inner := filepath.Join(sealed, "burrowee")
