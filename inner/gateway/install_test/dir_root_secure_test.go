@@ -625,12 +625,40 @@ func assertLevelSafeToState(t *testing.T, target string, uids, modes map[string]
 // $SYS_* roots all arrive from operator environment, so every spelling here is
 // reachable.
 //
+// BOTH LINK KINDS, and the relative one is not decoration. A structural test
+// asserts the function reads $1 exactly once; that is a different proposition
+// from "the anchor computes the right path", and relying on the first to cover
+// the second is the adjacency error this whole change has been about. The
+// anchor — `_alss_t="$(dirname "$_alss_d")/$_alss_t"` — only runs for a
+// RELATIVE target, so without a relative fixture it has no behavioural
+// coverage at all: anything could be substituted there and still read $1 once.
+//
 // The fix is one assignment at the top rather than a rule to remember:
 // normalize once, and never read $1 again.
 //
 // Mutations that redden it: put `_alss_d="$1"` back in place of the
-// normalize-then-copy; or use "$1" instead of "$_alss_d" at either the
-// readlink or the dirname.
+// normalize-then-copy, or use "$1" instead of "$_alss_d" at the readlink —
+// both, on both link kinds, on every platform.
+//
+// THE ANCHOR IS THE EXCEPTION, AND THE ASYMMETRY IS WORTH KNOWING. Reading the
+// raw "$1" at the anchor's `dirname` is a real defect on macOS and INERT on
+// Linux, because the two dirnames disagree about the spellings this predicate
+// normalizes:
+//
+//	                 GNU (Linux)        BSD (macOS)
+//	dirname X/.      <parent>           <parent>/X
+//	dirname X/./     <parent>           <parent>/X
+//	dirname X/.//.   <parent>           <parent>/X/.
+//
+// GNU folds the trailing `/.` away, so `dirname "$1"` and
+// `dirname "$_alss_d"` coincide for every legal spelling and the mutation
+// cannot be observed. On macOS they diverge and the guard refuses a sound
+// layout. So CI — Linux — cannot exercise this half of the fixture, and the
+// relative case here is coverage on macOS only; verified by driving the
+// shipped region plus the shipped function against a relative link there
+// (rc 1 mutated, rc 0 restored). What covers the anchor on EVERY platform is
+// TestNormalizingFunctionsDoNotReadTheRawSpelling, which is why that test is
+// load-bearing rather than a restatement of this one.
 func TestAssertLevelSafeToStateAnswersTheSameForEverySpelling(t *testing.T) {
 	root := canonicalTempDir(t)
 	volume := filepath.Join(root, "big")
@@ -638,32 +666,49 @@ func TestAssertLevelSafeToStateAnswersTheSameForEverySpelling(t *testing.T) {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(root, "datalink")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
 	plain := filepath.Join(root, "plain")
 	if err := os.MkdirAll(plain, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	none := map[string]string{}
-	// A sound chain above the target: every spelling must accept.
-	for _, spelling := range []string{link, link + "/", link + "/.", link + "//", link + "/.//."} {
-		if rc := assertLevelSafeToState(t, spelling, none, none); rc != 0 {
-			t.Errorf("assert_level_safe_to_state(%q) = %d, want 0 — the chain above the target is sound, and the spelling must not change that", spelling, rc)
-		}
+	absLink := filepath.Join(root, "datalink")
+	if err := os.Symlink(target, absLink); err != nil {
+		t.Fatal(err)
 	}
-	// A group-writable directory above the target: every spelling must refuse,
-	// and refuse for THAT reason rather than for an unreadable link.
-	badChain := map[string]string{volume: "775"}
-	for _, spelling := range []string{link, link + "/", link + "/."} {
-		if rc := assertLevelSafeToState(t, spelling, none, badChain); rc != 1 {
-			t.Errorf("assert_level_safe_to_state(%q) with a group-writable directory above the target = %d, want 1", spelling, rc)
-		}
+	// A RELATIVE target, anchored at the link's own directory — the only shape
+	// that reaches the anchor branch.
+	relLink := filepath.Join(root, "datalink-rel")
+	if err := os.Symlink(filepath.Join("big", "data"), relLink); err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]string{}
+	spellings := func(p string) []string {
+		return []string{p, p + "/", p + "/.", p + "//", p + "/.//."}
+	}
+	for _, link := range []struct{ kind, path string }{
+		{"an absolute link target", absLink},
+		{"a relative link target", relLink},
+	} {
+		t.Run(link.kind, func(t *testing.T) {
+			// A sound chain above the target: every spelling must accept.
+			for _, spelling := range spellings(link.path) {
+				if rc := assertLevelSafeToState(t, spelling, none, none); rc != 0 {
+					t.Errorf("assert_level_safe_to_state(%q) = %d, want 0 — the chain above the target is sound, and the spelling must not change that", spelling, rc)
+				}
+			}
+			// A group-writable directory above the target: every spelling must
+			// refuse, and refuse for THAT reason rather than for an unreadable
+			// link or a parent that does not exist.
+			badChain := map[string]string{volume: "775"}
+			for _, spelling := range spellings(link.path) {
+				if rc := assertLevelSafeToState(t, spelling, none, badChain); rc != 1 {
+					t.Errorf("assert_level_safe_to_state(%q) with a group-writable directory above the target = %d, want 1", spelling, rc)
+				}
+			}
+		})
 	}
 	// A level that is not a symlink is not this guard's business, in any
 	// spelling.
-	for _, spelling := range []string{plain, plain + "/", plain + "/."} {
+	for _, spelling := range spellings(plain) {
 		if rc := assertLevelSafeToState(t, spelling, none, none); rc != 0 {
 			t.Errorf("assert_level_safe_to_state(%q) on a real directory = %d, want 0", spelling, rc)
 		}
