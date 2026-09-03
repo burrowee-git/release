@@ -896,10 +896,16 @@ stale_exec_root_twin_ok() {
 }
 
 # stale_exec_root_decision <bin> <operator-home> — the WHOLE decision for one
-# name at $LEGACY_BIN_DIR, as one word: link-ours | link-foreign |
-# link-dangling | absent | irregular | foreign | no-twin | twin-untrusted |
-# unit:<file> | remove | remove-link. One function, used by the probe and the
-# sweep alike, for the reason stale_bin_decision gives.
+# name at $LEGACY_BIN_DIR, as one word: link-foreign | link-dangling | absent |
+# irregular | foreign | no-twin | twin-untrusted | unit:<file> | remove |
+# remove-link. One function, used by the probe and the sweep alike, for the
+# reason stale_bin_decision gives.
+#
+# THERE IS NO `link-ours`. A link of ours is not a verdict on its own: it still
+# has to clear the unit guard, so it leaves here as either `unit:<file>` or
+# `remove-link` and never as a word of its own. The word was listed here once
+# and emitted nowhere, which is the shape that makes a reader add a dead arm to
+# a caller's `case`.
 stale_exec_root_decision() {
     _serd_p="$LEGACY_BIN_DIR/$1"
     # stale_bin_verdict answers `symlink` FIRST, before ownership — a link's
@@ -981,7 +987,7 @@ remove_stale_exec_root_bins() {
     for _rser_b in $STALE_USER_BINS; do
         _rser_p="$LEGACY_BIN_DIR/$_rser_b"
         if stale_exec_root_is_kept "$_rser_b"; then
-            [ -e "$_rser_p" ] && echo "kept $_rser_p — no link was made at that name, so this is the only copy anything reaches there"
+            [ -e "$_rser_p" ] && echo "kept $_rser_p — \$STALE_EXEC_ROOT_KEEP names it, so this sweep leaves it alone"
             continue
         fi
         _rser_d="$(stale_exec_root_decision "$_rser_b" "$_rser_home")"

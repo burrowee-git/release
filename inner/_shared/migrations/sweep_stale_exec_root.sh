@@ -5,14 +5,24 @@
 #
 # 0.3 moved the exec root from /usr/local/bin to /usr/local/burrowee/bin — the
 # bin/ of the one machine-owned tree beside etc/<comp> and var/<comp> (spec
-# 2026-08-27-v0-3-system-root-layout §6, §8 item 4). The 0.3 installer places
-# every binary in the new tree and links the OPERATOR-TYPED names back into
-# /usr/local/bin where that directory is root-secure; every other name it
-# placed there in 0.2 — the updater above all, which a root unit execs by real
-# path and nobody types — is left behind as a stale real file. So is every
-# operator-typed name on a host whose /usr/local/bin was not root-secure, where
-# the installer declined to link. This rung sweeps those, by exact name, per
-# item.
+# 2026-08-27-v0-3-system-root-layout §6, §8 item 4; §6.1's symlinks are
+# SUPERSEDED — see below). The 0.3 installer places every binary in the new
+# tree and NOTHING is linked back into /usr/local/bin, so every name 0.2 put
+# there is left behind as a stale real file: the updater, which a root unit
+# execs by real path and nobody types, and the operator-typed names alike.
+# This rung sweeps them, by exact name, per item.
+#
+# EARLY 0.3 DID LINK, and that is why the symlink rule below is what it is.
+# The first 0.3 installers symlinked the operator-typed names back into
+# /usr/local/bin wherever that directory proved root-secure. On a clean modern
+# Mac /usr/local/bin does not exist, so nothing was linked and the install left
+# the operator no command they could type; on an Intel Mac Homebrew owns the
+# directory and the check declined for the opposite reason. Both are the
+# majority case, so the step was deleted and every installer now prints how to
+# reach the exec root from the operator's own login shell instead. A link found
+# in /usr/local/bin today is therefore a LEFTOVER of one of those releases, not
+# the install's PATH entry — which is exactly what the symlink rule below
+# inverted to say.
 #
 # ONE STEP IN THE LADDER. run.sh owns the version gate, the receipt and the
 # ordering; this script owns only the sweep. Never invoked directly.
@@ -42,10 +52,21 @@
 # row ordered after it — including the component's own 0.2→0.3 copy rung.
 #
 # PER ITEM, NEVER PER SECTION. Every name re-tests its own applicability where
-# it runs: a symlink (ours or anyone's) is never touched, a file with no
-# burrowee build stamp is not ours, a name with no trusted twin in the new
-# tree is the live install, a file some unit still names may be running.
-# One name's answer never decides another's.
+# it runs: a file with no burrowee build stamp is not ours, a name with no
+# trusted twin in the new tree is the live install, a file some unit still
+# names may be running. One name's answer never decides another's.
+#
+# SYMLINKS: OURS GO, EVERYONE ELSE'S STAY. This rule INVERTED when the link
+# step was deleted, so the old one is worth stating to show what changed.
+# Every symlink used to be spared, on the grounds that it WAS the install's
+# PATH entry and deleting one deleted the operator's access. Nothing links
+# there any more, so a link whose target resolves directly inside $BIN_DIR is
+# a leftover of an early 0.3 release sitting in a directory PATH reaches ahead
+# of the exec root, and it is removed — which takes no binary with it, since
+# the target is what $BIN_DIR still holds. A link pointing anywhere else is
+# the operator's and stays; one that does not resolve names nobody and stays.
+# The unit guard applies to a link exactly as to a file (a macOS
+# KeepAlive.PathState keys off the path's existence); the twin guard does not.
 #
 # MODES
 #   --applies   exit 0 if a sweep right now would remove something. FAILS

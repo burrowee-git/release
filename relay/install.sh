@@ -359,10 +359,22 @@ ok "verified — running inner installer"
 # carries it (sudo scrubs the environment), so it is forwarded explicitly as a
 # command-prefix assignment on the `env` invocation, the same boundary-crossing
 # pattern tools/bootstrap.template.sh uses for its own PREFIX. No PATH
-# persistence either: the inner installer links burrowee-relay-cli into
-# /usr/local/bin when that directory is root-secure and prints the one
-# `export PATH=…` line itself when it declines, so there is no rc file for
-# this script to edit.
+# persistence either: the inner installer owns the PATH question and prints the
+# `export PATH=…` line for the operator's own login shell itself, so there is no
+# rc file for this script to edit. (tools/bootstrap.template.sh used to edit one
+# for cli and agent; that block is deleted — see its own header for why.)
+#
+# RELAY'S INSTALLER IS NOT IN THIS REPO, and at the time of writing it still
+# LINKS burrowee-relay-cli into /usr/local/bin when that directory is
+# root-secure — the step every other component has now deleted. rkit resolves
+# relay's install.sh from the source tree being built (cmd/rkit/build.go), so
+# it is the relay repo's to change and this description is deliberately not a
+# claim about behaviour this repo controls. What this repo DOES control bites
+# either way: payload.sh's takes_shared_ladder stages the shared ladder for
+# relay, so a relay kit already carries the inverted sweep, which removes links
+# into $BIN_DIR. Until relay's own installer drops its link step, a relay
+# install can make three links and sweep them in the same run. That is tracked
+# as a blocker on any relay cut, not as something to patch from here.
 run_inner() {
     if [ -n "$ELEVATE" ]; then
         info "$COMP installs to /usr/local/burrowee/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"

@@ -2595,7 +2595,7 @@ assert_eq "$RC" 2 "the sweep still runs — the keep-list narrows it, it does no
 assert_present "$h37a4/old-bin/burrowee" "a kept name must survive: no link has replaced it, so this is the only copy at that path"
 assert_present "$h37a4/old-bin/burrowee-edge-cli" "a kept operator-typed name survives too"
 assert_gone "$h37a4/old-bin/burrowee-edge-updater" "while a name NOT in the keep-list is still swept — per item, never per section"
-assert_contains "$OUT" "kept $h37a4/old-bin/burrowee — no link was made at that name" "and the rung says why it kept it"
+assert_contains "$OUT" "kept $h37a4/old-bin/burrowee — \$STALE_EXEC_ROOT_KEEP names it" "and the rung says why it kept it"
 
 # 37a5. THE PROBE HONOURS IT TOO: with every removable name kept, --applies must
 #       answer no, or the runner authorises a sweep that then declines and the
