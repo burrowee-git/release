@@ -86,6 +86,24 @@ func TestTreeAssertionsRefuseBeforeTheyTouchTheHost(t *testing.T) {
 }
 
 // shellFunctionBody returns one shell function's text, brace to brace.
+// TestEnsureDirStatedJudgesTheChainAboveTheTargetNotTheTarget pins WHICH path
+// the guard judges, because the two differ by three characters and the wrong
+// one refuses a supported layout.
+//
+// $_eds_up is the RESOLVED parent of a symlinked level's target — the part
+// ensure_dir_stated can never repair. The target itself is what it repairs on
+// purpose: an operator who creates a directory, points a data root
+// at it and runs the installer is meant to have it chowned to root. Judging
+// the target would refuse that install.
+// dir_root_secure_test.go's TestDirIsRootSecureJudgesTheChainAboveASymlinkTargetSeparately
+// shows the two verdicts genuinely disagree in exactly that case.
+func TestEnsureDirStatedJudgesTheChainAboveTheTargetNotTheTarget(t *testing.T) {
+	fn := shellFunctionBody(t, string(mustReadFile(t, installShPath(t))), "ensure_dir_stated")
+	if !strings.Contains(fn, `dir_is_root_secure "$_eds_up"`) {
+		t.Errorf("ensure_dir_stated does not judge $_eds_up — judging the target itself refuses an operator-created directory that this installer is meant to chown, and judging nothing lets chown and chmod follow the link into a tree that will be refused anyway")
+	}
+}
+
 func shellFunctionBody(t *testing.T, body, name string) string {
 	t.Helper()
 	open := "\n" + name + "() {\n"

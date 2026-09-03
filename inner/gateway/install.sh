@@ -1604,21 +1604,34 @@ ensure_dir_stated() {
     # regardless of it. Hoisting one lstat over the config root was not enough;
     # the rule belongs here, where every level passes through.
     #
-    # WHAT IS JUDGED IS THE TARGET'S CHAIN, NOT THE TARGET. `$_eds_d/..` walks
-    # the resolved parent and everything above it — the part ensure_dir_stated
-    # can never repair. Judging the target itself would break a supported
-    # path: an operator who creates the directory, points a data root at it and
-    # runs the installer is meant to have it chowned to root, and that is
-    # exactly what the two lines below are for. A bad ANCESTOR is different —
-    # no chown of ours fixes it, so the install is already lost and the write
-    # buys nothing.
+    # WHAT IS JUDGED IS THE TARGET'S CHAIN, NOT THE TARGET — the part
+    # ensure_dir_stated can never repair. Judging the target itself would break
+    # a supported path: an operator who creates the directory, points a data
+    # root at it and runs the installer is meant to have it chowned to root,
+    # and that is exactly what the two lines below are for. A bad ANCESTOR is
+    # different: no chown of ours fixes it, so the install is already lost and
+    # the write only damages a directory outside this installer's tree.
+    #
+    # The parent is RESOLVED FIRST rather than handed over as "$_eds_d/..",
+    # because the walk judges every component of the path it is given — and the
+    # resolved path of "$_eds_d/.." runs THROUGH the target before popping back
+    # to it, so the target would be judged after all and the supported layout
+    # refused. `cd -P` gives the kernel's parent; the walk then starts from a
+    # path that does not contain the target at all. (A test asserts the two
+    # verdicts genuinely differ, which is the only reason this distinction is
+    # worth three extra lines.)
     #
     # A symlinked level whose chain is sound falls straight through and is
     # stated as before: pointing a var or data root at another volume is the
     # ordinary layout and must keep working.
     if dir_leaf_is_symlink "$_eds_d"; then
+        _eds_up="$(CDPATH= cd -P -- "$_eds_d/.." 2>/dev/null && pwd -P)" || _eds_up=''
         _eds_rc=0
-        dir_is_root_secure "$_eds_d/.." || _eds_rc=$?
+        if [ -n "$_eds_up" ]; then
+            dir_is_root_secure "$_eds_up" || _eds_rc=$?
+        else
+            _eds_rc=2
+        fi
         if [ "$_eds_rc" != 0 ]; then
             echo "error: $_eds_d is a symlink, and the directory it points into is not one" >&2
             echo "error: only root can rewrite — see the chain above its target." >&2

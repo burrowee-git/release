@@ -2742,6 +2742,22 @@ else
         "$t37a8/migrations/lib_stale_user_bins.sh" \
         "$h37a8/sealed/bin" "$h37a8/sys/bin" || RC=$?
     assert_eq "$RC" 1 "an unresolvable LEGACY side with a resolvable destination still compares textually — they are different directories and the sweep is legitimate"
+    # The DESTINATION side must resolve PHYSICALLY too, and this is the only
+    # shape where that shows. A `..` after a symlink is folded by the shell
+    # unless `cd -P` hands it to the kernel; folded, the destination resolves
+    # to nothing, the guard above answers "same" for safety, and a sweep that
+    # SHOULD run is silently skipped. The two directories here really are
+    # different, so "different" is the correct answer and only -P produces it.
+    # Without a legacy side that differs, `cd` and `cd -P` on the destination
+    # are indistinguishable — the guard subsumes the difference — which is why
+    # this case exists rather than another spelling in 37a7.
+    mkdir -p "$h37a8/sys/oldbin" "$h37a8/sys/leg"
+    ln -s "$h37a8/sys/etc" "$h37a8/sys/leg/link"
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir "$2" "$3"' _ \
+        "$t37a8/migrations/lib_stale_user_bins.sh" \
+        "$h37a8/sys/oldbin" "$h37a8/sys/leg/link/../bin" || RC=$?
+    assert_eq "$RC" 1 "a DESTINATION spelled with a .. after a symlink must resolve physically — folded by the shell it resolves to nothing, the guard answers 'same', and a legitimate sweep is skipped"
 fi
 chmod 0755 "$h37a8/sealed"
 

@@ -474,6 +474,59 @@ func TestDirLeafIsNotdirSeparatesATakenNameFromAMissingOne(t *testing.T) {
 	}
 }
 
+// TestDirIsRootSecureJudgesTheChainAboveASymlinkTargetSeparately is the
+// behavioural half of ensure_dir_stated's guard, and it pins a trap this
+// change fell into before the test caught it.
+//
+// The guard refuses a symlinked level before chown and chmod follow the link,
+// and it must judge only the chain ABOVE the link's target. The target itself
+// is what ensure_dir_stated repairs on purpose: an operator who creates a
+// directory, points a data root at it and runs the installer is meant to have
+// it chowned to root, so refusing on the target would refuse a supported
+// layout.
+//
+// THE TRAP: "$level/.." does NOT express "the chain above the target". This
+// walk judges every component of the path it is given, and the resolved path
+// of "$level/.." runs THROUGH the target before popping back to it — so the
+// target is judged after all. The first version of the guard passed that
+// spelling and would have refused exactly the layout it was written to
+// preserve. The guard resolves the parent with `cd -P` first and judges a path
+// that does not contain the target at all.
+//
+// The three assertions below are the whole argument: the target refuses, the
+// "$level/.." spelling ALSO refuses (which is why it cannot be used), and the
+// resolved parent accepts.
+func TestDirIsRootSecureJudgesTheChainAboveASymlinkTargetSeparately(t *testing.T) {
+	root := canonicalTempDir(t)
+	volume := filepath.Join(root, "volume")
+	target := filepath.Join(volume, "data")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "datalink")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]string{}
+	// The operator owns the target; everything above it is root's.
+	operatorOwns := map[string]string{target: "501"}
+
+	if rc := dirIsRootSecure(t, link, operatorOwns, none); rc != 1 {
+		t.Errorf("the target itself, operator-owned: rc = %d, want 1 — this is what the installer is meant to chown, not refuse", rc)
+	}
+	if rc := dirIsRootSecure(t, link+"/..", operatorOwns, none); rc != 1 {
+		t.Errorf("the \"$level/..\" spelling: rc = %d, want 1 — it resolves THROUGH the target, so it judges the target too; if this ever answers 0 the guard could use it directly and this test should be revisited", rc)
+	}
+	if rc := dirIsRootSecure(t, volume, operatorOwns, none); rc != 0 {
+		t.Errorf("the RESOLVED parent: rc = %d, want 0 — this is the only spelling that judges the chain without the target, and it is what the guard passes", rc)
+	}
+	// And when the chain above really is bad, the resolved parent catches it —
+	// the case the guard exists for, where no chown of ours repairs anything.
+	if rc := dirIsRootSecure(t, volume, none, map[string]string{volume: "775"}); rc != 1 {
+		t.Errorf("a group-writable directory above the target: rc = %d, want 1", rc)
+	}
+}
+
 // TestDirIsRootSecureRefusesAnEmptyOperand — an unset variable must never come
 // back "root-secure".
 //
