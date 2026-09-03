@@ -502,12 +502,14 @@ func TestDirLeafIsNotdirSeparatesATakenNameFromAMissingOne(t *testing.T) {
 // of "$level/.." runs THROUGH the target before popping back to it — so the
 // target is judged after all. The first version of the guard passed that
 // spelling and would have refused exactly the layout it was written to
-// preserve. The guard resolves the parent with `cd -P` first and judges a path
-// that does not contain the target at all.
+// preserve. The guard derives the parent from the link's TEXT instead —
+// readlink, then dirname — which never opens the target, and hands that to
+// this walk. It does not use `cd -P`: an intermediate form did, and that needs
+// search permission on the target, which is the EACCES trap all over again.
 //
 // The three assertions below are the whole argument: the target refuses, the
 // "$level/.." spelling ALSO refuses (which is why it cannot be used), and the
-// resolved parent accepts.
+// parent accepts.
 func TestDirIsRootSecureJudgesTheChainAboveASymlinkTargetSeparately(t *testing.T) {
 	root := canonicalTempDir(t)
 	volume := filepath.Join(root, "volume")
@@ -530,7 +532,7 @@ func TestDirIsRootSecureJudgesTheChainAboveASymlinkTargetSeparately(t *testing.T
 		t.Errorf("the \"$level/..\" spelling: rc = %d, want 1 — it resolves THROUGH the target, so it judges the target too; if this ever answers 0 the guard could use it directly and this test should be revisited", rc)
 	}
 	if rc := dirIsRootSecure(t, volume, operatorOwns, none); rc != 0 {
-		t.Errorf("the RESOLVED parent: rc = %d, want 0 — this is the only spelling that judges the chain without the target, and it is what the guard passes", rc)
+		t.Errorf("the DERIVED parent: rc = %d, want 0 — this is the only spelling that judges the chain without the target, and it is what the guard passes", rc)
 	}
 	// And when the chain above really is bad, the resolved parent catches it —
 	// the case the guard exists for, where no chown of ours repairs anything.
@@ -580,6 +582,91 @@ func TestDirIsRootSecureJudgesAParentWhoseChildIsUnsearchable(t *testing.T) {
 	// which is why the guard asks about the parent and not about the child.
 	if rc := dirIsRootSecure(t, filepath.Join(child, "below"), none, none); rc != 2 {
 		t.Errorf("something below the unsearchable child: rc = %d, want 2", rc)
+	}
+}
+
+// shellFuncText returns a whole shell function — header line, body and closing
+// brace — so a probe can define it alongside the contract region and call it.
+func shellFuncText(t *testing.T, body, name string) string {
+	t.Helper()
+	head := "\n" + name + "() {\n"
+	b := strings.Index(body, head)
+	if b < 0 {
+		t.Fatalf("the installer defines no %s()", name)
+	}
+	rest := body[b+1:]
+	e := strings.Index(rest, "\n}\n")
+	if e < 0 {
+		t.Fatalf("%s() is never closed", name)
+	}
+	return rest[:e+len("\n}\n")]
+}
+
+// assertLevelSafeToState drives the installer's own assert_level_safe_to_state
+// against the shipped contract region. The function depends on nothing but the
+// region plus readlink and dirname, so region + function is a complete program
+// and the test drives the shipped text rather than a transcription of it.
+func assertLevelSafeToState(t *testing.T, target string, uids, modes map[string]string) int {
+	t.Helper()
+	fn := shellFuncText(t, string(mustRead(t, installShPath(t))), "assert_level_safe_to_state")
+	return rootSecureProbe(t, "", fn+"\nassert_level_safe_to_state "+shQuote(target)+" 0755", uids, modes)
+}
+
+// TestAssertLevelSafeToStateAnswersTheSameForEverySpelling — the level guard
+// takes an operator-supplied path, and it must not disagree with the
+// predicates about which directory that path names.
+//
+// It did. The guard normalized through dir_leaf_is_symlink and then ran
+// readlink and dirname on the RAW argument, so a level spelled `X/` or `X/.`
+// made readlink fail EINVAL and the install was refused with "is a symlink
+// whose target could not be read" — on a layout the bare spelling accepts.
+// `dirname "X/."` also answers the link itself rather than its directory, so
+// the relative-target anchor was wrong in the same breath. $BIN_DIR and the
+// $SYS_* roots all arrive from operator environment, so every spelling here is
+// reachable.
+//
+// The fix is one assignment at the top rather than a rule to remember:
+// normalize once, and never read $1 again.
+//
+// Mutations that redden it: put `_alss_d="$1"` back in place of the
+// normalize-then-copy; or use "$1" instead of "$_alss_d" at either the
+// readlink or the dirname.
+func TestAssertLevelSafeToStateAnswersTheSameForEverySpelling(t *testing.T) {
+	root := canonicalTempDir(t)
+	volume := filepath.Join(root, "big")
+	target := filepath.Join(volume, "data")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "datalink")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(root, "plain")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]string{}
+	// A sound chain above the target: every spelling must accept.
+	for _, spelling := range []string{link, link + "/", link + "/.", link + "//", link + "/.//."} {
+		if rc := assertLevelSafeToState(t, spelling, none, none); rc != 0 {
+			t.Errorf("assert_level_safe_to_state(%q) = %d, want 0 — the chain above the target is sound, and the spelling must not change that", spelling, rc)
+		}
+	}
+	// A group-writable directory above the target: every spelling must refuse,
+	// and refuse for THAT reason rather than for an unreadable link.
+	badChain := map[string]string{volume: "775"}
+	for _, spelling := range []string{link, link + "/", link + "/."} {
+		if rc := assertLevelSafeToState(t, spelling, none, badChain); rc != 1 {
+			t.Errorf("assert_level_safe_to_state(%q) with a group-writable directory above the target = %d, want 1", spelling, rc)
+		}
+	}
+	// A level that is not a symlink is not this guard's business, in any
+	// spelling.
+	for _, spelling := range []string{plain, plain + "/", plain + "/."} {
+		if rc := assertLevelSafeToState(t, spelling, none, none); rc != 0 {
+			t.Errorf("assert_level_safe_to_state(%q) on a real directory = %d, want 0", spelling, rc)
+		}
 	}
 }
 

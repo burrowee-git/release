@@ -1737,19 +1737,43 @@ system_tree_levels() {
 # what ensure_dir_stated is for. A bad ancestor is different; no chown of ours
 # fixes it.
 #
-# The parent is RESOLVED FIRST rather than handed over as "$1/..", because the
-# walk judges every component of the path it is given — and the resolved path of
-# "$1/.." runs THROUGH the target before popping back to it, so the target would
-# be judged after all and the supported layout refused. `cd -P` gives the
-# kernel's parent; the walk then starts from a path that does not contain the
-# target at all. A test asserts those two verdicts genuinely differ, which is
-# the only reason this distinction is worth the extra lines.
+# THE PARENT IS DERIVED FROM THE LINK'S TEXT, not resolved by walking into it,
+# and not spelled "$1/..". Three candidates, two of them wrong:
+#
+#   "$1"        the target itself. Judging it refuses the supported layout —
+#               an operator-created directory is what ensure_dir_stated chowns.
+#   "$1/.."     resolves THROUGH the target before popping back to it, so the
+#               target is judged after all and the layout is refused anyway.
+#   readlink    then dirname on the result. This is what is used.
+#
+# The derivation is LEXICAL, deliberately: `dirname` of readlink's text is not
+# the kernel's parent, and does not try to be. Anything stronger would have to
+# walk into the target, and an earlier form that did — `cd -P -- "$1/.."` —
+# reintroduced the EACCES trap this whole change exists to forbid, because the
+# kernel resolves `..` INSIDE the target and this installer states data roots
+# to root:root 0700 through exactly such links. Lexical text plus
+# dir_is_root_secure is enough: the walk resolves what it is handed
+# component-by-component with stat and lstat, which need search on each
+# component's PARENT and never on the component, so the target is never opened.
+# A test asserts all three verdicts differ, which is the only reason this
+# distinction is worth the extra lines.
 #
 # A symlinked level whose chain is sound falls straight through and is stated
 # as before: pointing a var or data root at another volume is the ordinary
 # layout and must keep working.
 assert_level_safe_to_state() {
-    _alss_d="$1"
+    # NORMALIZED ONCE, AT ENTRY, AND $1 IS NOT TOUCHED AGAIN. Every operation
+    # below — readlink, dirname, the predicates, the messages — uses
+    # $_alss_d. The predicates normalize internally, so a function that reads
+    # the RAW spelling for anything else silently disagrees with them: here,
+    # `readlink` on a level spelled `X/` or `X/.` fails EINVAL and refused an
+    # install the bare spelling accepts, and `dirname "X/."` answers the link
+    # itself rather than its directory. That is the third new site to take a
+    # raw spelling, so it is not a thing to remember — it is one assignment at
+    # the top, and a test asserts $1 appears exactly once in any function that
+    # normalizes.
+    dir_spelling_normalize "$1"
+    _alss_d="$_dsn_out"
     dir_leaf_is_symlink "$_alss_d" || return 0
     # THE PARENT IS DERIVED, NEVER ENTERED. An earlier form resolved it with
     # `cd -P -- "$_alss_d/.."`, and that is the EACCES trap this whole change

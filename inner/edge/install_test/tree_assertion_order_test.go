@@ -255,6 +255,42 @@ func stripShellComments(body string) string {
 	return strings.Join(kept, "\n")
 }
 
+// TestNormalizingFunctionsDoNotReadTheRawSpelling is the raw-spelling rule,
+// made structural because remembering it has now failed three times.
+//
+// dir_spelling_normalize exists so that every spelling of one directory gets
+// one answer. A function that normalizes and then reads $1 again for something
+// else silently disagrees with the predicates it just called: the level guard
+// normalized through dir_leaf_is_symlink and then ran `readlink` and `dirname`
+// on the raw argument, so a level spelled `X/` or `X/.` made readlink fail
+// EINVAL and refused an install the bare spelling accepts, while
+// `dirname "X/."` answered the link itself rather than its directory.
+//
+// So: a function that normalizes uses $1 EXACTLY ONCE — to normalize it.
+// Everything after that reads the normalized value. That is one assignment at
+// the top of a function instead of a rule every new site has to know.
+//
+// Mutation that reddens it: read "$1" instead of "$_alss_d" anywhere in
+// assert_level_safe_to_state after the normalize call.
+func TestNormalizingFunctionsDoNotReadTheRawSpelling(t *testing.T) {
+	body := string(mustReadFile(t, installShPath(t)))
+	checked := 0
+	for _, name := range shellFunctionNames(body) {
+		code := stripShellComments(shellFunctionBody(t, body, name))
+		if !strings.Contains(code, "dir_spelling_normalize") {
+			continue
+		}
+		checked++
+		if n := strings.Count(code, "$1"); n != 1 {
+			t.Errorf("%s() normalizes its argument but reads $1 %d times, want exactly 1 — every read after the normalize call must use the normalized value, or this function disagrees with the predicates it just called about which directory $1 names",
+				name, n)
+		}
+	}
+	if checked < 3 {
+		t.Errorf("only %d normalizing functions were found — expected at least 3, so this test is probably matching nothing", checked)
+	}
+}
+
 // mustReadFile is this package's minimal file read; the gateway package has
 // mustRead already and this one does not.
 func mustReadFile(t *testing.T, path string) []byte {
