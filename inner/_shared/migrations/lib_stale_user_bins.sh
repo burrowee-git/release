@@ -461,6 +461,161 @@ login_shell_of_user() {
 }
 
 # ---------------------------------------------------------------------------
+# operator_login_shell — the LOGIN SHELL of the account this install is FOR, on
+# stdout, or empty and non-zero when there is no such account to advise.
+#
+# THREE STATES, AND THEY ARE NOT THE SAME. The privileged installers run under
+# `curl … | sudo sh`, where $SHELL and $HOME describe root and the account that
+# will actually type `burrowee` is $SUDO_USER; the cli and agent installers run
+# unprivileged, where this process IS that account and $SHELL is exact; and a
+# genuine root session has no operator behind it at all.
+#
+#   $SUDO_USER set        the elevation record names the subject. Its login
+#                         shell comes from the passwd database
+#                         (login_shell_of_user), never from $SHELL — sudo does
+#                         not reset $SHELL, so under sudo it is whatever
+#                         invoked sudo, and under `sudo -i` or cron it is
+#                         root's. Unresolvable is a REFUSAL, not a fallback to
+#                         $SHELL: an advice block naming the wrong shell's
+#                         profile is worse than one naming none.
+#   unset, unprivileged   this run is the operator's own shell. $SHELL is the
+#                         answer and no lookup is needed.
+#   unset, euid 0         a root login. Nobody invoked this, so there is no
+#                         operator to advise and the caller prints the generic
+#                         block.
+#
+# The environment is read only to SELECT, per privilege.md §3.2: a $SUDO_USER
+# naming no account resolves to nothing rather than inventing a subject, and
+# nothing here is granted by the variable — the only thing it steers is which
+# profile file a printed line names.
+# ---------------------------------------------------------------------------
+operator_login_shell() {
+    case "${SUDO_USER:-}" in
+    '' | root)
+        if [ "$(id -u)" = 0 ]; then return 1; fi
+        [ -n "${SHELL:-}" ] || return 1
+        printf '%s\n' "$SHELL"
+        return 0
+        ;;
+    esac
+    login_shell_of_user "$SUDO_USER"
+}
+
+# ---------------------------------------------------------------------------
+# render_path_advice <bin-dir> — the "Next steps" block every installer ends
+# with: how to reach <bin-dir> from the operator's own shell, in that shell's
+# syntax, naming the profile file that makes it permanent.
+#
+# WHY THIS EXISTS AT ALL. 0.3 moved the exec root to /usr/local/burrowee/bin,
+# which is on nobody's PATH, and the installers linked the operator-typed names
+# back into /usr/local/bin to compensate — but only where that directory proved
+# root-secure. On a clean modern Mac /usr/local/bin DOES NOT EXIST, so the
+# check answered "absent", nothing was linked, and the operator was handed a
+# successful install with no command they could type. That was not the rare
+# branch: it is the normal outcome on the newest hosts, and an Intel Mac whose
+# /usr/local/bin Homebrew owns fails the same check for the opposite reason.
+# The link step is gone; this block is what replaces it.
+#
+# IT IS PRINTED, NEVER APPLIED. The privileged installers' euid is 0 and a
+# shell profile lives inside a human's home directory, which is neither of the
+# two things elevation exists for (privilege.md: writing a system config file,
+# installing a system daemon). Nothing here writes, sources or evals anything;
+# the operator runs the line by hand. That is one paste against a privilege
+# surface we then do not have.
+#
+# IT IS PRINTED UNCONDITIONALLY, on every successful install including a
+# re-install that changed nothing. "Is it already on PATH?" is a question this
+# process cannot answer: under sudo it sees root's secure_path, not the
+# operator's interactive PATH, and reconstructing one by sourcing their profile
+# as root is far worse than a paragraph that is sometimes redundant.
+#
+# STDOUT, not stderr. It is the successful outcome of the run, not a
+# diagnostic.
+#
+# <bin-dir> IS AN ARGUMENT, not a global. The same function serves the system
+# components (/usr/local/burrowee/bin) and the per-user cli and agent
+# (${PREFIX:-$HOME/.local}/bin), and a component installer that sources this
+# library gets the identical block without knowing anything about it.
+#
+# THE SHELL SET WAS CHOSEN, NOT GUESSED. zsh is macOS's default and the
+# reported host's; bash is the Linux default and needs a different file on each
+# platform (.bash_profile is read by a macOS login shell, .profile by a Linux
+# one); fish shares no syntax with either — no `export`, and `fish_add_path` is
+# what records a path for every future session. Anything else gets the POSIX
+# export line and NO file name: guessing a startup file for an unknown shell is
+# how an operator ends up editing something their shell never reads.
+# ---------------------------------------------------------------------------
+render_path_advice() {
+    _rpa_dir="$1"
+    [ -n "$_rpa_dir" ] || return 0
+
+    _rpa_shell="$(operator_login_shell 2>/dev/null || true)"
+    # The home is resolved from the SAME subject the shell was, and only when a
+    # shell was resolved at all — so the $HOME branch below can never be root's:
+    # operator_login_shell has already refused the euid-0-with-no-$SUDO_USER
+    # case. One subject, one answer, both halves travelling together
+    # (privilege.md §3.1).
+    _rpa_home=""
+    if [ -n "$_rpa_shell" ]; then
+        case "${SUDO_USER:-}" in
+        '' | root) _rpa_home="${HOME:-}" ;;
+        *) _rpa_home="$(home_of_user "$SUDO_USER" 2>/dev/null || true)" ;;
+        esac
+    fi
+
+    _rpa_now="export PATH=\"$_rpa_dir:\$PATH\""
+    _rpa_profile=""
+    _rpa_permanent=""
+    if [ -n "$_rpa_home" ]; then
+        case "${_rpa_shell##*/}" in
+        zsh)
+            _rpa_profile="$_rpa_home/.zprofile"
+            ;;
+        bash)
+            # A macOS login shell reads .bash_profile and never .profile; a
+            # Linux one reads .profile. Naming the wrong one is advice that
+            # silently does nothing on the next login.
+            if [ "$(uname -s)" = "Darwin" ]; then
+                _rpa_profile="$_rpa_home/.bash_profile"
+            else
+                _rpa_profile="$_rpa_home/.profile"
+            fi
+            ;;
+        fish)
+            _rpa_profile="$_rpa_home/.config/fish/config.fish"
+            _rpa_now="set -gx PATH $_rpa_dir \$PATH"
+            _rpa_permanent="fish_add_path $_rpa_dir"
+            ;;
+        esac
+    fi
+    if [ -n "$_rpa_profile" ] && [ -z "$_rpa_permanent" ]; then
+        _rpa_permanent="echo '$_rpa_now' >> $_rpa_profile"
+    fi
+
+    echo ""
+    echo "==> Next steps"
+    echo "burrowee's commands are in $_rpa_dir, which is not on your PATH."
+    echo ""
+    echo "  Add it to this shell now:"
+    echo "    $_rpa_now"
+    echo ""
+    if [ -n "$_rpa_profile" ]; then
+        echo "  Make it permanent:"
+        echo "    $_rpa_permanent"
+        case "${_rpa_shell##*/}" in
+        fish) echo "    (that records it for every fish session; $_rpa_profile works too)" ;;
+        esac
+    else
+        echo "  Make it permanent by adding the line above to your shell's startup file."
+    fi
+    echo ""
+    echo "  Then:  burrowee help"
+    # An advisory message must never be able to end an install: every caller
+    # runs under `set -e` and calls this last.
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # stale_bin_shell_hint — say that the files just removed are what an
 # ALREADY-RUNNING shell may still be pointing at, and name the one command that
 # clears it.
