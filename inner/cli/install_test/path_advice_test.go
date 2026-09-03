@@ -208,6 +208,27 @@ func nextStepsBlock(t *testing.T, out string) string {
 	return rest[:j+len("  Then:  burrowee help")]
 }
 
+// unameStubDir returns a PATH dir whose `uname -s` answers goos and which
+// passes everything else through.
+//
+// THE BASH ARM IS THE ONLY ONE THAT BRANCHES ON THE PLATFORM: a macOS login
+// shell reads .bash_profile and never .profile, a Linux one reads .profile.
+// Without this stub the comparison below exercises whichever arm the runner
+// happens to be, so a drift confined to the OTHER arm ships green — and CI is
+// Linux while the reported host was a Mac, which is the worst possible split.
+// The shared library already seams this
+// (TestPathAdviceRendersBashProfilePerPlatform in the edge suite); the vendored
+// copy needs the same seam or its bash rendering is half-unmeasured.
+func unameStubDir(t *testing.T, goos string) string {
+	t.Helper()
+	dir := t.TempDir()
+	body := "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo " + goos + "; else /usr/bin/uname \"$@\"; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "uname"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // TestAgentsVendoredRendererMatchesTheSharedOne — the drift guard for the copy.
 //
 // The agent kit carries no migrations/ (tools/payload.sh stages one only for
@@ -219,18 +240,37 @@ func nextStepsBlock(t *testing.T, out string) string {
 // guard is behavioural: on one fixture host, under one login shell, the two
 // installers must print the SAME block, byte for byte.
 //
+// BOTH PLATFORM ARMS ARE DRIVEN, not just the runner's. bash is the only
+// rendering that branches on `uname -s`, so a stub pins each half in turn;
+// every other shell is asserted under both and must be identical regardless,
+// which also catches a copy that started consulting the platform where the
+// original does not.
+//
 // Both runs share a $HOME on purpose: the block interpolates the bin dir and
 // the profile path, so two homes would differ for a reason that is not drift.
 //
-// Mutation that reddens it: change a word in either copy.
+// Mutation that reddens it: change a word in either copy — including a word
+// that appears only in the .bash_profile line, which is what this seam adds.
 func TestAgentsVendoredRendererMatchesTheSharedOne(t *testing.T) {
-	for _, shell := range []string{"/bin/zsh", "/bin/bash", "/opt/homebrew/bin/fish", "/usr/bin/ksh"} {
-		t.Run(filepath.Base(shell), func(t *testing.T) {
+	shells := []string{"/bin/zsh", "/bin/bash", "/opt/homebrew/bin/fish", "/usr/bin/ksh"}
+	for _, goos := range []string{"Darwin", "Linux"} {
+		for _, shell := range shells {
+			t.Run(goos+"/"+filepath.Base(shell), func(t *testing.T) {
+				runVendoredRendererComparison(t, goos, shell)
+			})
+		}
+	}
+}
+
+func runVendoredRendererComparison(t *testing.T, goos, shell string) {
+	t.Helper()
+	{
+		{
 			home := t.TempDir()
 			env := []string{
 				"HOME=" + home,
 				"PREFIX=" + filepath.Join(home, ".local"),
-				"PATH=/usr/bin:/bin",
+				"PATH=" + unameStubDir(t, goos) + ":/usr/bin:/bin",
 				"SHELL=" + shell,
 				"LAUNCHD_DIR=" + filepath.Join(home, "no-launchd"),
 				"SYSTEMD_DIR=" + filepath.Join(home, "no-systemd"),
@@ -265,6 +305,17 @@ func TestAgentsVendoredRendererMatchesTheSharedOne(t *testing.T) {
 			if vendored != shared {
 				t.Errorf("the agent's vendored renderer has drifted from the shared one.\nshared:\n%s\n\nvendored:\n%s", shared, vendored)
 			}
-		})
+			// The stub has to be REACHED, or every arm above compares the
+			// runner's own platform twice and the seam is decoration.
+			if filepath.Base(shell) == "bash" {
+				wantProfile := ".profile"
+				if goos == "Darwin" {
+					wantProfile = ".bash_profile"
+				}
+				if !strings.Contains(shared, filepath.Join(home, wantProfile)) {
+					t.Errorf("the %s bash rendering does not name %s — the uname stub was not consulted:\n%s", goos, wantProfile, shared)
+				}
+			}
+		}
 	}
 }
