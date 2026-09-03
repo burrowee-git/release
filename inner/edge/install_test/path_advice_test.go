@@ -292,3 +292,39 @@ func TestEdgeUpdaterInstallPrintsThePathAdvice(t *testing.T) {
 	)
 	assertLacks(t, out, "has no render_path_advice")
 }
+
+// TestEdgeUnitsOnlyPrintsThePathAdvice — the units-only reinstall is the run
+// that SWEEPS, and a run that removes the operator's command owes them the
+// replacement instruction more than a fresh install does.
+//
+// `burrowee edge service install` / LocalReinstall reach install.sh in this
+// mode. It places no binaries, which is why it was originally read as "not an
+// install" and left silent — but placement was never the test. This is the
+// path that unlinks /usr/local/bin/burrowee-edge-cli and the shared `burrowee`
+// dispatcher on a converging 0.2 host, so it was the one run that took the
+// operator's typed command away and printed nothing about where it went.
+//
+// Mutation that reddens it: drop print_path_advice from the units-only branch.
+func TestEdgeUnitsOnlyPrintsThePathAdvice(t *testing.T) {
+	sb := newSandbox(t)
+	subj := adviceSubject{
+		user:  "edge-operator",
+		home:  filepath.Join(sb.home, "operator"),
+		shell: "/bin/zsh",
+	}
+	stub := stubRootEnv(t)
+	addPasswdStubs(t, stub, subj)
+
+	out, err := sb.run(t, "sh", stub,
+		"STUB_UPDATER_OPTED_IN=1",
+		"BURROWEE_UNITS_ONLY=1",
+		"SUDO_USER="+subj.user)
+	if err != nil {
+		t.Fatalf("units-only reinstall failed: %v\n%s", err, out)
+	}
+	assertContains(t, out,
+		"units-only reinstall",
+		"==> Next steps",
+		"    echo 'export PATH=\""+sb.sysBinDir+":$PATH\"' >> "+filepath.Join(subj.home, ".zprofile"),
+	)
+}

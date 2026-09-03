@@ -1558,6 +1558,15 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # happen here, after the units moved.
     sweep_stale_exec_root
     echo "edge units-only reinstall: service units re-rendered + reloaded."
+    # THE SWEEP JUST RAN, so this path owes the operator the advice as much as
+    # a full install does — more, in fact: this is the run that REMOVES
+    # /usr/local/bin/burrowee-edge-cli and the shared `burrowee` dispatcher
+    # from a converging 0.2 host, and until now it was the one run that
+    # printed no replacement instruction. "Units-only places no binaries, so
+    # it is not an install" was the wrong test; placement never was the test.
+    # A path that removes the operator's command has to say how to reach the
+    # replacement.
+    print_path_advice
     exit 0
 fi
 

@@ -140,3 +140,33 @@ func TestGatewayUpdaterInstallPrintsThePathAdvice(t *testing.T) {
 		t.Errorf("updater.install.sh fell back instead of calling the staged library's renderer:\n%s", out)
 	}
 }
+
+// TestGatewayUnitsOnlyPrintsThePathAdvice — the units-only reinstall is the
+// only path on which the gateway's exec-root sweep runs at all.
+//
+// The guard calls sweep_stale_exec_root through the kept installer
+// (guard.sh's sweep_stale_bins_via_kept_installer) and the guard is armed from
+// this mode, so the run that removes /usr/local/bin/burrowee-gateway-cli and
+// the shared `burrowee` dispatcher from a converging 0.2 host is exactly this
+// one. It printed nothing. Worse, update mode ends by telling the operator to
+// run `sudo burrowee gateway service install` — this mode — so the sequence
+// finished with their typed command gone and no replacement named anywhere.
+//
+// The advice is asserted in the FOREGROUND, not beside the sweep: the sweep
+// runs inside the guard, whose output goes to the transaction's guard.log and
+// never to the operator's terminal.
+//
+// Mutation that reddens it: drop print_path_advice from the units-only branch.
+func TestGatewayUnitsOnlyPrintsThePathAdvice(t *testing.T) {
+	home := t.TempDir()
+	stub := stubInitSystem(t)
+	seedMigrateCapableCLI(t, home)
+
+	out := runInstallSh(t, home, stub, "BURROWEE_UNITS_ONLY=1")
+
+	assertContains(t, out,
+		"==> Next steps",
+		"burrowee's commands are in "+binDir(home)+", which is not on your PATH.",
+		"  Then:  burrowee help",
+	)
+}

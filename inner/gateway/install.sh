@@ -4058,7 +4058,38 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # callers: `doctor --fix` reaches here through installGatewayUnits, so a
     # doctor call at the end of this block would be doctor running itself as
     # its own last remediation step. The fresh path has no such caller.
+
+    # THE ADVICE BELONGS HERE, AND THIS MODE IS WHY IT CANNOT BE SKIPPED.
     #
+    # This is the ONLY path on which the gateway's exec-root sweep runs: the
+    # guard calls sweep_stale_exec_root through the kept installer
+    # (guard.sh's sweep_stale_bins_via_kept_installer), and the guard is armed
+    # from here. So the run that REMOVES /usr/local/bin/burrowee-gateway-cli
+    # and the shared `burrowee` dispatcher from a converging 0.2 host is
+    # exactly this one — and until now it was the one run that printed no
+    # replacement instruction. Worse, update mode ends by telling the operator
+    # to run `sudo burrowee gateway service install`, which is this mode: the
+    # sequence finished with their typed command gone and nothing said about
+    # it anywhere.
+    #
+    # It corrects an earlier reading of mine that units-only "places no
+    # binaries, so it is not an install". Placement was never the test. A path
+    # that REMOVES the operator's command has to say how to reach the
+    # replacement, whatever we call the mode.
+    #
+    # PRINTED HERE RATHER THAN BESIDE THE SWEEP, because the sweep runs inside
+    # the guard, whose output goes to $TXN/guard.log and not to the operator's
+    # terminal. This foreground is the session they typed the verb in, and it
+    # is the only place they will read anything. The advice is true before the
+    # sweep completes as well as after — $BIN_DIR is off PATH either way.
+    #
+    # ON SUCCESS ONLY, same as the fresh path: a non-zero verdict means the
+    # guard rolled the host back, and advice about a tree this run reverted is
+    # advice about an install that did not happen.
+    if [ "$_verdict" = 0 ]; then
+        print_path_advice
+    fi
+
     # reattach's verdict, and nothing after it: 0 served / handed off
     # unreported, 1 rolled back or aborted with nothing started, 2 the
     # rollback itself failed.
