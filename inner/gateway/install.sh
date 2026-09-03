@@ -687,6 +687,12 @@ path_is_root_secure() {
 #                     the real directory b; the alias is followed and judged
 #                     like any other ancestor.
 #
+# EVERY PREDICATE THAT TAKES A CALLER-SUPPLIED SPELLING CALLS THIS, AND CALLS
+# IT ITSELF. dir_is_root_secure and dir_leaf_is_symlink do so directly;
+# dir_leaf_is_notdir and anything else built on dir_probe_reason get it from
+# there. That is deliberate placement, not repetition: the one predicate that
+# left it to its caller was wrong within a round of this function being added.
+#
 # It sets a variable rather than printing one because a command substitution
 # would strip a trailing newline from the ARGUMENT it is handed, and because
 # every caller here is inside `set -eu`. That is a statement about this
@@ -782,7 +788,15 @@ dir_leaf_is_notdir() {
 # "cannot reach it" from "it is not there" from "it is there and will not
 # resolve", and its callers do nothing but map those words onto their codes.
 dir_probe_reason() {
-    _dpr_p="$1"
+    # NORMALIZED HERE, not by the caller. dir_leaf_is_symlink normalized and
+    # dir_leaf_is_notdir did not, so a regular file spelled `X/` or `X/.`
+    # answered "absent" and link_operator_bins printed "does not exist on this
+    # host" about a file sitting right there — the misdirection this whole
+    # change exists to remove, reintroduced one round after the normalizer was
+    # written to prevent it. A rule a caller has to remember is a rule that
+    # gets forgotten, so every predicate built on this one now inherits it.
+    dir_spelling_normalize "$1"
+    _dpr_p="$_dsn_out"
     if [ -d "$_dpr_p" ]; then _dpr_out=directory; return 0; fi
     # `[ -e ]` BEFORE `[ -L ]`, and the order is the whole distinction: -e
     # FOLLOWS the link, so it is true exactly when the name lands on something
@@ -1595,56 +1609,6 @@ place_unit() {
 # stats and no sudo: nothing is written unless the stat disagrees.
 ensure_dir_stated() {
     _eds_d="$1"; _eds_m="$2"
-    # REFUSE BEFORE TOUCHING, AT THE SITE THAT TOUCHES. Everything below
-    # follows symlinks — `chown 0:0` and `chmod` are spelled without -h — so a
-    # symlinked level is not what gets stated: its TARGET is, and that target
-    # is a directory outside the tree this installer owns. Where the assertion
-    # afterwards would refuse the install anyway, that write is pure damage:
-    # the operator's directory is taken to root:root and the install fails
-    # regardless of it. Hoisting one lstat over the config root was not enough;
-    # the rule belongs here, where every level passes through.
-    #
-    # WHAT IS JUDGED IS THE TARGET'S CHAIN, NOT THE TARGET — the part
-    # ensure_dir_stated can never repair. Judging the target itself would break
-    # a supported path: an operator who creates the directory, points a data
-    # root at it and runs the installer is meant to have it chowned to root,
-    # and that is exactly what the two lines below are for. A bad ANCESTOR is
-    # different: no chown of ours fixes it, so the install is already lost and
-    # the write only damages a directory outside this installer's tree.
-    #
-    # The parent is RESOLVED FIRST rather than handed over as "$_eds_d/..",
-    # because the walk judges every component of the path it is given — and the
-    # resolved path of "$_eds_d/.." runs THROUGH the target before popping back
-    # to it, so the target would be judged after all and the supported layout
-    # refused. `cd -P` gives the kernel's parent; the walk then starts from a
-    # path that does not contain the target at all. (A test asserts the two
-    # verdicts genuinely differ, which is the only reason this distinction is
-    # worth three extra lines.)
-    #
-    # A symlinked level whose chain is sound falls straight through and is
-    # stated as before: pointing a var or data root at another volume is the
-    # ordinary layout and must keep working.
-    if dir_leaf_is_symlink "$_eds_d"; then
-        _eds_up="$(CDPATH= cd -P -- "$_eds_d/.." 2>/dev/null && pwd -P)" || _eds_up=''
-        _eds_rc=0
-        if [ -n "$_eds_up" ]; then
-            dir_is_root_secure "$_eds_up" || _eds_rc=$?
-        else
-            _eds_rc=2
-        fi
-        if [ "$_eds_rc" != 0 ]; then
-            echo "error: $_eds_d is a symlink, and the directory it points into is not one" >&2
-            echo "error: only root can rewrite — see the chain above its target." >&2
-            echo "error: refusing before anything is written: stating this level would" >&2
-            echo "error: chown and chmod THROUGH the link, changing a directory outside this" >&2
-            echo "error: installer's tree, and the install would then be refused anyway." >&2
-            echo "hint: nothing on this host has been created or changed by this run." >&2
-            echo "hint: check the ownership and modes of every directory above the link's" >&2
-            echo "hint: target; each must be owned by root and not group- or world-writable." >&2
-            echo "hint: or point $_eds_d at a directory inside a root-owned tree." >&2
-            return 1
-        fi
-    fi
     if [ ! -d "$_eds_d" ]; then
         if [ ! -d "$(dirname "$_eds_d")" ]; then
             echo "error: cannot create $_eds_d — its parent $(dirname "$_eds_d") does not exist," >&2
@@ -1729,6 +1693,76 @@ assert_roots_not_symlinked() {
     return 0
 }
 
+# system_tree_levels <fn> — the tree's levels, in creation order, each handed
+# to <fn> as (path, mode). ONE list, walked twice by ensure_system_tree: once
+# to refuse, once to create. A second copy of this list beside the first is the
+# drift this shape exists to prevent — the two passes cannot disagree about
+# which levels exist, because there is only one list.
+system_tree_levels() {
+    "$1" "$SYSTEM_ROOT" 0755 || return 1
+    "$1" "$BIN_DIR" 0755 || return 1
+    "$1" "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
+    "$1" "$SYS_ETC_ROOT" 0755 || return 1
+    "$1" "$SYS_CONFIG_DIR" 0755 || return 1
+    "$1" "$(dirname "$SYS_VAR_ROOT")" 0755 || return 1
+    "$1" "$SYS_VAR_ROOT" 0755 || return 1
+    "$1" "$SYS_DATA_DIR" 0700 || return 1
+    "$1" "$SYS_LOG_DIR" 0700 || return 1
+    return 0
+}
+
+# assert_level_safe_to_state <path> <mode> — the refusing half of one level.
+# Mode is accepted and ignored: it takes the same (path, mode) shape as
+# ensure_dir_stated so system_tree_levels can hand both the same list.
+#
+# A SYMLINKED LEVEL IS NOT WHAT GETS STATED — ITS TARGET IS. ensure_dir_stated's
+# `chown 0:0` and `chmod` are spelled without -h, so they follow the link into a
+# directory outside the tree this installer owns. Where the assertion afterwards
+# would refuse the install anyway, that write is pure damage: the operator's
+# directory is taken to root:root and the install fails regardless of it.
+#
+# WHAT IS JUDGED IS THE CHAIN ABOVE THE TARGET, NOT THE TARGET — the part
+# nothing here can repair. Judging the target itself would refuse a supported
+# layout: an operator who creates the directory, points a data root at it and
+# runs the installer is meant to have it chowned to root, and that is exactly
+# what ensure_dir_stated is for. A bad ancestor is different; no chown of ours
+# fixes it.
+#
+# The parent is RESOLVED FIRST rather than handed over as "$1/..", because the
+# walk judges every component of the path it is given — and the resolved path of
+# "$1/.." runs THROUGH the target before popping back to it, so the target would
+# be judged after all and the supported layout refused. `cd -P` gives the
+# kernel's parent; the walk then starts from a path that does not contain the
+# target at all. A test asserts those two verdicts genuinely differ, which is
+# the only reason this distinction is worth the extra lines.
+#
+# A symlinked level whose chain is sound falls straight through and is stated
+# as before: pointing a var or data root at another volume is the ordinary
+# layout and must keep working.
+assert_level_safe_to_state() {
+    _alss_d="$1"
+    dir_leaf_is_symlink "$_alss_d" || return 0
+    _alss_up="$(CDPATH= cd -P -- "$_alss_d/.." 2>/dev/null && pwd -P)" || _alss_up=''
+    _alss_rc=0
+    if [ -n "$_alss_up" ]; then
+        dir_is_root_secure "$_alss_up" || _alss_rc=$?
+    else
+        _alss_rc=2
+    fi
+    [ "$_alss_rc" != 0 ] || return 0
+    echo "error: $_alss_d is a symlink, and the directory it points into is not one" >&2
+    echo "error: only root can rewrite — see the chain above its target." >&2
+    echo "error: refusing before anything is written: stating this level would" >&2
+    echo "error: chown and chmod THROUGH the link, changing a directory outside this" >&2
+    echo "error: installer's tree, and the install would then be refused anyway." >&2
+    echo "hint: nothing on this host has been created or changed by this run — every" >&2
+    echo "hint: level is judged before the first one is created." >&2
+    echo "hint: check the ownership and modes of every directory above the link's" >&2
+    echo "hint: target; each must be owned by root and not group- or world-writable." >&2
+    echo "hint: or point $_alss_d at a directory inside a root-owned tree." >&2
+    return 1
+}
+
 # ensure_system_tree — the whole tree, top-down, one level at a time, then
 # asserted. The three chains meet at $SYSTEM_ROOT in production (bin/, etc/
 # and var/ are siblings under /usr/local/burrowee); under the test seams each
@@ -1743,15 +1777,10 @@ assert_roots_not_symlinked() {
 # logs/ are 0700: nothing under them is for a non-owner.
 ensure_system_tree() {
     assert_roots_not_symlinked || return 1
-    ensure_dir_stated "$SYSTEM_ROOT" 0755 || return 1
-    ensure_dir_stated "$BIN_DIR" 0755 || return 1
-    ensure_dir_stated "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
-    ensure_dir_stated "$SYS_ETC_ROOT" 0755 || return 1
-    ensure_dir_stated "$SYS_CONFIG_DIR" 0755 || return 1
-    ensure_dir_stated "$(dirname "$SYS_VAR_ROOT")" 0755 || return 1
-    ensure_dir_stated "$SYS_VAR_ROOT" 0755 || return 1
-    ensure_dir_stated "$SYS_DATA_DIR" 0700 || return 1
-    ensure_dir_stated "$SYS_LOG_DIR" 0700 || return 1
+    # PASS 1 — refuse. Nothing on the host has been touched yet.
+    system_tree_levels assert_level_safe_to_state || return 1
+    # PASS 2 — create and state, now that every level has been judged.
+    system_tree_levels ensure_dir_stated || return 1
     assert_system_tree
 }
 

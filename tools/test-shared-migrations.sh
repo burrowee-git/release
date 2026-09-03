@@ -2641,7 +2641,7 @@ assert_eq "$RC" 1 "--applies must answer no when the legacy dir IS the destinati
 #       the installer just placed. Each spelling below folds, anchors or
 #       resolves to $BIN_DIR and answers "different" to a text compare.
 #       Mutation that reddens all five: put the textual body back as the whole
-#       of stale_exec_root_same_dir (the two sed lines and the compare) — the
+#       of stale_exec_root_same_text as the whole of both entry points — the
 #       run then removes all four binaries out of the destination. The
 #       symlink-dotdot spelling has a second, narrower mutation of its own:
 #       drop the `-P` from both `cd`s, so the shell folds `..` textually
@@ -2700,63 +2700,62 @@ for _s37 in dot dotdot relative symlink-alias symlink-dotdot; do
     assert_eq "$RC" 1 "--applies must answer no for a $_s37 spelling of the destination"
 done
 
-# 37a8. THE FALLBACK IS PER SIDE, AND THE DESTINATION'S FAILURE IS THE DANGEROUS
-#       ONE. If the destination will not `cd`, nothing has been proved about
-#       whether the two name the same place — and the text fallback answers
-#       "different" for exactly the spellings 37a7 exists to close, arming the
-#       destructive sweep against the install destination. The guard answers
-#       SAME and refuses; failing toward not-deleting is the only safe direction
-#       for a delete guard, and a wrong "same" costs one skipped no-op run.
+# 37a8. THE TWO CALLERS NEED OPPOSITE SAFE DIRECTIONS, and one helper serving
+#       both cannot give them. remove_stale_exec_root_bins DELETES: where the
+#       truth cannot be established it must answer SAME and decline, because a
+#       wrong "different" unlinks binaries the installer just placed.
+#       stale_exec_root_bins_pending is the --applies PROBE and is documented
+#       FAIL-OPEN: it must answer DIFFERENT, because a wrong "same" records the
+#       rung as done and strands the stale copies forever. The single helper
+#       answered "same" for both, so an unresolvable $BIN_DIR silently retired
+#       a rung that had done nothing.
 #
-#       DRIVEN AT THE FUNCTION, not through the sweep, and that is not a
-#       shortcut — it is the honest level. Both callers gate on
-#       `[ -d "$LEGACY_BIN_DIR" ]` before they ever consult the guard, so an
-#       unsearchable tree fails THAT test first and the guard is never reached;
-#       a run-level fixture for this passes with the guard deleted, which was
-#       verified rather than assumed. The guard protects a caller that does not
-#       gate that way — the region is copied into other repos — so it is tested
-#       where it can actually be made to answer.
+#       DRIVEN AT THE FUNCTIONS, not through the sweep, and that is the honest
+#       level: both callers gate on `[ -d "$LEGACY_BIN_DIR" ]` before they ever
+#       consult the guard, so an unsearchable tree fails THAT test first and
+#       the guard is never reached — a run-level fixture for this passes with
+#       the guard deleted, which was verified rather than assumed.
 #
-#       Mutation that reddens it: delete `[ -n "$_sersd_rb" ] || return 0` from
-#       stale_exec_root_same_dir. The pair then falls through to the sed
-#       compare, `/.` reads as "different", and a sweep is authorised against a
-#       destination this run could not identify.
+#       Mutations that redden it: give the probe the sweep's fallback (add
+#       `[ -n "$_sersd_rb" ] || return 0` to _for_probe), or take the sweep's
+#       away; and drop the -P from either `cd` in stale_exec_root_resolve_pair.
 t37a8="$TMP/t37a8"; exec_sweep_kit "$t37a8"; h37a8="$t37a8/home"
+_lib37="$t37a8/migrations/lib_stale_user_bins.sh"
 mkdir -p "$h37a8/sealed/bin"
 chmod 0000 "$h37a8/sealed"
 if [ "$(id -u)" -eq 0 ]; then
     echo "-- case 37a8 skipped: running as root, which can search a 0000 directory, so no destination spelling is unresolvable here"
 else
-    # legacy resolves; the destination sits under an unsearchable ancestor and
-    # does not. The two spellings differ textually, so only the guard can
-    # answer "same".
+    # The SWEEP must decline when the destination cannot be identified.
     RC=0
-    sh -c '. "$1"; stale_exec_root_same_dir "$2" "$3"' _ \
-        "$t37a8/migrations/lib_stale_user_bins.sh" \
-        "$h37a8/sys/bin/." "$h37a8/sealed/bin" || RC=$?
-    assert_eq "$RC" 0 "an unresolvable DESTINATION must answer 'same' — a sweep must never be authorised against a destination this run could not identify"
-    # and the legacy-only failure still falls through to the text compare, so
-    # the probe's documented fail-open is not quietly closed
+    sh -c '. "$1"; stale_exec_root_same_dir_for_sweep "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sys/bin/." "$h37a8/sealed/bin" || RC=$?
+    assert_eq "$RC" 0 "sweep: an unresolvable DESTINATION must answer 'same' — nothing may be deleted against a destination this run could not identify"
+    # The PROBE must keep the rung pending on the very same pair.
     RC=0
-    sh -c '. "$1"; stale_exec_root_same_dir "$2" "$3"' _ \
-        "$t37a8/migrations/lib_stale_user_bins.sh" \
-        "$h37a8/sealed/bin" "$h37a8/sys/bin" || RC=$?
-    assert_eq "$RC" 1 "an unresolvable LEGACY side with a resolvable destination still compares textually — they are different directories and the sweep is legitimate"
+    sh -c '. "$1"; stale_exec_root_same_dir_for_probe "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sys/bin/." "$h37a8/sealed/bin" || RC=$?
+    assert_eq "$RC" 1 "probe: the SAME unresolvable pair must answer 'different' — a wrong 'same' records the rung as done and strands the stale copies"
+    # A legacy side that will not resolve: the sweep may still compare
+    # textually (it can unlink nothing out of a tree it cannot enter), and the
+    # probe stays open.
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir_for_sweep "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sealed/bin" "$h37a8/sys/bin" || RC=$?
+    assert_eq "$RC" 1 "sweep: an unresolvable LEGACY side with a resolvable destination still compares textually — they are different directories and the sweep is legitimate"
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir_for_probe "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sealed/bin" "$h37a8/sys/bin" || RC=$?
+    assert_eq "$RC" 1 "probe: an unresolvable LEGACY side leaves the rung pending"
     # The DESTINATION side must resolve PHYSICALLY too, and this is the only
-    # shape where that shows. A `..` after a symlink is folded by the shell
-    # unless `cd -P` hands it to the kernel; folded, the destination resolves
-    # to nothing, the guard above answers "same" for safety, and a sweep that
-    # SHOULD run is silently skipped. The two directories here really are
-    # different, so "different" is the correct answer and only -P produces it.
-    # Without a legacy side that differs, `cd` and `cd -P` on the destination
-    # are indistinguishable — the guard subsumes the difference — which is why
-    # this case exists rather than another spelling in 37a7.
+    # shape where that shows: a `..` after a symlink folds to nothing under a
+    # logical cd, the sweep's guard then answers "same", and a sweep that
+    # SHOULD run is silently skipped. The two directories here really differ.
     mkdir -p "$h37a8/sys/oldbin" "$h37a8/sys/leg"
     ln -s "$h37a8/sys/etc" "$h37a8/sys/leg/link"
     RC=0
-    sh -c '. "$1"; stale_exec_root_same_dir "$2" "$3"' _ \
-        "$t37a8/migrations/lib_stale_user_bins.sh" \
-        "$h37a8/sys/oldbin" "$h37a8/sys/leg/link/../bin" || RC=$?
+    sh -c '. "$1"; stale_exec_root_same_dir_for_sweep "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sys/oldbin" "$h37a8/sys/leg/link/../bin" || RC=$?
     assert_eq "$RC" 1 "a DESTINATION spelled with a .. after a symlink must resolve physically — folded by the shell it resolves to nothing, the guard answers 'same', and a legitimate sweep is skipped"
 fi
 chmod 0755 "$h37a8/sealed"

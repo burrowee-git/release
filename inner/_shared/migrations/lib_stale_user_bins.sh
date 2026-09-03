@@ -628,77 +628,95 @@ LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
 # replaced the file, so nothing is stranded.
 STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 
-# stale_exec_root_same_dir A B — true when A and B name the same directory.
-# $LEGACY_BIN_DIR and $BIN_DIR reach this library through independent seams, and
-# when they name the same place this sweep must NOT run: every name it would
-# then decide `remove` for is a binary the installer has just placed, whose
-# "twin" is the very file being deleted.
+# ARE $LEGACY_BIN_DIR AND $BIN_DIR THE SAME DIRECTORY? Two callers ask, and
+# THEIR SAFE DIRECTIONS ARE OPPOSITE, which is why there are two entry points
+# over one resolver instead of one function with one answer:
+#
+#   remove_stale_exec_root_bins  DELETES. Its wrong answer unlinks binaries the
+#     installer has just placed, so where the truth cannot be established it
+#     must answer SAME and decline to sweep. Wrong cost: one skipped no-op run.
+#     → stale_exec_root_same_dir_for_sweep
+#
+#   stale_exec_root_bins_pending  is the rung's --applies PROBE, and is
+#     documented FAIL-OPEN: a legacy tree it cannot read is "still needed",
+#     never "nothing there". Its wrong answer records the rung as done and
+#     strands the stale copies forever, so where the truth cannot be
+#     established it must answer DIFFERENT and leave the work pending. Wrong
+#     cost: one no-op run.
+#     → stale_exec_root_same_dir_for_probe
+#
+# One helper serving both is the defect this shape exists to prevent: the
+# single function answered "same" on an unresolvable destination — right for
+# the sweep, and for the probe it turned `--applies` into "no" for any host
+# whose $BIN_DIR does not resolve, silently retiring a rung that had done
+# nothing. A future edit that changes one fallback now cannot touch the other.
 #
 # RESOLVED PHYSICALLY, not compared as text. The first fix here collapsed
 # repeated slashes and stripped trailing ones with sed, which is the body of
 # install.sh's normalize_dir — and that function says out loud what it is:
 # "TEXTUAL ONLY — no '.'/'..' folding, no symlink resolution, no relative-path
-# anchoring". Textual is safe THERE because normalize_dir's gate REFUSES on a
-# mismatch. Here the mismatch direction is destructive, so every spelling the
-# text compare cannot see is a live way to delete the install: `/usr/local/bin/.`
-# and `/usr/local/bin/../bin` fold to the destination, a relative spelling
-# anchors to it, and a symlinked alias resolves to it — each of them answers
-# "different" to a text compare and arms the sweep against the destination.
-# One spelling was fixed and the class was left open; `cd`+`pwd -P` closes the
-# class, because the kernel does the folding, the anchoring and the resolution.
+# anchoring". Every spelling the text compare cannot see is a live way to
+# delete the install: `/usr/local/bin/.` and `/usr/local/bin/../bin` fold to
+# the destination, a relative spelling anchors to it, and a symlinked alias
+# resolves to it.
 #
 # `cd -P`, NOT a bare `cd`, and that is the same logical-versus-physical
-# distinction the root-secure walk beside this was rewritten to respect — left
-# unapplied here for three rounds. A bare `cd` is LOGICAL: the shell folds a
-# `..` textually against the path it was given instead of letting the kernel
-# resolve it, so `<legacy>/link/../bin`, where `link` is a symlink, is folded
-# to `<legacy>/bin`, which does not exist, and the `cd` FAILS. That side then
-# resolves to nothing, the destination guard below does not fire because the
-# DESTINATION resolved fine, and the text compare answers "different" for a
-# path that IS the install destination — arming the sweep to delete the
-# binaries the installer has just placed, which is exactly what case 37a7
-# exists to prevent. `-P` hands the resolution to the kernel, which is the
-# only thing that agrees with what the sweep will actually open.
+# distinction the root-secure walk beside this was rewritten to respect. A bare
+# `cd` is LOGICAL: the shell folds a `..` textually instead of letting the
+# kernel resolve it, so `<legacy>/link/../bin`, where `link` is a symlink, is
+# folded to a path that does not exist and the `cd` FAILS — after which the
+# text compare answers "different" about the install destination itself.
 #
 # The `cd` runs in a command substitution, so it is a SUBSHELL and the sourcing
 # installer's own working directory never moves. CDPATH is cleared because a
 # relative operand would otherwise be resolved against it.
 #
-# THE TWO SIDES ARE NOT INTERCHANGEABLE, and the fallback is written per side.
-# Both callers pass (LEGACY, DESTINATION) in that order, and the failure
-# directions are opposite:
-#
-#   the DESTINATION will not resolve — an unsearchable ancestor, or it is not
-#   created yet at `--applies` probe time. Nothing has been proved about
-#   whether the two name the same place, and a text compare will happily answer
-#   "different" for a symlink alias, a `/.`, a `/..` or a relative spelling —
-#   arming the destructive sweep against the install destination, which is the
-#   whole thing 37a7 exists to close. So: answer SAME and refuse to sweep.
-#   Failing toward not-deleting is the only safe direction for a delete guard;
-#   a wrong "same" costs one skipped no-op run.
-#
-#   only the LEGACY side will not resolve — `cd` fails exactly when a directory
-#   cannot be entered, and a legacy directory that cannot be entered is one
-#   this sweep can unlink nothing out of. The text compare is safe there, and
-#   it preserves the probe's documented fail-open. A non-existent legacy
-#   directory never reaches here at all: both callers test
-#   `[ -d "$LEGACY_BIN_DIR" ]` first.
-#
 # Deliberately NOT named normalize_dir: inner/*/install.sh defines one and
 # sources this library from inside a function, so a second definition of that
 # name would silently take over for the rest of that shell.
-stale_exec_root_same_dir() {
+
+# stale_exec_root_resolve_pair LEGACY DESTINATION — sets $_sersd_ra / $_sersd_rb
+# to each side resolved by the kernel, or to '' for a side that will not
+# resolve. The shared half; neither fallback lives here.
+stale_exec_root_resolve_pair() {
     _sersd_ra="$(CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P)" || _sersd_ra=''
     _sersd_rb="$(CDPATH= cd -P -- "$2" 2>/dev/null && pwd -P)" || _sersd_rb=''
+}
+
+# stale_exec_root_same_text LEGACY DESTINATION — the textual compare, kept only
+# as a POSITIVE short-circuit: two identical spellings are certainly the same
+# directory whether or not either resolves. It can never prove they DIFFER.
+stale_exec_root_same_text() {
+    _sersd_a="$(printf '%s' "$1" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    _sersd_b="$(printf '%s' "$2" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    [ "${_sersd_a:-/}" = "${_sersd_b:-/}" ]
+}
+
+# For the SWEEP: unresolvable ⇒ SAME ⇒ do not delete.
+stale_exec_root_same_dir_for_sweep() {
+    stale_exec_root_resolve_pair "$1" "$2"
     if [ -n "$_sersd_ra" ] && [ -n "$_sersd_rb" ]; then
         [ "$_sersd_ra" = "$_sersd_rb" ]
         return $?
     fi
-    # The DESTINATION is the side whose failure is dangerous: see above.
+    # A destination this run cannot identify is one nothing may be deleted
+    # against. A legacy side that will not resolve cannot be entered either, so
+    # the sweep could unlink nothing out of it: the text compare is safe there
+    # and preserves the probe's fail-open shape for the caller below.
     [ -n "$_sersd_rb" ] || return 0
-    _sersd_a="$(printf '%s' "$1" | sed -e 's|//*|/|g' -e 's|/*$||')"
-    _sersd_b="$(printf '%s' "$2" | sed -e 's|//*|/|g' -e 's|/*$||')"
-    [ "${_sersd_a:-/}" = "${_sersd_b:-/}" ]
+    stale_exec_root_same_text "$1" "$2"
+}
+
+# For the PROBE: unresolvable ⇒ DIFFERENT ⇒ the rung stays pending.
+stale_exec_root_same_dir_for_probe() {
+    stale_exec_root_resolve_pair "$1" "$2"
+    if [ -n "$_sersd_ra" ] && [ -n "$_sersd_rb" ]; then
+        [ "$_sersd_ra" = "$_sersd_rb" ]
+        return $?
+    fi
+    # Identical spellings still prove sameness; nothing else does. Anything
+    # unproven leaves the rung pending, which is this caller's fail-open.
+    stale_exec_root_same_text "$1" "$2"
 }
 
 # stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
@@ -746,7 +764,7 @@ stale_exec_root_decision() {
 stale_exec_root_bins_pending() {
     [ -n "$STALE_USER_BINS" ] || return 1
     [ -d "$LEGACY_BIN_DIR" ] || return 1
-    ! stale_exec_root_same_dir "$LEGACY_BIN_DIR" "$BIN_DIR" || return 1
+    ! stale_exec_root_same_dir_for_probe "$LEGACY_BIN_DIR" "$BIN_DIR" || return 1
     _serp_dir="$LEGACY_BIN_DIR"
     [ -r "$_serp_dir" ] && [ -x "$_serp_dir" ] || return 0
     _serp_home="$(operator_home 2>/dev/null)"
@@ -773,7 +791,7 @@ remove_stale_exec_root_bins() {
     # moved, or a seam pointing both at one directory. Normalized: a trailing
     # slash on one side only would make this compare "different" and sweep the
     # install away.
-    ! stale_exec_root_same_dir "$LEGACY_BIN_DIR" "$BIN_DIR" || return 0
+    ! stale_exec_root_same_dir_for_sweep "$LEGACY_BIN_DIR" "$BIN_DIR" || return 0
     if ! { [ -r "$LEGACY_BIN_DIR" ] && [ -x "$LEGACY_BIN_DIR" ]; }; then
         echo "note: cannot read $LEGACY_BIN_DIR — its stale burrowee copies were not swept." >&2
         return 0
