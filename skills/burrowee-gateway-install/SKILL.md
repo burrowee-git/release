@@ -102,8 +102,8 @@ line prints.**
 > are equivalent — the dispatcher just execs the gateway component. Apart from
 > `version`, `burrowee-gateway` is configured entirely by environment variables
 > (covered in `burrowee-gateway-setup`) and starts running when invoked with no
-> subcommand, and the registrar — reached as `burrowee register …`, since the bare
-> `burrowee-register` is not linked onto PATH — takes `-sock`/`-name`/`-target`
+> subcommand, and the registrar — reached as `burrowee register …`, since
+> nothing puts a bare `burrowee-register` on PATH — takes `-sock`/`-name`/`-target`
 > flags. Do not run a bare `burrowee gateway` here (it would try to start with
 > missing env).
 

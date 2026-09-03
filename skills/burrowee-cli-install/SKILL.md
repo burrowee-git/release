@@ -1,21 +1,23 @@
 ---
 name: burrowee-cli-install
-description: Install the burrowee cli (the local client + forwarder) on this machine (macOS + Linux). Use when the operator asks to "install burrowee cli", "get the burrowee client", or pastes release.burrowee.com/cli/install.sh or release.burrowee.com/skills/burrowee-cli-install/SKILL.md. Stop after the binaries are on PATH and `burrowee cli version` reports a version — pairing + connect live in the burrowee-cli-setup skill, which the operator triggers next.
+description: Install the burrowee cli (the local client + forwarder) on this machine (macOS + Linux). Use when the operator asks to "install burrowee cli", "get the burrowee client", or pastes release.burrowee.com/cli/install.sh or release.burrowee.com/skills/burrowee-cli-install/SKILL.md. Stop after the binaries are installed and `burrowee cli version` reports a version — pairing + connect live in the burrowee-cli-setup skill, which the operator triggers next.
 ---
 
 # burrowee-cli-install
 
 You are an LLM coding agent (Claude Code, Cursor, Aider, …) tasked with putting the
-**burrowee cli** on this machine. The install drops two binaries into PATH: the
-`burrowee` dispatcher and the `burrowee-cli` component. The dispatcher execs the
-component, so `burrowee cli …` and the bare `burrowee-cli …` are the same surface.
+**burrowee cli** on this machine. The install drops two binaries into
+`${PREFIX:-$HOME/.local}/bin` — the `burrowee` dispatcher and the `burrowee-cli`
+component — and that directory is **not necessarily on PATH**. The dispatcher
+execs the component, so `burrowee cli …` and the bare `burrowee-cli …` are the
+same surface once either is reachable.
 
 The job is narrow: install + verify. Do **not** start pairing or connect flows —
 those belong to the `burrowee-cli-setup` skill the operator invokes next.
 
 The operator may need to perform out-of-terminal actions (granting shell
-permissions, opening a new shell to pick up `PATH`). Pause and ask; resume when
-they confirm.
+permissions, running the `export PATH=…` line the install prints, opening a new
+shell to pick it up). Pause and ask; resume when they confirm.
 
 ---
 
