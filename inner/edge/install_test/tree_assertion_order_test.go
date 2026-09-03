@@ -32,6 +32,7 @@ package install_test
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -133,6 +134,125 @@ func shellFunctionBody(t *testing.T, body, name string) string {
 		t.Fatalf("%s() is never closed", name)
 	}
 	return rest[:e]
+}
+
+// TestNoPathJudgingFunctionEntersTheDirectory is the no-`cd` rule, applied to
+// EVERY function this installer defines rather than to the pinned region.
+//
+// THE POINT IS THE SCOPE. There was already a test forbidding a `cd` in the
+// functions that judge a path — and it scanned the contract region only. A
+// helper added OUTSIDE the region then resolved a parent with
+// `cd -P -- "$dir/.."`, which needs SEARCH permission on the symlink's target,
+// and the installer states data roots to root:root 0700 through exactly such
+// links: the layout installed once and refused every re-run afterwards. The
+// guard could not see it by construction, because the guard covered a REGION
+// and the rule is about a BEHAVIOUR.
+//
+// So the rule is now: any function that consults the root-secure predicates is
+// judging a path, and a function that judges a path does not enter it. `[ -d ]`,
+// `[ -L ]`, `readlink`, `dirname` and `stat` need search on a path's PARENT;
+// `cd` needs it on the path itself, and the account this installer runs as is
+// exactly the account that does not have it.
+//
+// Mutation that reddens it: resolve the parent in assert_level_safe_to_state
+// with `cd -P -- "$_alss_d/.."` again.
+func TestNoPathJudgingFunctionEntersTheDirectory(t *testing.T) {
+	predicates := []string{
+		"dir_is_root_secure", "dir_level_is_root_secure", "dir_probe_reason",
+		"dir_spelling_normalize", "dir_leaf_is_symlink", "dir_leaf_is_notdir",
+	}
+	body := string(mustReadFile(t, installShPath(t)))
+	fns := shellFunctionNames(body)
+	if len(fns) < 20 {
+		t.Fatalf("only %d functions found in the installer — the scanner is not seeing the file", len(fns))
+	}
+	judging := 0
+	for _, name := range fns {
+		code := stripShellComments(shellFunctionBody(t, body, name))
+		judges := false
+		for _, pred := range predicates {
+			// A predicate's own definition does not count as consulting it.
+			if strings.Contains(code, pred) && name != pred {
+				judges = true
+			}
+		}
+		if !judges {
+			continue
+		}
+		judging++
+		for i, line := range strings.Split(code, "\n") {
+			if strings.Contains(line, "cd ") {
+				t.Errorf("%s() judges a path and changes directory (line %d): %s\n"+
+					"a `cd` needs search permission on the path itself; every other probe needs it only on the parent, and this installer runs as an account that has neither on a root-owned 0700 tree",
+					name, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	if judging < 3 {
+		t.Errorf("only %d functions were found to consult the predicates — expected at least 3, so this test is probably matching nothing", judging)
+	}
+}
+
+// TestOutOfPinNamesExist keeps the region's "THE PIN IS NOT THE WHOLE CONTRACT"
+// list honest. It is the instruction another repo follows when it re-syncs the
+// pinned region, and it went stale within one round of being written: it named
+// a guard inside ensure_dir_stated that had already been replaced, so a repo
+// following it would have looked there, found nothing, and shipped the region
+// with chown and chmod still following a symlink out of its own tree.
+func TestOutOfPinNamesExist(t *testing.T) {
+	body := string(mustReadFile(t, installShPath(t)))
+	const head = "# THE PIN IS NOT THE WHOLE CONTRACT."
+	const tail = "# They are outside deliberately"
+	b := strings.Index(body, head)
+	e := strings.Index(body, tail)
+	if b < 0 || e < b {
+		t.Fatal("the out-of-pin block is missing or its bounds moved — this test can no longer find the list it checks")
+	}
+	sweep := filepath.Join(filepath.Dir(filepath.Dir(installShPath(t))), "_shared", "migrations", "lib_stale_user_bins.sh")
+	lib, err := os.ReadFile(sweep)
+	if err != nil {
+		t.Fatalf("read %s: %v", sweep, err)
+	}
+	var named []string
+	for _, line := range strings.Split(body[b:e], "\n") {
+		if !strings.HasPrefix(line, "#   * ") {
+			continue
+		}
+		name := strings.Fields(strings.TrimPrefix(line, "#   * "))[0]
+		named = append(named, name)
+		if !strings.Contains(body, "\n"+name+"() {\n") && !strings.Contains(string(lib), "\n"+name+"() {\n") {
+			t.Errorf("the out-of-pin list names %s, which no longer exists in the installer or the sweep library — a repo re-syncing the region would look for it and find nothing", name)
+		}
+	}
+	if len(named) < 4 {
+		t.Errorf("the out-of-pin list names %d functions, want at least 4 — has the list lost entries, or the marker changed?", len(named))
+	}
+}
+
+// shellFunctionNames returns every `name() {` this file defines, in order.
+func shellFunctionNames(body string) []string {
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasSuffix(line, "() {") || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			continue
+		}
+		out = append(out, strings.TrimSuffix(line, "() {"))
+	}
+	return out
+}
+
+// stripShellComments drops whole-line comments so prose about `cd` is not read
+// as a call to it.
+func stripShellComments(body string) string {
+	var kept []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			kept = append(kept, "")
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // mustReadFile is this package's minimal file read; the gateway package has

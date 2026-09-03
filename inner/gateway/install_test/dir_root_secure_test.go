@@ -539,6 +539,50 @@ func TestDirIsRootSecureJudgesTheChainAboveASymlinkTargetSeparately(t *testing.T
 	}
 }
 
+// TestDirIsRootSecureJudgesAParentWhoseChildIsUnsearchable is the property
+// assert_level_safe_to_state depends on, and the one an earlier form of that
+// guard destroyed by resolving the parent with `cd`.
+//
+// The installer states data roots to root:root 0700 THROUGH a symlink. After
+// the first install the target is therefore unsearchable by the unprivileged
+// account the installer runs as — and `cd -P -- "$link/.."` needs search on
+// the target, because the kernel resolves `..` inside it. So the "put var on
+// the big disk" layout installed once and was refused on every re-run, blaming
+// a chain that was perfectly root-owned.
+//
+// Deriving the parent instead (readlink + dirname) and handing THAT to this
+// predicate works, because the walk uses stat and lstat: they need search on
+// each component's PARENT and never on the component itself. This asserts
+// exactly that — the parent is judged with the child sealed shut.
+//
+// REAL only below root, like the other unsearchability cases: root searches a
+// 0000 directory regardless. CI runs as an ordinary uid.
+func TestDirIsRootSecureJudgesAParentWhoseChildIsUnsearchable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: no chmod can make a directory unsearchable for this process, so the fixture cannot stage the condition under test")
+	}
+	root := canonicalTempDir(t)
+	parent := filepath.Join(root, "big")
+	child := filepath.Join(parent, "gwdata")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(child, 0o755) })
+	// Stands in for the root:root 0700 the installer states through the link.
+	if err := os.Chmod(child, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	none := map[string]string{}
+	if rc := dirIsRootSecure(t, parent, none, none); rc != 0 {
+		t.Errorf("the parent of an unsearchable child: rc = %d, want 0 — judging a chain must never require entering what hangs below it, or every re-run of a supported layout is refused", rc)
+	}
+	// The child itself is a different question and still answers undecidable,
+	// which is why the guard asks about the parent and not about the child.
+	if rc := dirIsRootSecure(t, filepath.Join(child, "below"), none, none); rc != 2 {
+		t.Errorf("something below the unsearchable child: rc = %d, want 2", rc)
+	}
+}
+
 // TestDirIsRootSecureRefusesAnEmptyOperand — an unset variable must never come
 // back "root-secure".
 //

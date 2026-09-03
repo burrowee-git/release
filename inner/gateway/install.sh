@@ -474,22 +474,31 @@ have_real_root() {
 #   burrowee-git/relay    install.sh                  (relay's inner installer
 #                                                      lives in its own repo)
 #
-# THE PIN IS NOT THE WHOLE CONTRACT. Three things this region's correctness
-# depends on live OUTSIDE these sentinels, so a re-sync that copies the region
-# alone brings none of them and no test in any repo notices:
+# THE PIN IS NOT THE WHOLE CONTRACT. These functions live OUTSIDE the
+# sentinels, so a re-sync that copies the region alone brings none of them and
+# no test in any repo notices. Each line below is checked against the shipped
+# installer by tools' TestOutOfPinNamesExist, because this list is load-bearing
+# documentation in a change whose whole point is that the pin does not cover
+# it — and it went stale within one round the first time it was written:
 #
-#   assert_roots_not_symlinked   the config root may not be a symlink, checked
-#                                before anything is created
-#   ensure_dir_stated's guard    a symlinked level whose target's chain is bad
-#                                is refused BEFORE chown/chmod follow the link
-#   stale_exec_root_same_dir     in inner/_shared/migrations/lib_stale_user_bins.sh,
-#                                and outside that file's own SHARED SWEEP
-#                                CONTRACT sentinels as well
+#   * assert_roots_not_symlinked — the config root may not be a symlink,
+#     checked before anything is created.
+#   * system_tree_levels — the tree's levels as ONE list, so the refusing and
+#     the creating pass cannot drift apart.
+#   * assert_level_safe_to_state — a symlinked level whose target's chain is
+#     bad is refused BEFORE chown and chmod follow the link. (This replaced a
+#     guard that briefly lived inside ensure_dir_stated; a repo that copies the
+#     region and looks there will find nothing.)
+#   * stale_exec_root_same_dir_for_sweep — in
+#     inner/_shared/migrations/lib_stale_user_bins.sh, and outside that file's
+#     own SHARED SWEEP CONTRACT sentinels as well.
+#   * stale_exec_root_same_dir_for_probe — its opposite-fail-safe twin, same
+#     file.
 #
-# They are outside deliberately: each one names variables that differ per
-# component ($SYS_CONFIG_DIR here, $COMP_HOME in edge) or lives in the sweep
-# library, so none of them can be byte-identical text. A repo re-syncing this
-# region must take them as named changes, not assume the pin covered them.
+# They are outside deliberately: each names variables that differ per component
+# ($SYS_CONFIG_DIR here, $COMP_HOME in edge) or lives in the sweep library, so
+# none of them can be byte-identical text. A repo re-syncing this region must
+# take them as named changes, not assume the pin covered them.
 #
 # It is duplicated rather than sourced because it must run even when a bundle
 # carries no migrations/ directory at all (BURROWEE_UNITS_ONLY re-runs a kept
@@ -1742,24 +1751,74 @@ system_tree_levels() {
 assert_level_safe_to_state() {
     _alss_d="$1"
     dir_leaf_is_symlink "$_alss_d" || return 0
-    _alss_up="$(CDPATH= cd -P -- "$_alss_d/.." 2>/dev/null && pwd -P)" || _alss_up=''
-    _alss_rc=0
-    if [ -n "$_alss_up" ]; then
-        dir_is_root_secure "$_alss_up" || _alss_rc=$?
-    else
-        _alss_rc=2
+    # THE PARENT IS DERIVED, NEVER ENTERED. An earlier form resolved it with
+    # `cd -P -- "$_alss_d/.."`, and that is the EACCES trap this whole change
+    # exists to forbid, reintroduced outside the region where the test that
+    # forbids it could not see: the kernel resolves `..` INSIDE the target, so
+    # that cd needs SEARCH permission on the target itself. This installer runs
+    # unprivileged and elevates per step, and it states $SYS_DATA_DIR to
+    # root:root 0700 through exactly such a link — so the "put var on the big
+    # disk" layout installed once and then refused every re-run, blaming a
+    # chain that was perfectly root-owned.
+    #
+    # readlink + dirname needs search on the LINK'S directory only, and
+    # dir_is_root_secure walks what it is given with stat and lstat, which need
+    # search on each component's PARENT and never on the component. Nothing
+    # here opens the target.
+    _alss_t="$(readlink "$_alss_d" 2>/dev/null)" || _alss_t=''
+    if [ -z "$_alss_t" ]; then
+        echo "error: $_alss_d is a symlink whose target could not be read, so the" >&2
+        echo "error: directory it would be stated through cannot be established." >&2
+        echo "error: refusing before anything is written." >&2
+        echo "hint: nothing on this host has been created or changed by this run — every" >&2
+        echo "hint: level is judged before the first one is created." >&2
+        echo "hint: the ownership and modes of $_alss_d are NOT implicated — reading the" >&2
+        echo "hint: link is." >&2
+        return 1
     fi
-    [ "$_alss_rc" != 0 ] || return 0
-    echo "error: $_alss_d is a symlink, and the directory it points into is not one" >&2
-    echo "error: only root can rewrite — see the chain above its target." >&2
-    echo "error: refusing before anything is written: stating this level would" >&2
-    echo "error: chown and chmod THROUGH the link, changing a directory outside this" >&2
-    echo "error: installer's tree, and the install would then be refused anyway." >&2
-    echo "hint: nothing on this host has been created or changed by this run — every" >&2
-    echo "hint: level is judged before the first one is created." >&2
-    echo "hint: check the ownership and modes of every directory above the link's" >&2
-    echo "hint: target; each must be owned by root and not group- or world-writable." >&2
-    echo "hint: or point $_alss_d at a directory inside a root-owned tree." >&2
+    case "$_alss_t" in
+    /*) ;;
+    # A relative target is anchored at the link's own directory, exactly as the
+    # kernel anchors it.
+    *) _alss_t="$(dirname "$_alss_d")/$_alss_t" ;;
+    esac
+    _alss_up="$(dirname "$_alss_t")"
+    _alss_rc=0
+    dir_is_root_secure "$_alss_up" || _alss_rc=$?
+    case "$_alss_rc" in
+    0) return 0 ;;
+    2)
+        # Undecidable is not insecure, here as everywhere else in this file.
+        echo "error: the ownership of the directories above $_alss_t could not be" >&2
+        echo "error: established, so whether stating $_alss_d would write into a" >&2
+        echo "error: tree only root can rewrite is not known." >&2
+        echo "error: refusing before anything is written." >&2
+        echo "hint: nothing on this host has been created or changed by this run." >&2
+        echo "hint: their permissions are NOT implicated — reading them is. Either this" >&2
+        echo "hint: host's 'stat' answered neither dialect, or a symlink on the way could" >&2
+        echo "hint: not be followed; a re-run settles the second." >&2
+        ;;
+    3)
+        echo "error: $_alss_d is a symlink pointing into $_alss_up, which does not" >&2
+        echo "error: exist — the link leads nowhere this installer can state." >&2
+        echo "error: refusing before anything is written." >&2
+        echo "hint: nothing on this host has been created or changed by this run." >&2
+        echo "hint: create the directory the link points into, or point $_alss_d" >&2
+        echo "hint: somewhere that exists." >&2
+        ;;
+    *)
+        echo "error: $_alss_d is a symlink, and the directory it points into is not one" >&2
+        echo "error: only root can rewrite — see the chain above its target." >&2
+        echo "error: refusing before anything is written: stating this level would" >&2
+        echo "error: chown and chmod THROUGH the link, changing a directory outside this" >&2
+        echo "error: installer's tree, and the install would then be refused anyway." >&2
+        echo "hint: nothing on this host has been created or changed by this run — every" >&2
+        echo "hint: level is judged before the first one is created." >&2
+        echo "hint: check the ownership and modes of every directory above the link's" >&2
+        echo "hint: target; each must be owned by root and not group- or world-writable." >&2
+        echo "hint: or point $_alss_d at a directory inside a root-owned tree." >&2
+        ;;
+    esac
     return 1
 }
 
