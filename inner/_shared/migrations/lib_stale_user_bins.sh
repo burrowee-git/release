@@ -751,11 +751,27 @@ remove_stale_user_bins() {
 # unit_naming_bin) rather than restating them, so what "ours", "has a twin" and
 # "still named by a unit" mean cannot drift between the two sweeps.
 #
+# SYMLINKS: OURS GO, EVERYONE ELSE'S STAY — and this rule INVERTED, so the
+# reason the old one was right is worth keeping. Every symlink here used to be
+# spared, checked FIRST and before ownership (a link's stamp is its target's),
+# because "the 0.3 installer links the operator-typed names from /usr/local/bin
+# into the new tree (spec §6.1); deleting one of those is deleting the install's
+# PATH entry." That sentence was true and is now false: nothing links there any
+# more. §6.1 is superseded, the installers print an export line for the
+# operator's own shell instead, and a link into $BIN_DIR is therefore not the
+# install's PATH entry but a leftover of an earlier 0.3 install — sitting in a
+# directory an operator's PATH reaches AHEAD of the exec root.
+#
+# Three shapes, three decisions, because they are not the same question:
+#   * OURS — the link resolves and its target is under $BIN_DIR. Removed.
+#     Removing a link removes no binary: the target it named is exactly what
+#     $BIN_DIR still holds, which is why the twin guard below does not apply to
+#     it. The UNIT guard does, for the reason it always did.
+#   * THEIRS — it resolves somewhere else. An operator's own wrapper. Left.
+#   * DANGLING — it does not resolve at all, so nothing can say whose it was.
+#     Left: undecidable cases fail toward KEEP, here as everywhere else.
+#
 # WHAT IT DOES NOT TOUCH, per item, and why:
-#   * A SYMLINK, ours or anyone's. The 0.3 installer links the operator-typed
-#     names from /usr/local/bin into the new tree (spec §6.1); deleting one of
-#     those is deleting the install's PATH entry. Checked FIRST, before
-#     ownership, because a link's stamp is its target's.
 #   * A file that is not a burrowee binary (no build stamp) — an operator's own.
 #   * A name whose twin in $BIN_DIR is missing, not ours, not a regular file
 #     owned by $STALE_EXEC_ROOT_TWIN_OWNER, or group/other-writable: the new
@@ -772,15 +788,27 @@ remove_stale_user_bins() {
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-/usr/local/bin}"
 
 # STALE_EXEC_ROOT_KEEP — names the sweep must leave in $LEGACY_BIN_DIR no matter
-# what it decides about them. The installer sets it to the operator-typed names
-# it did NOT link: on a host whose /usr/local/bin is not root-secure,
-# link_operator_bins creates nothing and prints the PATH line instead, and the
-# real 0.2 file at that name is then the ONLY copy anything reaches by the
-# absolute path — the shared `burrowee` dispatcher above all, which every
-# co-installed component and every consumer resolves as /usr/local/bin/burrowee.
-# Removing it there would leave that path empty on exactly the host class this
-# whole change exists for. Empty on a host where the links WERE made: the link
-# replaced the file, so nothing is stranded.
+# what it decides about them.
+#
+# NOTHING SETS IT ANY MORE, and that is the whole second-order effect of
+# deleting the link step. The installers used to hand it every operator-typed
+# name they had not linked: on a host whose /usr/local/bin was not root-secure
+# nothing was linked, and the real 0.2 file at that name was then the ONLY copy
+# anything reached by the absolute path — the shared `burrowee` dispatcher
+# above all, which every co-installed component resolved as
+# /usr/local/bin/burrowee. Removing it there would have left that path empty on
+# exactly the host class this change exists for.
+#
+# No consumer resolves by that path today: no install links there, and $BIN_DIR
+# is what every unit, every root exec and the printed PATH advice name. So the
+# list is empty on every host, and the real-file removals a first 0.3 run used
+# to defer happen on that first run. Intended, and asserted rather than merely
+# allowed (inner/edge/install_test/exec_root_sweep_test.go).
+#
+# It survives as a SEAM rather than being deleted: it is what lets a suite that
+# cannot create root-owned files drive the keep branch in both directions
+# (tools/test-shared-migrations.sh 37a4, 37a5), and a guard no test can enter
+# is a guard that can be deleted without anything going red.
 STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:-}"
 
 # stale_exec_root_is_kept NAME — true when NAME is in $STALE_EXEC_ROOT_KEEP.
@@ -800,15 +828,41 @@ stale_exec_root_twin_ok() {
 }
 
 # stale_exec_root_decision <bin> <operator-home> — the WHOLE decision for one
-# name at $LEGACY_BIN_DIR, as one word: symlink | absent | irregular | foreign
-# | no-twin | twin-untrusted | unit:<file> | remove. One function, used by
-# the probe and the sweep alike, for the reason stale_bin_decision gives.
+# name at $LEGACY_BIN_DIR, as one word: link-ours | link-foreign |
+# link-dangling | absent | irregular | foreign | no-twin | twin-untrusted |
+# unit:<file> | remove | remove-link. One function, used by the probe and the
+# sweep alike, for the reason stale_bin_decision gives.
 stale_exec_root_decision() {
     _serd_p="$LEGACY_BIN_DIR/$1"
     # stale_bin_verdict answers `symlink` FIRST, before ownership — a link's
     # stamp is its target's — which is exactly the order this sweep needs.
     _serd_v="$(stale_bin_verdict "$_serd_p")"
     case "$_serd_v" in
+    symlink)
+        # `-e` FOLLOWS the link, so it is the resolution test: a link that does
+        # not resolve tells us nothing about whose it was and is kept.
+        [ -e "$_serd_p" ] || { echo link-dangling; return 0; }
+        # ONE HOP, and an absolute prefix compare — deliberately the same rule
+        # the installers' unlink_operator_bins uses, so the sweep and the
+        # uninstall cannot disagree about which links are ours. A link through
+        # some other link is not recognised and is therefore kept, which is the
+        # safe direction.
+        case "$(readlink "$_serd_p" 2>/dev/null)" in
+        "$BIN_DIR"/*) ;;
+        *) echo link-foreign; return 0 ;;
+        esac
+        # The unit guard applies to a link exactly as it does to a file: on
+        # macOS a 0.2 plist's KeepAlive.PathState keys off the existence of the
+        # path it names, so unlinking one a supervisor still watches stops the
+        # running daemon. The TWIN guard does not — removing a link removes no
+        # binary at all, and the target it named is what $BIN_DIR still holds.
+        if _serd_u="$(unit_naming_bin "$LEGACY_BIN_DIR" "$1" "$2")"; then
+            echo "unit:$_serd_u"
+            return 0
+        fi
+        echo remove-link
+        return 0
+        ;;
     ours) ;;
     *) echo "$_serd_v"; return 0 ;;
     esac
@@ -834,9 +888,9 @@ stale_exec_root_bins_pending() {
     _serp_home="$(operator_home 2>/dev/null)"
     for _serp_b in $STALE_USER_BINS; do
         stale_exec_root_is_kept "$_serp_b" && continue
-        if [ "$(stale_exec_root_decision "$_serp_b" "$_serp_home" 2>/dev/null)" = remove ]; then
-            return 0
-        fi
+        case "$(stale_exec_root_decision "$_serp_b" "$_serp_home" 2>/dev/null)" in
+        remove | remove-link) return 0 ;;
+        esac
     done
     return 1
 }
@@ -868,8 +922,11 @@ remove_stale_exec_root_bins() {
         _rser_d="$(stale_exec_root_decision "$_rser_b" "$_rser_home")"
         case "$_rser_d" in
         absent) ;;
-        symlink)
-            echo "kept $_rser_p — a symlink (the install's PATH entry when it points into $BIN_DIR), never swept"
+        link-foreign)
+            echo "kept $_rser_p — a symlink pointing outside $BIN_DIR, so it is not ours"
+            ;;
+        link-dangling)
+            echo "kept $_rser_p — a symlink whose target does not resolve, so nothing can say whose it is"
             ;;
         irregular)
             echo "note: $_rser_p is not a regular file — left in place." >&2
@@ -893,6 +950,17 @@ remove_stale_exec_root_bins() {
                 echo "removed stale 0.2 exec-root copy: $_rser_p (the install is $BIN_DIR/$_rser_b)"
             else
                 echo "note: could not remove $_rser_p — remove it by hand." >&2
+            fi
+            ;;
+        remove-link)
+            # A link an EARLIER 0.3 install made, back when there was a link
+            # step. It removes no binary — $BIN_DIR/$_rser_b is what it named
+            # and is what stays — and it clears a name an operator's PATH
+            # reaches ahead of the exec root.
+            if rm -f "$_rser_p"; then
+                echo "removed stale 0.3 exec-root link: $_rser_p (the install is $BIN_DIR/$_rser_b)"
+            else
+                echo "note: could not remove the link $_rser_p — remove it by hand." >&2
             fi
             ;;
         esac

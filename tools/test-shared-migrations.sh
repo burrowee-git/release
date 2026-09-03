@@ -2427,10 +2427,17 @@ assert_contains "$(cat "$ch36/env.seen" 2>/dev/null)" "LEGACY_BIN_DIR=/usr/local
 
 # ---------------------------------------------------------------------------
 # 37. THE 0.3.0 EXEC-ROOT SWEEP (sweep_stale_exec_root.sh). 0.3 moved the
-#     binaries to /usr/local/burrowee/bin and linked the operator-typed names
-#     back into /usr/local/bin; what 0.2 left there as REAL files is what this
-#     rung removes — per name, and only a burrowee build with a trusted twin
-#     in the new tree that no unit still names.
+#     binaries to /usr/local/burrowee/bin; what 0.2 left in /usr/local/bin as
+#     REAL files is what this rung removes — per name, and only a burrowee
+#     build with a trusted twin in the new tree that no unit still names.
+#
+#     0.3 ALSO LINKED the operator-typed names back into /usr/local/bin, and
+#     that step is gone: nothing links there any more, the installers print an
+#     export line for the operator's own shell instead, and a link into
+#     $BIN_DIR is therefore a leftover of an earlier 0.3 install rather than
+#     the install's PATH entry. So a link of OURS is removed, a link pointing
+#     anywhere else is left, and one that does not resolve is left — 37i
+#     drives all three.
 #
 #     Fixture: $ob is the 0.2 exec root, $nb the 0.3 one. Both are under
 #     $TMP; the twin-owner seam names this suite's own user, since the suite
@@ -2473,10 +2480,9 @@ run_exec_sweep_rung() {
 }
 # exec_sweep_kit <dir> — a system-scheme edge kit whose ledger carries only the
 # 0.3.0 sweep row, with the 0.3 tree populated (twins) and the 0.2 exec root
-# holding one of each shape: a real copy of ours (the updater — nobody types
-# it, so the installer never links it), a real copy of ours under an
-# operator-typed name (a host where the installer declined to link), a symlink
-# the installer made, and an operator's own foreign file.
+# holding one of each shape: a real copy of ours (the updater), a real copy of
+# ours under an operator-typed name, a symlink an EARLIER 0.3 install made into
+# the new tree, and an operator's own foreign file.
 exec_sweep_kit() {
     kit "$1" edge system installed-version $EDGE_BINS
     printf '# ledger\n0.3.0 sweep_stale_exec_root.sh\n' > "$1/migrations/ledger"
@@ -2495,12 +2501,11 @@ run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 2 "no anchor + a pending exec-root sweep must exit 2 (migrations ran)"
 assert_contains "$OUT" "sweep_stale_exec_root.sh applies: no recorded version" "the --applies probe must select the rung"
 assert_gone "$h37/old-bin/burrowee-edge-updater" "the 0.2 real copy of the updater must be removed — nobody types it and the installer never links it"
-assert_gone "$h37/old-bin/burrowee-edge-cli" "a 0.2 real copy under an operator-typed name is removed too — the installer declined to link on this host"
-assert_present "$h37/old-bin/burrowee-edge" "the installer's symlink must survive"
-assert_eq "$(readlink "$h37/old-bin/burrowee-edge")" "$h37/sys/bin/burrowee-edge" "and still point into the 0.3 tree"
+assert_gone "$h37/old-bin/burrowee-edge-cli" "a 0.2 real copy under an operator-typed name is removed too — nothing links over it any more"
+assert_gone "$h37/old-bin/burrowee-edge" "a link into the 0.3 tree is OURS and goes: no install makes one now, so it is a leftover on a directory PATH reaches first"
 assert_present "$h37/old-bin/burrowee" "an operator's own foreign file must survive"
 assert_contains "$OUT" "removed stale 0.2 exec-root copy: $h37/old-bin/burrowee-edge-updater" "the rung must name what it removed"
-assert_contains "$OUT" "kept $h37/old-bin/burrowee-edge — a symlink" "and say why the link was kept"
+assert_contains "$OUT" "removed stale 0.3 exec-root link: $h37/old-bin/burrowee-edge" "and name the link separately — a link removal takes no binary with it"
 assert_contains "$OUT" "$h37/old-bin/burrowee carries no burrowee build stamp" "and why the foreign file was kept"
 assert_present "$h37/sys/etc/edge/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "the receipt must land in the NEW config root"
 for b in $EDGE_BINS; do assert_present "$h37/sys/bin/$b" "the 0.3 tree must be untouched ($b)"; done
@@ -2526,7 +2531,7 @@ OUT="$(
 )"; RC=$?
 assert_eq "$RC" 2 "with BIN_DIR unset the runner must still resolve the 0.3 exec root and sweep"
 assert_gone "$h37a2/old-bin/burrowee-edge-updater" "the stale 0.2 copy must be swept when BIN_DIR was never exported"
-assert_present "$h37a2/old-bin/burrowee-edge" "the installer's symlink still survives"
+assert_gone "$h37a2/old-bin/burrowee-edge" "and the leftover 0.3 link goes with it"
 assert_present "$h37a2/sys/etc/edge/migration-receipts/sweep_stale_exec_root.sh@0.3.0.done" "and the receipt records a sweep that actually happened"
 
 # 37a3. THE UPDATER TRACK NEVER INHERITS THE LEGACY ANCHOR. The updater ladder
@@ -2558,11 +2563,16 @@ assert_contains "$OUT" "sweep_stale_exec_root.sh applies: no recorded version" "
 assert_eq "$RC" 2 "and run"
 
 # 37a4. THE KEEP-LIST. A name in $STALE_EXEC_ROOT_KEEP is never removed, however
-#       the per-name evidence reads. The installers hand the ladder every
-#       operator-typed name, because the rung runs BEFORE link_operator_bins has
-#       made a single link: until one has, the real 0.2 file at that name is the
-#       only copy anything reaches by the absolute path — the shared `burrowee`
-#       dispatcher above all, which every co-installed component resolves there.
+#       the per-name evidence reads.
+#
+#       NOTHING SETS IT ANY MORE. The installers used to hand the ladder every
+#       operator-typed name, because the rung ran before a single link had been
+#       made and the real 0.2 file at that name was then the only copy anything
+#       reached by the absolute path. No consumer resolves by that path today,
+#       so the list is empty on every host and those files are swept on the
+#       first 0.3 run. The seam stays and is driven HERE, in both directions,
+#       because a guard no test can enter is one that can be deleted without
+#       anything going red.
 #       Mutation that reddens it: drop stale_exec_root_is_kept's call from
 #       remove_stale_exec_root_bins (or from the --applies probe, for the second
 #       half).
@@ -2599,7 +2609,7 @@ assert_eq "$RC" 1 "--applies must answer no when every removable name is kept"
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"
 assert_contains "$OUT" "sweep_stale_exec_root.sh skipped: its receipt records it completed here" "the receipt must gate the second run"
-assert_present "$h37/old-bin/burrowee-edge" "the link is still there after the second run"
+assert_present "$h37/old-bin/burrowee" "the operator's own file is still there after the second run"
 
 # 37c. NOTHING TO SWEEP: no 0.2 exec root at all — a host born on 0.3.
 t37c="$TMP/t37c"; exec_sweep_kit "$t37c"; h37c="$t37c/home"; rm -rf "$h37c/old-bin"
@@ -2611,6 +2621,11 @@ assert_contains "$OUT" "sweep_stale_exec_root.sh skipped: no recorded version, a
 #      than the seam names: the old copy is kept and the reason is said. The
 #      seam is what makes this drivable both ways without root.
 t37d="$TMP/t37d"; exec_sweep_kit "$t37d"; h37d="$t37d/home"
+# The leftover 0.3 link is removed on its own evidence, without consulting a
+# twin — removing a link takes no binary with it — so it is taken out of this
+# fixture, which is about the twin guard alone. Left in, --applies would answer
+# yes for the link and this section would pass while saying nothing about twins.
+rm -f "$h37d/old-bin/burrowee-edge"
 EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d"; run_exec_sweep_rung "$t37d" "$h37d" --applies; unset EXEC_SWEEP_TWIN_OWNER
 assert_eq "$RC" 1 "--applies must answer no when no twin is trusted"
 EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d"; run_exec_sweep_rung "$t37d" "$h37d"; unset EXEC_SWEEP_TWIN_OWNER
@@ -2649,6 +2664,47 @@ t37g="$TMP/t37g"; exec_sweep_kit "$t37g"; h37g="$t37g/home"; rm -f "$h37g/sys/bi
 run_exec_sweep_rung "$t37g" "$h37g"
 assert_present "$h37g/old-bin/burrowee-edge-updater" "with no twin in the 0.3 tree the 0.2 copy is the live install"
 assert_contains "$OUT" "kept $h37g/old-bin/burrowee-edge-updater — there is no $h37g/sys/bin/burrowee-edge-updater" "and the rung says so"
+
+# 37i. THE THREE SYMLINK SHAPES, each its own decision. The rule INVERTED when
+#      the link step was deleted: every symlink used to be spared on the
+#      grounds that it WAS the install's PATH entry, and no install makes one
+#      any more. So a link of ours is stale state on a directory an operator's
+#      PATH reaches ahead of the exec root; anyone else's is still theirs; and
+#      one that does not resolve tells us nothing about whose it was, so it is
+#      kept — undecidable cases fail toward KEEP, here as everywhere else.
+#      Mutations that redden it, one per claim: spare every symlink again;
+#      remove every symlink; treat a dangling link as ours.
+t37i="$TMP/t37i"; exec_sweep_kit "$t37i"; h37i="$t37i/home"
+rm -f "$h37i/old-bin/burrowee" "$h37i/old-bin/burrowee-edge-cli"
+ln -s "$TMP/t37i-operator-wrapper" "$h37i/old-bin/burrowee"
+: > "$TMP/t37i-operator-wrapper"
+ln -s "$h37i/nothing-here-at-all" "$h37i/old-bin/burrowee-edge-cli"
+run_exec_sweep_rung "$t37i" "$h37i"
+assert_eq "$RC" 0 "the three link shapes are decisions, never failures"
+assert_gone "$h37i/old-bin/burrowee-edge" "a link into \$BIN_DIR is ours and goes"
+assert_present "$h37i/old-bin/burrowee" "a link pointing outside \$BIN_DIR is the operator's and stays"
+# assert_present would follow the link and call a DANGLING one absent, which is
+# exactly the state under test — so this one is checked with -h, on the link
+# itself, and not through it.
+CASES=$((CASES + 1))
+[ -h "$h37i/old-bin/burrowee-edge-cli" ] || fail "a link that does not resolve names nobody, so it stays ($h37i/old-bin/burrowee-edge-cli is gone)"
+assert_contains "$OUT" "removed stale 0.3 exec-root link: $h37i/old-bin/burrowee-edge" "and the rung names the one it removed"
+assert_contains "$OUT" "kept $h37i/old-bin/burrowee — a symlink pointing outside" "and says why it kept the foreign one"
+assert_contains "$OUT" "kept $h37i/old-bin/burrowee-edge-cli — a symlink whose target does not resolve" "and why it kept the dangling one"
+
+# 37j. A UNIT STILL NAMES THE LINK. On macOS a 0.2 plist's KeepAlive.PathState
+#      keys off the EXISTENCE of the path it names, so unlinking a link a
+#      supervisor still watches stops the running daemon exactly as unlinking a
+#      binary would. The unit guard therefore applies to a link too — the TWIN
+#      guard does not, because removing a link removes no binary.
+#      Mutation that reddens it: drop the unit_naming_bin call from the symlink
+#      branch of stale_exec_root_decision.
+t37j="$TMP/t37j"; exec_sweep_kit "$t37j"; h37j="$t37j/home"; mkdir -p "$h37j/launchd"
+printf '<plist><dict><key>KeepAlive</key><dict><key>PathState</key><dict><key>%s/old-bin/burrowee-edge</key><true/></dict></dict></dict></plist>\n' "$h37j" > "$h37j/launchd/com.burrowee.edge.plist"
+EXEC_SWEEP_LAUNCHD_DIR="$h37j/launchd"; run_exec_sweep_rung "$t37j" "$h37j"; unset EXEC_SWEEP_LAUNCHD_DIR
+assert_eq "$RC" 0 "a unit-named link is a decline, not a failure"
+assert_present "$h37j/old-bin/burrowee-edge" "a link a supervisor still watches must not be unlinked"
+assert_contains "$OUT" "$h37j/launchd/com.burrowee.edge.plist still names $h37j/old-bin/burrowee-edge" "and the unit must be named"
 
 # 37h. BAD ARGUMENT — the same contract as its siblings.
 run_exec_sweep_rung "$t37g" "$h37g" --bogus
