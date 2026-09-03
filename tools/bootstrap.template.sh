@@ -102,9 +102,6 @@
 #   BURROWEE_RELEASE_REPO        GitHub repo serving releases (default burrowee-git/release)
 #   BURROWEE_SKIP_PREFLIGHT=1    skip the OS-dependency preflight (manage deps yourself)
 #   BURROWEE_SKIP_NGINX=1        (edge) skip nginx + stream module in the preflight
-#   BURROWEE_NO_PATH_EDIT=1      do not persist PREFIX/bin to your shell rc (no effect for
-#                                the gateway or the edge, which edit no rc —
-#                                their inner installer links into /usr/local/bin or prints the PATH line)
 #   BURROWEE_CHANNEL_BASE        base URL for the static channel (preflight.sh lives here)
 #   BURROWEE_DL_BASE             (test hook) download assets from this base instead of GitHub
 #   CONSOLE_URL                  Burrowee console base URL; used by the R2 fallback when
@@ -170,9 +167,10 @@ REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 #
 # PER COMPONENT, because this template is shared and they no longer agree. The
 # gateway and the edge install to /usr/local/burrowee/bin, root-owned, and
-# nowhere else (the operator-typed binaries are then LINKED into /usr/local/bin
-# when that directory is root-secure — a link, not a second destination): their
-# inner installers REFUSE a PREFIX that names anywhere else, so manufacturing a
+# nowhere else — nothing is linked back into /usr/local/bin any more, and their
+# inner installers end by printing how to reach the exec root from the
+# operator's own login shell. They REFUSE a PREFIX that names anywhere else, so
+# manufacturing a
 # per-user one here would make every `curl … | sh` fail — and, before that
 # refusal existed, manufacturing one is precisely what sent every bootstrap
 # install down the per-user branch, which also switched off unit rendering,
@@ -864,59 +862,37 @@ if [ "$MODE" = upgrade ]; then
     ok "$COMP $TAG installed and its migrations forced from floor $MIG_FLOOR"
 fi
 
-# ---- PATH persistence ---------------------------------------------------
-# On a real install, idempotently add PREFIX/bin to the operator's shell rc so a
-# fresh shell finds `burrowee` (the live-VPS `command not found`). bash reads
-# ~/.bashrc for INTERACTIVE shells, but a LOGIN shell (ssh) reads the first of
-# ~/.bash_profile / ~/.bash_login / ~/.profile and does NOT auto-source ~/.bashrc
-# — so write to both the interactive rc and the login file, else PATH is missing
-# over ssh. An unset/unknown $SHELL defaults to the bash files. Fault-tolerant:
-# an unwritable rc must never abort the script (the bins are already installed).
+# ---- PATH persistence: NOT THIS SCRIPT'S, AND NO LONGER ANYONE'S TO WRITE ----
+# This bootstrap used to append a marked `# >>> burrowee PATH >>>` block to the
+# operator's shell rc for cli and agent — their interactive rc plus whichever
+# login file the shell reads — and then tell them to run the export line too.
+# It is deleted, and the deletion is the point rather than a casualty of one.
 #
-# SKIPPED ENTIRELY FOR THE GATEWAY AND THE EDGE: they install to
-# /usr/local/burrowee/bin and their INNER installer owns the PATH question —
-# it links the operator-typed binaries into /usr/local/bin when that directory
-# is root-secure, and prints the one `export PATH=…` line itself when it
-# declines to link. Only it knows which happened, so this script cannot say
-# anything useful, and $PREFIX is empty for them — "$PREFIX/bin" would expand
-# to "/bin", a directory this script has no business writing into anyone's rc.
+# THREE REASONS, in the order they matter:
 #
-# Skipped as root, for all components: this script does not edit root's shell
-# rc. Note what that means for cli/agent and is not papered over here — a root
-# install of those lands in $PREFIX/bin, i.e. /root/.local/bin under root's
-# $HOME, which root's PATH does not include, and no marker is written to say so.
-# That gap predates this comment; the previous version of it claimed such an
-# install "lands in /usr/local/bin (already on PATH)", which no code has ever
-# implemented.
-if [ "$COMP" != gateway ] && [ "$COMP" != edge ] && [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ] && [ "$(id -u)" != 0 ]; then
-    BIN_DIR="$PREFIX/bin"
-    case ":$PATH:" in
-        *":$BIN_DIR:"*) : ;;   # already on PATH this shell
-        *)
-            # rc set: interactive rc + the login file the shell actually sources.
-            case "$(basename "${SHELL:-bash}")" in
-                zsh)
-                    rc_files="$HOME/.zshrc"
-                    [ -f "$HOME/.zprofile" ] && rc_files="$rc_files $HOME/.zprofile"
-                    ;;
-                *)  # bash (and any unrecognized shell defaults to bash rc files)
-                    rc_files="$HOME/.bashrc"
-                    if   [ -f "$HOME/.bash_profile" ]; then rc_files="$rc_files $HOME/.bash_profile"
-                    elif [ -f "$HOME/.bash_login" ];   then rc_files="$rc_files $HOME/.bash_login"
-                    else rc_files="$rc_files $HOME/.profile"; fi
-                    ;;
-            esac
-            for rc in $rc_files; do
-                if [ -f "$rc" ] && grep -q 'burrowee PATH' "$rc" 2>/dev/null; then
-                    continue   # marker already present in this file
-                fi
-                {
-                    printf '\n# >>> burrowee PATH >>>\n'
-                    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
-                    printf '# <<< burrowee PATH <<<\n'
-                } >> "$rc" 2>/dev/null && info "added $BIN_DIR to PATH in $rc"
-            done
-            info "run: export PATH=\"$BIN_DIR:\$PATH\"   (or open a new shell) to use burrowee now"
-            ;;
-    esac
-fi
+#   1. IT CONTRADICTED THE INNER INSTALLER. Since the exec-root PATH-advice
+#      change, install.sh ends by printing the line to run and the ONE profile
+#      file that makes it permanent. An operator who followed that instruction
+#      and also got this block ended up with the same export twice in
+#      ~/.zprofile — and the second copy carries no marker, so the idempotence
+#      check above would not have caught it on the next install either. Two
+#      components cannot both own the advice; the one that knows the operator's
+#      shell owns it.
+#
+#   2. IT WAS WRONG FOR FISH. The rc set was chosen by `basename "$SHELL"` with
+#      bash as the default arm, so a fish operator had `export PATH=…` — not a
+#      fish builtin — appended to a ~/.bashrc that fish never reads. Silently
+#      ineffective, in the one shell whose syntax shares nothing with the other
+#      two. The printed advice renders `set -gx` / `fish_add_path` instead.
+#
+#   3. WRITING THE OPERATOR'S SHELL IS A DECLARED NON-GOAL of the change that
+#      removed the /usr/local/bin symlinks ("writing, sourcing or eval-ing
+#      anything in the operator's shell"). It was rejected for the root
+#      installers on privilege grounds; for cli and agent the privilege
+#      argument does not apply — they run as the operator — but the reason the
+#      operator should be the one to edit their own startup files does.
+#
+# What replaces it is one paste, in the syntax of the shell they actually use,
+# naming the file their shell actually reads. BURROWEE_NO_PATH_EDIT went with
+# it: there is no edit left to suppress.
+

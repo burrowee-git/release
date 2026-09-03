@@ -42,11 +42,15 @@ build to verify its payload, that single `minisign` file stays in the bin
 directory afterwards.
 Binaries land in
 `$HOME/.local/bin` (override with `PREFIX`) — **except the gateway and the
-edge**, which install to the root-owned `/usr/local/burrowee/bin` and nowhere else, then link the operator-typed names into `/usr/local/bin` when that directory is root-secure:
-their service units run as root and name the binaries absolutely, and other
+edge**, which install to the root-owned `/usr/local/burrowee/bin` and nowhere
+else. Nothing is linked back into `/usr/local/bin`: that directory does not
+exist on a clean modern Mac and belongs to Homebrew on many others, so the
+installers end by printing the `export PATH=…` line for your own login shell
+and the profile file that makes it permanent. They print it; they never write
+it. Their service units run as root and name the binaries absolutely, and other
 components resolve `/usr/local/burrowee/bin/burrowee` by absolute path. A `PREFIX` set
 for either is refused rather than honoured or silently overridden. Both share
-the `burrowee` dispatcher link, and a 0.3 dispatcher resolves only 0.3 components: on a
+the `burrowee` dispatcher, and a 0.3 dispatcher resolves only 0.3 components: on a
 host running gateway and edge, upgrade both in the same session. The edge
 additionally requires root — it manages a system service, so run it with
 `sudo` (as the one-liner above does).

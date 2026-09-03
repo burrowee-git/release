@@ -121,7 +121,7 @@ func (sb sandbox) env(stub string, extra ...string) []string {
 		"PATH=" + stub + ":/usr/bin:/bin",
 		"STUB_LOG=" + filepath.Join(sb.home, "stub-calls.log"),
 		"SYS_BIN_DIR=" + sb.sysBinDir,
-		"BURROWEE_LINK_DIR=" + filepath.Join(sb.home, "usr-local-bin"),
+		"BURROWEE_LEGACY_BIN_DIR=" + filepath.Join(sb.home, "usr-local-bin"),
 		"SYSTEMD_UNIT_DIR=" + sb.unitDir,
 		"LAUNCHD_PLIST_DIR=" + filepath.Join(sb.home, "LaunchDaemons"),
 		"ROOT_HOME=" + sb.rootHome,

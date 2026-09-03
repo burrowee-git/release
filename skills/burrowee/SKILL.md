@@ -18,12 +18,23 @@ split), so either form works. It is the open-source signing client.
 
 ## 0. Install the CLI
 Run `burrowee-agent version`. If it prints a version line, skip to §1. If the
-command is missing, install it (the binary lands on PATH as `burrowee-agent`):
+command is missing, install it:
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 https://release.burrowee.com/agent/install.sh | sh
 burrowee-agent version
 ```
+
+The binary lands in `${PREFIX:-$HOME/.local}/bin`, **which is not necessarily on
+PATH** — on many hosts it is not, and `burrowee-agent version` then fails with
+"command not found" immediately after a successful install. The installer's last
+lines are a "Next steps" block rendered for the operator's own login shell: the
+`export PATH=…` line to run now, and the profile file that makes it permanent
+(`.zprofile` for zsh, `.bash_profile` or `.profile` for bash by platform, and
+`fish_add_path` for fish, which has no `export` builtin). **Read the block the
+install actually printed** rather than reciting one, and run the line it gives —
+nothing is written to any profile for the operator. Until then, reach the binary
+by full path: `"$HOME/.local/bin/burrowee-agent" version`.
 
 (If your platform package channel differs, fetch the entry from
 `ai.burrowee.com/llms.txt` — it carries the current install one-liner.)

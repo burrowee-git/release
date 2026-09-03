@@ -161,7 +161,6 @@ run_install() {
     BURROWEE_DL_BASE="http://127.0.0.1:${PORT}" \
     BURROWEE_CLI_VERSION="${TAG}" \
     BURROWEE_SKIP_PREFLIGHT=1 \
-    BURROWEE_NO_PATH_EDIT=1 \
     PREFIX="$2" \
     PATH="${SYSTEM_ONLY_PATH}" \
         sh "${REPO_ROOT}/${COMP}/install.sh" 2>&1

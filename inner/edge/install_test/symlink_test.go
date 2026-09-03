@@ -1,8 +1,20 @@
-// symlink_test.go — the /usr/local/bin symlinks, spec §6.1's four rules, for
-// the edge. The gateway's inner/gateway/install_test/symlink_test.go carries
-// the reasoning; this is the same five claims against edge's LINK_BINS
-// (burrowee, burrowee-edge, burrowee-edge-cli — never burrowee-edge-updater,
-// which its unit execs by real path).
+// symlink_test.go — there are no symlinks. This file asserts the ABSENCE of
+// the step that used to make them, which is a claim that needs a test far more
+// than the step ever did.
+//
+// 0.3 linked the operator-typed names (burrowee, burrowee-edge,
+// burrowee-edge-cli — never burrowee-edge-updater, which its unit execs by
+// real path) from /usr/local/bin into $BIN_DIR wherever that directory proved
+// root-secure. On a clean modern Mac /usr/local/bin does not exist, so nothing
+// was linked and the install ended with no command the operator could type.
+// The step is deleted; every install prints an export line for the invoking
+// operator's own shell instead (path_advice_test.go).
+//
+// Of spec §6.1's four rules, only rule 1 survives, and only as a statement
+// that is now trivially true: nothing root execs names a link, because no link
+// exists. It is still asserted below, because "the units name $BIN_DIR" is a
+// property of the renderers and would not stop being worth checking if
+// somebody re-added a link step tomorrow.
 package install_test
 
 import (
@@ -14,8 +26,10 @@ import (
 
 var edgeOperatorTypedBins = []string{"burrowee", "burrowee-edge", "burrowee-edge-cli"}
 
-// linkingStub is stubRootEnv plus a stat reporting uid 0 with the real
-// modes, so the sandboxed link directory can READ as root-secure.
+// linkingStub is stubRootEnv plus a stat reporting uid 0 with the real modes,
+// so the sandboxed system tree can READ as root-secure. It is named for what
+// it once enabled; what it enables now is the ownership walk over the tree
+// install.sh builds.
 func linkingStub(t *testing.T, sb sandbox) string {
 	t.Helper()
 	stub := stubRootEnv(t)
@@ -23,109 +37,97 @@ func linkingStub(t *testing.T, sb sandbox) string {
 	return stub
 }
 
-// TestEdgeLinksAreCreatedWhenTheLinkDirIsRootSecure — rule 2, positive.
-// Mutation that reddens it: delete the ln -sfn.
-func TestEdgeLinksAreCreatedWhenTheLinkDirIsRootSecure(t *testing.T) {
+// TestEdgeInstallPutsNothingInTheLegacyExecRoot — the invariant that replaced
+// spec §6.1 rules 2, 3 and 4. A root-secure legacy directory is the case the
+// old step would have LINKED into, so this is the strongest form of the claim:
+// even where linking was safe and wanted, nothing is written there.
+//
+// Mutation that reddens it: put link_operator_bins back.
+func TestEdgeInstallPutsNothingInTheLegacyExecRoot(t *testing.T) {
 	sb := newSandbox(t)
-	link := edgeLinkDir(sb.home)
-	if err := os.MkdirAll(link, 0o755); err != nil {
+	legacy := edgeLegacyBinDir(sb.home)
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	out, err := sb.run(t, "sh", linkingStub(t, sb), "STUB_UPDATER_OPTED_IN=1")
 	if err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
-	for _, b := range edgeOperatorTypedBins {
-		target, readErr := os.Readlink(filepath.Join(link, b))
-		if readErr != nil {
-			t.Errorf("%s/%s is not a symlink: %v", link, b, readErr)
-			continue
-		}
-		if want := filepath.Join(sb.sysBinDir, b); target != want {
-			t.Errorf("%s/%s -> %s, want %s", link, b, target, want)
-		}
-	}
-	entries, readErr := os.ReadDir(link)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if len(entries) != len(edgeOperatorTypedBins) {
-		t.Errorf("link dir holds %d entries, want exactly %v — the updater must not be linked", len(entries), edgeOperatorTypedBins)
-	}
-	if strings.Contains(out, `export PATH="`) {
-		t.Errorf("the PATH hint was printed although the links were created:\n%s", out)
-	}
-}
-
-// TestEdgeNoLinkIsCreatedWhenTheLinkDirIsNotRootSecure — rule 2, negative:
-// a group-writable link directory gets zero entries and the one PATH line.
-// Mutation that reddens it: drop the dir_is_root_secure gate.
-func TestEdgeNoLinkIsCreatedWhenTheLinkDirIsNotRootSecure(t *testing.T) {
-	sb := newSandbox(t)
-	link := edgeLinkDir(sb.home)
-	if err := os.MkdirAll(link, 0o775); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(link, 0o775); err != nil {
-		t.Fatal(err)
-	}
-	out, err := sb.run(t, "sh", linkingStub(t, sb), "STUB_UPDATER_OPTED_IN=1")
-	if err != nil {
-		t.Fatalf("install failed: %v\n%s", err, out)
-	}
-	entries, readErr := os.ReadDir(link)
+	entries, readErr := os.ReadDir(legacy)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
 	if len(entries) != 0 {
-		t.Errorf("a link was created in a group-writable directory: %v", entries)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the install wrote %v into %s — nothing may be placed there, linked or otherwise", names, legacy)
 	}
-	assertContains(t, out, `export PATH="`+sb.sysBinDir+`:$PATH"`, link)
+	if strings.Contains(out, "linked into") {
+		t.Errorf("the install reported making links:\n%s", out)
+	}
 }
 
-// TestEdgeARealFileAtTheLinkPathIsReplacedNotWrittenThrough — rule 3: every
-// 0.2 host carries a REAL /usr/local/bin/burrowee-edge-cli.
-func TestEdgeARealFileAtTheLinkPathIsReplacedNotWrittenThrough(t *testing.T) {
+// TestEdgeInstallLeavesAnOperatorsOwnFilesInTheLegacyExecRoot — the same
+// invariant from the other side. The old step REPLACED whatever sat at an
+// operator-typed name (rule 3: rm -f, then ln -sfn), which was correct while
+// something was being put there and is now simply a destructive act with no
+// purpose. An operator's own file at one of those names is theirs.
+//
+// The stale-exec-root sweep is a different question and is answered
+// separately (exec_root_sweep_test.go): it removes a file only on positive
+// evidence that it is a burrowee build with a trusted twin. The files here
+// carry no burrowee build stamp, so no rule in this installer touches them.
+//
+// Mutation that reddens it: put link_operator_bins back — it would replace
+// both.
+func TestEdgeInstallLeavesAnOperatorsOwnFilesInTheLegacyExecRoot(t *testing.T) {
 	sb := newSandbox(t)
-	link := edgeLinkDir(sb.home)
-	if err := os.MkdirAll(link, 0o755); err != nil {
+	legacy := edgeLegacyBinDir(sb.home)
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stale := filepath.Join(link, "burrowee-edge-cli")
-	if err := os.WriteFile(stale, []byte("#!/bin/sh\necho STALE-0.2-CLI\n"), 0o755); err != nil {
+	theirFile := filepath.Join(legacy, "burrowee-edge-cli")
+	if err := os.WriteFile(theirFile, []byte("#!/bin/sh\necho operator's own wrapper\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere-burrowee")
 	if err := os.WriteFile(elsewhere, []byte("elsewhere\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(elsewhere, filepath.Join(link, "burrowee")); err != nil {
+	theirLink := filepath.Join(legacy, "burrowee")
+	if err := os.Symlink(elsewhere, theirLink); err != nil {
 		t.Fatal(err)
 	}
+
 	out, err := sb.run(t, "sh", linkingStub(t, sb), "STUB_UPDATER_OPTED_IN=1")
 	if err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
-	if target, readErr := os.Readlink(stale); readErr != nil {
-		t.Errorf("%s is still a regular file after the install: %v", stale, readErr)
-	} else if want := filepath.Join(sb.sysBinDir, "burrowee-edge-cli"); target != want {
-		t.Errorf("%s -> %s, want %s", stale, target, want)
+	if got := readFile(t, theirFile); !strings.Contains(got, "operator's own wrapper") {
+		t.Errorf("%s was replaced by the install: %q", theirFile, got)
 	}
-	if got := readFile(t, filepath.Join(sb.sysBinDir, "burrowee-edge-cli")); strings.Contains(got, "STALE") {
-		t.Errorf("the stale file's bytes reached $BIN_DIR — the link was written through:\n%s", got)
+	target, readErr := os.Readlink(theirLink)
+	if readErr != nil {
+		t.Errorf("%s is no longer a symlink: %v", theirLink, readErr)
+	} else if target != elsewhere {
+		t.Errorf("%s -> %s, want the operator's own target %s", theirLink, target, elsewhere)
 	}
 	if got := readFile(t, elsewhere); got != "elsewhere\n" {
-		t.Errorf("the pre-existing symlink's target was written through: %q", got)
+		t.Errorf("the operator's symlink was written THROUGH: %q", got)
 	}
 }
 
-// TestEdgeNoRenderedUnitNamesALink — rule 1: both units name $SYS_BIN_DIR,
-// never the link directory. Mutation that reddens it: render
-// `$LINK_DIR/burrowee-edge` into either unit.
-func TestEdgeNoRenderedUnitNamesALink(t *testing.T) {
+// TestEdgeNoRenderedUnitNamesTheLegacyExecRoot — spec §6.1 rule 1, the one
+// that survives. Both units name $SYS_BIN_DIR and never the 0.2 exec root.
+//
+// Mutation that reddens it: render `$LEGACY_BIN_DIR/burrowee-edge` into either
+// unit.
+func TestEdgeNoRenderedUnitNamesTheLegacyExecRoot(t *testing.T) {
 	sb := newSandbox(t)
-	link := edgeLinkDir(sb.home)
-	if err := os.MkdirAll(link, 0o755); err != nil {
+	legacy := edgeLegacyBinDir(sb.home)
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	out, err := sb.run(t, "sh", stubRootEnv(t), "STUB_UPDATER_OPTED_IN=1")
@@ -137,21 +139,31 @@ func TestEdgeNoRenderedUnitNamesALink(t *testing.T) {
 		if !strings.Contains(body, sb.sysBinDir+"/burrowee-edge") {
 			t.Errorf("%s does not name the real path under %s:\n%s", unit, sb.sysBinDir, body)
 		}
-		if strings.Contains(body, link) {
-			t.Errorf("%s names the link directory %s — root would exec a path a non-root user may be able to replace:\n%s", unit, link, body)
+		if strings.Contains(body, legacy) {
+			t.Errorf("%s names the 0.2 exec root %s — root would exec a path a non-root user may be able to replace:\n%s", unit, legacy, body)
 		}
 	}
 }
 
-// TestEdgeUninstallRemovesOnlyOurOwnLinks — rule 4. Mutation that reddens
-// it: drop the target-under-$BIN_DIR check.
-func TestEdgeUninstallRemovesOnlyOurOwnLinks(t *testing.T) {
+// TestEdgeUninstallRemovesOnlyOurOwnDanglingLinks — the one thing an uninstall
+// still has to do in the legacy exec root. No install makes a link there any
+// more, but hosts that took a 0.3 release which DID are carrying them right
+// now, and an uninstall that left them would leave a dangling name in a
+// directory on the operator's PATH.
+//
+// Three shapes, one outcome each: ours (a link into $BIN_DIR whose target this
+// uninstall just removed) goes; a link pointing outside our tree is somebody
+// else's and stays; a regular file at a linkable name is the operator's and
+// stays.
+//
+// Mutation that reddens it: drop the target-under-$BIN_DIR check.
+func TestEdgeUninstallRemovesOnlyOurOwnDanglingLinks(t *testing.T) {
 	sb := newSandbox(t)
-	link := edgeLinkDir(sb.home)
-	if err := os.MkdirAll(link, 0o755); err != nil {
+	legacy := edgeLegacyBinDir(sb.home)
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ours := filepath.Join(link, "burrowee-edge-cli")
+	ours := filepath.Join(legacy, "burrowee-edge-cli")
 	if err := os.Symlink(filepath.Join(sb.sysBinDir, "burrowee-edge-cli"), ours); err != nil {
 		t.Fatal(err)
 	}
@@ -159,11 +171,11 @@ func TestEdgeUninstallRemovesOnlyOurOwnLinks(t *testing.T) {
 	if err := os.WriteFile(foreignTarget, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	foreign := filepath.Join(link, "burrowee-edge")
+	foreign := filepath.Join(legacy, "burrowee-edge")
 	if err := os.Symlink(foreignTarget, foreign); err != nil {
 		t.Fatal(err)
 	}
-	regular := filepath.Join(link, "burrowee")
+	regular := filepath.Join(legacy, "burrowee")
 	if err := os.WriteFile(regular, []byte("#!/bin/sh\necho operator's own\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

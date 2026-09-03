@@ -734,10 +734,10 @@ sweep_stale_bins_via_kept_installer() {
         log "no root-secure installer at $BIN_DIR/install.sh — skipping the stale-bin sweep"
         return 0
     fi
-    if BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins || true; link_operator_bins || true; sweep_stale_exec_root || true' "$BIN_DIR/install.sh" \
+    if BURROWEE_SOURCE_ONLY=1 sh -c '. "$0"; sweep_stale_user_bins || true; sweep_stale_exec_root || true' "$BIN_DIR/install.sh" \
         >> "$TXN/guard.log" 2>&1
     then
-        log "stale-bin sweep, operator links and exec-root sweep ran via $BIN_DIR/install.sh"
+        log "stale-bin sweep and exec-root sweep ran via $BIN_DIR/install.sh"
     else
         log "stale-bin sweep failed (via $BIN_DIR/install.sh) — continuing"
     fi
