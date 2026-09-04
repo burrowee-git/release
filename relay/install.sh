@@ -65,10 +65,22 @@ CHANNEL_BASE="$BASE/$COMP"
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
 # set we drop the TLS-only flags (they'd reject http://); signed requests are
 # still verified against the baked pubkey regardless.
+CURL_BUDGET="--connect-timeout 15 --max-time 300"
 if [ -n "${BURROWEE_DL_BASE:-}" ]; then
-    CURL="curl -fsSL --connect-timeout 15 --max-time 300"
+    CURL_TLS=""
 else
-    CURL="curl -fsSL --proto =https --tlsv1.2 --connect-timeout 15 --max-time 300"
+    CURL_TLS="--proto =https --tlsv1.2"
+fi
+CURL="curl -fsSL $CURL_TLS $CURL_BUDGET"
+
+# CURL_DL — the gated relay artifact, fetched with a progress meter when a
+# person is watching. Same rationale and same constraints as the public
+# bootstrap: the meter goes to STDERR so stdout and the data path are untouched,
+# and a non-interactive install stays exactly as quiet as it is today.
+if [ -t 2 ] && [ -z "${BURROWEE_NO_PROGRESS:-}" ]; then
+    CURL_DL="curl -fSL --progress-bar $CURL_TLS $CURL_BUDGET"
+else
+    CURL_DL="$CURL"
 fi
 
 # ---- helpers ------------------------------------------------------------
@@ -260,9 +272,13 @@ gated_get() {
     rm -f "$_msg"
     [ -n "$_sig" ] || fail "signing failed or returned empty signature — is $KEY a valid ed25519 PEM private key?"
 
-    # Gated fetch: send the three required headers
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string; POSIX sh has no arrays.
-    $CURL \
+    # Gated fetch: send the three required headers.
+    # $CURL_DL is $CURL plus a progress meter when stderr is a terminal (see the
+    # template) — the relay artifact is the large one here. The challenge fetch
+    # above stays on the quiet form: its response is parsed from STDOUT, and a
+    # meter for a few bytes of JSON is noise.
+    # shellcheck disable=SC2086  # $CURL_DL is an intentional space-split command string; POSIX sh has no arrays.
+    $CURL_DL \
         -H "X-Burrowee-Key-FP: $FP" \
         -H "X-Burrowee-Nonce: $_nonce" \
         -H "X-Burrowee-Sig: $_sig" \
@@ -359,10 +375,22 @@ ok "verified — running inner installer"
 # carries it (sudo scrubs the environment), so it is forwarded explicitly as a
 # command-prefix assignment on the `env` invocation, the same boundary-crossing
 # pattern tools/bootstrap.template.sh uses for its own PREFIX. No PATH
-# persistence either: the inner installer links burrowee-relay-cli into
-# /usr/local/bin when that directory is root-secure and prints the one
-# `export PATH=…` line itself when it declines, so there is no rc file for
-# this script to edit.
+# persistence either: the inner installer owns the PATH question and prints the
+# `export PATH=…` line for the operator's own login shell itself, so there is no
+# rc file for this script to edit. (tools/bootstrap.template.sh used to edit one
+# for cli and agent; that block is deleted — see its own header for why.)
+#
+# RELAY'S INSTALLER IS NOT IN THIS REPO, and at the time of writing it still
+# LINKS burrowee-relay-cli into /usr/local/bin when that directory is
+# root-secure — the step every other component has now deleted. rkit resolves
+# relay's install.sh from the source tree being built (cmd/rkit/build.go), so
+# it is the relay repo's to change and this description is deliberately not a
+# claim about behaviour this repo controls. What this repo DOES control bites
+# either way: payload.sh's takes_shared_ladder stages the shared ladder for
+# relay, so a relay kit already carries the inverted sweep, which removes links
+# into $BIN_DIR. Until relay's own installer drops its link step, a relay
+# install can make three links and sweep them in the same run. That is tracked
+# as a blocker on any relay cut, not as something to patch from here.
 run_inner() {
     if [ -n "$ELEVATE" ]; then
         info "$COMP installs to /usr/local/burrowee/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"

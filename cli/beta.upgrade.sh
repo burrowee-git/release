@@ -34,7 +34,7 @@
 # binaries, migrations/upgrade.sh is still migrations-only, and
 # updater.install.sh still touches only the updater. And it is the SAME FILE,
 # not a fork per mode: everything that makes this script a trust anchor — the
-# pinned preflight sha256, the baked pubkey, the v0.3.1.beta.2026.08.31.de001b0a floor, the
+# pinned preflight sha256, the baked pubkey, the v0.3.3.beta.2026.09.04.e64dd688 floor, the
 # SHA256SUMS.txt minisign gate — is the same lines for all three modes, because
 # a copy of a trust anchor is a copy that drifts from it.
 #
@@ -102,9 +102,6 @@
 #   BURROWEE_RELEASE_REPO        GitHub repo serving releases (default burrowee-git/release)
 #   BURROWEE_SKIP_PREFLIGHT=1    skip the OS-dependency preflight (manage deps yourself)
 #   BURROWEE_SKIP_NGINX=1        (edge) skip nginx + stream module in the preflight
-#   BURROWEE_NO_PATH_EDIT=1      do not persist PREFIX/bin to your shell rc (no effect for
-#                                the gateway or the edge, which edit no rc —
-#                                their inner installer links into /usr/local/bin or prints the PATH line)
 #   BURROWEE_CHANNEL_BASE        base URL for the static channel (preflight.sh lives here)
 #   BURROWEE_DL_BASE             (test hook) download assets from this base instead of GitHub
 #   CONSOLE_URL                  Burrowee console base URL; used by the R2 fallback when
@@ -163,16 +160,17 @@ PREFLIGHT_SHA256="d6382a0ad2a38630cfcd39b105cafac48b615a514aa6644352f85b075ade2c
 # It rides the same first-party static channel, over the same TLS fetch, that
 # delivered $PUBKEY, so it costs no trust the installer did not already require;
 # and no download source gets to choose it.
-MIN_VERSION="v0.3.1.beta.2026.08.31.de001b0a"
+MIN_VERSION="v0.3.3.beta.2026.09.04.e64dd688"
 REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 
 # resolve_prefix — the install root this bootstrap hands the inner installer.
 #
 # PER COMPONENT, because this template is shared and they no longer agree. The
 # gateway and the edge install to /usr/local/burrowee/bin, root-owned, and
-# nowhere else (the operator-typed binaries are then LINKED into /usr/local/bin
-# when that directory is root-secure — a link, not a second destination): their
-# inner installers REFUSE a PREFIX that names anywhere else, so manufacturing a
+# nowhere else — nothing is linked back into /usr/local/bin any more, and their
+# inner installers end by printing how to reach the exec root from the
+# operator's own login shell. They REFUSE a PREFIX that names anywhere else, so
+# manufacturing a
 # per-user one here would make every `curl … | sh` fail — and, before that
 # refusal existed, manufacturing one is precisely what sent every bootstrap
 # install down the per-user branch, which also switched off unit rendering,
@@ -242,10 +240,40 @@ GH_PROXIES="${BURROWEE_GH_PROXY-https://gh-proxy.org https://cdn.gh-proxy.org ht
 # of hanging until --max-time. This matters for the gh-proxy mirror loop: a mirror
 # that streams a few MB then stalls is abandoned in ~20s so the NEXT mirror is
 # tried, rather than the install appearing stuck for the full 5-minute max-time.
+CURL_BUDGET="--connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
 if [ -n "$DL_BASE" ]; then
-    CURL="curl -fsSL --connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
+    CURL_TLS=""
 else
-    CURL="curl -fsSL --proto =https --tlsv1.2 --connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
+    CURL_TLS="--proto =https --tlsv1.2"
+fi
+CURL="curl -fsSL $CURL_TLS $CURL_BUDGET"
+
+# DL_METER / CURL_DL — the release assets are fetched with a progress meter when
+# a person is watching, and silently when one is not.
+#
+# WHY: the component zip is ~16MB. On a slow link that is minutes in which the
+# installer prints nothing at all, and an operator cannot tell a slow download
+# from a hung one — the difference between waiting and reaching for Ctrl-C. curl
+# already knows how to say so; it was only ever suppressed by the `-s` in the
+# quiet form above.
+#
+# WHERE IT GOES: curl writes the meter to STDERR. Nothing here touches stdout,
+# so `curl … | sh` is unaffected and no downloaded byte passes near it.
+#
+# WHEN: only when stderr is a terminal. Redirected to a log or a CI transcript a
+# progress bar is a screenful of carriage returns, so a non-interactive install
+# keeps exactly the output it has today. BURROWEE_NO_PROGRESS=1 turns it off for
+# a terminal that still does not want it.
+#
+# -fSL, not -fsSL: dropping `-s` is what un-suppresses the meter. `-S` (show
+# errors) and `-f` (fail on HTTP error) are unchanged, so failure behaviour is
+# identical in both forms.
+if [ -t 2 ] && [ -z "${BURROWEE_NO_PROGRESS:-}" ]; then
+    DL_METER=1
+    CURL_DL="curl -fSL --progress-bar $CURL_TLS $CURL_BUDGET"
+else
+    DL_METER=""
+    CURL_DL="$CURL"
 fi
 
 # ---- helpers ------------------------------------------------------------
@@ -844,6 +872,22 @@ ZIP="burrowee-${COMP}-${OS}-${ARCH}.zip"
 # one segment. Direct GitHub ($BASE) keeps the literal slash (it 404s on %2F).
 MIRROR_BASE="https://github.com/${REPO}/releases/download/$(printf '%s' "${TAG}" | sed 's#/#%2F#g')"
 
+# _get <curl-args…> — one download attempt for a release asset.
+#
+# With the meter on we also stop discarding curl's stderr. The two go together
+# on purpose: an operator watching a progress bar stall should see the reason
+# the primary was abandoned, and burying it under a half-drawn bar is worse than
+# printing it. With the meter off the output is byte-for-byte what it was.
+_get() {
+    if [ -n "$DL_METER" ]; then
+        # shellcheck disable=SC2086  # intentional word-split of $CURL_DL flags
+        $CURL_DL "$@"
+    else
+        # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+        $CURL "$@" 2>/dev/null
+    fi
+}
+
 dl() {
     # dl <remote-name> <local-name>  (local goes under $TMP)
     #
@@ -868,8 +912,7 @@ dl() {
     # The mirror attempts below keep the longer budget: they're the fallback of last
     # resort, so abandoning a working-but-slow mirror at 30s would risk failing the
     # whole install. --connect-timeout 15 + --speed-time 20 (stall) still apply.
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    if $CURL --max-time 30 -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
+    if _get --max-time 30 -o "$TMP/$_local" "$BASE/$_asset"; then
         return 0
     fi
     # Mirror fallback: route the %2F-encoded GitHub URL (MIRROR_BASE) through each
@@ -879,8 +922,7 @@ dl() {
     if [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
         for _proxy in $GH_PROXIES; do
             info "primary failed; trying mirror: $_proxy/$MIRROR_BASE/$_asset"
-            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            if $CURL -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset" 2>/dev/null; then
+            if _get -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset"; then
                 ok "downloaded $_asset via mirror $_proxy"
                 return 0
             fi
@@ -909,8 +951,7 @@ dl() {
                     ;;
             esac
             if [ "$_valid_scheme" -eq 1 ]; then
-                # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-                $CURL -o "$TMP/$_local" "$_r2url" 2>/dev/null \
+                _get -o "$TMP/$_local" "$_r2url" \
                     || fail "R2 fallback download failed for $_asset — check device grant and retry"
                 ok "downloaded $_asset via R2 fallback"
                 return 0
@@ -1001,8 +1042,14 @@ minisign_fetch() {
     fi
     for _mf_src in $_mf_srcs; do
         rm -f "$_mf_out"
-        # shellcheck disable=SC2086  # $CURL is a command plus its flags
-        $CURL -o "$_mf_out" "$_mf_src" 2>/dev/null || continue
+        # _get, not $CURL: minisign is a real artifact fetched across upstream
+        # GitHub and then each mirror in turn, and each attempt used to be
+        # silent — a slow or stalled mirror here reads as a hung installer, at
+        # the one moment the operator has been given no output to read. _get
+        # (module: download, spliced above) carries the progress meter and the
+        # stderr policy that goes with it, so this behaves exactly like the
+        # component zip's own download rather than inventing a second rule.
+        _get -o "$_mf_out" "$_mf_src" || continue
         [ -n "$_mf_want" ] || return 0
         _mf_got="$(sha256_of "$_mf_out")" || break
         [ "$_mf_got" = "$_mf_want" ] && return 0
@@ -1393,59 +1440,37 @@ if [ "$MODE" = upgrade ]; then
     ok "$COMP $TAG installed and its migrations forced from floor $MIG_FLOOR"
 fi
 
-# ---- PATH persistence ---------------------------------------------------
-# On a real install, idempotently add PREFIX/bin to the operator's shell rc so a
-# fresh shell finds `burrowee` (the live-VPS `command not found`). bash reads
-# ~/.bashrc for INTERACTIVE shells, but a LOGIN shell (ssh) reads the first of
-# ~/.bash_profile / ~/.bash_login / ~/.profile and does NOT auto-source ~/.bashrc
-# — so write to both the interactive rc and the login file, else PATH is missing
-# over ssh. An unset/unknown $SHELL defaults to the bash files. Fault-tolerant:
-# an unwritable rc must never abort the script (the bins are already installed).
+# ---- PATH persistence: NOT THIS SCRIPT'S, AND NO LONGER ANYONE'S TO WRITE ----
+# This bootstrap used to append a marked `# >>> burrowee PATH >>>` block to the
+# operator's shell rc for cli and agent — their interactive rc plus whichever
+# login file the shell reads — and then tell them to run the export line too.
+# It is deleted, and the deletion is the point rather than a casualty of one.
 #
-# SKIPPED ENTIRELY FOR THE GATEWAY AND THE EDGE: they install to
-# /usr/local/burrowee/bin and their INNER installer owns the PATH question —
-# it links the operator-typed binaries into /usr/local/bin when that directory
-# is root-secure, and prints the one `export PATH=…` line itself when it
-# declines to link. Only it knows which happened, so this script cannot say
-# anything useful, and $PREFIX is empty for them — "$PREFIX/bin" would expand
-# to "/bin", a directory this script has no business writing into anyone's rc.
+# THREE REASONS, in the order they matter:
 #
-# Skipped as root, for all components: this script does not edit root's shell
-# rc. Note what that means for cli/agent and is not papered over here — a root
-# install of those lands in $PREFIX/bin, i.e. /root/.local/bin under root's
-# $HOME, which root's PATH does not include, and no marker is written to say so.
-# That gap predates this comment; the previous version of it claimed such an
-# install "lands in /usr/local/bin (already on PATH)", which no code has ever
-# implemented.
-if [ "$COMP" != gateway ] && [ "$COMP" != edge ] && [ -z "${BURROWEE_UNINSTALL:-}" ] && [ -z "${BURROWEE_NO_PATH_EDIT:-}" ] && [ "$(id -u)" != 0 ]; then
-    BIN_DIR="$PREFIX/bin"
-    case ":$PATH:" in
-        *":$BIN_DIR:"*) : ;;   # already on PATH this shell
-        *)
-            # rc set: interactive rc + the login file the shell actually sources.
-            case "$(basename "${SHELL:-bash}")" in
-                zsh)
-                    rc_files="$HOME/.zshrc"
-                    [ -f "$HOME/.zprofile" ] && rc_files="$rc_files $HOME/.zprofile"
-                    ;;
-                *)  # bash (and any unrecognized shell defaults to bash rc files)
-                    rc_files="$HOME/.bashrc"
-                    if   [ -f "$HOME/.bash_profile" ]; then rc_files="$rc_files $HOME/.bash_profile"
-                    elif [ -f "$HOME/.bash_login" ];   then rc_files="$rc_files $HOME/.bash_login"
-                    else rc_files="$rc_files $HOME/.profile"; fi
-                    ;;
-            esac
-            for rc in $rc_files; do
-                if [ -f "$rc" ] && grep -q 'burrowee PATH' "$rc" 2>/dev/null; then
-                    continue   # marker already present in this file
-                fi
-                {
-                    printf '\n# >>> burrowee PATH >>>\n'
-                    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
-                    printf '# <<< burrowee PATH <<<\n'
-                } >> "$rc" 2>/dev/null && info "added $BIN_DIR to PATH in $rc"
-            done
-            info "run: export PATH=\"$BIN_DIR:\$PATH\"   (or open a new shell) to use burrowee now"
-            ;;
-    esac
-fi
+#   1. IT CONTRADICTED THE INNER INSTALLER. Since the exec-root PATH-advice
+#      change, install.sh ends by printing the line to run and the ONE profile
+#      file that makes it permanent. An operator who followed that instruction
+#      and also got this block ended up with the same export twice in
+#      ~/.zprofile — and the second copy carries no marker, so the idempotence
+#      check above would not have caught it on the next install either. Two
+#      components cannot both own the advice; the one that knows the operator's
+#      shell owns it.
+#
+#   2. IT WAS WRONG FOR FISH. The rc set was chosen by `basename "$SHELL"` with
+#      bash as the default arm, so a fish operator had `export PATH=…` — not a
+#      fish builtin — appended to a ~/.bashrc that fish never reads. Silently
+#      ineffective, in the one shell whose syntax shares nothing with the other
+#      two. The printed advice renders `set -gx` / `fish_add_path` instead.
+#
+#   3. WRITING THE OPERATOR'S SHELL IS A DECLARED NON-GOAL of the change that
+#      removed the /usr/local/bin symlinks ("writing, sourcing or eval-ing
+#      anything in the operator's shell"). It was rejected for the root
+#      installers on privilege grounds; for cli and agent the privilege
+#      argument does not apply — they run as the operator — but the reason the
+#      operator should be the one to edit their own startup files does.
+#
+# What replaces it is one paste, in the syntax of the shell they actually use,
+# naming the file their shell actually reads. BURROWEE_NO_PATH_EDIT went with
+# it: there is no edit left to suppress.
+

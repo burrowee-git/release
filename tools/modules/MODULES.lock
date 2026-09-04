@@ -1,9 +1,9 @@
 # module            version  sha256-of-authored-text
 # rewritten by tools/lock-modules.sh — do not hand-edit
-download-r2-only   v1       243e1005500e2867695e9baed93897270ded43d89a11687a6c80e1c39569db63
-download           v1       9ac4341c316864347d7c355ba69ce94dd3ddf565ed8584412c2db0343a781597
+download-r2-only   v2       457af3a8bdd29f320449298f003213e883d6348e16e35d0d776b90f94784ed90
+download           v2       8158f8399c6d6cb3f2a66faf3fe2c7fc80db0ff7ecd1bfc5b6529a60d94a1921
 helpers            v1       e84df2c8a4bd2a4be9b0182739be87d0db8cbac2ae0ce9de9dd21741360b0595
-install-minisign-common v1       a99204f6af06b41f306b210861a39f5f481a3edfd8f129d113256034da039cb5
+install-minisign-common v2       631ace10f12cd33fc18e041edf344e93426f25e5febf57839d9f033dfac09761
 install-minisign-darwin v1       99e7c93fb5b3b7fb3eb0fd8c9bcfd406463474f0238377e967ee8f8dda32a02b
 install-minisign-linux v1       91ddfdf52530426753342526f1ee043866abf4e9d4f40d39d70d44e5f21eb8e3
 platform-detect    v2       089a98222549899d073af735977aa3341486c9cb06169a247a35674d6832f4d7

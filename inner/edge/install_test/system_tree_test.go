@@ -18,9 +18,11 @@ import (
 // sq single-quotes s for a generated shell stub.
 func sq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// edgeLinkDir is the sandboxed /usr/local/bin every env builder in this
-// package hands install.sh as BURROWEE_LINK_DIR.
-func edgeLinkDir(home string) string { return filepath.Join(home, "usr-local-bin") }
+// edgeLegacyBinDir is the sandboxed stand-in for /usr/local/bin — the 0.2 exec
+// root the sweep reads — which every env builder in this package hands
+// install.sh as BURROWEE_LEGACY_BIN_DIR. Never the real directory: the machines
+// this suite runs on are live 0.2 hosts.
+func edgeLegacyBinDir(home string) string { return filepath.Join(home, "usr-local-bin") }
 
 // statedTreeModes is every level of the tree an install creates inside the
 // sandbox, with the mode install.sh states for it (ensure_system_tree). The

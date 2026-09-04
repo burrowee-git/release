@@ -51,8 +51,13 @@ done
 [ -n "$GEN" ] || die "no generated */install.sh carries '# BEGIN install-minisign-common' — is the template wired and regenerated?"
 say "extracting the blocks from ${GEN#"$REPO_ROOT"/}"
 extract() { sed -n "/^# BEGIN $1\$/,/^# END $1\$/p" "$GEN"; }
+# install-minisign-common needs _get() from the download block (its `# needs:`
+# names download). The block itself cannot be spliced whole: it fetches the
+# component zip at source time. Extract the one function, the way
+# test-checksum-verify.sh lifts sha256_of().
 {
     extract helpers; extract sha256
+    sed -n '/^_get()/,/^}/p' "$GEN"
     extract install-minisign-common; extract install-minisign-linux; extract install-minisign-darwin
 } > "$W/block.sh"
 extract require-minisign > "$W/require.sh"
@@ -60,6 +65,7 @@ for m in helpers sha256 install-minisign-common install-minisign-linux install-m
     grep -q "^# END $m\$" "$W/block.sh" || die "could not extract the $m block (markers missing or renamed)"
 done
 grep -q '^# END require-minisign$' "$W/require.sh" || die "could not extract the require-minisign block"
+grep -q '^_get()' "$W/block.sh" || die "could not extract _get() from the download block"
 # The pins must be single-line assignments, or the substitutions below miss.
 for v in MINISIGN_VERSION MINISIGN_LINUX_SHA256 MINISIGN_MACOS_SHA256 MINISIGN_KNOWN_PATHS; do
     [ "$(grep -c "^$v=" "$W/block.sh")" = 1 ] || die "expected exactly one '$v=' line in the extracted block"
@@ -145,6 +151,7 @@ cat > "$W/run.sh" <<'RUNNER'
 set -eu
 OS="$CASE_OS"; ARCH="$CASE_ARCH"; PREFIX="$CASE_PREFIX"; TMP="$CASE_TMP"
 DL_BASE="$CASE_DL_BASE"; GH_PROXIES=""; CURL="curl -fsSL"; COMP=test
+DL_METER=""; CURL_DL="$CURL"    # what the bootstrap sets off a tty: _get uses $CURL
 MINISIGN="${CASE_MINISIGN:-}"
 mkdir -p "$TMP"
 . "$BLOCK"

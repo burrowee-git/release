@@ -430,24 +430,38 @@ for f in "$EDGE" "$GW"; do
     grep -qE '(burrowee-edge-cli|burrowee-gateway-cli)" doctor.*--fix' "$f" \
         && note "$comp: the doctor tail passes --fix — the install's last act must be a report, not a remediation"
     # The doctor tail is the last thing the script DOES — checked as "nothing
-    # but comments, blank lines and the allowed trailing statement follows it",
-    # not as `tail -n 1`, because gateway now ends with one more statement:
-    # `exit "$_verdict"`, reattach's own verdict (Task 9) — doctor's exit
-    # status is a diagnostic's, never the install's, and something has to
-    # supply the real one. This USED to be finish_with_updater_verdict; that
-    # call moved off the full-install tail entirely (section 7b below), because
-    # the guard now performs the restart finish_with_updater_verdict used to
-    # report on, off this session, and its own verdict (reattach's) is what
-    # this tail exits on instead.
+    # but comments, blank lines and the ALLOWED trailing statements follow it",
+    # not as `tail -n 1`, because two things legitimately come after it.
+    #
+    #   * `exit "$_verdict"` (gateway) — reattach's own verdict (Task 9).
+    #     doctor's exit status is a diagnostic's, never the install's, and
+    #     something has to supply the real one. This USED to be
+    #     finish_with_updater_verdict; that call moved off the full-install
+    #     tail entirely (section 7b below), because the guard now performs the
+    #     restart it used to report on, off this session.
+    #   * `print_path_advice` — the "Next steps" block that replaced the
+    #     /usr/local/bin symlinks. It has to be the last thing PRINTED, which
+    #     is the whole complaint it answers: the operator used to be handed a
+    #     bare PATH suggestion buried in the tail of a long install log. It
+    #     cannot touch the verdict — it returns 0, nothing reads its status,
+    #     and on the gateway it is inside `if [ "$_verdict" = 0 ]`, which
+    #     READS the verdict and never sets it. So the claim this section makes
+    #     ("nothing after the doctor tail changes what the install reports")
+    #     is unchanged; only the allowed set is.
+    #
+    # WHAT THIS MUST STILL CATCH is a REMEDIATION or a second start creeping in
+    # after the report, which is what the enumeration — rather than a blanket
+    # "anything may follow" — is for.
     after="$(sed -n '/doctor < \/dev\/null || true/,$p' "$f" | sed '1d' \
         | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
     case "$comp" in
     gateway)
-        [ "$after" = 'exit "$_verdict"' ] \
+        _want="$(printf '%s\n' 'if [ "$_verdict" = 0 ]; then' '    print_path_advice' 'fi' 'exit "$_verdict"')"
+        [ "$after" = "$_want" ] \
             || note "$comp: unexpected code after the doctor tail: [$after]" ;;
     *)
-        [ -z "$after" ] \
-            || note "$comp: the doctor tail is not the last thing the script does: [$after]" ;;
+        [ "$after" = 'print_path_advice' ] \
+            || note "$comp: unexpected code after the doctor tail: [$after]" ;;
     esac
 done
 

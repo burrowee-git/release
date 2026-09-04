@@ -1,21 +1,23 @@
 ---
 name: burrowee-cli-install
-description: Install the burrowee cli (the local client + forwarder) on this machine (macOS + Linux). Use when the operator asks to "install burrowee cli", "get the burrowee client", or pastes release.burrowee.com/cli/install.sh or release.burrowee.com/skills/burrowee-cli-install/SKILL.md. Stop after the binaries are on PATH and `burrowee cli version` reports a version — pairing + connect live in the burrowee-cli-setup skill, which the operator triggers next.
+description: Install the burrowee cli (the local client + forwarder) on this machine (macOS + Linux). Use when the operator asks to "install burrowee cli", "get the burrowee client", or pastes release.burrowee.com/cli/install.sh or release.burrowee.com/skills/burrowee-cli-install/SKILL.md. Stop after the binaries are installed and `burrowee cli version` reports a version — pairing + connect live in the burrowee-cli-setup skill, which the operator triggers next.
 ---
 
 # burrowee-cli-install
 
 You are an LLM coding agent (Claude Code, Cursor, Aider, …) tasked with putting the
-**burrowee cli** on this machine. The install drops two binaries into PATH: the
-`burrowee` dispatcher and the `burrowee-cli` component. The dispatcher execs the
-component, so `burrowee cli …` and the bare `burrowee-cli …` are the same surface.
+**burrowee cli** on this machine. The install drops two binaries into
+`${PREFIX:-$HOME/.local}/bin` — the `burrowee` dispatcher and the `burrowee-cli`
+component — and that directory is **not necessarily on PATH**. The dispatcher
+execs the component, so `burrowee cli …` and the bare `burrowee-cli …` are the
+same surface once either is reachable.
 
 The job is narrow: install + verify. Do **not** start pairing or connect flows —
 those belong to the `burrowee-cli-setup` skill the operator invokes next.
 
 The operator may need to perform out-of-terminal actions (granting shell
-permissions, opening a new shell to pick up `PATH`). Pause and ask; resume when
-they confirm.
+permissions, running the `export PATH=…` line the install prints, opening a new
+shell to pick it up). Pause and ask; resume when they confirm.
 
 ---
 
@@ -82,12 +84,30 @@ line prints.**
 > subcommands are `connect`, `ssh`, `pair`, `daemon`, `relays` (covered in
 > `burrowee-cli-setup`).
 
-If the bin dir isn't on PATH, tell the operator to add this to their shell rc
-(`~/.zshrc`, `~/.bashrc`, …) and open a new shell:
+If the bin dir isn't on PATH, **read the block the install printed** rather
+than reciting one. It ends with a "Next steps" section rendered for the
+operator's own login shell — the line to run now, and the profile file that
+makes it permanent:
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
 ```
+==> Next steps
+burrowee's commands are in /Users/<u>/.local/bin, which is not on your PATH.
+
+  Add it to this shell now:
+    export PATH="/Users/<u>/.local/bin:$PATH"
+
+  Make it permanent:
+    echo 'export PATH="/Users/<u>/.local/bin:$PATH"' >> /Users/<u>/.zprofile
+
+  Then:  burrowee help
+```
+
+The file named varies by shell and platform — `.zprofile` for zsh,
+`.bash_profile` for bash on macOS, `.profile` for bash on Linux, and fish is
+told `fish_add_path` because `export` is not a fish builtin at all. A shell the
+installer cannot identify is given the export line and **no** file name, and
+guessing one for the operator is how they end up editing a file their shell
+never reads. Nothing is written to any profile for them: they run the line.
 
 Anything else (missing binary, "command not found" even by full path, wrong-arch
 error) means the install didn't land — surface the output and stop.

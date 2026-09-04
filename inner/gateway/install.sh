@@ -208,45 +208,28 @@ if [ -n "${PREFIX:-}" ]; then
     unset _prefix_bin _true_bin
 fi
 BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
-# LINK_BINS — the subset of $BINS an OPERATOR TYPES, and therefore the only
-# names symlinked from $LINK_DIR (/usr/local/bin) into $BIN_DIR so that
-# `burrowee-gateway-cli …` keeps working with no PATH change now that the exec
-# root is off PATH. Deliberately smaller than $BINS: burrowee-gateway-console
-# and burrowee-gateway-updater are spawned by a root parent that names the
-# real path, and burrowee-register is execed by the dispatcher the same way —
-# nothing a human types, so nothing to link (spec §6.1 rule 1: nothing root
-# execs ever names a link). $BINS \ $LINK_BINS is exactly the set the exec-root
-# sweep removes from /usr/local/bin, where 0.2 left real copies of them — run
-# by the guard after the verified restart (sweep_stale_exec_root), because a
-# unit still naming one of them is refused by the library until the units move.
-LINK_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
-# BURROWEE_LINK_DIR is a TEST-ONLY seam like BURROWEE_BIN_DIR: it redirects
-# the link directory so the suite never touches the real /usr/local/bin.
-LINK_DIR="${BURROWEE_LINK_DIR:-/usr/local/bin}"
-# What link_operator_bins actually linked. The exec-root sweep leaves every
-# operator-typed name that is NOT in here alone: with no link at that path the
-# real 0.2 file is the only copy anything reaches by it.
-LINKED_OPERATOR_BINS=""
-
-# exec_root_keep_list — the operator-typed names no link will replace on this
-# host, resolved BEFORE anything runs so the ladder rung can be handed it too.
-# When $LINK_DIR is not root-secure link_operator_bins creates nothing, and the
-# real 0.2 file at each of those names stays the only copy anything reaches by
-# the absolute path — the shared `burrowee` dispatcher above all. The
-# installer's own later call narrows this to what it actually linked.
-exec_root_keep_list() {
-    # EVERY operator-typed name, unconditionally. This is what the LADDER is
-    # handed, and the ladder runs before link_operator_bins has made a single
-    # link — so at that moment no link has replaced anything, and the real 0.2
-    # file at each of these names is still the only copy reachable by the
-    # absolute path. The installer's own sweep, which runs after linking,
-    # narrows this to the names it could not link (LINKED_OPERATOR_BINS).
-    echo "$LINK_BINS"
-}
-# The 0.2 exec root the sweep reads is the SAME directory the links go into, so
-# it follows the link seam: a sandboxed run must never iterate the real
-# /usr/local/bin of the host it runs on (this workstation is a live 0.2 host).
-LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-$LINK_DIR}"
+# OPERATOR_BINS — the subset of $BINS an OPERATOR TYPES. Deliberately smaller
+# than $BINS: burrowee-gateway-console and burrowee-gateway-updater are spawned
+# by a root parent that names the real path, and burrowee-register is execed by
+# the dispatcher the same way — nothing a human types. It has ONE consumer
+# left, the stale-exec-root sweep: these are the names a 0.2 install left as
+# real files in /usr/local/bin, and the ones an operator's PATH finds there
+# ahead of $BIN_DIR. The sweep runs from the guard after the verified restart
+# (sweep_stale_exec_root), because a unit still naming one of them is refused
+# by the library until the units move.
+#
+# IT WAS CALLED LINK_BINS, and the rename is the point: nothing is symlinked
+# anywhere any more (see the block where link_operator_bins used to be). A list
+# still named for a step that no longer exists is how the step gets re-added by
+# someone who reads the name as a promise.
+OPERATOR_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
+# The 0.2 exec root the sweep reads. BURROWEE_LEGACY_BIN_DIR is a TEST-ONLY
+# seam like BURROWEE_BIN_DIR, and it is LOAD-BEARING: a sandboxed run must
+# never iterate the real /usr/local/bin of the host it runs on (this
+# workstation is a live 0.2 host). It used to chain through BURROWEE_LINK_DIR,
+# which is gone with the link step — a test still setting only the old seam
+# would sweep the developer's own machine.
+LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-${BURROWEE_LEGACY_BIN_DIR:-/usr/local/bin}}"
 COMP=gateway
 GW_HOME="$HOME/.burrowee/gateway"
 # The per-user component tree. Identical to $GW_HOME for this component, spelled
@@ -1519,14 +1502,60 @@ sweep_stale_exec_root() {
         echo "note: the 0.2 copies in $LEGACY_BIN_DIR were not swept. Re-run a complete release." >&2
         return 0
     fi
-    STALE_EXEC_ROOT_KEEP=""
-    for _ssk in $LINK_BINS; do
-        case " $LINKED_OPERATOR_BINS " in
-        *" $_ssk "*) ;;
-        *) STALE_EXEC_ROOT_KEEP="${STALE_EXEC_ROOT_KEEP:+$STALE_EXEC_ROOT_KEEP }$_ssk" ;;
-        esac
-    done
+    # NO KEEP-LIST. It used to hold every operator-typed name this host had no
+    # link at, because with nothing linked there the real 0.2 file was the only
+    # copy anything reached by the absolute path — the shared `burrowee`
+    # dispatcher above all. Nothing resolves by that path any more: no install
+    # links there, and $BIN_DIR is what every unit, every root exec and the
+    # printed PATH advice name. So the names that used to be deferred to a
+    # later run are swept on the FIRST 0.3 run. That is the intended
+    # behaviour, not an accident of the refactor.
     remove_stale_exec_root_bins
+}
+
+# ---------------------------------------------------------------------------
+# print_path_advice — the "Next steps" block this install ends with, rendered
+# for the INVOKING operator's login shell by the same shared library the sweeps
+# come from (render_path_advice, inside the byte-pinned SHARED SWEEP CONTRACT
+# region, so the gateway's copy of that library carries the identical function).
+#
+# IT IS WHAT REPLACED THE /usr/local/bin SYMLINKS. The exec root is $BIN_DIR,
+# which is on nobody's PATH; the operator-typed names used to be linked back
+# into /usr/local/bin to compensate, and on a clean modern Mac that directory
+# does not exist — so nothing was linked and the install ended with no command
+# the operator could type.
+#
+# NEVER FATAL, AND NEVER SILENT. This runs as the last thing on the success
+# path, past every write; dying under `set -eu` with "not found" would report a
+# complete install as a failure. A kit whose library predates the renderer still
+# owes the operator the one line that makes these commands reachable — that is
+# the entire point of this change — so the fallback prints it by hand rather
+# than saying nothing.
+# ---------------------------------------------------------------------------
+print_path_advice() {
+    if ! command -v render_path_advice >/dev/null 2>&1; then
+        _ppa_lib="$(stale_sweep_lib)"
+        if [ -n "$_ppa_lib" ] && [ "$STALE_SWEEP_LOADED" != 1 ]; then
+            # shellcheck source=/dev/null
+            . "$_ppa_lib"
+            STALE_SWEEP_LOADED=1
+        fi
+    fi
+    if command -v render_path_advice >/dev/null 2>&1; then
+        render_path_advice "$BIN_DIR"
+        return 0
+    fi
+    echo "note: the loaded sweep library has no render_path_advice — this kit predates the" >&2
+    echo "note: shell-aware PATH advice, so here is the one line it would have rendered." >&2
+    echo ""
+    echo "==> Next steps"
+    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo ""
+    echo "  Add it to this shell now:"
+    echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    echo ""
+    echo "  Then:  burrowee help"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1939,117 +1968,126 @@ assert_system_tree() {
 }
 
 # ---------------------------------------------------------------------------
-# THE /usr/local/bin SYMLINKS (spec §6.1). The exec root is
-# /usr/local/burrowee/bin, which is on nobody's PATH; the binaries an operator
-# types are linked from $LINK_DIR so `burrowee-gateway-cli …` still resolves.
+# THERE IS NO LINK STEP, AND THIS IS WHERE IT USED TO BE (spec §6.1,
+# superseded). It symlinked the operator-typed names from /usr/local/bin into
+# $BIN_DIR wherever that directory proved root-secure, deferred that to the
+# guard on a 0.2 host whose loaded units still named the link path
+# (links_deferred_to_guard), and printed a bare PATH line when it declined.
 #
-# RULE 2 IS THE ONE THAT MATTERS: link ONLY into a root-secure directory. A
-# root-owned symlink is necessary but not sufficient — `unlink` is governed by
-# write permission on the CONTAINING directory, so in a Homebrew-owned
-# /usr/local/bin any user can delete root's link and drop their own file at
-# that name, and the operator's next `sudo burrowee-gateway-cli` runs it as
-# root. Root ownership of the link is not the protection; the directory's is.
-# So dir_is_root_secure is asked FIRST, and on anything but 0 no link is
-# created at all — the one line that adds the exec root to PATH is printed
-# instead. On the host this layout was written for (an Intel Mac whose
-# /usr/local/bin burrowee's own installer created under sudo before Homebrew
-# wanted it) it passes; on a Mac where brew got there first it declines.
+# THE ARGUMENT THAT KILLED IT IS THE SAME ONE THAT BUILT IT. Rule 2 said "link
+# ONLY into a root-secure directory", because `unlink` is governed by write
+# permission on the CONTAINING directory: in a Homebrew-owned /usr/local/bin
+# any user can delete root's link and drop their own file at that name, and the
+# operator's next `sudo burrowee-gateway-cli` runs it as root. That reasoning
+# still holds exactly — what turned out to be false is the sentence after it,
+# "on the host this layout was written for it passes". On a clean modern Mac
+# /usr/local/bin does not exist at all, so the check answers "absent" and the
+# refusal path IS the normal path; on a Mac where brew got there first it
+# refuses for the opposite reason. Both are the majority case. A step whose
+# safe branch is the rare one is not a fallback, it is a coin flip that leaves
+# half the fleet with an installed component and no command to type.
 #
-# RULE 3: created as root, REPLACING whatever is there — `rm -f` then
-# `ln -sfn`, never a write through an existing link or file. Every 0.2 host
-# carries a real /usr/local/bin/burrowee-gateway-cli, and a stale regular
-# file left in place shadows the new install completely; a pre-existing
-# symlink pointing elsewhere would have ln's write land in that other file.
+# Rules 3 and 4 (replace, never write through; remove on uninstall) had that
+# link as their whole subject and go with it, and so does the deferral: with no
+# link to make, there is nothing for the guard's post-restart housekeeping to
+# be handed. Rule 1 — nothing root execs ever names a link — survives and is
+# now trivially true, because no link exists: every unit, the updater's
+# ServeBin and the runner's cli path name $BIN_DIR, enforced by the renderers.
 #
-# RULE 1 is enforced by the renderers, not here: every unit, the updater's
-# ServeBin and the runner's cli path name $BIN_DIR. The links exist for
-# humans. RULE 4 is unlink_operator_bins below.
+# WHAT REPLACES IT is print_path_advice, which a successful install ends with:
+# the export line for the INVOKING operator's own login shell, the profile file
+# that makes it permanent, printed and never applied. See its header, and
+# render_path_advice in the shared sweep library.
 #
-# NEVER FATAL. A link is a convenience; an install whose links could not be
-# made is a complete install with a PATH note.
+# unlink_operator_bins stays, and is the ONLY thing in this file that still
+# touches $LEGACY_BIN_DIR by name — see its own header for why an uninstall
+# still has work to do there.
 # ---------------------------------------------------------------------------
-link_operator_bins() {
-    _lob_rc=0
-    dir_is_root_secure "$LINK_DIR" || _lob_rc=$?
-    if [ "$_lob_rc" != 0 ]; then
-        case "$_lob_rc" in
-        3) if dir_leaf_is_notdir "$LINK_DIR"; then
-               echo "note: $LINK_DIR is not a directory — something else is at that name — so no burrowee" ;
-               echo "note: command was linked into it. The name is taken; this is not a missing directory." ;
-           else
-               echo "note: $LINK_DIR does not exist on this host, so no burrowee command was linked into it." ;
-           fi ;;
-        2) echo "note: the ownership of $LINK_DIR could not be established — either 'stat' answered neither" ;
-           echo "note: dialect, or a symlink on the way could not be followed — so no burrowee command was linked" ;
-           echo "note: into it: a link is only safe in a directory proven root-owned." ;;
-        *) echo "note: $LINK_DIR is not root-owned and unwritable by non-root all the way to /, so no burrowee" ;
-           echo "note: command was linked into it — in a directory another user can write, root's own link can be" ;
-           echo "note: unlinked and replaced, and the next 'sudo burrowee-gateway-cli' would run that user's file as root." ;;
-        esac
-        echo "note: run the gateway's commands by their real path, or add the exec root to PATH:"
-        echo "    export PATH=\"$BIN_DIR:\$PATH\""
-        return 0
-    fi
-    _lob_linked=""
-    for _lob in $LINK_BINS; do
-        [ -f "$BIN_DIR/$_lob" ] || continue
-        # Already ours: a steady-state refresh needs no sudo at all.
-        if [ -L "$LINK_DIR/$_lob" ] && [ "$(readlink "$LINK_DIR/$_lob")" = "$BIN_DIR/$_lob" ]; then
-            _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
-            continue
-        fi
-        # ATOMIC, never unlink-then-relink. A 0.2 macOS plist holds
-        # KeepAlive.PathState on $LINK_DIR/burrowee-gateway; an `rm -f` there
-        # makes launchd observe the watched path vanish and SIGTERM the running
-        # gateway — the one the operator may be tunnelled through — which it
-        # then restarts from the OLD in-memory job definition now resolving
-        # through the new link. Building the link beside its name and renaming
-        # it over closes that window: rename(2) within one directory is atomic,
-        # so the path is never absent. Rule 3's "replace, never write through"
-        # still holds — a real file at the name is replaced, not followed.
-        _lob_tmp="$LINK_DIR/.burrowee-link.$$.$_lob"
-        if ! run_root ln -sfn "$BIN_DIR/$_lob" "$_lob_tmp"; then
-            echo "note: could not stage a link in $LINK_DIR for $_lob; run it by its real path." >&2
-            continue
-        fi
-        if ! run_root mv -f "$_lob_tmp" "$LINK_DIR/$_lob"; then
-            run_root rm -f "$_lob_tmp" || true
-            echo "note: could not put $LINK_DIR/$_lob in place — it still shadows $BIN_DIR/$_lob; remove it by hand." >&2
-            continue
-        fi
-        _lob_linked="${_lob_linked:+$_lob_linked }$_lob"
-    done
-    LINKED_OPERATOR_BINS="$_lob_linked"
-    [ -z "$_lob_linked" ] || echo "linked into $LINK_DIR: $_lob_linked"
-}
 
-# links_deferred_to_guard — true when a unit ALREADY ON DISK (on a steady host,
-# the one the supervisor is running) still names a path under $LINK_DIR: the
-# 0.2 layout. Replacing that path now (rm -f, ln -sfn) can bounce the daemon
-# on macOS (KeepAlive.PathState) before the 0.3 unit exists, and a rollback
-# would leave the restored 0.2 plist pointing at a dangling link. When it is
-# true the guard makes the links after the verified restart instead. Asked
-# BEFORE render_units, while the on-disk units are still the loaded ones; a
-# fresh host has no such unit and links right away.
-links_deferred_to_guard() {
-    for _ldg_f in "$LAUNCHD_DIR"/*burrowee*gateway*.plist "$SYSTEMD_DIR"/burrowee-gateway*.service; do
-        [ -f "$_ldg_f" ] || continue
-        if grep -qF "$LINK_DIR/burrowee" "$_ldg_f" 2>/dev/null; then return 0; fi
-    done
-    return 1
+# --- LINK OWNERSHIP · BYTE-IDENTICAL COPY · do not edit one copy -------------
+# This block exists three times in the release repo — in
+# _shared/migrations/lib_stale_user_bins.sh (inside the SHARED SWEEP CONTRACT
+# region, so it travels to the gateway repo's copy of that library too) and in
+# inner/gateway/install.sh and inner/edge/install.sh beside
+# unlink_operator_bins. The sweep and the uninstall must not disagree about
+# which links are ours, and the uninstall path cannot depend on the library
+# being loaded: the gateway sources it lazily, from inside its sweep functions.
+# The copies are pinned byte-identical by TestLinkOwnershipCopiesAreIdentical,
+# the same way the PREFIX gate's four copies are pinned by
+# tools/prefix-gate-drift.test.sh.
+#
+# link_target_is_ours <link-path> — whether <link-path> is a symlink this
+# project placed: one whose target names a file DIRECTLY inside $BIN_DIR.
+#
+# IT USED TO BE A PREFIX MATCH — `case "$(readlink "$p")" in "$BIN_DIR"/*)` —
+# and that accepted a shape no install ever created: a target of
+# "$BIN_DIR/../../etc/foo" begins with "$BIN_DIR/" and so read as ours, and a
+# foreign link at a burrowee-typed name was removed on that evidence. The blast
+# radius was bounded — removing a symlink unlinks the LINK and never its
+# target, and the name has to be in the candidate list already — so this was a
+# false-positive removal rather than a traversal write. It was still a decision
+# made on a string that did not mean what the comparison assumed.
+#
+# WHAT THE PREFIX FORM DID GET RIGHT, so nobody "fixes" it back the other way:
+# a SIBLING directory was never a hole. The pattern carries an explicit "/"
+# after $BIN_DIR, so "$BIN_DIR-old/burrowee" did not match it. That case is
+# asserted below anyway, because the exact-directory rule is what keeps it
+# true rather than the accident of a trailing slash in a glob.
+#
+# NO PATH ARITHMETIC, AND THAT IS THE POINT. A target carrying a "." or ".."
+# component is REFUSED outright rather than folded, and so is one carrying a
+# doubled or trailing slash. Folding would be claiming to know where a path
+# LANDS, which is a different and racy question from the one being asked —
+# normalize_dir's header makes the same argument about the PREFIX gate — and
+# every shape refused here is one no install ever wrote: each link was
+# `ln -sfn "$BIN_DIR/<name>"`, absolute and clean. So the refusal costs nothing
+# real and fails toward KEEP, the direction every guard here fails in.
+#
+# THE DIRECTORY MUST BE $BIN_DIR EXACTLY, not merely a prefix of the target.
+link_target_is_ours() {
+    _ltio_t="$(readlink "$1" 2>/dev/null)"
+    [ -n "$_ltio_t" ] || return 1
+    # Absolute only: every link this project created was an absolute
+    # "$BIN_DIR/<name>". A relative target is somebody else's by construction.
+    case "$_ltio_t" in
+    /*) ;;
+    *) return 1 ;;
+    esac
+    # The trailing slash makes the LAST component testable the same way as
+    # every other one; an absolute path's FIRST component can never be "." or
+    # "..", so no leading guard is needed.
+    case "$_ltio_t/" in
+    */./* | */../* | *//*) return 1 ;;
+    esac
+    _ltio_b="${BIN_DIR:-}"
+    [ -n "$_ltio_b" ] || return 1
+    # One trailing slash tolerated on $BIN_DIR, which is caller-supplied.
+    # Nothing else about it is normalised: every other reader uses it raw, and
+    # a second spelling here would be a second answer to "where is the install".
+    _ltio_b="${_ltio_b%/}"
+    [ "${_ltio_t%/*}" = "$_ltio_b" ] || return 1
+    # Something must remain after the directory: "$BIN_DIR" itself names no file.
+    [ -n "${_ltio_t##*/}" ] || return 1
+    return 0
 }
+# --- end LINK OWNERSHIP ------------------------------------------------------
 
-# unlink_operator_bins — RULE 4: removed on uninstall, and only when the link
-# still points into OUR tree. A regular file at one of these names is the
-# operator's; a symlink pointing anywhere else is somebody else's.
+# unlink_operator_bins — an uninstall clears a link a PREVIOUS release left in
+# the 0.2 exec root, and only when it still points into OUR tree. A regular
+# file at one of these names is the operator's; a symlink pointing anywhere
+# else is somebody else's.
+#
+# NOTHING THIS SCRIPT DOES CREATES ONE ANY MORE, and that is not a reason to
+# delete this: hosts installed by a 0.3 release that still linked are carrying
+# those links right now, and an uninstall that left them behind would leave a
+# dangling name in a directory on the operator's PATH. The install path clears
+# them the other way, through the stale-exec-root sweep (a symlink into
+# $BIN_DIR is ours and is removed); this is the same cleanup on the way out.
 unlink_operator_bins() {
-    for _uob in $LINK_BINS; do
-        _uob_p="$LINK_DIR/$_uob"
+    for _uob in $OPERATOR_BINS; do
+        _uob_p="$LEGACY_BIN_DIR/$_uob"
         [ -L "$_uob_p" ] || continue
-        case "$(readlink "$_uob_p")" in
-        "$BIN_DIR"/*) ;;
-        *) continue ;;
-        esac
+        link_target_is_ours "$_uob_p" || continue
         # A link whose target still exists is still serving someone: the shared
         # `burrowee` dispatcher stays in $BIN_DIR while a sibling component is
         # installed, and its link must stay with it. Same rule as the edge's.
@@ -4605,7 +4643,38 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # callers: `doctor --fix` reaches here through installGatewayUnits, so a
     # doctor call at the end of this block would be doctor running itself as
     # its own last remediation step. The fresh path has no such caller.
+
+    # THE ADVICE BELONGS HERE, AND THIS MODE IS WHY IT CANNOT BE SKIPPED.
     #
+    # This is the ONLY path on which the gateway's exec-root sweep runs: the
+    # guard calls sweep_stale_exec_root through the kept installer
+    # (guard.sh's sweep_stale_bins_via_kept_installer), and the guard is armed
+    # from here. So the run that REMOVES /usr/local/bin/burrowee-gateway-cli
+    # and the shared `burrowee` dispatcher from a converging 0.2 host is
+    # exactly this one — and until now it was the one run that printed no
+    # replacement instruction. Worse, update mode ends by telling the operator
+    # to run `sudo burrowee gateway service install`, which is this mode: the
+    # sequence finished with their typed command gone and nothing said about
+    # it anywhere.
+    #
+    # It corrects an earlier reading of mine that units-only "places no
+    # binaries, so it is not an install". Placement was never the test. A path
+    # that REMOVES the operator's command has to say how to reach the
+    # replacement, whatever we call the mode.
+    #
+    # PRINTED HERE RATHER THAN BESIDE THE SWEEP, because the sweep runs inside
+    # the guard, whose output goes to $TXN/guard.log and not to the operator's
+    # terminal. This foreground is the session they typed the verb in, and it
+    # is the only place they will read anything. The advice is true before the
+    # sweep completes as well as after — $BIN_DIR is off PATH either way.
+    #
+    # ON SUCCESS ONLY, same as the fresh path: a non-zero verdict means the
+    # guard rolled the host back, and advice about a tree this run reverted is
+    # advice about an install that did not happen.
+    if [ "$_verdict" = 0 ]; then
+        print_path_advice
+    fi
+
     # reattach's verdict, and nothing after it: 0 served / handed off
     # unreported, 1 rolled back or aborted with nothing started, 2 the
     # rollback itself failed.
@@ -4770,12 +4839,11 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         ROOT_BIN_PLACE_EXCLUDE="burrowee-gateway-updater"
         migrate_from_legacy
         render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
-        # The links are made HERE on the update path: this path arms no guard —
-        # the updater restarts the service itself right after this script exits —
-        # so there is no later step to defer them to. The exec-root sweep still
-        # has to wait until the loaded units name $BIN_DIR: the units-only
-        # reinstall (`burrowee gateway service install`) does it after load_units.
-        link_operator_bins
+        # The exec-root sweep still has to wait until the loaded units name
+        # $BIN_DIR: the units-only reinstall (`burrowee gateway service
+        # install`) does it after load_units. This path arms no guard — the
+        # updater restarts the service itself right after this script exits —
+        # so there is no later step here to hand it to.
         echo "note: once the service has restarted onto the new units, 'sudo burrowee gateway service install' sweeps the 0.2 copies out of $LEGACY_BIN_DIR"
 
         # The version LAST, and only once everything above succeeded. Recording it
@@ -4972,10 +5040,6 @@ txn_phase replacing
 
 place_all_bins
 
-# Decided here, BEFORE render_units, while the on-disk units are the loaded
-# ones: see links_deferred_to_guard. The links themselves follow render_units.
-if links_deferred_to_guard; then LINKS_DEFERRED=1; else LINKS_DEFERRED=0; fi
-
 "$BIN_DIR/burrowee" --version 2>/dev/null || true
 
 # Write both SYSTEM service units (single-slot consent first, then migrate any
@@ -5011,15 +5075,6 @@ migrate_from_legacy
 keep_installer_copy
 
 render_units
-
-# The operator-typed links: now, on a host whose loaded units never named the
-# link path (a fresh install); after the verified restart, in the guard, on a
-# 0.2 host whose loaded units still do (links_deferred_to_guard above).
-if [ "$LINKS_DEFERRED" = 1 ]; then
-    echo "note: the operator links into $LINK_DIR follow the restart (a loaded unit still names that path)"
-else
-    link_operator_bins
-fi
 
 # load_units USED TO run right here, restarting the daemon in the foreground —
 # on the very connection an operator tunnelled through that gateway is reading
@@ -5220,6 +5275,21 @@ fi
 # privileged work through run_root. Only `--fix` remediates or prompts, and this
 # is the read-only verb.
 "$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
+
+# ---- the last thing printed on a SUCCESSFUL install ------------------------
+# The operator's own next step: how to reach $BIN_DIR from the shell they
+# actually use. Printed unconditionally on success, including on a re-install
+# that changed nothing — under `sudo` this process sees root's secure_path and
+# cannot observe the operator's interactive PATH, so "is it already on PATH?"
+# is a question it must not pretend to have answered.
+#
+# ON SUCCESS ONLY. A non-zero verdict means the guard rolled the host back to
+# the build it was already running, and telling that operator how to reach a
+# tree this run just reverted would be advice about an install that did not
+# happen.
+if [ "$_verdict" = 0 ]; then
+    print_path_advice
+fi
 
 # reattach's verdict, and nothing after it: 0 served / handed off unreported,
 # 1 rolled back or aborted with nothing started, 2 rollback itself failed (see
