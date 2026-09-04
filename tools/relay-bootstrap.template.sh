@@ -65,10 +65,22 @@ CHANNEL_BASE="$BASE/$COMP"
 # BURROWEE_DL_BASE test hook points at a local plain-HTTP server, so when it is
 # set we drop the TLS-only flags (they'd reject http://); signed requests are
 # still verified against the baked pubkey regardless.
+CURL_BUDGET="--connect-timeout 15 --max-time 300"
 if [ -n "${BURROWEE_DL_BASE:-}" ]; then
-    CURL="curl -fsSL --connect-timeout 15 --max-time 300"
+    CURL_TLS=""
 else
-    CURL="curl -fsSL --proto =https --tlsv1.2 --connect-timeout 15 --max-time 300"
+    CURL_TLS="--proto =https --tlsv1.2"
+fi
+CURL="curl -fsSL $CURL_TLS $CURL_BUDGET"
+
+# CURL_DL — the gated relay artifact, fetched with a progress meter when a
+# person is watching. Same rationale and same constraints as the public
+# bootstrap: the meter goes to STDERR so stdout and the data path are untouched,
+# and a non-interactive install stays exactly as quiet as it is today.
+if [ -t 2 ] && [ -z "${BURROWEE_NO_PROGRESS:-}" ]; then
+    CURL_DL="curl -fSL --progress-bar $CURL_TLS $CURL_BUDGET"
+else
+    CURL_DL="$CURL"
 fi
 
 # ---- helpers ------------------------------------------------------------
