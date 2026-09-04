@@ -457,6 +457,32 @@ have_real_root() {
 #   burrowee-git/relay    install.sh                  (relay's inner installer
 #                                                      lives in its own repo)
 #
+# THE PIN IS NOT THE WHOLE CONTRACT. These functions live OUTSIDE the
+# sentinels, so a re-sync that copies the region alone brings none of them and
+# no test in any repo notices. Each line below is checked against the shipped
+# installer by tools' TestOutOfPinNamesExist, because this list is load-bearing
+# documentation in a change whose whole point is that the pin does not cover
+# it — and it went stale within one round the first time it was written:
+#
+#   * assert_roots_not_symlinked — the config root may not be a symlink,
+#     checked before anything is created.
+#   * system_tree_levels — the tree's levels as ONE list, so the refusing and
+#     the creating pass cannot drift apart.
+#   * assert_level_safe_to_state — a symlinked level whose target's chain is
+#     bad is refused BEFORE chown and chmod follow the link. (This replaced a
+#     guard that briefly lived inside ensure_dir_stated; a repo that copies the
+#     region and looks there will find nothing.)
+#   * stale_exec_root_same_dir_for_sweep — in
+#     inner/_shared/migrations/lib_stale_user_bins.sh, and outside that file's
+#     own SHARED SWEEP CONTRACT sentinels as well.
+#   * stale_exec_root_same_dir_for_probe — its opposite-fail-safe twin, same
+#     file.
+#
+# They are outside deliberately: each names variables that differ per component
+# ($SYS_CONFIG_DIR here, $COMP_HOME in edge) or lives in the sweep library, so
+# none of them can be byte-identical text. A repo re-syncing this region must
+# take them as named changes, not assume the pin covered them.
+#
 # It is duplicated rather than sourced because it must run even when a bundle
 # carries no migrations/ directory at all (BURROWEE_UNITS_ONLY re-runs a kept
 # self-copy that may predate one), and because the gateway does not take the
@@ -469,6 +495,29 @@ have_real_root() {
 # The functions below are the WHOLE predicate — the shell half of
 # core/binary's IsRootSecure (files) and IsRootSecureDir (directories).
 # Anything that changes what "root-secure" means belongs in here.
+#
+# THE TWO PREDICATES IN HERE DO NOT CURRENTLY ANSWER THE SAME-STRENGTH
+# QUESTION, and the name of this region must not be read as promising that
+# they do:
+#
+#   dir_is_root_secure  walks the path COMPONENT BY COMPONENT from /,
+#                       resolving each symlink where it is met, so it judges
+#                       every directory substitutable for any component —
+#                       lexical chain, resolved chain, and the holder of every
+#                       link on the way.
+#   path_is_root_secure walks its ancestors LEXICALLY and resolves nothing, so
+#                       for a symlinked ancestor it never judges the chain that
+#                       holds the ancestor's TARGET. On Linux it happens to
+#                       refuse such a path because a symlink stats 0777; on
+#                       macOS a symlink stats 0755 and it does not.
+#
+# The weaker of the two is the one that gates a root EXEC (the unit's
+# ProgramArguments, the updater's ServeBin, RootExecInstallScript, every
+# RequireRootSecureExec subject). That is a known, reported gap with its own
+# surface and its own callers; closing it is its own change with its own
+# red-first tests, deliberately not folded into the directory form's — this
+# function has had four defects found in it in one day, three of them
+# introduced while fixing the previous one.
 
 # ---------------------------------------------------------------------------
 # The stat dialect, decided once.
@@ -600,6 +649,182 @@ path_is_root_secure() {
     return 0
 }
 
+# dir_spelling_normalize <path> — sets $_dsn_out to <path> with the trailing
+# spellings removed that do not change WHICH DIRECTORY IS NAMED.
+#
+# THIS IS THE ONE HOME FOR THAT RULE, and it is a function rather than four
+# lines inline because the question "does this path name a symlink at its final
+# component" has now been answered wrongly three times in this file's history,
+# every time by somebody looking at one spelling. A predicate about a DIRECTORY
+# must be a function of the directory, not of how a caller spelled it, and
+# these are the spellings a caller can legally pass:
+#
+#   X                 the leaf is X. Tested as given.
+#   X/  X//           the same directory: a trailing separator only forces the
+#                     kernel to resolve X as a directory. STRIPPED — otherwise
+#                     `[ -L X/ ]` is false for a symlinked X and the refusal
+#                     below is one character away from being bypassed.
+#   X/.  X/./  X/.//. `.` names the directory itself, so it never changes which
+#                     directory is named. STRIPPED, repeatedly, interleaved
+#                     with the separators above.
+#   X/..              a DIFFERENT directory — X's parent, after symlink
+#                     resolution. NOT stripped, and it never needs to be: `..`
+#                     from any directory yields a real directory, so a path
+#                     ending in /.. cannot have a symlinked leaf.
+#   a/./b  a//b       interior; they do not touch the leaf. The walk skips and
+#                     collapses them, and `[ -L a/./b ]` lstats b correctly.
+#   bin  ./bin        relative; lstat anchors them to the working directory
+#                     exactly as the walk does.
+#   alias/bin         a symlinked ALIAS in an ANCESTOR position. The leaf is
+#                     the real directory b; the alias is followed and judged
+#                     like any other ancestor.
+#
+# EVERY PREDICATE THAT TAKES A CALLER-SUPPLIED SPELLING CALLS THIS, AND CALLS
+# IT ITSELF. dir_is_root_secure and dir_leaf_is_symlink do so directly;
+# dir_leaf_is_notdir and anything else built on dir_probe_reason get it from
+# there. That is deliberate placement, not repetition: the one predicate that
+# left it to its caller was wrong within a round of this function being added.
+#
+# It sets a variable rather than printing one because a command substitution
+# would strip a trailing newline from the ARGUMENT it is handed, and because
+# every caller here is inside `set -eu`. That is a statement about this
+# function only — the readlink in the walk below does go through a command
+# substitution, and says at its own site what that costs and why it stands.
+dir_spelling_normalize() {
+    _dsn_out="$1"
+    while :; do
+        case "$_dsn_out" in
+        /) break ;;
+        */) _dsn_out="${_dsn_out%/}" ;;
+        */.) _dsn_out="${_dsn_out%/.}" ;;
+        *) break ;;
+        esac
+    done
+    # "/." and "/" both name the root, and the loop above empties the first —
+    # but ONLY a rooted input can empty, so the restoration is guarded on that.
+    # Unguarded it also fired for an EMPTY OPERAND, turning "" into "/" and
+    # answering "root-secure" for an unset variable: a rule written for one
+    # input shape firing on another, which is the third time in this change.
+    # The caller's own guard is below, in dir_is_root_secure.
+    case "$1" in
+    /*) [ -n "$_dsn_out" ] || _dsn_out=/ ;;
+    esac
+}
+
+# dir_leaf_is_symlink <path> — true when the directory <path> names is reached
+# through a symlink at its FINAL component, in any legal spelling. Exported
+# from this region so a CALLER can ask the same question the predicate asked:
+# dir_is_root_secure answers 1 for this and for "somebody on the way can
+# rewrite it", and a caller that reports only the second sends an operator to
+# audit ownership and modes that are perfectly correct.
+dir_leaf_is_symlink() {
+    dir_spelling_normalize "$1"
+    [ -L "$_dsn_out" ]
+}
+
+# dir_leaf_is_notdir <path> — true when something IS at <path> and it is not a
+# directory. The caller-facing half of a distinction dir_probe_reason already
+# draws: `notdir` and `absent` both map to code 3, because 3 says "there is no
+# DIRECTORY here" and that is true of both — but they are not the same sentence
+# to an operator. Without this the code was computed and then discarded at the
+# call site, so a $LINK_DIR that is a regular file printed "does not exist on
+# this host" about a file sitting right there. Separating them is the entire
+# reason dir_probe_reason asks -e before -L.
+dir_leaf_is_notdir() {
+    dir_probe_reason "$1"
+    [ "$_dpr_out" = notdir ]
+}
+
+# dir_probe_reason <path> — sets $_dpr_out to WHY `[ -d <path> ]` answers as it
+# does, in one word. ONE function owns this boundary, because `[ -d ]` is false
+# for four different facts and they do not map to one code:
+#
+#   directory     a real, reachable directory.
+#   notdir        something is at the name and it is not a directory. No
+#                 directory is here — which is what code 3 says.
+#   absent        nothing is at the name, AND this process could see that: the
+#                 nearest ancestor that exists is a directory it can search.
+#                 Code 3.
+#   unreachable   it could not look. The nearest ancestor that exists is a
+#                 directory this process cannot SEARCH, so nothing below it is
+#                 observable. Code 2 — "it is not there" is a claim this
+#                 process is not entitled to make.
+#   unresolvable  something IS at the name — lstat sees a symlink — but it
+#                 resolves to nothing: a loop, a dangling target, a volume that
+#                 is not mounted. Code 2. Never 3: the name is occupied, and
+#                 "does not exist" sends an operator to create a directory
+#                 where something already sits.
+#
+# The observables, in the order they are asked, and what each one settles:
+#
+#   [ -d p ]   follows symlinks — true only for a real, reachable directory.
+#   [ -L p ]   does NOT follow — true for a symlink even when its target is
+#              missing, looping, or on an unmounted volume. Reached only after
+#              -e has said the name lands on nothing, and it is the only thing
+#              that separates UNRESOLVABLE from ABSENT: without it a 70-link
+#              chain or a config root parked on an unmounted volume was
+#              reported as "does not exist — re-run so it can be created".
+#   [ -e p ]   follows — true whenever the name lands on something that
+#              exists, symlink or not. Asked BEFORE -L, because that order is
+#              what separates a link onto a regular file (notdir, 3) from a
+#              link onto nothing at all (unresolvable, 2).
+#   then, only when the name itself answered nothing, WALK UP to the nearest
+#   ancestor that exists and ask whether it is searchable. That is what
+#   separates UNREACHABLE from ABSENT, and testing only the LEXICAL parent is
+#   not enough: a missing grandparent makes the parent unreadable too, so
+#   /nonexistent-top/x and <tmp>/a/nodir/deeper both answered "unreachable" —
+#   sending an operator to check `command -v stat` about a tree that is simply
+#   not there.
+#
+# The two directions are one defect and one fix: this function distinguishes
+# "cannot reach it" from "it is not there" from "it is there and will not
+# resolve", and its callers do nothing but map those words onto their codes.
+dir_probe_reason() {
+    # NORMALIZED HERE, not by the caller. dir_leaf_is_symlink normalized and
+    # dir_leaf_is_notdir did not, so a regular file spelled `X/` or `X/.`
+    # answered "absent" and link_operator_bins printed "does not exist on this
+    # host" about a file sitting right there — the misdirection this whole
+    # change exists to remove, reintroduced one round after the normalizer was
+    # written to prevent it. A rule a caller has to remember is a rule that
+    # gets forgotten, so every predicate built on this one now inherits it.
+    dir_spelling_normalize "$1"
+    _dpr_p="$_dsn_out"
+    if [ -d "$_dpr_p" ]; then _dpr_out=directory; return 0; fi
+    # `[ -e ]` BEFORE `[ -L ]`, and the order is the whole distinction: -e
+    # FOLLOWS the link, so it is true exactly when the name lands on something
+    # that exists. A symlink to a regular file is therefore `notdir` — there is
+    # no directory here, code 3 — and only a link that lands on NOTHING (a
+    # dangling target, a loop, an unmounted volume) falls through to -L and
+    # `unresolvable`. Asking -L first called every symlinked non-directory
+    # unresolvable, so $LINK_DIR pointed at a file printed "the ownership could
+    # not be established … check which stat is on PATH": the misdirection the
+    # 1/2/3 split exists to stop, inside the function that owns the split.
+    if [ -e "$_dpr_p" ]; then _dpr_out=notdir; return 0; fi
+    if [ -L "$_dpr_p" ]; then _dpr_out=unresolvable; return 0; fi
+    _dpr_a="$_dpr_p"
+    while :; do
+        case "$_dpr_a" in
+        */*)
+            _dpr_a="${_dpr_a%/*}"
+            [ -n "$_dpr_a" ] || _dpr_a=/
+            ;;
+        *) _dpr_a=. ;;
+        esac
+        if [ -d "$_dpr_a" ]; then
+            if [ -x "$_dpr_a" ]; then _dpr_out=absent; else _dpr_out=unreachable; fi
+            return 0
+        fi
+        if [ -e "$_dpr_a" ]; then _dpr_out=absent; return 0; fi
+        if [ -L "$_dpr_a" ]; then _dpr_out=unresolvable; return 0; fi
+        # / and . both exist and are directories, so the loop above returns on
+        # them; reaching here at all means the filesystem answered nothing for
+        # anything, and there is nothing left to walk up to.
+        case "$_dpr_a" in
+        / | .) _dpr_out=absent; return 0 ;;
+        esac
+    done
+}
+
 # dir_is_root_secure <path> — the directory form of the predicate above, and
 # the shell half of core/binary's IsRootSecureDir. Same four codes; the leaf is
 # a DIRECTORY, so 3 means "no such directory" rather than "no such file". The
@@ -614,59 +839,209 @@ path_is_root_secure() {
 # shared flag would let a caller ask the wrong question with a one-character
 # typo — a directory passed to the file form answers 3 ("absent"), which reads
 # as "nothing to check" rather than as the wrong question.
+#
+# THE PROPERTY, stated over components rather than over one resolved string:
+# every directory that could be SUBSTITUTED for any component of the path is
+# root-owned and unwritable by non-root. That is every component of the path as
+# spelled, every component of the path it resolves to, and — for each symlink
+# met on the way — the chain of directories that holds that link.
+#
+# THE WALK THEREFORE GOES DOWNWARD, ONE COMPONENT AT A TIME, RESOLVING EACH
+# SYMLINK WHERE IT IS MET. Collapsing the path first — `cd "$(dirname …)" &&
+# pwd -P` — and walking upward from the result is what this replaces, and it
+# was wrong in a way no leaf test can repair: physical resolution ERASES every
+# intermediate symlink, so neither the link nor the chain holding it is ever
+# stat'ed. With /usr group-writable and /usr/local a symlink into a root-owned
+# /opt/burrowee-local, the collapsed chain (/opt/burrowee-local/bin, /opt, /)
+# walks perfectly clean and the install proceeds — after which any member of
+# /usr's group repoints /usr/local at a tree they own, taking the identity and
+# host-cert directory this installer is about to create and the exec root root
+# will run binaries from. A `[ -L ]` test added for the LEAF does not reach it
+# either: the leaf was never the substitutable component.
+#
+# Downward is also what makes the holder chain free. Each component is judged
+# BEFORE the walk descends through it, so by the time a symlink is followed the
+# directory holding it has already been judged; following it just re-enters the
+# same loop on the target, from / again when the target is absolute, judging
+# that chain the same way.
+#
+# A SYMLINK'S OWN uid AND MODE ARE DELIBERATELY NOT TESTED. Replacing a symlink
+# is governed by write permission on the directory that holds it — the
+# component already judged — and the link's own mode is not even portable:
+# 0777 on Linux, 0755 on macOS. Testing it would refuse every symlinked path on
+# one platform and none on the other, which is a dialect bug wearing a security
+# check's clothes.
+#
+# A SYMLINKED LEAF IS FOLLOWED AND JUDGED ON BOTH CHAINS — the holder's and the
+# target's — and it is NOT refused here. The refusal core/binary's
+# IsRootSecureDir applies belongs to ONE caller, not to this predicate, and the
+# difference is the whole of an operator ruling:
+#
+#   Each component's daemon refuses a symlinked config root itself, at exactly
+#   one place, and this mirrors that place and no other:
+#     gateway  internal/gateway/system_tool.IsRootSecureDir (root_secure_unix.go),
+#              wired at internal/gateway/config_root.go:27
+#     edge     internal/edgeroot, root_secure_unix.go:26 — os.Lstat, refusing a
+#              symlink outright, reached through guardSystemRoot /
+#              systemRootSecure at ensure.go:153
+#   Both give the same directory-specific reason: "a config or data root that
+#   is a symlink is not a packaging fact, it is somebody redirecting where the
+#   daemon writes its secrets, so it is refused outright". A briefly-shipped form of this function
+#   refused a symlinked leaf for EVERY root the installer asserts —
+#   $SYSTEM_ROOT, $BIN_DIR, the etc/var roots and $SYS_DATA_DIR as well as the
+#   config root — and "put var on the big disk" is an ordinary supported
+#   layout: those installs worked before, are never rejected by the daemon, and
+#   would have started failing hard. A refusal that breaks a working layout is
+#   a worse outcome than the one it prevents there.
+#
+# So the rule is applied where its justification reaches and no further:
+# dir_leaf_is_symlink is what a caller asks, and only the CONFIG root's caller
+# asks it. Every other root keeps the both-chains judgement below, which is
+# what actually protects them.
+#
+# A symlinked ANCESTOR is always followed and judged — that is the substitution
+# this walk exists to catch, and Go accepts it too (too readily: see the region
+# header).
+#
+# NOTHING HERE ENTERS THE DIRECTORY IT IS ASKED ABOUT, and nothing here `cd`s
+# at all. This script runs UNPRIVILEGED and elevates per step, and the leaf is
+# routinely root-owned 0700 ($SYS_DATA_DIR): `cd` into that is EACCES for the
+# operator, and an earlier form that did it refused every non-root install with
+# a message about `stat` dialects. `[ -d ]`, `[ -L ]`, `readlink` and `stat` on
+# a path all need search permission on its PARENT only, and every parent this
+# walk touches must be 0755-and-root-owned to pass at all.
 dir_is_root_secure() {
-    _ds_d="$1"
-    [ -d "$_ds_d" ] || return 3
-    # Walk the RESOLVED directory, never the lexical spelling. stat does not
-    # dereference a symlink and a macOS symlink is itself root-owned 0755, so a
-    # /usr/local/bin -> /Users/x/bin link passes every check while the directory
-    # a link would actually be written into is never examined — and root's own
-    # links then land somewhere that user can rewrite.
-    #
-    # RESOLVED THROUGH THE PARENT, never by entering the directory itself: this
-    # script runs UNPRIVILEGED and elevates per step, and the leaf it is asked
-    # about is routinely root-owned 0700 ($SYS_DATA_DIR). `cd` into that is
-    # EACCES for the operator, while stat'ing it from outside is not — an
-    # earlier form entered the leaf and refused every non-root install with a
-    # message about `stat` dialects. A symlinked leaf is still followed, since
-    # that is the substitution this resolution exists to catch.
-    _ds_p="$(cd "$(dirname "$_ds_d")" 2>/dev/null && pwd -P)" || return 2
-    [ -n "$_ds_p" ] || return 2
-    case "$_ds_d" in
-    /) ;;
-    *) _ds_d="${_ds_p%/}/$(basename "$_ds_d")" ;;
+    # An EMPTY operand answers 3: it names no directory, `[ -d "" ]` is false
+    # for it by specification, and dir_spelling_normalize is what makes sure it
+    # still is — see the guard there. It must never answer 0, which it did
+    # while that guard was missing. A second check here would state the same
+    # rule twice and leave neither one testable: delete either and the suite
+    # stays green, so the rule lives in exactly one place.
+    # ONE normalization, here, before anything looks at the spelling —
+    # dir_spelling_normalize owns which spellings name the same directory.
+    dir_spelling_normalize "$1"
+    _ds_in="$_dsn_out"
+    dir_probe_reason "$_ds_in"
+    case "$_dpr_out" in
+    directory) ;;
+    absent | notdir) return 3 ;;
+    *) return 2 ;;
     esac
-    # A SYMLINKED LEAF MUST SATISFY BOTH CHAINS. Resolving to the target and
-    # walking only from there ignores the directory that HOLDS the link: with a
-    # group-writable /usr/local and /usr/local/bin -> a root-owned tree, the
-    # target walks clean while the owner of /usr/local can repoint `bin` at any
-    # moment — after which root's own links address someone else's directory.
-    # The holder's chain is checked first, then the resolved target's below.
-    if [ -L "$_ds_d" ]; then
-        dir_chain_is_root_secure "$_ds_p" || return $?
-        _ds_d="$(cd "$_ds_d" 2>/dev/null && pwd -P)" || return 2
-        [ -n "$_ds_d" ] || return 2
-    fi
-    dir_chain_is_root_secure "$_ds_d"
+    case "$_ds_in" in
+    /*) _ds_rest="$_ds_in" ;;
+    *)
+        # A relative spelling is judged against the physical working directory,
+        # whose own components are then walked like any other. `pwd -P` reports
+        # the cwd this process already has; it enters nothing.
+        _ds_cwd="$(pwd -P 2>/dev/null)" || return 2
+        [ -n "$_ds_cwd" ] || return 2
+        _ds_rest="${_ds_cwd%/}/$_ds_in"
+        ;;
+    esac
+    # / is a component like any other, and the only one the loop below never
+    # reaches — every candidate it builds hangs off it.
+    dir_level_is_root_secure / || return $?
+    _ds_done=''    # the prefix already judged, fully resolved; '' means /
+    _ds_hops=0     # symlinks followed, so the loop terminates come what may
+    while :; do
+        # Separators, however many, carry no component.
+        while :; do
+            case "$_ds_rest" in
+            /*) _ds_rest="${_ds_rest#/}" ;;
+            *) break ;;
+            esac
+        done
+        [ -n "$_ds_rest" ] || return 0
+        case "$_ds_rest" in
+        */*)
+            _ds_comp="${_ds_rest%%/*}"
+            _ds_rest="${_ds_rest#*/}"
+            ;;
+        *)
+            _ds_comp="$_ds_rest"
+            _ds_rest=''
+            ;;
+        esac
+        case "$_ds_comp" in
+        .) continue ;;
+        # .. after a resolved prefix pops that prefix, exactly as the kernel
+        # resolves it — and the popped directory was judged on the way in.
+        ..)
+            _ds_done="${_ds_done%/*}"
+            continue
+            ;;
+        esac
+        _ds_cur="$_ds_done/$_ds_comp"
+        if [ -L "$_ds_cur" ]; then
+            _ds_hops=$((_ds_hops + 1))
+            # A cycle cannot arrive through the `[ -d ]` above — the kernel
+            # resolved the whole path to get there, and refuses a loop long
+            # before this bound. It is a path rewritten UNDERNEATH the walk
+            # that this stops, and "I could not follow it" is undecidable,
+            # not insecure.
+            [ "$_ds_hops" -le 64 ] || return 2
+            # KNOWN LIMIT, stated because the region asserts the opposite
+            # invariant one function up and a reader is entitled to see them
+            # reconciled: `$( )` strips every trailing newline, so a link whose
+            # TARGET's last component ends in one is resolved here one
+            # character short of what the kernel follows, and the walk then
+            # judges a different directory than the one asked about.
+            #
+            # It is left as it is, deliberately. Recovering the bytes needs the
+            # `&& printf X` guard plus removal of readlink's own terminator,
+            # and whether readlink writes that terminator is a DIALECT question
+            # of the same kind that cost this file the stat bug — so the
+            # recovery would need its own probe, and a probe that is wrong
+            # truncates every target instead of one. Against that: creating
+            # such a link requires write access to the directory holding it,
+            # and this walk refuses any chain a non-root account can write, so
+            # the only account that can set one up is the one the predicate
+            # exists to trust. A wrong answer here is root's about root's.
+            #
+            # dir_spelling_normalize's comment says it avoids a command
+            # substitution to keep a path entitled to a trailing newline; that
+            # is true of the ARGUMENT it is handed and is not a claim about
+            # this line.
+            _ds_t="$(readlink "$_ds_cur" 2>/dev/null)" || return 2
+            [ -n "$_ds_t" ] || return 2
+            case "$_ds_t" in
+            /*)
+                _ds_done=''
+                _ds_rest="${_ds_t#/}/$_ds_rest"
+                ;;
+            *) _ds_rest="$_ds_t/$_ds_rest" ;;
+            esac
+            continue
+        fi
+        dir_level_is_root_secure "$_ds_cur" || return $?
+        _ds_done="$_ds_cur"
+    done
 }
 
-# dir_chain_is_root_secure DIR — the ownership walk itself, from DIR up to /:
-# every level root-owned and writable by nobody else. Split out of
-# dir_is_root_secure so a symlinked leaf can be judged by the chain that HOLDS
-# the link as well as the one that holds its target. Takes an already-resolved
-# path; nothing else calls it.
-dir_chain_is_root_secure() {
-    _dc_d="$1"
-    while :; do
-        [ -d "$_dc_d" ] || return 1
-        _dc_v="$(stat_uid "$_dc_d")" || return 2
-        [ "$_dc_v" = 0 ] || return 1
-        _dc_v="$(stat_mode "$_dc_d")" || return 2
-        if mode_allows_nonroot_write "$_dc_v"; then return 1; fi
-        _dc_parent="$(dirname "$_dc_d")"
-        [ "$_dc_parent" != "$_dc_d" ] || break
-        _dc_d="$_dc_parent"
-    done
+# dir_level_is_root_secure <dir> — one already-resolved component of the walk:
+# it is a directory, root owns it, and nobody else may write it. Codes 0, 1 and
+# 2 carry dir_is_root_secure's meanings. 3 is not this function's to answer:
+# only the leaf can legitimately be absent, and that is settled before the walk
+# starts. A component that has stopped being a directory mid-walk is 1 — the
+# path no longer denotes what it was asked about — but a component this process
+# cannot even reach is 2, per dir_probe_reason: the walk descends through
+# root-owned directories, a root-owned 0700 one passes and is unsearchable by
+# an unprivileged operator, and reporting that as "not secure" is the exact
+# misdirection the 1-vs-2 split exists to prevent.
+dir_level_is_root_secure() {
+    dir_probe_reason "$1"
+    case "$_dpr_out" in
+    directory) ;;
+    # Only the LEAF can legitimately be absent, and that was settled before the
+    # walk began, so here "nothing there" is 1 — the path stopped denoting what
+    # it was asked about — while "could not look" and "will not resolve" stay 2.
+    absent | notdir) return 1 ;;
+    *) return 2 ;;
+    esac
+    _dl_v="$(stat_uid "$1")" || return 2
+    [ "$_dl_v" = 0 ] || return 1
+    _dl_v="$(stat_mode "$1")" || return 2
+    if mode_allows_nonroot_write "$_dl_v"; then return 1; fi
     return 0
 }
 # === ROOT-SECURE CONTRACT END ===
@@ -1304,6 +1679,202 @@ ensure_dir_stated() {
     fi
 }
 
+# assert_roots_not_symlinked — the CHEAP, PRIVILEGE-FREE half of the tree
+# assertion, and it runs BEFORE anything on the host is created or modified.
+#
+# THE ORDERING RULE, stated here because it has now been got wrong twice in one
+# function: A CHECK THAT CAN REFUSE THE INSTALL RUNS BEFORE ANY STEP THAT
+# TOUCHES THE HOST, and a check that needs no privilege does not sit behind a
+# gate that does. This one is a pure lstat — no uid 0, no write, no stat
+# dialect — and it decides the whole run, so nothing may happen before it.
+#
+# What running it late cost: it used to sit at the END of assert_system_tree,
+# which runs after ensure_system_tree has walked the tree calling
+# ensure_dir_stated — and ensure_dir_stated does `run_root chown 0:0` and
+# `run_root chmod 0755`, NEITHER with -h, so both follow a symlink. An operator
+# who pointed $SYS_CONFIG_DIR at a directory they owned had that directory taken
+# to root:root 0755 and was then handed a refusal saying ownership was not the
+# problem. The install was doomed from the moment the link was seen, so the
+# mutation bought nothing; it only damaged a tree that was none of this
+# installer's business.
+#
+# And it sat below assert_system_tree's `have_real_root` gate. That gate exists
+# because OWNERSHIP cannot be asserted without uid 0, which says nothing about
+# an lstat. On a re-run over an already-correct tree where run_root never
+# reaches root — the sandboxed harness, or a failing sudo — the modes already
+# match, nothing is written, the assert returns 0 early, and a symlinked config
+# root was silently accepted. The daemon then refused at first start, which is
+# the outcome this check exists to move earlier.
+#
+# THE CONFIG ROOT ALONE MAY NOT BE A SYMLINK, mirroring exactly what the
+# component's daemon refuses and no more. Every other root keeps the
+# both-chains judgement in assert_system_tree, which is what protects them; a
+# symlinked $SYSTEM_ROOT or data root is the ordinary "put var on the big disk"
+# layout, it installed cleanly before, and the daemon never rejects it.
+assert_roots_not_symlinked() {
+    if dir_leaf_is_symlink "$SYS_CONFIG_DIR"; then
+        echo "error: $SYS_CONFIG_DIR is a SYMLINK, and the machine-owned CONFIG root must" >&2
+        echo "error: be a real directory — whatever the link points at, and however well" >&2
+        echo "error: owned that target is." >&2
+        echo "error: refusing to install — the daemon mints its console token and identity" >&2
+        echo "error: into this directory, a link is a redirection of where those are written," >&2
+        echo "error: and nothing about its target's ownership records that it moved or stops" >&2
+        echo "error: it moving again. The daemon refuses it at first start; refusing here" >&2
+        echo "error: is that same answer, given while the install can still be fixed." >&2
+        echo "hint: ownership and modes are not what refused this run, and nothing on this" >&2
+        echo "hint: host has been created or changed by it — this check runs first for that" >&2
+        echo "hint: reason." >&2
+        echo "hint: point the setting at the real directory, or replace the link with the" >&2
+        echo "hint: directory itself; then re-run 'burrowee gateway service install'." >&2
+        return 1
+    fi
+    return 0
+}
+
+# system_tree_levels <fn> — the tree's levels, in creation order, each handed
+# to <fn> as (path, mode). ONE list, walked twice by ensure_system_tree: once
+# to refuse, once to create. A second copy of this list beside the first is the
+# drift this shape exists to prevent — the two passes cannot disagree about
+# which levels exist, because there is only one list.
+system_tree_levels() {
+    "$1" "$SYSTEM_ROOT" 0755 || return 1
+    "$1" "$BIN_DIR" 0755 || return 1
+    "$1" "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
+    "$1" "$SYS_ETC_ROOT" 0755 || return 1
+    "$1" "$SYS_CONFIG_DIR" 0755 || return 1
+    "$1" "$(dirname "$SYS_VAR_ROOT")" 0755 || return 1
+    "$1" "$SYS_VAR_ROOT" 0755 || return 1
+    "$1" "$SYS_DATA_DIR" 0700 || return 1
+    "$1" "$SYS_LOG_DIR" 0700 || return 1
+    return 0
+}
+
+# assert_level_safe_to_state <path> <mode> — the refusing half of one level.
+# Mode is accepted and ignored: it takes the same (path, mode) shape as
+# ensure_dir_stated so system_tree_levels can hand both the same list.
+#
+# A SYMLINKED LEVEL IS NOT WHAT GETS STATED — ITS TARGET IS. ensure_dir_stated's
+# `chown 0:0` and `chmod` are spelled without -h, so they follow the link into a
+# directory outside the tree this installer owns. Where the assertion afterwards
+# would refuse the install anyway, that write is pure damage: the operator's
+# directory is taken to root:root and the install fails regardless of it.
+#
+# WHAT IS JUDGED IS THE CHAIN ABOVE THE TARGET, NOT THE TARGET — the part
+# nothing here can repair. Judging the target itself would refuse a supported
+# layout: an operator who creates the directory, points a data root at it and
+# runs the installer is meant to have it chowned to root, and that is exactly
+# what ensure_dir_stated is for. A bad ancestor is different; no chown of ours
+# fixes it.
+#
+# THE PARENT IS DERIVED FROM THE LINK'S TEXT, not resolved by walking into it,
+# and not spelled "$1/..". Three candidates, two of them wrong:
+#
+#   "$1"        the target itself. Judging it refuses the supported layout —
+#               an operator-created directory is what ensure_dir_stated chowns.
+#   "$1/.."     resolves THROUGH the target before popping back to it, so the
+#               target is judged after all and the layout is refused anyway.
+#   readlink    then dirname on the result. This is what is used.
+#
+# The derivation is LEXICAL, deliberately: `dirname` of readlink's text is not
+# the kernel's parent, and does not try to be. Anything stronger would have to
+# walk into the target, and an earlier form that did — `cd -P -- "$1/.."` —
+# reintroduced the EACCES trap this whole change exists to forbid, because the
+# kernel resolves `..` INSIDE the target and this installer states data roots
+# to root:root 0700 through exactly such links. Lexical text plus
+# dir_is_root_secure is enough: the walk resolves what it is handed
+# component-by-component with stat and lstat, which need search on each
+# component's PARENT and never on the component, so the target is never opened.
+# A test asserts all three verdicts differ, which is the only reason this
+# distinction is worth the extra lines.
+#
+# A symlinked level whose chain is sound falls straight through and is stated
+# as before: pointing a var or data root at another volume is the ordinary
+# layout and must keep working.
+assert_level_safe_to_state() {
+    # NORMALIZED ONCE, AT ENTRY, AND $1 IS NOT TOUCHED AGAIN. Every operation
+    # below — readlink, dirname, the predicates, the messages — uses
+    # $_alss_d. The predicates normalize internally, so a function that reads
+    # the RAW spelling for anything else silently disagrees with them: here,
+    # `readlink` on a level spelled `X/` or `X/.` fails EINVAL and refused an
+    # install the bare spelling accepts, and `dirname "X/."` answers the link
+    # itself rather than its directory. That is the third new site to take a
+    # raw spelling, so it is not a thing to remember — it is one assignment at
+    # the top, and a test asserts $1 appears exactly once in any function that
+    # normalizes.
+    dir_spelling_normalize "$1"
+    _alss_d="$_dsn_out"
+    dir_leaf_is_symlink "$_alss_d" || return 0
+    # THE PARENT IS DERIVED, NEVER ENTERED. An earlier form resolved it with
+    # `cd -P -- "$_alss_d/.."`, and that is the EACCES trap this whole change
+    # exists to forbid, reintroduced outside the region where the test that
+    # forbids it could not see: the kernel resolves `..` INSIDE the target, so
+    # that cd needs SEARCH permission on the target itself. This installer runs
+    # unprivileged and elevates per step, and it states $SYS_DATA_DIR to
+    # root:root 0700 through exactly such a link — so the "put var on the big
+    # disk" layout installed once and then refused every re-run, blaming a
+    # chain that was perfectly root-owned.
+    #
+    # readlink + dirname needs search on the LINK'S directory only, and
+    # dir_is_root_secure walks what it is given with stat and lstat, which need
+    # search on each component's PARENT and never on the component. Nothing
+    # here opens the target.
+    _alss_t="$(readlink "$_alss_d" 2>/dev/null)" || _alss_t=''
+    if [ -z "$_alss_t" ]; then
+        echo "error: $_alss_d is a symlink whose target could not be read, so the" >&2
+        echo "error: directory it would be stated through cannot be established." >&2
+        echo "error: refusing before anything is written." >&2
+        echo "hint: nothing on this host has been created or changed by this run — every" >&2
+        echo "hint: level is judged before the first one is created." >&2
+        echo "hint: the ownership and modes of $_alss_d are NOT implicated — reading the" >&2
+        echo "hint: link is." >&2
+        return 1
+    fi
+    case "$_alss_t" in
+    /*) ;;
+    # A relative target is anchored at the link's own directory, exactly as the
+    # kernel anchors it.
+    *) _alss_t="$(dirname "$_alss_d")/$_alss_t" ;;
+    esac
+    _alss_up="$(dirname "$_alss_t")"
+    _alss_rc=0
+    dir_is_root_secure "$_alss_up" || _alss_rc=$?
+    case "$_alss_rc" in
+    0) return 0 ;;
+    2)
+        # Undecidable is not insecure, here as everywhere else in this file.
+        echo "error: the ownership of the directories above $_alss_t could not be" >&2
+        echo "error: established, so whether stating $_alss_d would write into a" >&2
+        echo "error: tree only root can rewrite is not known." >&2
+        echo "error: refusing before anything is written." >&2
+        echo "hint: nothing on this host has been created or changed by this run." >&2
+        echo "hint: their permissions are NOT implicated — reading them is. Either this" >&2
+        echo "hint: host's 'stat' answered neither dialect, or a symlink on the way could" >&2
+        echo "hint: not be followed; a re-run settles the second." >&2
+        ;;
+    3)
+        echo "error: $_alss_d is a symlink pointing into $_alss_up, which does not" >&2
+        echo "error: exist — the link leads nowhere this installer can state." >&2
+        echo "error: refusing before anything is written." >&2
+        echo "hint: nothing on this host has been created or changed by this run." >&2
+        echo "hint: create the directory the link points into, or point $_alss_d" >&2
+        echo "hint: somewhere that exists." >&2
+        ;;
+    *)
+        echo "error: $_alss_d is a symlink, and the directory it points into is not one" >&2
+        echo "error: only root can rewrite — see the chain above its target." >&2
+        echo "error: refusing before anything is written: stating this level would" >&2
+        echo "error: chown and chmod THROUGH the link, changing a directory outside this" >&2
+        echo "error: installer's tree, and the install would then be refused anyway." >&2
+        echo "hint: nothing on this host has been created or changed by this run — every" >&2
+        echo "hint: level is judged before the first one is created." >&2
+        echo "hint: check the ownership and modes of every directory above the link's" >&2
+        echo "hint: target; each must be owned by root and not group- or world-writable." >&2
+        echo "hint: or point $_alss_d at a directory inside a root-owned tree." >&2
+        ;;
+    esac
+    return 1
+}
+
 # ensure_system_tree — the whole tree, top-down, one level at a time, then
 # asserted. The three chains meet at $SYSTEM_ROOT in production (bin/, etc/
 # and var/ are siblings under /usr/local/burrowee); under the test seams each
@@ -1317,15 +1888,11 @@ ensure_dir_stated() {
 # detect (the Go side says the same, ConfigRootMode). var/gateway and its
 # logs/ are 0700: nothing under them is for a non-owner.
 ensure_system_tree() {
-    ensure_dir_stated "$SYSTEM_ROOT" 0755 || return 1
-    ensure_dir_stated "$BIN_DIR" 0755 || return 1
-    ensure_dir_stated "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
-    ensure_dir_stated "$SYS_ETC_ROOT" 0755 || return 1
-    ensure_dir_stated "$SYS_CONFIG_DIR" 0755 || return 1
-    ensure_dir_stated "$(dirname "$SYS_VAR_ROOT")" 0755 || return 1
-    ensure_dir_stated "$SYS_VAR_ROOT" 0755 || return 1
-    ensure_dir_stated "$SYS_DATA_DIR" 0700 || return 1
-    ensure_dir_stated "$SYS_LOG_DIR" 0700 || return 1
+    assert_roots_not_symlinked || return 1
+    # PASS 1 — refuse. Nothing on the host has been touched yet.
+    system_tree_levels assert_level_safe_to_state || return 1
+    # PASS 2 — create and state, now that every level has been judged.
+    system_tree_levels ensure_dir_stated || return 1
     assert_system_tree
 }
 
@@ -1348,6 +1915,7 @@ ensure_system_tree() {
 # wasted on a tree that was right the first time when what actually happened
 # is that stat did not answer.
 assert_system_tree() {
+    assert_roots_not_symlinked || return 1
     if ! have_real_root; then
         echo "note: this run never reached uid 0, so the ownership of $SYSTEM_ROOT" >&2
         echo "note: cannot be asserted — skipping the root-secure check on the tree." >&2
@@ -1358,14 +1926,31 @@ assert_system_tree() {
         dir_is_root_secure "$_ast" || _ast_rc=$?
         if [ "$_ast_rc" = 0 ]; then continue; fi
         if [ "$_ast_rc" = 2 ]; then
-            echo "error: could not read the owner and mode of $_ast — this host's 'stat'" >&2
-            echo "error: answered neither the GNU form (stat -c '%u') nor the BSD form" >&2
-            echo "error: (stat -f '%u') with a plain number." >&2
+            # TWO causes, and naming only one sends the operator to the wrong
+            # place. dir_is_root_secure walks the path component by component,
+            # so it answers 2 when a `stat` did not answer AND when a symlink
+            # on the way could not be followed — the second has nothing to do
+            # with which stat is on PATH. Asserting a dialect problem here
+            # would be the same misdirection the 1-vs-2 split exists to stop.
+            echo "error: could not establish the owner and mode of every directory on the" >&2
+            echo "error: way to $_ast, so nothing is known either way." >&2
             echo "error: refusing to install — the gateway's state would sit in a directory" >&2
             echo "error: whose ownership could not be established." >&2
             echo "hint: the permissions of $_ast are NOT implicated — reading them is." >&2
-            echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
-            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+            echo "hint: two things answer this way. Either this host's 'stat' answered" >&2
+            echo "hint: neither the GNU form (stat -c '%u') nor the BSD form (stat -f '%u')" >&2
+            echo "hint: with a plain number — check which stat is on PATH ('command -v stat')" >&2
+            echo "hint: and that it is the system one; or a symlink on the way could not be" >&2
+            echo "hint: followed, which is what a path rewritten while it is walked looks" >&2
+            echo "hint: like, and a re-run settles that one." >&2
+            echo "hint: then re-run 'burrowee gateway service install'." >&2
+        elif [ "$_ast_rc" = 3 ] && dir_leaf_is_notdir "$_ast"; then
+            echo "error: $_ast is not a directory — something else is at that name." >&2
+            echo "error: refusing to install a service whose state would have to sit inside" >&2
+            echo "error: it. This is not a permission problem and not a missing directory:" >&2
+            echo "error: the name is taken." >&2
+            echo "hint: move or remove whatever is at $_ast, or point the setting at a" >&2
+            echo "hint: directory; then re-run 'burrowee gateway service install'." >&2
         elif [ "$_ast_rc" = 3 ]; then
             echo "error: $_ast does not exist — refusing to install a service whose state" >&2
             echo "error: would sit in a directory this run failed to create." >&2

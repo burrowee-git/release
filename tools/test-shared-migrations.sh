@@ -2605,6 +2605,171 @@ STALE_EXEC_ROOT_KEEP="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-upd
     run_exec_sweep_rung "$t37a5" "$h37a5" --applies
 assert_eq "$RC" 1 "--applies must answer no when every removable name is kept"
 
+# 37a6. THE INSTALL-DESTINATION GUARD IS NORMALIZED. $LEGACY_BIN_DIR and
+#       $BIN_DIR reach this library through independent seams, and a spelling
+#       that differs only by a trailing or doubled slash names the SAME
+#       directory. A raw string compare answers "different", the sweep then runs
+#       against the install destination, and every name it decides `remove` for
+#       is a binary the installer just placed — with a "twin" that is the very
+#       file being deleted. Mutation that reddens it: put the raw
+#       `[ "$LEGACY_BIN_DIR" != "$BIN_DIR" ]` compare back at either site.
+t37a6="$TMP/t37a6"; exec_sweep_kit "$t37a6"; h37a6="$t37a6/home"
+# The 0.3 tree IS the legacy dir here, spelled with a trailing slash on one side.
+OUT="$(
+    HOME="$h37a6" COMP=edge \
+    COMP_HOME="$h37a6/sys/etc/edge" COMP_DATA="$h37a6/sys/var/edge" \
+    BIN_DIR="$h37a6/sys/bin" LEGACY_BIN_DIR="$h37a6/sys/bin/" \
+    STALE_USER_BINS="$EDGE_BINS" \
+    STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+    LAUNCHD_DIR="$h37a6/no-launchd" SYSTEMD_DIR="$h37a6/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h37a6/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t37a6/migrations/sweep_stale_exec_root.sh" 2>&1
+)"; RC=$?
+assert_eq "$RC" 0 "a legacy dir that IS the destination is a no-op, not a failure"
+for b in $EDGE_BINS; do assert_present "$h37a6/sys/bin/$b" "the install destination must be untouched ($b)"; done
+# and the probe must agree, or --applies authorises a sweep the run then declines
+OUT="$(
+    HOME="$h37a6" COMP=edge \
+    COMP_HOME="$h37a6/sys/etc/edge" COMP_DATA="$h37a6/sys/var/edge" \
+    BIN_DIR="$h37a6/sys/bin" LEGACY_BIN_DIR="$h37a6/sys/bin/" \
+    STALE_USER_BINS="$EDGE_BINS" \
+    STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+    LAUNCHD_DIR="$h37a6/no-launchd" SYSTEMD_DIR="$h37a6/no-systemd" \
+    BURROWEE_LEGACY_HOME_PARENTS="$h37a6/nowhere" SUDO=/nonexistent-sudo \
+    sh "$t37a6/migrations/sweep_stale_exec_root.sh" --applies 2>&1
+)"; RC=$?
+assert_eq "$RC" 1 "--applies must answer no when the legacy dir IS the destination"
+
+# 37a7. THE GUARD IS PHYSICAL, NOT TEXTUAL. 37a6 closed ONE spelling — a
+#       trailing slash — with a text compare lifted from install.sh's
+#       normalize_dir, whose own comment says what it is: "TEXTUAL ONLY — no
+#       '.'/'..' folding, no symlink resolution, no relative-path anchoring".
+#       Textual is safe in normalize_dir because that gate REFUSES on a
+#       mismatch. Here the mismatch direction is DESTRUCTIVE: a spelling the
+#       compare cannot see is equal arms the sweep against the install
+#       destination, and every name it then decides `remove` for is a binary
+#       the installer just placed. Each spelling below folds, anchors or
+#       resolves to $BIN_DIR and answers "different" to a text compare.
+#       Mutation that reddens all five: put the textual body back as the whole
+#       of stale_exec_root_same_text as the whole of both entry points — the
+#       run then removes all four binaries out of the destination. The
+#       symlink-dotdot spelling has a second, narrower mutation of its own:
+#       drop the `-P` from both `cd`s, so the shell folds `..` textually
+#       instead of letting the kernel resolve it. That is the same
+#       logical-versus-physical distinction the root-secure walk beside this
+#       was rewritten to respect, and it went unapplied here for three rounds.
+for _s37 in dot dotdot relative symlink-alias symlink-dotdot; do
+    t37a7="$TMP/t37a7-$_s37"; exec_sweep_kit "$t37a7"; h37a7="$t37a7/home"
+    _cwd37="$PWD"
+    case "$_s37" in
+    dot) _leg37="$h37a7/sys/bin/." ;;
+    dotdot) _leg37="$h37a7/sys/bin/../bin" ;;
+    relative) _leg37="bin"; _cwd37="$h37a7/sys" ;;
+    symlink-alias)
+        ln -s "$h37a7/sys/bin" "$h37a7/sys/binlink"
+        _leg37="$h37a7/sys/binlink"
+        ;;
+    # A `..` AFTER A SYMLINK, which only the kernel folds correctly. The link
+    # sits in leg/ and points at sys/etc, so physically link/../bin IS
+    # sys/bin — the destination — while a LOGICAL fold gives sys/leg/bin,
+    # which does not exist. A bare `cd` folds logically, fails, resolves that
+    # side to nothing, and the text compare then answers "different" about the
+    # install destination itself.
+    symlink-dotdot)
+        mkdir -p "$h37a7/sys/leg"
+        ln -s "$h37a7/sys/etc" "$h37a7/sys/leg/link"
+        _leg37="$h37a7/sys/leg/link/../bin"
+        ;;
+    esac
+    OUT="$(
+        cd "$_cwd37" &&
+        HOME="$h37a7" COMP=edge \
+        COMP_HOME="$h37a7/sys/etc/edge" COMP_DATA="$h37a7/sys/var/edge" \
+        BIN_DIR="$h37a7/sys/bin" LEGACY_BIN_DIR="$_leg37" \
+        STALE_USER_BINS="$EDGE_BINS" \
+        STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+        LAUNCHD_DIR="$h37a7/no-launchd" SYSTEMD_DIR="$h37a7/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$h37a7/nowhere" SUDO=/nonexistent-sudo \
+        sh "$t37a7/migrations/sweep_stale_exec_root.sh" 2>&1
+    )"; RC=$?
+    assert_eq "$RC" 0 "a $_s37 spelling of the destination is a no-op, not a failure"
+    for b in $EDGE_BINS; do
+        assert_present "$h37a7/sys/bin/$b" "the install destination must be untouched ($_s37 spelling, $b)"
+    done
+    OUT="$(
+        cd "$_cwd37" &&
+        HOME="$h37a7" COMP=edge \
+        COMP_HOME="$h37a7/sys/etc/edge" COMP_DATA="$h37a7/sys/var/edge" \
+        BIN_DIR="$h37a7/sys/bin" LEGACY_BIN_DIR="$_leg37" \
+        STALE_USER_BINS="$EDGE_BINS" \
+        STALE_EXEC_ROOT_TWIN_OWNER="$(id -un)" \
+        LAUNCHD_DIR="$h37a7/no-launchd" SYSTEMD_DIR="$h37a7/no-systemd" \
+        BURROWEE_LEGACY_HOME_PARENTS="$h37a7/nowhere" SUDO=/nonexistent-sudo \
+        sh "$t37a7/migrations/sweep_stale_exec_root.sh" --applies 2>&1
+    )"; RC=$?
+    assert_eq "$RC" 1 "--applies must answer no for a $_s37 spelling of the destination"
+done
+
+# 37a8. THE TWO CALLERS NEED OPPOSITE SAFE DIRECTIONS, and one helper serving
+#       both cannot give them. remove_stale_exec_root_bins DELETES: where the
+#       truth cannot be established it must answer SAME and decline, because a
+#       wrong "different" unlinks binaries the installer just placed.
+#       stale_exec_root_bins_pending is the --applies PROBE and is documented
+#       FAIL-OPEN: it must answer DIFFERENT, because a wrong "same" records the
+#       rung as done and strands the stale copies forever. The single helper
+#       answered "same" for both, so an unresolvable $BIN_DIR silently retired
+#       a rung that had done nothing.
+#
+#       DRIVEN AT THE FUNCTIONS, not through the sweep, and that is the honest
+#       level: both callers gate on `[ -d "$LEGACY_BIN_DIR" ]` before they ever
+#       consult the guard, so an unsearchable tree fails THAT test first and
+#       the guard is never reached — a run-level fixture for this passes with
+#       the guard deleted, which was verified rather than assumed.
+#
+#       Mutations that redden it: give the probe the sweep's fallback (add
+#       `[ -n "$_sersd_rb" ] || return 0` to _for_probe), or take the sweep's
+#       away; and drop the -P from either `cd` in stale_exec_root_resolve_pair.
+t37a8="$TMP/t37a8"; exec_sweep_kit "$t37a8"; h37a8="$t37a8/home"
+_lib37="$t37a8/migrations/lib_stale_user_bins.sh"
+mkdir -p "$h37a8/sealed/bin"
+chmod 0000 "$h37a8/sealed"
+if [ "$(id -u)" -eq 0 ]; then
+    echo "-- case 37a8 skipped: running as root, which can search a 0000 directory, so no destination spelling is unresolvable here"
+else
+    # The SWEEP must decline when the destination cannot be identified.
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir_for_sweep "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sys/bin/." "$h37a8/sealed/bin" || RC=$?
+    assert_eq "$RC" 0 "sweep: an unresolvable DESTINATION must answer 'same' — nothing may be deleted against a destination this run could not identify"
+    # The PROBE must keep the rung pending on the very same pair.
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir_for_probe "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sys/bin/." "$h37a8/sealed/bin" || RC=$?
+    assert_eq "$RC" 1 "probe: the SAME unresolvable pair must answer 'different' — a wrong 'same' records the rung as done and strands the stale copies"
+    # A legacy side that will not resolve: the sweep may still compare
+    # textually (it can unlink nothing out of a tree it cannot enter), and the
+    # probe stays open.
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir_for_sweep "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sealed/bin" "$h37a8/sys/bin" || RC=$?
+    assert_eq "$RC" 1 "sweep: an unresolvable LEGACY side with a resolvable destination still compares textually — they are different directories and the sweep is legitimate"
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir_for_probe "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sealed/bin" "$h37a8/sys/bin" || RC=$?
+    assert_eq "$RC" 1 "probe: an unresolvable LEGACY side leaves the rung pending"
+    # The DESTINATION side must resolve PHYSICALLY too, and this is the only
+    # shape where that shows: a `..` after a symlink folds to nothing under a
+    # logical cd, the sweep's guard then answers "same", and a sweep that
+    # SHOULD run is silently skipped. The two directories here really differ.
+    mkdir -p "$h37a8/sys/oldbin" "$h37a8/sys/leg"
+    ln -s "$h37a8/sys/etc" "$h37a8/sys/leg/link"
+    RC=0
+    sh -c '. "$1"; stale_exec_root_same_dir_for_sweep "$2" "$3"' _ \
+        "$_lib37" "$h37a8/sys/oldbin" "$h37a8/sys/leg/link/../bin" || RC=$?
+    assert_eq "$RC" 1 "a DESTINATION spelled with a .. after a symlink must resolve physically — folded by the shell it resolves to nothing, the guard answers 'same', and a legitimate sweep is skipped"
+fi
+chmod 0755 "$h37a8/sealed"
+
 # 37b. IDEMPOTENT: the receipt skips it, and nothing else changes.
 run_exec_sweep_ladder "$t37" "$h37"
 assert_eq "$RC" 0 "a second run finds the receipt and applies nothing"
