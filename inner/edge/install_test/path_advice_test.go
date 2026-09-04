@@ -174,6 +174,49 @@ func TestPathAdviceRendersFishSyntaxAndNeverExport(t *testing.T) {
 	assertLacks(t, out, "export PATH=", adviceDecoyHome)
 }
 
+// TestPathAdviceKeepsFishSyntaxWhenOnlyTheHomeIsUnresolvable — the split that
+// a single `case` under the home guard got wrong.
+//
+// A SHELL'S SYNTAX DOES NOT DEPEND ON ITS OWNER'S HOME. Only the profile file
+// does, and the two questions are answered by DIFFERENT lookups:
+// login_shell_of_user falls back to reading /etc/passwd, home_of_user does not
+// (it tries getent, then dscl, then a guess at the home's PARENT directory).
+// So a passwd entry with a shell and an empty home field — a service account,
+// or a slim image with neither getent nor dscl where only /etc/passwd answers —
+// resolves the shell and not the home. Under the old shape the fish rewrite sat
+// inside `[ -n "$_rpa_home" ]`, and that operator was handed
+// `export PATH="…:$PATH"`, which fish rejects outright.
+//
+// The generic "add the line above to your shell's startup file" is correct here
+// and stays: no home means no file worth naming. What must not happen is a line
+// the named shell cannot run.
+//
+// Mutation that reddens it: move the `case "${_rpa_shell##*/}"` that sets
+// _rpa_now back inside the home guard.
+func TestPathAdviceKeepsFishSyntaxWhenOnlyTheHomeIsUnresolvable(t *testing.T) {
+	stub := t.TempDir()
+	// Field 6 (home) empty, field 7 (shell) fish. cut -d: -f6 answers "" and
+	// cut -d: -f7 answers the shell, from one and the same entry.
+	stubBin(t, stub, "getent", "#!/bin/sh\n"+
+		"[ \"$1\" = passwd ] || exit 2\n"+
+		"case \"$2\" in\n"+
+		"opnohome) printf '%s:x:1000:1000:::%s\\n' \"$2\" '/usr/bin/fish' ;;\n"+
+		"*) exit 2 ;;\n"+
+		"esac\n")
+	stubBin(t, stub, "dscl", "#!/bin/sh\nexit 1\n")
+	stubBin(t, stub, "id", "#!/bin/sh\nif [ \"$1\" = \"-u\" ]; then echo 0; else /usr/bin/id \"$@\"; fi\n")
+	stubBin(t, stub, "uname", "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then echo Linux; else /usr/bin/uname \"$@\"; fi\n")
+
+	out := renderAdvice(t, adviceBinDir, stub, "opnohome")
+
+	assertContains(t, out,
+		"    set -gx PATH "+adviceBinDir+" $PATH",
+		"  Make it permanent by adding the line above to your shell's startup file.",
+	)
+	// No file is named, and above all no POSIX export line: fish cannot run it.
+	assertLacks(t, out, "export PATH=", adviceDecoyHome, "config.fish", "fish_add_path")
+}
+
 // TestPathAdviceIsGenericForARootSessionWithNoOperator — $SUDO_USER unset at
 // euid 0 is a genuine root login: nobody invoked it, so there is no operator to
 // advise and no profile file that could be named. The export line still has to

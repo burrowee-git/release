@@ -2626,12 +2626,34 @@ t37d="$TMP/t37d"; exec_sweep_kit "$t37d"; h37d="$t37d/home"
 # fixture, which is about the twin guard alone. Left in, --applies would answer
 # yes for the link and this section would pass while saying nothing about twins.
 rm -f "$h37d/old-bin/burrowee-edge"
-EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d"; run_exec_sweep_rung "$t37d" "$h37d" --applies; unset EXEC_SWEEP_TWIN_OWNER
+# `root` and NOT an invented name. `find -user nosuchuser` is a usage error on
+# GNU find — it exits non-zero without printing — and the library now separates
+# that from a real answer: an unusable find is "could not be asked", a different
+# verdict with a different message. A fixture naming a non-existent account
+# would drive THAT branch while claiming to test this one. root exists
+# everywhere and owns nothing this unprivileged fixture created.
+EXEC_SWEEP_TWIN_OWNER="root"; run_exec_sweep_rung "$t37d" "$h37d" --applies; unset EXEC_SWEEP_TWIN_OWNER
 assert_eq "$RC" 1 "--applies must answer no when no twin is trusted"
-EXEC_SWEEP_TWIN_OWNER="nobody-such-user-37d"; run_exec_sweep_rung "$t37d" "$h37d"; unset EXEC_SWEEP_TWIN_OWNER
+EXEC_SWEEP_TWIN_OWNER="root"; run_exec_sweep_rung "$t37d" "$h37d"; unset EXEC_SWEEP_TWIN_OWNER
 assert_eq "$RC" 0 "the rung declines per name and exits 0"
 assert_present "$h37d/old-bin/burrowee-edge-updater" "an untrusted twin must keep the 0.2 copy in place"
-assert_contains "$OUT" "is not a regular file owned by nobody-such-user-37d" "and say which owner it wanted"
+assert_contains "$OUT" "is not a regular file owned by root" "and say which owner it wanted"
+
+# 37d2. THE TWIN COULD NOT BE ASKED ABOUT. An absent `find`, or a build whose
+#       -user / -perm -g+w this host's find rejects (some BusyBox
+#       configurations), is not evidence about the twin. Both outcomes keep the
+#       file, so the only thing separating them is what the operator is told —
+#       and "your install directory is unsafe" sends them to fix the wrong
+#       thing when the truth is that this host has no usable find.
+t37d2="$TMP/t37d2"; exec_sweep_kit "$t37d2"; h37d2="$t37d2/home"
+rm -f "$h37d2/old-bin/burrowee-edge"
+_find_stub="$TMP/stub-find-37d2"; mkdir -p "$_find_stub"
+printf '#!/bin/sh\nexit 1\n' > "$_find_stub/find"; chmod +x "$_find_stub/find"
+PATH="$_find_stub:$PATH" run_exec_sweep_rung "$t37d2" "$h37d2"
+assert_eq "$RC" 0 "an unusable find must not fail the rung"
+assert_present "$h37d2/old-bin/burrowee-edge-updater" "nothing is removed when the twin cannot be checked"
+assert_contains "$OUT" "could not be asked whether" "and the operator is told which of the two happened"
+assert_lacks "$OUT" "is not a regular file owned by" "an unusable find must not be reported as an untrusted twin"
 
 # 37e. A UNIT STILL NAMES IT: on the first 0.3 install the 0.2 updater unit
 #      still names /usr/local/bin/burrowee-edge-updater, and unlinking a file a

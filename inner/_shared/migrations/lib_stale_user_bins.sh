@@ -906,11 +906,51 @@ stale_exec_root_is_kept() {
 }
 STALE_EXEC_ROOT_TWIN_OWNER="${STALE_EXEC_ROOT_TWIN_OWNER:-root}"
 
-# stale_exec_root_twin_ok <bin> — $BIN_DIR/<bin> is a regular file owned by
-# $STALE_EXEC_ROOT_TWIN_OWNER and writable by nobody else. `find -prune` on
-# the file itself prints it iff every test holds; POSIX find, both dialects.
-stale_exec_root_twin_ok() {
-    [ -n "$(find "$BIN_DIR/$1" -prune -type f -user "$STALE_EXEC_ROOT_TWIN_OWNER" ! -perm -g+w ! -perm -o+w 2>/dev/null)" ]
+# ---------------------------------------------------------------------------
+# stale_exec_root_twin_state <bin> — what can be said about $BIN_DIR/<bin>, the
+# file this sweep is about to leave as the ONLY copy on the host: one of
+# ok | untrusted | uncheckable.
+#
+# WHY THIS ASKS FOR ROOT OWNERSHIP WHEN system_twin_exists REFUSES TO. Three
+# functions up, that one argues at length that a uid-0 test "would make the
+# sweep silently do nothing on every such host — a guard scoped to the wrong
+# observed set". Both statements are right, because the two ask DIFFERENT
+# questions of DIFFERENT directories:
+#
+#   system_twin_exists asks "is this name installed at all?", of a $BIN_DIR
+#   that is whatever destination the caller resolved — including an explicit
+#   PREFIX, which installs unprivileged in full. Demanding root there would
+#   scope the guard to hosts it was never about.
+#
+#   this asks "is the file I am about to leave as the last copy fit to be it?",
+#   of the MACHINE-OWNED exec root, reached from $LEGACY_BIN_DIR — /usr/local/bin,
+#   the 0.2 SYSTEM exec root. A per-user PREFIX install never put anything
+#   there: its 0.2 binaries went to $PREFIX/bin, so this sweep has no candidates
+#   on that host and the owner test cannot silence anything. Where it does have
+#   candidates, root is what the installer already asserted about $BIN_DIR
+#   before this ladder ran, and re-checking it is the whole point of the guard.
+#
+# It stays a SEAM rather than a euid test for the reason it always was: a suite
+# that cannot create root-owned files must still be able to drive both sides.
+#
+# `find` IS ASKED A QUESTION IT MUST GET RIGHT, AND ITS FAILURE IS NOT A
+# VERDICT. `find -prune` on the file itself prints it iff every test holds — but
+# an absent find, or a build that rejects `-user` or `-perm -g+w` (some BusyBox
+# configurations), prints nothing too, and the old one-liner read that as
+# "untrusted": every name kept, with a message naming a cause that was not the
+# real one. The exit STATUS separates the two. Either way nothing is removed —
+# both fail toward KEEP — but the operator is told which happened.
+# ---------------------------------------------------------------------------
+stale_exec_root_twin_state() {
+    # The assignment carries the status, and it is TESTED rather than left to
+    # `$?` on the next line: every caller runs under `set -e`, where a bare
+    # `_x="$(failing-cmd)"` ends the script before anything can read `$?`.
+    if ! _serts_out="$(find "$BIN_DIR/$1" -prune -type f -user "$STALE_EXEC_ROOT_TWIN_OWNER" ! -perm -g+w ! -perm -o+w 2>/dev/null)"; then
+        echo uncheckable
+        return 0
+    fi
+    if [ -n "$_serts_out" ]; then echo ok; return 0; fi
+    echo untrusted
 }
 
 # stale_exec_root_decision <bin> <operator-home> — the WHOLE decision for one
@@ -956,7 +996,11 @@ stale_exec_root_decision() {
     *) echo "$_serd_v"; return 0 ;;
     esac
     system_twin_exists "$1" || { echo no-twin; return 0; }
-    stale_exec_root_twin_ok "$1" || { echo twin-untrusted; return 0; }
+    case "$(stale_exec_root_twin_state "$1")" in
+    ok) ;;
+    uncheckable) echo twin-uncheckable; return 0 ;;
+    *) echo twin-untrusted; return 0 ;;
+    esac
     if _serd_u="$(unit_naming_bin "$LEGACY_BIN_DIR" "$1" "$2")"; then
         echo "unit:$_serd_u"
         return 0
@@ -971,7 +1015,12 @@ stale_exec_root_decision() {
 stale_exec_root_bins_pending() {
     [ -n "$STALE_USER_BINS" ] || return 1
     [ -d "$LEGACY_BIN_DIR" ] || return 1
-    [ "$LEGACY_BIN_DIR" != "$BIN_DIR" ] || return 1
+    # Normalised, exactly as the sweep does it — a probe that answered "yes" on
+    # a spelling the sweep then declines is the probe/sweep disagreement this
+    # whole pairing exists to make impossible.
+    _serp_ln="$(printf '%s' "$LEGACY_BIN_DIR" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    _serp_bn="$(printf '%s' "$BIN_DIR" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    [ "${_serp_ln:-/}" != "${_serp_bn:-/}" ] || return 1
     _serp_dir="$LEGACY_BIN_DIR"
     [ -r "$_serp_dir" ] && [ -x "$_serp_dir" ] || return 0
     _serp_home="$(operator_home 2>/dev/null)"
@@ -994,14 +1043,25 @@ remove_stale_exec_root_bins() {
         return 0
     fi
     [ -d "$LEGACY_BIN_DIR" ] || return 0
-    # Never the install destination itself — a host whose exec root never
+    # NEVER THE INSTALL DESTINATION ITSELF — a host whose exec root never
     # moved, or a seam pointing both at one directory.
-    [ "$LEGACY_BIN_DIR" != "$BIN_DIR" ] || return 0
+    #
+    # NORMALISED, NOT COMPARED RAW. A raw string compare passes for
+    # LEGACY_BIN_DIR=/usr/local/bin/ against BIN_DIR=/usr/local/bin, and every
+    # name then decides `ours` against a twin that is the SAME FILE — so the
+    # sweep deletes the live install and reports it as a stale copy. The rung
+    # normalises both spellings before calling in, but this library is also
+    # called DIRECTLY by the component installers, where this guard is the only
+    # one there is.
+    _rser_ln="$(printf '%s' "$LEGACY_BIN_DIR" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    _rser_bn="$(printf '%s' "$BIN_DIR" | sed -e 's|//*|/|g' -e 's|/*$||')"
+    [ "${_rser_ln:-/}" != "${_rser_bn:-/}" ] || return 0
     if ! { [ -r "$LEGACY_BIN_DIR" ] && [ -x "$LEGACY_BIN_DIR" ]; }; then
         echo "note: cannot read $LEGACY_BIN_DIR — its stale burrowee copies were not swept." >&2
         return 0
     fi
     _rser_home="$(operator_home 2>/dev/null)"
+    STALE_BINS_REMOVED="${STALE_BINS_REMOVED:-0}"
     for _rser_b in $STALE_USER_BINS; do
         _rser_p="$LEGACY_BIN_DIR/$_rser_b"
         if stale_exec_root_is_kept "$_rser_b"; then
@@ -1030,6 +1090,10 @@ remove_stale_exec_root_bins() {
             echo "note: $BIN_DIR/$_rser_b is not a regular file owned by $STALE_EXEC_ROOT_TWIN_OWNER and writable by nobody" >&2
             echo "note: else — refusing to remove $_rser_p and leave that as the only copy." >&2
             ;;
+        twin-uncheckable)
+            echo "note: this host's \`find\` could not be asked whether $BIN_DIR/$_rser_b is fit to be the" >&2
+            echo "note: only copy (absent, or it rejects -user / -perm -g+w) — $_rser_p is left in place." >&2
+            ;;
         unit:*)
             echo "note: ${_rser_d#unit:} still names $_rser_p, so a supervisor may be running it —" >&2
             echo "note: left in place. Once the units name $BIN_DIR, the next install sweeps it." >&2
@@ -1037,6 +1101,7 @@ remove_stale_exec_root_bins() {
         remove)
             if rm -f "$_rser_p"; then
                 echo "removed stale 0.2 exec-root copy: $_rser_p (the install is $BIN_DIR/$_rser_b)"
+                STALE_BINS_REMOVED=$((${STALE_BINS_REMOVED:-0} + 1))
             else
                 echo "note: could not remove $_rser_p — remove it by hand." >&2
             fi
@@ -1048,11 +1113,25 @@ remove_stale_exec_root_bins() {
             # reaches ahead of the exec root.
             if rm -f "$_rser_p"; then
                 echo "removed stale 0.3 exec-root link: $_rser_p (the install is $BIN_DIR/$_rser_b)"
+                STALE_BINS_REMOVED=$((${STALE_BINS_REMOVED:-0} + 1))
             else
                 echo "note: could not remove the link $_rser_p — remove it by hand." >&2
             fi
             ;;
         esac
     done
+
+    # THE HASH-TABLE HINT BELONGS HERE MORE THAN ANYWHERE. The per-user sweep
+    # emits it because an already-running bash re-execs a cached absolute path
+    # and fails "No such file or directory" (observed 2026-08-18). This sweep
+    # removes /usr/local/bin/burrowee — the precise path an operator's shell is
+    # most likely to have cached, because it was the only one on their PATH.
+    # Same rule as there: only when a removal actually happened, or it is false
+    # on the host that reads it and ignored on the host where it is true.
+    # stale_bin_shell_hint says it once per process, so an installer that runs
+    # both sweeps does not say it twice.
+    if [ "${STALE_BINS_REMOVED:-0}" -gt 0 ]; then
+        stale_bin_shell_hint
+    fi
     return 0
 }

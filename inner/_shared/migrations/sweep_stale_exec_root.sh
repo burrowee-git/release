@@ -116,6 +116,29 @@ if [ "${1:-}" != "" ]; then
 fi
 
 say "sweeping the 0.2 exec root $LEGACY_BIN_DIR of real copies replaced by $BIN_DIR"
+STALE_BINS_REMOVED=0
 remove_stale_exec_root_bins
 say "sweep complete — anything removed, kept or left in place is named above"
+
+# ---------------------------------------------------------------------------
+# AND THEN SAY HOW TO REACH THE COMMANDS AGAIN. On a 0.2 host
+# /usr/local/bin/<name> is the operator's only PATH-reachable entry point — it
+# is the 0.2 exec root, and it is on every default PATH — while $BIN_DIR is on
+# nobody's. The installers print the advice block that closes that gap, but
+# THE UPDATER NEVER RUNS install.sh (lib_stale_user_bins.sh's header: it swaps
+# binaries and restarts the daemon), and the updater is how a fielded host
+# crosses 0.2→0.3. Without this, a push-updated host loses `burrowee` from its
+# PATH in silence — the exact report this change exists to answer.
+#
+# Only when something was actually removed: a sweep that removed nothing took
+# no command off anyone's PATH.
+# ---------------------------------------------------------------------------
+if [ "${STALE_BINS_REMOVED:-0}" -gt 0 ]; then
+    if command -v render_path_advice >/dev/null 2>&1; then
+        render_path_advice "$BIN_DIR"
+    else
+        warn "$LIB has no render_path_advice — this kit predates the shell-aware PATH"
+        warn "advice. $BIN_DIR is not on your PATH: export PATH=\"$BIN_DIR:\$PATH\""
+    fi
+fi
 
