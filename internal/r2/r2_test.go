@@ -5,8 +5,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeDoer struct {
@@ -204,5 +206,275 @@ func TestDeleteNon2xxErrors(t *testing.T) {
 	c := New("acct", "downloads", "AKID", "SECRET", &fakeDoer{status: 403})
 	if err := c.Delete(context.Background(), "k"); err == nil {
 		t.Fatal("expected error on 403")
+	}
+}
+
+// --- transport policy --------------------------------------------------------
+//
+// These pin the 2026-09-03 regression. The package used to hang a flat 30s
+// timeout on the http.Client, which covers the body write too, so a 15.9MB
+// component zip could only be published from a link doing 530KB/s or better.
+// Three beta cuts died at publish-dir's first PUT with `context deadline
+// exceeded` while the bucket and the credential were both fine.
+//
+// The tests below use a deliberately short phase so a real server can outlast
+// it in milliseconds; the production value is phaseTimeout.
+
+const (
+	testPhase = 500 * time.Millisecond
+	testSlow  = 3 * testPhase // comfortably past the phase, still a fast test
+)
+
+func TestDefaultClientCarriesNoWholeRequestTimeout(t *testing.T) {
+	// A whole-request clock is what capped object size. If one comes back, the
+	// size ceiling comes back with it, silently.
+	if got := newHTTPClient().Timeout; got != 0 {
+		t.Errorf("http.Client.Timeout = %v, want 0: a whole-request clock caps how large an object can be moved", got)
+	}
+}
+
+func TestTransportBoundsEveryNonTransferPhase(t *testing.T) {
+	tr := newTransport(testPhase)
+	if tr.TLSHandshakeTimeout != testPhase {
+		t.Errorf("TLSHandshakeTimeout = %v, want %v", tr.TLSHandshakeTimeout, testPhase)
+	}
+	if tr.ResponseHeaderTimeout != testPhase {
+		t.Errorf("ResponseHeaderTimeout = %v, want %v", tr.ResponseHeaderTimeout, testPhase)
+	}
+	if tr.ExpectContinueTimeout == 0 {
+		t.Error("ExpectContinueTimeout unset: a server that never answers 100-Continue would stall the PUT")
+	}
+	if tr.IdleConnTimeout == 0 {
+		t.Error("IdleConnTimeout unset")
+	}
+	if tr.DialContext == nil {
+		t.Error("DialContext unset: the connect phase would fall back to no timeout")
+	}
+
+	d := newDialer(testPhase)
+	if d.Timeout != testPhase {
+		t.Errorf("dialer Timeout = %v, want %v", d.Timeout, testPhase)
+	}
+	if d.KeepAlive != testPhase {
+		t.Errorf("dialer KeepAlive = %v, want %v: keepalive is the only thing watching a connection mid-transfer", d.KeepAlive, testPhase)
+	}
+}
+
+// slowReadHandler stalls before draining the request body, so the socket
+// buffers fill and the CLIENT's write blocks for at least stall. It then drains
+// fast and answers immediately, leaving no silence after the write for
+// ResponseHeaderTimeout to legitimately catch — the time under test is the
+// transfer itself and nothing else.
+//
+// Note what this shape encodes: net/http starts the ResponseHeaderTimeout clock
+// when the request write COMPLETES, so the guarantee is "a blocked write costs
+// nothing", not "the server may take as long as it likes". A server that
+// swallows the whole body into kernel buffers and then goes quiet is still on
+// the clock, and should be.
+func slowReadHandler(t *testing.T, stall time.Duration) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(stall)
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func TestSlowUploadIsNotChargedAgainstTheTimeout(t *testing.T) {
+	srv := httptest.NewServer(slowReadHandler(t, testSlow))
+	defer srv.Close()
+
+	body := make([]byte, 8<<20) // past any loopback socket buffer, so the write really blocks
+	c := &http.Client{Transport: newTransport(testPhase)}
+	req, err := http.NewRequest(http.MethodPut, srv.URL+"/cli/beta/x.zip", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.ContentLength = int64(len(body))
+
+	start := time.Now()
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v — a slow upload must not count against a non-transfer timeout", err)
+	}
+	resp.Body.Close()
+	if elapsed := time.Since(start); elapsed <= testPhase {
+		t.Fatalf("upload took %v, not longer than the %v phase — the test proved nothing", elapsed, testPhase)
+	}
+}
+
+func TestSlowDownloadIsNotChargedAgainstTheTimeout(t *testing.T) {
+	// The Get direction: register fetch-dir reads whole artifacts back out.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // headers promptly...
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("ResponseWriter is not a Flusher")
+			return
+		}
+		fl.Flush()
+		const chunks = 15
+		for i := 0; i < chunks; i++ { // ...then trickle the body past the phase
+			w.Write([]byte("payload"))
+			fl.Flush()
+			time.Sleep(testSlow / chunks)
+		}
+	}))
+	defer srv.Close()
+
+	c := &http.Client{Transport: newTransport(testPhase)}
+	start := time.Now()
+	resp, err := c.Get(srv.URL + "/cli/beta/x.zip")
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("reading a slow body failed: %v — the download direction is being timed too", err)
+	}
+	if len(got) != 15*len("payload") {
+		t.Errorf("short read: %d bytes", len(got))
+	}
+	if elapsed := time.Since(start); elapsed <= testPhase {
+		t.Fatalf("download took %v, not longer than the %v phase — the test proved nothing", elapsed, testPhase)
+	}
+}
+
+func TestSilenceBeforeResponseHeadersStillTimesOut(t *testing.T) {
+	// The bound must still exist: a server that takes the request and then says
+	// nothing is a stuck request, not a slow transfer.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		time.Sleep(testSlow)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := &http.Client{Transport: newTransport(testPhase)}
+	req, err := http.NewRequest(http.MethodPut, srv.URL+"/k", bytes.NewReader([]byte("small")))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	start := time.Now()
+	resp, err := c.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected a timeout: a silent server after the request is written must not be waited on forever")
+	}
+	if elapsed := time.Since(start); elapsed >= testSlow {
+		t.Errorf("gave up after %v, want about %v — ResponseHeaderTimeout is not being applied", elapsed, testPhase)
+	}
+}
+
+// --- stall watchdog ----------------------------------------------------------
+//
+// The phase timeouts bound the parts of a request where no bytes SHOULD move.
+// This bounds the part where bytes should be moving and are not: once headers
+// are in, or once the request body has started going out, net/http bounds
+// nothing, and a peer that holds the connection open while saying nothing would
+// be waited on forever.
+
+const testIdle = 200 * time.Millisecond
+
+func TestStallGuardCancelsWhenNothingMoves(t *testing.T) {
+	g := newStallGuard(context.Background(), testIdle)
+	defer g.stop()
+
+	select {
+	case <-g.ctx.Done():
+	case <-time.After(8 * testIdle):
+		t.Fatal("guard never fired: a silent connection would be waited on forever")
+	}
+	if !g.fired.Load() {
+		t.Error("guard cancelled without recording that IT was the cause")
+	}
+	err := g.annotate(g.ctx.Err())
+	if !strings.Contains(err.Error(), "stalled: no bytes moved") {
+		t.Errorf("annotate gave %q, want it to name the stall — a bare \"context canceled\" reads like the caller gave up", err)
+	}
+}
+
+// trickle yields one byte every gap, total times, then EOF. It is the shape the
+// watchdog must NOT kill: slow, but never silent.
+type trickle struct {
+	gap       time.Duration
+	remaining int
+}
+
+func (tr *trickle) Read(b []byte) (int, error) {
+	if tr.remaining == 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(tr.gap)
+	tr.remaining--
+	b[0] = 'x'
+	return 1, nil
+}
+
+func TestStallGuardLeavesASlowButMovingTransferAlone(t *testing.T) {
+	g := newStallGuard(context.Background(), testIdle)
+	defer g.stop()
+
+	// 12 reads a quarter of the budget apart: three times the idle window in
+	// total, never a gap long enough to be a stall.
+	src := &trickle{gap: testIdle / 4, remaining: 12}
+	n, err := io.Copy(io.Discard, g.reader(src))
+	if err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if n != 12 {
+		t.Errorf("read %d bytes, want 12", n)
+	}
+	if g.fired.Load() {
+		t.Error("guard killed a transfer that was moving — slow is not stalled, and a 16MB upload on a bad link is exactly this shape")
+	}
+	if g.ctx.Err() != nil {
+		t.Errorf("context cancelled during a live transfer: %v", g.ctx.Err())
+	}
+}
+
+// deadDoer accepts the request and then says nothing, like a peer holding a
+// connection open. It never reads the body, so no progress is ever reported.
+type deadDoer struct{}
+
+func (deadDoer) Do(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+func TestStalledPutIsReportedAsStalled(t *testing.T) {
+	c := New("acct", "downloads", "AKID", "SECRET", deadDoer{})
+	c.idle = testIdle // the production budget is stallTimeout; this is the seam
+
+	err := c.Put(context.Background(), "cli/beta/x.zip", []byte("payload"), "application/zip")
+	if err == nil {
+		t.Fatal("a silent peer must fail the PUT, not hang the cut")
+	}
+	if !strings.Contains(err.Error(), "stalled: no bytes moved") {
+		t.Errorf("Put error %q does not say the transfer stalled", err)
+	}
+	if !strings.Contains(err.Error(), "cli/beta/x.zip") {
+		t.Errorf("Put error %q does not name the object", err)
+	}
+}
+
+func TestStalledGetIsReportedAsStalled(t *testing.T) {
+	c := New("acct", "downloads", "AKID", "SECRET", deadDoer{})
+	c.idle = testIdle
+
+	_, err := c.Get(context.Background(), "cli/beta/x.zip")
+	if err == nil {
+		t.Fatal("a silent peer must fail the GET")
+	}
+	if !strings.Contains(err.Error(), "stalled: no bytes moved") {
+		t.Errorf("Get error %q does not say the transfer stalled", err)
+	}
+}
+
+func TestNewSetsTheProductionStallBudget(t *testing.T) {
+	// The seam above must not be how the real client is configured.
+	if got := New("acct", "downloads", "AKID", "SECRET", nil).idle; got != stallTimeout {
+		t.Errorf("client idle = %v, want %v", got, stallTimeout)
 	}
 }
