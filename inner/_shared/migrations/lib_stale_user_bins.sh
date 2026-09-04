@@ -631,9 +631,22 @@ render_path_advice() {
         esac
     fi
 
-    _rpa_now="export PATH=\"$_rpa_dir:\$PATH\""
     _rpa_profile=""
     _rpa_permanent=""
+
+    # THE SYNTAX IS THE SHELL'S, AND IT DOES NOT DEPEND ON THE HOME. Only the
+    # PROFILE FILE does. These two questions were once answered in one `case`
+    # under `[ -n "$_rpa_home" ]`, and the difference is not academic:
+    # login_shell_of_user falls back to reading /etc/passwd, which home_of_user
+    # does not, so on a slim image with neither getent nor dscl the shell
+    # resolves and the home does not — and a fish operator was then handed
+    # `export PATH="…:$PATH"`, which fish rejects. Syntax first,
+    # unconditionally; the file second, only when there is a home to put it in.
+    case "${_rpa_shell##*/}" in
+    fish) _rpa_now="set -gx PATH $_rpa_dir \$PATH" ;;
+    *)    _rpa_now="export PATH=\"$_rpa_dir:\$PATH\"" ;;
+    esac
+
     if [ -n "$_rpa_home" ]; then
         case "${_rpa_shell##*/}" in
         zsh)
@@ -651,7 +664,6 @@ render_path_advice() {
             ;;
         fish)
             _rpa_profile="$_rpa_home/.config/fish/config.fish"
-            _rpa_now="set -gx PATH $_rpa_dir \$PATH"
             _rpa_permanent="fish_add_path $_rpa_dir"
             ;;
         esac
@@ -736,6 +748,12 @@ render_path_advice() {
 # through it ends at `return 0`.
 # ---------------------------------------------------------------------------
 stale_bin_shell_hint() {
+    # ONCE PER PROCESS. An installer runs both sweeps — the per-user one and
+    # the exec-root one — and each ends by calling this on a run that removed
+    # something. The sentence is about ONE shell's hash table; saying it twice
+    # in one install reads as two different problems.
+    [ "${STALE_BIN_SHELL_HINT_SAID:-0}" = 1 ] && return 0
+    STALE_BIN_SHELL_HINT_SAID=1
     _sbsh_shell=""
     case "${SUDO_USER:-}" in
     '' | root) ;;
