@@ -1037,7 +1037,7 @@ assert_contains "$OUT" "hash -r" "and the POSIX form"
 #     noticed. A guard that answers for claims it never made is exactly the
 #     defect this suite exists to catch, so it only speaks for the checked-in
 #     file.
-SWEEP_CONTRACT_DIGEST="5079d006947432d94e68d07a91f10c338ddfb4775476db8a58ac14983bf74c4e"
+SWEEP_CONTRACT_DIGEST="87ac827def95a5bd01ce43566ec4530fddb6bc618fb0ffe91064ba3d7fe2e3c1"
 
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
