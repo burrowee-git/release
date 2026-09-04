@@ -1,6 +1,6 @@
-# module: download  v1
+# module: download  v2
 # needs:  helpers
-# since:  2026-08-25
+# since:  2026-08-25 (v2 2026-09-04: progress meter on asset fetches)
 if [ -n "$DL_BASE" ]; then
     BASE="$DL_BASE"
 else
@@ -14,6 +14,22 @@ ZIP="@brand@-${COMP}-${OS}-${ARCH}.zip"
 # mirror-only base with the tag's slash percent-encoded (%2F) so the tag stays
 # one segment. Direct GitHub ($BASE) keeps the literal slash (it 404s on %2F).
 MIRROR_BASE="https://github.com/${REPO}/releases/download/$(printf '%s' "${TAG}" | sed 's#/#%2F#g')"
+
+# _get <curl-args…> — one download attempt for a release asset.
+#
+# With the meter on we also stop discarding curl's stderr. The two go together
+# on purpose: an operator watching a progress bar stall should see the reason
+# the primary was abandoned, and burying it under a half-drawn bar is worse than
+# printing it. With the meter off the output is byte-for-byte what it was.
+_get() {
+    if [ -n "$DL_METER" ]; then
+        # shellcheck disable=SC2086  # intentional word-split of $CURL_DL flags
+        $CURL_DL "$@"
+    else
+        # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+        $CURL "$@" 2>/dev/null
+    fi
+}
 
 dl() {
     # dl <remote-name> <local-name>  (local goes under $TMP)
@@ -39,8 +55,7 @@ dl() {
     # The mirror attempts below keep the longer budget: they're the fallback of last
     # resort, so abandoning a working-but-slow mirror at 30s would risk failing the
     # whole install. --connect-timeout 15 + --speed-time 20 (stall) still apply.
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    if $CURL --max-time 30 -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
+    if _get --max-time 30 -o "$TMP/$_local" "$BASE/$_asset"; then
         return 0
     fi
     # Mirror fallback: route the %2F-encoded GitHub URL (MIRROR_BASE) through each
@@ -50,8 +65,7 @@ dl() {
     if [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
         for _proxy in $GH_PROXIES; do
             info "primary failed; trying mirror: $_proxy/$MIRROR_BASE/$_asset"
-            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            if $CURL -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset" 2>/dev/null; then
+            if _get -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset"; then
                 ok "downloaded $_asset via mirror $_proxy"
                 return 0
             fi
@@ -80,8 +94,7 @@ dl() {
                     ;;
             esac
             if [ "$_valid_scheme" -eq 1 ]; then
-                # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-                $CURL -o "$TMP/$_local" "$_r2url" 2>/dev/null \
+                _get -o "$TMP/$_local" "$_r2url" \
                     || fail "R2 fallback download failed for $_asset — check device grant and retry"
                 ok "downloaded $_asset via R2 fallback"
                 return 0

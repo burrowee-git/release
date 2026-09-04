@@ -1,6 +1,6 @@
-# module: download-r2-only  v1
+# module: download-r2-only  v2
 # needs:  helpers
-# since:  2026-08-25
+# since:  2026-08-25 (v2 2026-09-04: progress meter on the gated artifact)
 
 # gated_get <path> <local-filename>
 #   path      : the request path, e.g. /relay/release/latest.linux-amd64.zip
@@ -31,9 +31,13 @@ gated_get() {
     rm -f "$_msg"
     [ -n "$_sig" ] || fail "signing failed or returned empty signature — is $KEY a valid ed25519 PEM private key?"
 
-    # Gated fetch: send the three required headers
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string; POSIX sh has no arrays.
-    $CURL \
+    # Gated fetch: send the three required headers.
+    # $CURL_DL is $CURL plus a progress meter when stderr is a terminal (see the
+    # template) — the relay artifact is the large one here. The challenge fetch
+    # above stays on the quiet form: its response is parsed from STDOUT, and a
+    # meter for a few bytes of JSON is noise.
+    # shellcheck disable=SC2086  # $CURL_DL is an intentional space-split command string; POSIX sh has no arrays.
+    $CURL_DL \
         -H "X-Burrowee-Key-FP: $FP" \
         -H "X-Burrowee-Nonce: $_nonce" \
         -H "X-Burrowee-Sig: $_sig" \

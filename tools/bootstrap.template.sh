@@ -240,10 +240,40 @@ GH_PROXIES="${BURROWEE_GH_PROXY-https://gh-proxy.org https://cdn.gh-proxy.org ht
 # of hanging until --max-time. This matters for the gh-proxy mirror loop: a mirror
 # that streams a few MB then stalls is abandoned in ~20s so the NEXT mirror is
 # tried, rather than the install appearing stuck for the full 5-minute max-time.
+CURL_BUDGET="--connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
 if [ -n "$DL_BASE" ]; then
-    CURL="curl -fsSL --connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
+    CURL_TLS=""
 else
-    CURL="curl -fsSL --proto =https --tlsv1.2 --connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
+    CURL_TLS="--proto =https --tlsv1.2"
+fi
+CURL="curl -fsSL $CURL_TLS $CURL_BUDGET"
+
+# DL_METER / CURL_DL — the release assets are fetched with a progress meter when
+# a person is watching, and silently when one is not.
+#
+# WHY: the component zip is ~16MB. On a slow link that is minutes in which the
+# installer prints nothing at all, and an operator cannot tell a slow download
+# from a hung one — the difference between waiting and reaching for Ctrl-C. curl
+# already knows how to say so; it was only ever suppressed by the `-s` in the
+# quiet form above.
+#
+# WHERE IT GOES: curl writes the meter to STDERR. Nothing here touches stdout,
+# so `curl … | sh` is unaffected and no downloaded byte passes near it.
+#
+# WHEN: only when stderr is a terminal. Redirected to a log or a CI transcript a
+# progress bar is a screenful of carriage returns, so a non-interactive install
+# keeps exactly the output it has today. BURROWEE_NO_PROGRESS=1 turns it off for
+# a terminal that still does not want it.
+#
+# -fSL, not -fsSL: dropping `-s` is what un-suppresses the meter. `-S` (show
+# errors) and `-f` (fail on HTTP error) are unchanged, so failure behaviour is
+# identical in both forms.
+if [ -t 2 ] && [ -z "${BURROWEE_NO_PROGRESS:-}" ]; then
+    DL_METER=1
+    CURL_DL="curl -fSL --progress-bar $CURL_TLS $CURL_BUDGET"
+else
+    DL_METER=""
+    CURL_DL="$CURL"
 fi
 
 # ---- helpers ------------------------------------------------------------
