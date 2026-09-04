@@ -1,5 +1,5 @@
-# module: install-minisign-common  v1
-# needs:  helpers sha256 tmp-workspace
+# module: install-minisign-common  v2
+# needs:  helpers sha256 tmp-workspace download
 # since:  2026-08-26
 # Provides minisign when the host has none. The per-platform modules that follow
 # try the OS package manager first, then the official jedisct1/minisign release
@@ -71,8 +71,14 @@ minisign_fetch() {
     fi
     for _mf_src in $_mf_srcs; do
         rm -f "$_mf_out"
-        # shellcheck disable=SC2086  # $CURL is a command plus its flags
-        $CURL -o "$_mf_out" "$_mf_src" 2>/dev/null || continue
+        # _get, not $CURL: minisign is a real artifact fetched across upstream
+        # GitHub and then each mirror in turn, and each attempt used to be
+        # silent — a slow or stalled mirror here reads as a hung installer, at
+        # the one moment the operator has been given no output to read. _get
+        # (module: download, spliced above) carries the progress meter and the
+        # stderr policy that goes with it, so this behaves exactly like the
+        # component zip's own download rather than inventing a second rule.
+        _get -o "$_mf_out" "$_mf_src" || continue
         [ -n "$_mf_want" ] || return 0
         _mf_got="$(sha256_of "$_mf_out")" || break
         [ "$_mf_got" = "$_mf_want" ] && return 0

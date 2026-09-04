@@ -240,10 +240,40 @@ GH_PROXIES="${BURROWEE_GH_PROXY-https://gh-proxy.org https://cdn.gh-proxy.org ht
 # of hanging until --max-time. This matters for the gh-proxy mirror loop: a mirror
 # that streams a few MB then stalls is abandoned in ~20s so the NEXT mirror is
 # tried, rather than the install appearing stuck for the full 5-minute max-time.
+CURL_BUDGET="--connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
 if [ -n "$DL_BASE" ]; then
-    CURL="curl -fsSL --connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
+    CURL_TLS=""
 else
-    CURL="curl -fsSL --proto =https --tlsv1.2 --connect-timeout 15 --max-time 300 --speed-limit 4096 --speed-time 20"
+    CURL_TLS="--proto =https --tlsv1.2"
+fi
+CURL="curl -fsSL $CURL_TLS $CURL_BUDGET"
+
+# DL_METER / CURL_DL — the release assets are fetched with a progress meter when
+# a person is watching, and silently when one is not.
+#
+# WHY: the component zip is ~16MB. On a slow link that is minutes in which the
+# installer prints nothing at all, and an operator cannot tell a slow download
+# from a hung one — the difference between waiting and reaching for Ctrl-C. curl
+# already knows how to say so; it was only ever suppressed by the `-s` in the
+# quiet form above.
+#
+# WHERE IT GOES: curl writes the meter to STDERR. Nothing here touches stdout,
+# so `curl … | sh` is unaffected and no downloaded byte passes near it.
+#
+# WHEN: only when stderr is a terminal. Redirected to a log or a CI transcript a
+# progress bar is a screenful of carriage returns, so a non-interactive install
+# keeps exactly the output it has today. BURROWEE_NO_PROGRESS=1 turns it off for
+# a terminal that still does not want it.
+#
+# -fSL, not -fsSL: dropping `-s` is what un-suppresses the meter. `-S` (show
+# errors) and `-f` (fail on HTTP error) are unchanged, so failure behaviour is
+# identical in both forms.
+if [ -t 2 ] && [ -z "${BURROWEE_NO_PROGRESS:-}" ]; then
+    DL_METER=1
+    CURL_DL="curl -fSL --progress-bar $CURL_TLS $CURL_BUDGET"
+else
+    DL_METER=""
+    CURL_DL="$CURL"
 fi
 
 # ---- helpers ------------------------------------------------------------
@@ -842,6 +872,22 @@ ZIP="burrowee-${COMP}-${OS}-${ARCH}.zip"
 # one segment. Direct GitHub ($BASE) keeps the literal slash (it 404s on %2F).
 MIRROR_BASE="https://github.com/${REPO}/releases/download/$(printf '%s' "${TAG}" | sed 's#/#%2F#g')"
 
+# _get <curl-args…> — one download attempt for a release asset.
+#
+# With the meter on we also stop discarding curl's stderr. The two go together
+# on purpose: an operator watching a progress bar stall should see the reason
+# the primary was abandoned, and burying it under a half-drawn bar is worse than
+# printing it. With the meter off the output is byte-for-byte what it was.
+_get() {
+    if [ -n "$DL_METER" ]; then
+        # shellcheck disable=SC2086  # intentional word-split of $CURL_DL flags
+        $CURL_DL "$@"
+    else
+        # shellcheck disable=SC2086  # intentional word-split of $CURL flags
+        $CURL "$@" 2>/dev/null
+    fi
+}
+
 dl() {
     # dl <remote-name> <local-name>  (local goes under $TMP)
     #
@@ -866,8 +912,7 @@ dl() {
     # The mirror attempts below keep the longer budget: they're the fallback of last
     # resort, so abandoning a working-but-slow mirror at 30s would risk failing the
     # whole install. --connect-timeout 15 + --speed-time 20 (stall) still apply.
-    # shellcheck disable=SC2086  # $CURL is an intentional space-split command string (flags + binary); POSIX sh has no arrays.
-    if $CURL --max-time 30 -o "$TMP/$_local" "$BASE/$_asset" 2>/dev/null; then
+    if _get --max-time 30 -o "$TMP/$_local" "$BASE/$_asset"; then
         return 0
     fi
     # Mirror fallback: route the %2F-encoded GitHub URL (MIRROR_BASE) through each
@@ -877,8 +922,7 @@ dl() {
     if [ -z "$DL_BASE" ] && [ -n "$GH_PROXIES" ]; then
         for _proxy in $GH_PROXIES; do
             info "primary failed; trying mirror: $_proxy/$MIRROR_BASE/$_asset"
-            # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-            if $CURL -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset" 2>/dev/null; then
+            if _get -o "$TMP/$_local" "$_proxy/$MIRROR_BASE/$_asset"; then
                 ok "downloaded $_asset via mirror $_proxy"
                 return 0
             fi
@@ -907,8 +951,7 @@ dl() {
                     ;;
             esac
             if [ "$_valid_scheme" -eq 1 ]; then
-                # shellcheck disable=SC2086  # intentional word-split of $CURL flags
-                $CURL -o "$TMP/$_local" "$_r2url" 2>/dev/null \
+                _get -o "$TMP/$_local" "$_r2url" \
                     || fail "R2 fallback download failed for $_asset — check device grant and retry"
                 ok "downloaded $_asset via R2 fallback"
                 return 0
@@ -999,8 +1042,14 @@ minisign_fetch() {
     fi
     for _mf_src in $_mf_srcs; do
         rm -f "$_mf_out"
-        # shellcheck disable=SC2086  # $CURL is a command plus its flags
-        $CURL -o "$_mf_out" "$_mf_src" 2>/dev/null || continue
+        # _get, not $CURL: minisign is a real artifact fetched across upstream
+        # GitHub and then each mirror in turn, and each attempt used to be
+        # silent — a slow or stalled mirror here reads as a hung installer, at
+        # the one moment the operator has been given no output to read. _get
+        # (module: download, spliced above) carries the progress meter and the
+        # stderr policy that goes with it, so this behaves exactly like the
+        # component zip's own download rather than inventing a second rule.
+        _get -o "$_mf_out" "$_mf_src" || continue
         [ -n "$_mf_want" ] || return 0
         _mf_got="$(sha256_of "$_mf_out")" || break
         [ "$_mf_got" = "$_mf_want" ] && return 0
