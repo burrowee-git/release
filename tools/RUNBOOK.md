@@ -643,20 +643,27 @@ so an operator value survives an update:
   console afterwards: the signed manifest carries exactly one listener
   address. The other two are fixed by editing `etc/edge/config` on the host.
 
-**A BETA EDGE IS NOT READY TO RUN YET, and the reason is a cross-channel
-write.** Its unit is `ExecStart=… burrowee-edge run` with no `--home`, so the
-daemon resolves the STABLE config root and persists its listener defaults
-there — measured on the CI VM: a beta-only install created
-`/usr/local/burrowee/etc/edge/config` carrying `lan_listen=127.0.0.1:9448`,
-under a root nothing had installed into. Adding `--home <beta root>/etc` to the
-unit stops that (also measured) but is not yet correct either: the edge refuses
-to persist into a root-owned tree through `--home`, and derives its data root as
-`<beta root>/edge` instead of `<beta root>/var/edge`, which would put the LAN
-cert in the wrong place on a host where the edge does come up. Both are edge
-feature 06's `--home` gap. **Until it closes, install the beta edge only on a
-host with no stable edge, and expect `/usr/local/burrowee/etc/edge` to appear.**
-The gateway has no such gap — its unit names the beta root and its daemon
-honours it.
+**The beta edge units name the beta root**, both of them and on both
+platforms: `ExecStart=… burrowee-edge run --home /usr/local/burrowee/beta/etc`,
+and the same flag on the updater, whose agent would otherwise fetch, place and
+restart against the stable tree. The daemon normalizes that root to its own
+component dir and keeps the etc/var split, so a beta start writes
+`beta/etc/edge/config` and `beta/var/edge/running.json` and leaves the stable
+config byte-identical — measured on the CI machine, with a stable edge's config
+present, before and after (edge feature 13). Earlier beta installers, whose
+edge unit carried no `--home` at all, created
+`/usr/local/burrowee/etc/edge/config` with stable's `lan_listen` in it under a
+root nothing had installed into; a host that saw that can delete the stray
+stable config root if nothing stable is installed there.
+
+Still open, and it bites any SUDO-ELEVATED write into the beta tree — the cli's
+`doctor --fix`, and the daemon's `sudo burrowee-edge-cli nginx` re-exec, but not
+the daemon under systemd (root, no `SUDO_UID`, measured): core's
+`setup.IsSystemOwnedPath` knows only the STABLE pair, so a root-owned beta tree
+fails the per-user ownership question and the write is refused with
+`refusing to write … owned by uid 0, not the invoking user`, naming a
+`chown -R <you>` that would hand the beta install to an unprivileged account.
+It is a core change and a core tag; the units above are unaffected.
 
 Two cosmetic gaps a beta host will show, both waiting on another repo:
 `burroweeb gateway status` reports the STABLE instance (the cli's `status` /
