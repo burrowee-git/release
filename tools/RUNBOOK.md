@@ -643,6 +643,15 @@ so an operator value survives an update:
   console afterwards: the signed manifest carries exactly one listener
   address. The other two are fixed by editing `etc/edge/config` on the host.
 
+Two cosmetic gaps a beta host will show, both waiting on another repo:
+`burroweeb gateway status` reports the STABLE instance (the cli's `status` /
+`service status` / `service uninstall` are still fixed to the stable roots), and
+the "Next steps" PATH advice at the end of an install says `burrowee help` where
+it means `burroweeb help` — that line lives inside the SHARED SWEEP CONTRACT
+region of `inner/_shared/migrations/lib_stale_user_bins.sh`, whose digest is
+pinned here **and** in the gateway repo's copy, so fixing it is a coordinated
+change in both.
+
 And three the beta installers deliberately do **not** do, because each of them
 acts on the STABLE install running beside it: the 0.2→0.3 migration ladder, the
 legacy per-user unit teardown, and the stale-bin / exec-root sweeps.

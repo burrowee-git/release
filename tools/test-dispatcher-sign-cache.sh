@@ -156,6 +156,11 @@ run_build_dispatcher() {
         SRC_DISPATCHER="${FAKE_SRC}"
         DISP_STAMP="v9.9.9.2020.01.01.deadbeef"
         DISP_DIR="${CACHE}"
+        # The dispatcher's NAME is a channel fact now (tools/channels.sh): the
+        # cache is keyed on it, and so is the -X pair build.sh bakes. This suite
+        # is about the SIGNING cache, so it runs the stable name — which is also
+        # the one whose cache behaviour has to be unchanged.
+        DISP_NAME="burrowee"
         GO_BIN="/nonexistent/go"    # the stub build.sh never invokes go
         export APPLE_SIGN="$1"      # release.sh exports it; build.sh reads it
         # shellcheck source=/dev/null
