@@ -75,6 +75,11 @@ for comp in gateway edge; do
     hasnt_re "${inner}" '^[[:space:]]*migrate_from_legacy[[:space:]]*$'
     hasnt_re "${inner}" '^[[:space:]]*run_migration_ladder[[:space:]]*$'
     hasnt_re "${inner}" '^[[:space:]]*remove_legacy_user_units[[:space:]]*$'
+    # migrate_config is dropped WHOLE under beta, not merely gated: its seeds
+    # go through `burrowee-edge-cli config get|set`, which resolves the STABLE
+    # config root, so on a FRESH beta install every version gate is crossed and
+    # the writes land in the OTHER install's config file.
+    hasnt_re "${inner}" '^[[:space:]]*migrate_config[[:space:]]'
 
     # And the stable twin still has to be the file it always was.
     has "${comp}/install.sh" '/usr/local/burrowee/bin'

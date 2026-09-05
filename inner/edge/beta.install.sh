@@ -1707,7 +1707,17 @@ fi
 if [ -n "${BURROWEE_VERSION:-}" ]; then
     OLD_VER=""
     [ -f "$VERSION_MARKER" ] && OLD_VER="$(cat "$VERSION_MARKER" 2>/dev/null || true)"
-    migrate_config "$OLD_VER" || echo "warning: config migration step failed; continuing" >&2
+    # migrate_config is NOT run under the beta root, for the same reason the
+    # ladder is not: every block in it converges a host across a version
+    # boundary this root has no history of. It is also actively harmful here,
+    # and that is the sharper point — its seeds go through seed_if_absent, which
+    # calls `burrowee-edge-cli config get|set` with no home, and the cli
+    # resolves the STABLE config root. On a FRESH beta install ($OLD_VER is
+    # empty, so every gate is crossed) that writes buffer_stream and
+    # buffer_session into the OTHER install's config file, silently.
+    #
+    # seed_beta_defaults below is the beta root's whole config story, and it
+    # writes the file itself rather than going through the cli — see its note.
     seed_beta_defaults || echo "warning: beta default seeding failed; continuing" >&2
     mkdir -p "$COMP_HOME" 2>/dev/null || true
     if [ "$MIGRATE_UNRECORDED" = 1 ]; then
