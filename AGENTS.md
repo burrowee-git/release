@@ -70,7 +70,9 @@ The installers are now rendered per channel from three constants —
 `tools/channels.sh`: the install root, the dispatcher name, and the channel
 segment in the unit names. A beta install goes to `/usr/local/burrowee/beta`,
 carries the `burroweeb` dispatcher, and runs as `burrowee-beta-<comp>` /
-`com.burrowee.beta.<comp>`. **Beta twins install beside stable, never over it,
+`com.burrowee.beta.<comp>`. (The **gateway** twin is complete; the **edge**
+twin still writes into the stable config root at daemon start — see
+`tools/RUNBOOK.md`, "Side by side, not over the top".) **Beta twins install beside stable, never over it,
 and a beta cut is allowed for every component that ships a twin.** So is a
 stable cut: nothing about an open beta cycle blocks one.
 

@@ -643,6 +643,21 @@ so an operator value survives an update:
   console afterwards: the signed manifest carries exactly one listener
   address. The other two are fixed by editing `etc/edge/config` on the host.
 
+**A BETA EDGE IS NOT READY TO RUN YET, and the reason is a cross-channel
+write.** Its unit is `ExecStart=… burrowee-edge run` with no `--home`, so the
+daemon resolves the STABLE config root and persists its listener defaults
+there — measured on the CI VM: a beta-only install created
+`/usr/local/burrowee/etc/edge/config` carrying `lan_listen=127.0.0.1:9448`,
+under a root nothing had installed into. Adding `--home <beta root>/etc` to the
+unit stops that (also measured) but is not yet correct either: the edge refuses
+to persist into a root-owned tree through `--home`, and derives its data root as
+`<beta root>/edge` instead of `<beta root>/var/edge`, which would put the LAN
+cert in the wrong place on a host where the edge does come up. Both are edge
+feature 06's `--home` gap. **Until it closes, install the beta edge only on a
+host with no stable edge, and expect `/usr/local/burrowee/etc/edge` to appear.**
+The gateway has no such gap — its unit names the beta root and its daemon
+honours it.
+
 Two cosmetic gaps a beta host will show, both waiting on another repo:
 `burroweeb gateway status` reports the STABLE instance (the cli's `status` /
 `service status` / `service uninstall` are still fixed to the stable roots), and
