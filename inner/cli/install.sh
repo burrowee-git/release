@@ -101,9 +101,9 @@ is_digits() {
 }
 
 STAT_FLAVOR=none
-if is_digits "$(stat -c '%u' / 2>/dev/null)"; then
+if is_digits "$(stat -L -c '%u' / 2>/dev/null)"; then
     STAT_FLAVOR=gnu
-elif is_digits "$(stat -f '%u' / 2>/dev/null)"; then
+elif is_digits "$(stat -L -f '%u' / 2>/dev/null)"; then
     STAT_FLAVOR=bsd
 fi
 
@@ -111,10 +111,21 @@ fi
 # outcome: a helper that can put junk on stdout turns the comparison below into
 # a silent false, which reads to an operator as "your tree is wrong" rather
 # than "I could not look".
+#
+# `-L` FOLLOWS SYMLINKS, and it is the probe's flags too so the invocation
+# proved to work is the invocation used. Without it a ~/.burrowee an operator
+# symlinked onto another volume would be judged by the LINK's owner while
+# everything else in this script — `[ -d ]`, the `[ -O ]` fallback, `mkdir`
+# itself — acts on the target. Judging one object and writing into another is
+# the failure mode this check exists to remove, and refusing the symlink
+# instead would break a host that works today for a layout the installer has no
+# business having an opinion about. (The two-owner case cannot be built by an
+# unprivileged suite — link and target are both the tester's — so this is
+# argued rather than asserted.)
 stat_uid() {
     case "$STAT_FLAVOR" in
-    gnu) _su_v="$(stat -c '%u' "$1" 2>/dev/null)" || return 1 ;;
-    bsd) _su_v="$(stat -f '%u' "$1" 2>/dev/null)" || return 1 ;;
+    gnu) _su_v="$(stat -L -c '%u' "$1" 2>/dev/null)" || return 1 ;;
+    bsd) _su_v="$(stat -L -f '%u' "$1" 2>/dev/null)" || return 1 ;;
     *) return 1 ;;
     esac
     is_digits "$_su_v" || return 1
@@ -133,7 +144,8 @@ uid_label() {
     fi
 }
 
-# tree_is_mine <dir> — true when <dir> belongs to the account running this.
+# tree_is_mine <dir> <my-uid> — true when <dir> belongs to the account running
+# this.
 #
 # The comparison is `stat`'s owner against `id -u` rather than the shell's own
 # `[ -O ]` so that the REFUSAL is reachable from an unprivileged suite: no test
@@ -147,14 +159,16 @@ uid_label() {
 # dialect or `id` is not there: an installer that cannot look must not answer
 # "not yours" about a tree that is fine. A false refusal here removes the only
 # path the operator has left.
+#
+# The uid is passed in rather than read again here: one `id -u` per run, and
+# the number in the refusal is then the same number the decision was made on.
 tree_is_mine() {
     _tim_owner="$(stat_uid "$1" || true)"
-    _tim_me="$(id -u 2>/dev/null || true)"
-    if [ -z "$_tim_owner" ] || ! is_digits "$_tim_me"; then
+    if [ -z "$_tim_owner" ] || ! is_digits "$2"; then
         [ -O "$1" ]
         return
     fi
-    [ "$_tim_owner" = "$_tim_me" ]
+    [ "$_tim_owner" = "$2" ]
 }
 
 # refuse_foreign_tree <dir> <my-uid> — the loud half. Never returns.
@@ -185,13 +199,25 @@ refuse_foreign_tree() {
         # printed with the substitutions left in: it still pastes, and it still
         # resolves to the account that runs it, which is the account that owns
         # the tree.
+        #
+        # A GROUP IS NAMED ONLY WHEN IT WAS READ. `chown -R <uid>` leaves the
+        # group alone, which is what handing a tree back means; filling the
+        # group's place with the uid because `id -g` did not answer spells a
+        # real command — `chown -R 4242:4242` — that confidently moves the tree
+        # into whatever group happens to carry that gid.
         if is_digits "$_rf_me"; then
-            _rf_own="$_rf_me:$(id -g 2>/dev/null || printf '%s' "$_rf_me")"
+            _rf_gid="$(id -g 2>/dev/null || true)"
+            if is_digits "$_rf_gid"; then
+                _rf_own="$_rf_me:$_rf_gid"
+            else
+                _rf_own="$_rf_me"
+            fi
         else
             _rf_own='$(id -u):$(id -g)'
         fi
         echo "error: This installer creates ~/.burrowee/$COMP itself and never changes the" >&2
-        echo "error: ownership of a tree it does not own. Repair it by hand:" >&2
+        echo "error: ownership of a tree it does not own. Repair it by hand — look at what" >&2
+        echo "error: the tree holds first, because -R takes everything under it:" >&2
         echo "error:" >&2
         echo "error:     sudo chown -R $_rf_own $_rf_dir" >&2
         echo "error:" >&2
@@ -219,7 +245,7 @@ ensure_user_tree() {
     is_digits "$_eut_me" || _eut_me=""
     for _eut_d in "$TREE_ROOT" "$COMP_HOME" "$SOCKET_DIR"; do
         if [ -d "$_eut_d" ]; then
-            tree_is_mine "$_eut_d" || refuse_foreign_tree "$_eut_d" "$_eut_me"
+            tree_is_mine "$_eut_d" "$_eut_me" || refuse_foreign_tree "$_eut_d" "$_eut_me"
             continue
         fi
         if [ -e "$_eut_d" ]; then

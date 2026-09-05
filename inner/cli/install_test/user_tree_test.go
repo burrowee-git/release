@@ -269,6 +269,75 @@ func TestCliEmptyTreeStillLooksLikeAFreshInstall(t *testing.T) {
 	}
 }
 
+// TestCliRemedyDropsTheGroupItCannotName — the remedy is a command the
+// operator pastes as root, so every field in it has to be one this run
+// actually learned.
+//
+// `id -g` failing while `id -u` answers is the case: printing the uid in the
+// group's place spells `chown -R 4242:4242` — a real command, confidently
+// wrong, that moves the tree into whichever group happens to carry that gid.
+// `chown -R <uid> <dir>` leaves the group alone, which is what "hand this tree
+// back" means.
+func TestCliRemedyDropsTheGroupItCannotName(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: the tree this test creates would be root-owned, so the refusal is unreachable")
+	}
+	home := t.TempDir()
+	staging := t.TempDir()
+	seedCliBins(t, staging)
+	treeRoot := filepath.Join(home, ".burrowee")
+	if err := os.Mkdir(treeRoot, 0o755); err != nil {
+		t.Fatalf("seed tree root: %v", err)
+	}
+	stubs := t.TempDir()
+	body := "#!/bin/sh\n" +
+		"if [ $# -eq 1 ] && [ \"$1\" = \"-u\" ]; then echo " + otherUID + "; exit 0; fi\n" +
+		"if [ $# -eq 1 ] && [ \"$1\" = \"-g\" ]; then exit 1; fi\n" +
+		"exec /usr/bin/id \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(stubs, "id"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write id stub: %v", err)
+	}
+
+	out, err := runTreeInstall(t, home, staging, stubs)
+	if err == nil {
+		t.Fatalf("install.sh must FAIL on a tree it does not own; it exited 0:\n%s", out)
+	}
+	want := "chown -R " + otherUID + " " + treeRoot
+	if !strings.Contains(out, want) {
+		t.Errorf("the remedy must drop a group it could not read; want %q in:\n%s", want, out)
+	}
+	if strings.Contains(out, otherUID+":") {
+		t.Errorf("the remedy names a group this run never learned:\n%s", out)
+	}
+}
+
+// TestCliInstallFollowsASymlinkedTree — a ~/.burrowee an operator symlinked
+// onto another volume is two objects with two owners, and the installer has to
+// judge the one the daemon will actually write into. Following is also what
+// every other test in this file's subject does — `[ -d ]`, `[ -O ]` and
+// `mkdir` all follow — so the alternative was not "refuse or follow" but
+// "agree with the rest of the script or contradict it".
+func TestCliInstallFollowsASymlinkedTree(t *testing.T) {
+	home := t.TempDir()
+	staging := t.TempDir()
+	seedCliBins(t, staging)
+	real := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.Symlink(real, filepath.Join(home, ".burrowee")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	out, err := runTreeInstall(t, home, staging, "")
+	if err != nil {
+		t.Fatalf("an operator's own symlinked tree must still install: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(real, "cli", "sockets")); err != nil {
+		t.Errorf("the tree was not created through the symlink: %v\n%s", err, out)
+	}
+}
+
 // TestCliInstallDoesNotRefuseWhenItCannotLook — the other side of the
 // ownership check, and the one a refusal-only suite would miss.
 //
