@@ -2825,10 +2825,25 @@ snapshot_db() {
         return 0
     fi
 
+@STABLE_ONLY_BEGIN@
     if run_root "$BIN_DIR/burrowee-gateway-cli" db snapshot "$_dst" 2>/dev/null; then
         SNAPSHOT_CONSISTENCY=exact
         return 0
     fi
+@STABLE_ONLY_END@
+@BETA_ONLY_BEGIN@
+    # THE CLI ARM IS NOT TAKEN UNDER THE BETA ROOT. `db snapshot` picks its own
+    # source, and with no home to resolve it picks the STABLE database — so the
+    # snapshot this transaction would roll back to is the OTHER install's, taken
+    # while claiming consistency=exact. A rollback from it would overwrite this
+    # root's database with the other one's, which is worse than having no
+    # snapshot at all.
+    #
+    # Nothing is lost by dropping it: the sqlite3 arm below is an online backup
+    # too, it also records consistency=exact, and it names $SYS_DATA_DIR
+    # explicitly — this root's own path. Restore the cli arm the day `db
+    # snapshot` takes the instance's home.
+@BETA_ONLY_END@
     if command -v sqlite3 >/dev/null 2>&1 &&
        run_root sqlite3 "$SYS_DATA_DIR/gateway.db" ".backup '$_dst'" 2>/dev/null; then
         SNAPSHOT_CONSISTENCY=exact

@@ -80,6 +80,10 @@ for comp in gateway edge; do
     # config root, so on a FRESH beta install every version gate is crossed and
     # the writes land in the OTHER install's config file.
     hasnt_re "${inner}" '^[[:space:]]*migrate_config[[:space:]]'
+    # Same defect, the gateway's copy: `db snapshot` picks its own source and,
+    # with no home to resolve, picks the STABLE database — a snapshot of the
+    # other install, recorded as this transaction's rollback point.
+    hasnt_re "${inner}" 'burrowee-gateway-cli" db snapshot'
 
     # And the stable twin still has to be the file it always was.
     has "${comp}/install.sh" '/usr/local/burrowee/bin'
