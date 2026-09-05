@@ -1433,6 +1433,9 @@ EOF
         # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
         # HOME=/root so the daemon's os.UserHomeDir() resolves /root/.burrowee/edge
         # (a root system service has no HOME otherwise).
+        # The ExecStart below carries the channel's home flag: nothing on
+        # stable, --home on beta, where a unit without it resolves the STABLE
+        # roots (channel_home_args in tools/channels.sh).
         # Restart=always (matching core/setup's system units, which land on the
         # SAME paths): the update-restart rung SIGTERMs the running daemon and
         # relies on systemd respawning it after a CLEAN exit — on-failure would

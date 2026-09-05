@@ -1227,10 +1227,24 @@ migrate_config() {
 # every value: none of these is reachable from the console afterwards except
 # tls_listen (the signed manifest carries exactly one listener address, edge
 # feature 06), so the other two are only ever fixed by editing this file.
+#
+# It creates its own config root when that is missing, exactly as the gateway's
+# seed_beta_config does and for the reason measured there: this function has two
+# callers reaching it by different routes, and a linear read of the file cannot
+# decide which of them has already run ensure_system_tree. Depending on the
+# ordering is what left the gateway's units-only path seeding into a root that
+# did not exist — the seed failed, warned, and the daemon started on the STABLE
+# port. ensure_system_tree is idempotent, so this costs the full path nothing.
 seed_beta_defaults() {
     _sbd="$COMP_HOME/config"
     if [ -e "$_sbd" ]; then
         return 0
+    fi
+    if [ ! -d "$COMP_HOME" ]; then
+        ensure_system_tree || {
+            echo "warning: could not create $COMP_HOME — the beta edge will fall back to the STABLE listeners (lan 9448/8448, tls 9443) and fight the stable edge for them" >&2
+            return 0
+        }
     fi
     _sbd_tmp="$(mktemp)" || return 0
     {
@@ -1437,7 +1451,7 @@ setup_root_service() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LAUNCHD_LABEL</string>
-  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge</string><string>run</string></array>
+  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge</string><string>run</string>@HOME_PLIST_ARGS@</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -1456,7 +1470,7 @@ EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LAUNCHD_UPDATER_LABEL</string>
-  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge-updater</string><string>run</string></array>
+  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge-updater</string><string>run</string>@HOME_PLIST_ARGS@</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge-updater</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -1495,6 +1509,9 @@ EOF
         # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
         # HOME=/root so the daemon's os.UserHomeDir() resolves /root/.burrowee/edge
         # (a root system service has no HOME otherwise).
+        # The ExecStart below carries the channel's home flag: nothing on
+        # stable, --home on beta, where a unit without it resolves the STABLE
+        # roots (channel_home_args in tools/channels.sh).
         # Restart=always (matching core/setup's system units, which land on the
         # SAME paths): the update-restart rung SIGTERMs the running daemon and
         # relies on systemd respawning it after a CLEAN exit — on-failure would
@@ -1509,7 +1526,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HOME=/root
-ExecStart=$SYS_BIN_DIR/burrowee-edge run
+ExecStart=$SYS_BIN_DIR/burrowee-edge run@HOME_ARGS@
 Restart=always
 RestartSec=2
 TimeoutStopSec=30
@@ -1533,7 +1550,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HOME=/root
-ExecStart=$SYS_BIN_DIR/burrowee-edge-updater run
+ExecStart=$SYS_BIN_DIR/burrowee-edge-updater run@HOME_ARGS@
 Restart=always
 RestartSec=2
 TimeoutStopSec=30
@@ -1612,6 +1629,16 @@ fi
 # ---------------------------------------------------------------------------
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     ensure_system_tree
+@BETA_ONLY_BEGIN@
+    # BEFORE the units are rendered and started, not after: setup_root_service
+    # starts the daemon, and a beta daemon that starts with no config of its own
+    # resolves the binary's defaults — stable's lan 9448 and tls :443 — and
+    # fights the stable edge for both. Measured on the CI machine: the beta unit
+    # came up, failed to bind 127.0.0.1:9448 and :443, and systemd gave up after
+    # five restarts. This is the path edge's LocalReinstall runs, so it is not a
+    # test-only route.
+    seed_beta_defaults || echo "warning: beta default seeding failed; continuing" >&2
+@BETA_ONLY_END@
     setup_root_service
     # The updater track reaches 0.3 through here (LocalReinstall), never through
     # the full path below: the ladder it ran earlier found the 0.2 units still

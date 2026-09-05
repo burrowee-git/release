@@ -109,6 +109,24 @@ has inner/gateway/beta.install.sh "burrowee-gateway --no-open --home ${BETA_ROOT
 has inner/gateway/beta.install.sh "burrowee-gateway-updater run --home ${BETA_ROOT}/etc"
 pass "beta gateway units name the beta root, updater included"
 
+# The same for EDGE, and it is the fix for what feature 08 measured on the CI
+# machine: with no --home, a beta-only edge install created
+# /usr/local/burrowee/etc/edge/config carrying stable's lan_listen — a cross-
+# channel write into a root nothing had installed into. Both units, both
+# platforms: the launchd plist is a second spelling of the same fact and a beta
+# host that got only one of them would run half-isolated.
+has inner/edge/beta.install.sh "burrowee-edge run --home ${BETA_ROOT}/etc"
+has inner/edge/beta.install.sh "burrowee-edge-updater run --home ${BETA_ROOT}/etc"
+for _bin in burrowee-edge burrowee-edge-updater; do
+    has inner/edge/beta.install.sh "<string>\$SYS_BIN_DIR/${_bin}</string><string>run</string><string>--home</string><string>${BETA_ROOT}/etc</string>"
+done
+# And the stable edge units still carry NO --home: the daemon's own defaulting
+# resolves the stable pair, and a flag there would be a new line in every
+# stable installer in the field.
+hasnt inner/edge/install.sh "burrowee-edge run --home"
+hasnt inner/edge/install.sh "burrowee-edge-updater run --home"
+pass "beta edge units name the beta root on both platforms, updater included; stable edge names none"
+
 # seed_beta_config must not depend on WHERE it is called from. Its two callers
 # reach it by different routes — the fresh install has run ensure_system_tree
 # itself, BURROWEE_UNITS_ONLY (`service install`, no bundle) gets it only from
@@ -128,5 +146,26 @@ grep -q '16519' "${TMPDIR:-/tmp}/sbc.$$" \
     || { rm -f "${TMPDIR:-/tmp}/sbc.$$"; fail "seed_beta_config no longer writes 16519"; }
 rm -f "${TMPDIR:-/tmp}/sbc.$$"
 pass "seed_beta_config creates its own config root, so neither caller's ordering can silence it"
+
+# The edge's seed had BOTH halves of that defect, and the second one is worse:
+# seed_beta_defaults was never called on the units-only path at all — the path
+# edge's LocalReinstall runs — so on the CI machine the beta edge came up with
+# no config of its own, resolved the binary's stable defaults, and died five
+# times over `bind: address already in use` on 127.0.0.1:9448 and :443.
+#
+# Both properties are asserted the same way the gateway's are: on the CALL for
+# the path (a units-only block is short enough to read as one), and on the
+# FUNCTION for the root, which is what makes the ordering unable to silence it.
+sed -n '/^if \[ -n "${BURROWEE_UNITS_ONLY:-}" \]; then/,/^fi$/p' inner/edge/beta.install.sh > "${TMPDIR:-/tmp}/sbduo.$$"
+grep -q 'seed_beta_defaults' "${TMPDIR:-/tmp}/sbduo.$$" \
+    || { rm -f "${TMPDIR:-/tmp}/sbduo.$$"; fail "the units-only path does not seed the beta edge's listeners — the daemon it then starts binds the STABLE ports"; }
+rm -f "${TMPDIR:-/tmp}/sbduo.$$"
+sed -n '/^seed_beta_defaults() {/,/^}/p' inner/edge/beta.install.sh > "${TMPDIR:-/tmp}/sbd.$$"
+grep -q 'ensure_system_tree' "${TMPDIR:-/tmp}/sbd.$$" \
+    || { rm -f "${TMPDIR:-/tmp}/sbd.$$"; fail "seed_beta_defaults does not create its own config root — a units-only run seeds nothing and the beta edge falls back to the stable listeners"; }
+rm -f "${TMPDIR:-/tmp}/sbd.$$"
+# And the stable installer has no such function or call to lose.
+hasnt inner/edge/install.sh 'seed_beta_defaults'
+pass "seed_beta_defaults runs on the units-only path and creates its own config root"
 
 echo "PASS tools/test-bootstraps.sh"

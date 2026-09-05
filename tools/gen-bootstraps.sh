@@ -215,6 +215,8 @@ render_inner() {
         -e "s|@UNIT_DASH@|$(channel_unit_dash "$_ri_ch")|g" \
         -e "s|@UNIT_ROOT_ARGS@|$(channel_unit_root_args "$_ri_ch")|g" \
         -e "s|@UNIT_ROOT_PLIST_ARGS@|$(channel_unit_root_plist_args "$_ri_ch")|g" \
+        -e "s|@HOME_ARGS@|$(channel_home_args "$_ri_ch")|g" \
+        -e "s|@HOME_PLIST_ARGS@|$(channel_home_plist_args "$_ri_ch")|g" \
         -e "s|@UPDATER_HOME_ARGS@|$(channel_updater_home_args "$_ri_ch")|g" \
         -e "s|@UPDATER_HOME_PLIST_ARGS@|$(channel_updater_home_plist_args "$_ri_ch")|g" \
         "$_ri_exp" > "$_ri_tmp"
