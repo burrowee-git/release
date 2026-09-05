@@ -231,11 +231,10 @@ OPERATOR_BINS="@DISPATCHER@ burrowee-gateway burrowee-gateway-cli"
 # would sweep the developer's own machine.
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-${BURROWEE_LEGACY_BIN_DIR:-/usr/local/bin}}"
 COMP=gateway
-# $GW_HOME / $COMP_HOME — the LEGACY per-user tree — are NOT defined here any
-# more. They are derived from operator_home() beside prior_install_present,
-# because that function is what resolves whose home they belong to and a value
-# spelled from $HOME up here could not use it. Nothing between this line and
-# that one reads either name; see their definition for what they now mean.
+# $GW_HOME / $COMP_HOME are not defined here any more — they are derived from
+# operator_home() beside prior_install_present, which is the only resolver of
+# "whose home is this" in the file. Nothing between this line and that one
+# reads either name.
 # The invoking user. No longer rendered into any unit (the daemon runs as root)
 # — it is only compared against the owner a LEGACY per-user unit still records,
 # to decide whether taking over the slot needs consent.
@@ -790,10 +789,10 @@ ensure_root_exec_surface() {
     done
 
     # This script and its migrations, so the root updater's offline reinstall
-    # has a root-owned installer to exec. THIS IS THE ONLY KEPT COPY: the
-    # per-user one at $GW_HOME is gone (see where keep_installer_copy used to
-    # be), so a `service install` re-run resolves migrations/ and guard.sh
-    # beside THIS file, on a path no unprivileged user can rewrite.
+    # has a root-owned installer to exec. THIS IS THE ONLY KEPT COPY (why:
+    # "THERE IS NO keep_installer_copy" below), so a `service install` re-run
+    # resolves migrations/ and guard.sh beside THIS file, on a path no
+    # unprivileged user can rewrite.
     if [ ! -f "$BIN_DIR/install.sh" ] || ! cmp -s "$0" "$BIN_DIR/install.sh"; then
         run_root /usr/bin/install -m 0755 "$0" "$BIN_DIR/install.sh" || return 1
     fi
@@ -1761,6 +1760,20 @@ operator_home() {
 # re-run the passwd lookup and re-print its unresolvable-$SUDO_USER note once
 # per caller, and — worse — leave open the possibility of two callers getting
 # two answers about one host.
+#
+# operator_home AND NOT running_user_home, deliberately. The shared library
+# offers both: operator_home is BEST EFFORT (an unresolvable $SUDO_USER falls
+# back to $HOME with a note), running_user_home REFUSES rather than name a tree
+# it is not sure of. The refusing one is right for an ADOPTION, whose copy is
+# unrecoverable if aimed wrong — and the gateway's ladder makes exactly that
+# refusal itself, in its own runner, re-deriving $GW_HOME from $SUDO_USER and
+# exiting 1 when the account has no resolvable home ("REFUSING: running as
+# root … the one tree this ladder is allowed to migrate cannot be named").
+# Refusing HERE as well would buy nothing and cost the two things this value
+# actually feeds — a read-only pre-flight probe and a read-only "already set
+# up" probe — which must answer on every host, including one with no resolvable
+# $SUDO_USER at all. A probe that refuses to answer is the failure mode that
+# leaves everything downstream guessing.
 # ---------------------------------------------------------------------------
 OPERATOR_HOME="$(operator_home)"
 GW_HOME="$OPERATOR_HOME/.burrowee/gateway"
@@ -1815,15 +1828,31 @@ migration_sudo() {
 # record_installed_version <version> — write the migration ladder's version
 # anchor at $SYS_CONFIG_DIR/.installed-version.
 #
-# IT USED TO BE WRITTEN AT $GW_HOME, and that was two defects in one line. The
-# write itself was a root process creating a tree in the operator's home under
-# `curl … | sudo sh` — the root-owned ~/.burrowee this change exists to stop.
-# And the destination was wrong regardless of who wrote it: the gateway is a
-# `system`-scheme component, so migrations/run.sh reads its anchor out of the
-# machine-owned config root ($SYS_CONFIG_ROOT/<comp>) and never looked at the
-# per-user tree at all. The writer and the reader named different files, which
-# is why essentially every host reached the ladder through the --applies
-# fallback the runner's own header calls exceptional.
+# IT USED TO BE WRITTEN AT $GW_HOME, by a root process creating a tree in the
+# operator's home under `curl … | sudo sh` — the root-owned ~/.burrowee this
+# file stopped creating. Neither of the two things elevation exists for is a
+# file in somebody's home, so the write moved regardless of who reads it.
+#
+# READ THIS BEFORE ASSUMING THE RUNNER FOLLOWED. **The gateway does NOT take
+# the shared ladder** — tools/payload.sh's takes_shared_ladder is edge|cli|relay
+# — so the runner in a gateway kit is burrowee-git/gateway's OWN
+# migrations/run.sh, not inner/_shared's. That runner's installed_version()
+# reads `$GW_HOME/.installed-version`. A reading of inner/_shared/migrations/
+# run.sh (which resolves a `system` component's anchor under $SYS_CONFIG_ROOT)
+# describes the EDGE, the CLI and the RELAY, and is the wrong file to reason
+# about this line from.
+#
+# So until that runner is repointed, a host installed by this build records its
+# version here and the gateway ladder's numeric gate finds nothing: every rung
+# falls through to its own --applies probe. That is the runner's documented
+# degraded path rather than a silent one, and it is the accepted cost of not
+# root-owning a directory in a human's home for another release. The lockstep
+# change in the gateway repo reads $SYS_CONFIG_DIR/.installed-version first and
+# $GW_HOME's second for one release, after which the fallback goes.
+#
+# The destination needs no new hand-off: migrate_from_legacy and the
+# --probe-pending fork both already export BURROWEE_SYSTEM_CONFIG_DIR="$SYS_CONFIG_DIR",
+# and that runner already keeps its RECEIPTS under the same root.
 #
 # The runner gates each migration on `installed_version < target` and falls back
 # to the migration's own --applies probe only when NOTHING is recorded. Leaving
@@ -1845,9 +1874,9 @@ migration_sudo() {
 # ---------------------------------------------------------------------------
 #
 # It is written to BOTH machine-owned roots, and they answer different
-# questions. The $SYS_CONFIG_DIR copy is the migration ladder's anchor — run.sh
-# reads it, and for a `system`-scheme component that root IS the tree the rungs
-# migrate INTO. The $BIN_DIR copy is the updater's: on a root-scheme host core's
+# questions. The $SYS_CONFIG_DIR copy is the migration ladder's anchor — the
+# root the rungs migrate INTO, and where the runner already keeps its receipts.
+# The $BIN_DIR copy is the updater's: on a root-scheme host core's
 # local-update path reads <component home>/.installed-version to decide whether
 # an install is already current, and that home is now $BIN_DIR. One writer for
 # both keeps them from disagreeing.
@@ -1876,8 +1905,26 @@ record_installed_version() {
         echo "note: could not write the migration ladder's version anchor at" >&2
         echo "note: $SYS_CONFIG_DIR/.installed-version — the next install asks each" >&2
         echo "note: migration whether it applies instead of reading the version." >&2
+    elif ! run_root chmod 0644 "$SYS_CONFIG_DIR/.installed-version"; then
+        # A DIFFERENT FAILURE FROM THE ONE ABOVE, and the one that hides. The
+        # runner reads this file unprivileged; an anchor it cannot read is not
+        # reported to it as a permission problem, it simply is not there, and
+        # the runner falls back to the legacy per-user path. So say which of the
+        # two happened rather than letting one message cover both.
+        echo "note: wrote the migration ladder's version anchor but could not make it" >&2
+        echo "note: readable ($SYS_CONFIG_DIR/.installed-version, wanted mode 0644). The" >&2
+        echo "note: ladder reads it unprivileged, so it will read the legacy per-user" >&2
+        echo "note: anchor — or none — until the mode is fixed." >&2
     fi
-    printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
+    if ! printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null; then
+        # Same shape as its sibling above, and for the same reason: a discarded
+        # write is a host whose updater silently compares against nothing and
+        # re-runs an install it already has. `|| true` said this could not
+        # matter; it can.
+        echo "note: could not write the root updater's version marker at" >&2
+        echo "note: $BIN_DIR/.installed-version — the updater cannot tell whether this" >&2
+        echo "note: host is already current and may reinstall the same build." >&2
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -3050,10 +3097,9 @@ snapshot_restore() {
 # run from there, unchecked at both ends. Neither end was safe. The SOURCE was
 # "$(dirname "$0")/guard.sh", which for a default-mode re-run of the kept
 # $GW_HOME/install.sh was an OPERATOR-WRITABLE copy under $HOME — the very path
-# guard.sh's own header argues must never be sourced as root. (That per-user
-# copy is gone entirely now, so the only re-run this resolution can reach is
-# the root-owned $BIN_DIR one; the argument stands unchanged for the source it
-# still resolves.) And the DESTINATION was never walked by path_is_root_secure,
+# guard.sh's own header argues must never be sourced as root. (That copy is
+# gone; the argument stands unchanged for the source this still resolves.)
+# And the DESTINATION was never walked by path_is_root_secure,
 # so on an Intel macOS host where Homebrew chowns /usr/local it was a
 # user-writable path a root LaunchDaemon execs at every arm.
 #
@@ -4455,16 +4501,11 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         echo "note: and the installed version is not recorded, so the migration stays pending" >&2
     fi
 
-    # THE PER-USER INSTALLER COPY USED TO BE MADE HERE, and its whole ordering
-    # problem went with it. It mkdir -p'd $GW_HOME, and the ladder's "$GW_HOME
-    # does not exist" evidence is the only thing standing between
-    # `curl … | sudo sh` and a silently mis-targeted migration under ROOT's
-    # $HOME — so creating that directory before the runner was allowed to look
-    # at it made the guard unreachable from every entry point on this host.
-    # The ordering fix put the copy after the migration; deleting the copy
-    # removes the question. The kept installer this mode still leaves behind is
-    # the root-owned one ensure_root_exec_surface places into $BIN_DIR, written
-    # long before the migration and touching nobody's home.
+    # The per-user installer copy used to be made here, AFTER the migration so
+    # that it could not falsify the ladder's "$GW_HOME does not exist"
+    # evidence. Deleting it removed the question ("THERE IS NO
+    # keep_installer_copy"); the kept installer this mode leaves behind is the
+    # root-owned $BIN_DIR one, placed long before the migration.
     report_unrecorded_migration
 
     # This mode has no start step of its own; say so rather than leaving the
@@ -4647,12 +4688,9 @@ fi
 migrate_from_legacy
 @STABLE_ONLY_END@
 
-# NOTHING IS KEPT UNDER $GW_HOME HERE ANY MORE. This is where the per-user
-# installer copy was made — after migrate_from_legacy, because the function
-# mkdir -p'd $GW_HOME and the ladder's "$GW_HOME does not exist" evidence is
-# the only thing standing between `curl … | sudo sh` and a silently
-# mis-targeted migration under ROOT's $HOME. The kept installer a later
-# `service install` runs is the root-owned $BIN_DIR copy that
+# Nothing is kept under $GW_HOME here any more — this is where the per-user
+# installer copy was made ("THERE IS NO keep_installer_copy"). The kept
+# installer a later `service install` runs is the root-owned $BIN_DIR copy
 # ensure_root_exec_surface placed before the migration ever started.
 
 @BETA_ONLY_BEGIN@
@@ -4717,13 +4755,9 @@ echo "verified: binaries and units are in place and consistent"
 # next step. All tty I/O is fault-tolerant so it can never abort the install.
 #
 # gateway_already_set_up probes for the STATE itself, never for a non-empty
-# $COMP_HOME. That distinction was forced by an installer copy this script made
-# into $COMP_HOME a few dozen lines earlier, so "non-empty" was something the
-# run guaranteed about itself: on a genuinely virgin host the old test printed
-# "already set up — skipping setup" and the blob + PIN prompt never ran. The
-# copy is gone, and the distinction stays — a directory is not an enrolment,
-# and nothing should have to re-derive that the next time something lands in
-# there.
+# $COMP_HOME. A directory is not an enrolment: the old test read one as though
+# it were and told a virgin host it was "already set up", skipping the blob +
+# PIN prompt entirely.
 #
 # Both layouts count, and both are READS of somebody else's tree. Pre-0.2.0
 # state lives in the operator's per-user tree ($COMP_HOME, resolved through
