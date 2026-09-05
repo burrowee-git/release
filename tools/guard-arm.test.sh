@@ -412,11 +412,21 @@ t_guard_arm_honours_no_restart() {
 # enrolment. The behavioural half (a real install leaves the home empty) is
 # driven end to end in inner/gateway/install_test/operator_home_test.go.
 t_no_installer_writes_under_a_users_home() {
-    for _f in "$INSTALL_SRC" "$HERE/inner/gateway/beta.install.sh"; do
+    # THE TEMPLATE IS IN THE LIST, not just the two renders. An edit lands in
+    # install.template.sh first, and a contributor who has not yet re-run
+    # tools/gen-bootstraps.sh would otherwise get a green suite over a defect
+    # that is already committed to the authored file.
+    #
+    # Both spellings of each name ($GW_HOME and ${GW_HOME}) and every writer
+    # this file actually has to hand — including `tee`, which is how an
+    # elevated write is spelled here (run_root tee), and `install`, `sed -i`
+    # and `dd`, which are the three ways a future edit would most plausibly
+    # reach a path without looking like a copy.
+    for _f in "$HERE/inner/gateway/install.template.sh" "$INSTALL_SRC" "$HERE/inner/gateway/beta.install.sh"; do
         [ -f "$_f" ] || continue
         grep -q '^keep_installer_copy()' "$_f" &&
             fail "$_f defines keep_installer_copy again — a root-run installer must not copy itself into a user's home"
-        _w="$(grep -nE '^[[:space:]]*[^#]*((mkdir|cp|mv|ln|touch|rm|chmod|chown|/usr/bin/install)[^|#]*\$(GW|COMP)_HOME|>[[:space:]]*"?\$(GW|COMP)_HOME)' "$_f" || true)"
+        _w="$(grep -nE '^[[:space:]]*[^#]*((mkdir|cp|mv|ln|touch|rm|chmod|chown|tee|dd|sed|install)[^|#]*\$\{?(GW|COMP)_HOME\}?|>[[:space:]]*"?\$\{?(GW|COMP)_HOME\}?)' "$_f" || true)"
         [ -z "$_w" ] ||
             fail "$_f writes into the operator's per-user tree — reads are fine, writes are the defect:
 $_w"

@@ -27,6 +27,7 @@ package install_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -49,9 +50,14 @@ func operatorSandbox(t *testing.T, home, stub string) string {
 	return operatorHome
 }
 
-// treeSnapshot lists every path under dir, relative to it. Absent is the empty
-// list, never a failure: "the installer created the tree" is one of the things
-// being asserted about.
+// treeSnapshot lists every path under dir, relative to it, SORTED. Absent is
+// the empty list, never a failure: "the installer created the tree" is one of
+// the things being asserted about.
+//
+// Sorted, and compared as a slice rather than by length, because a comparison
+// of counts passes on the one shape it most needs to catch: a run that removes
+// one entry and adds another. filepath.Walk is already lexical, so the sort is
+// belt and braces — and it is what makes the assertion's diff readable.
 func treeSnapshot(t *testing.T, dir string) []string {
 	t.Helper()
 	var out []string
@@ -74,7 +80,28 @@ func treeSnapshot(t *testing.T, dir string) []string {
 	if err != nil {
 		t.Fatalf("walk %s: %v", dir, err)
 	}
+	slices.Sort(out)
 	return out
+}
+
+// assertTreeUnchanged compares two treeSnapshot results by CONTENT.
+func assertTreeUnchanged(t *testing.T, what, dir string, before, after []string) {
+	t.Helper()
+	if slices.Equal(before, after) {
+		return
+	}
+	var added, removed []string
+	for _, p := range after {
+		if !slices.Contains(before, p) {
+			added = append(added, p)
+		}
+	}
+	for _, p := range before {
+		if !slices.Contains(after, p) {
+			removed = append(removed, p)
+		}
+	}
+	t.Errorf("%s changed the operator's home %s — added %v, removed %v", what, dir, added, removed)
 }
 
 // assertOperatorHomeUntouched is the assertion every mode owes, spelled once.
@@ -116,9 +143,7 @@ func TestFreshInstallUnderSudoWritesNothingUnderTheOperatorHome(t *testing.T) {
 		t.Fatalf("fresh install failed: %v\n%s", err, out)
 	}
 
-	if after := treeSnapshot(t, operatorHome); len(after) != len(before) {
-		t.Errorf("the install wrote into the operator's home %s: before %v, after %v", operatorHome, before, after)
-	}
+	assertTreeUnchanged(t, "the fresh install", operatorHome, before, treeSnapshot(t, operatorHome))
 	assertOperatorHomeUntouched(t, home)
 	assertOperatorHomeUntouched(t, operatorHome)
 }
@@ -141,9 +166,7 @@ func TestUnitsOnlyUnderSudoWritesNothingUnderTheOperatorHome(t *testing.T) {
 		"BURROWEE_VERSION=gateway/v0.3.0.2026.09.05.abcdef12",
 	)
 
-	if after := treeSnapshot(t, operatorHome); len(after) != len(before) {
-		t.Errorf("units-only wrote into the operator's home %s: before %v, after %v", operatorHome, before, after)
-	}
+	assertTreeUnchanged(t, "units-only", operatorHome, before, treeSnapshot(t, operatorHome))
 	assertOperatorHomeUntouched(t, home)
 	assertOperatorHomeUntouched(t, operatorHome)
 }
