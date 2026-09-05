@@ -251,6 +251,34 @@ if run_public; then ok "gateway (stable, twin present): assembly succeeds"; else
 check "a beta twin sitting in the tree does not reach a STABLE cut" \
     "$(unzip -p "${stage}/${asset}" install.sh)" "STABLE inner installer"
 
+# --- a beta cut with no twin REFUSES, and says which file to write ------------
+# The one that shipped: versions/cli.beta.stamp exists, inner/cli has no twin,
+# and the resolver used to fall back to the stable installer -- so a beta cli cut
+# built a zip whose installer targets the stable root, under the stable unit
+# names, placing the stable dispatcher. A "beta" install that installs over
+# stable is the entire defect this channel split exists to remove, so it is a
+# refusal and not a warning.
+CHANNEL=beta
+fixture cli burrowee-cli
+printf 'STABLE inner installer\n' > "${REPO_ROOT}/inner/cli/install.sh"
+printf 'update\n'                 > "${src}/update.sh"
+printf 'updater self-update\n'    > "${src}/updater.update.sh"
+shared_ladder_src "${src}"
+# A SUBSHELL, because the refusal is an `exit 1` inside the extracted block --
+# release.sh's own spelling, and the reason it is a refusal rather than a
+# warning. Run bare, it would take this suite with it.
+if ( run_public ) 2>"${TMP}/beta-refusal.err"; then
+    bad "cli (beta, no twin): assembly SUCCEEDED — it staged the stable installer into a beta zip"
+else
+    ok "cli (beta, no twin): assembly refuses"
+fi
+if grep -q 'inner/cli/beta.install.sh' "${TMP}/beta-refusal.err"; then
+    ok "the refusal names the file that is missing"
+else
+    bad "the refusal does not name inner/cli/beta.install.sh: $(cat "${TMP}/beta-refusal.err")"
+fi
+CHANNEL=stable
+
 # --- edge: a directory member whose content comes from another tree ----------
 fixture edge burrowee-edge
 printf 'inner installer\n' > "${REPO_ROOT}/inner/edge/install.sh"

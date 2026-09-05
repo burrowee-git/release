@@ -50,14 +50,43 @@ inner_prefix() {
     return 0
 }
 
-# inner_script_src <comp> <base> — the inner script this cut stages for <comp>,
-# preferring this channel's twin and falling back to the stable original.
-# Prints nothing when neither exists (the presence guard the callers rely on).
+# inner_script_src <comp> <base> — the inner script this cut stages for <comp>:
+# this channel's twin, or the stable original on the stable channel. Prints
+# nothing when the component has no such script at all (the presence guard the
+# callers rely on for updater.install.sh and guard.sh).
+#
+# THERE IS NO FALLBACK FROM BETA TO STABLE, and that is the whole of this
+# function. A beta cut that quietly staged inner/<comp>/install.sh would build a
+# beta zip whose installer targets /usr/local/burrowee, writes the stable unit
+# names and places the stable dispatcher — i.e. a "beta" install that installs
+# OVER stable, which is the entire defect this channel split exists to remove.
+# It is not hypothetical: versions/cli.beta.stamp exists (the cli's cycle is
+# open) and inner/cli has no twin, so the fallback made `release.sh cli
+# --channel beta` an over-install of stable by the stable installer.
+#
+# So: the component has the script and a twin -> the twin. It has neither ->
+# nothing, the same answer as on stable. It has the script but NO twin on a beta
+# cut -> refuse, naming the file to write. Never the stable file.
 inner_script_src() {
-    local p
-    p="${INNER_DIR}/$1/$(inner_prefix)$2"
-    [ -f "${p}" ] || p="${INNER_DIR}/$1/$2"
-    [ -f "${p}" ] && printf '%s\n' "${p}"
+    local comp="$1" base="$2" twin stable
+    stable="${INNER_DIR}/${comp}/${base}"
+    if [ "${CHANNEL:-stable}" != beta ]; then
+        [ -f "${stable}" ] && printf '%s\n' "${stable}"
+        return 0
+    fi
+    twin="${INNER_DIR}/${comp}/$(inner_prefix)${base}"
+    if [ -f "${twin}" ]; then
+        printf '%s\n' "${twin}"
+        return 0
+    fi
+    if [ -f "${stable}" ]; then
+        echo "✗ ${comp}: a beta cut needs ${twin}, and it is not there." >&2
+        echo "  ${stable} is the STABLE installer: staging it would build a beta zip that" >&2
+        echo "  installs over the stable root, under the stable unit names." >&2
+        echo "  Author inner/${comp}/${base%.sh}.template.sh and re-run tools/gen-bootstraps.sh," >&2
+        echo "  or close ${comp}'s beta cycle (remove versions/${comp}.beta.stamp)." >&2
+        return 1
+    fi
     return 0
 }
 

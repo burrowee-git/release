@@ -2245,10 +2245,10 @@ do_release() {
         # installer; spelled REPO_ROOT-relative here, like the line it replaces,
         # because this site's whole point is that install.sh comes from THIS
         # repo's tree and not from the component source.
-        inner_install="${REPO_ROOT}/inner/${comp}/$(inner_prefix)install.sh"
-        [ -f "${inner_install}" ] || inner_install="${REPO_ROOT}/inner/${comp}/install.sh"
-        [ -f "${inner_install}" ] \
-            || { echo "✗ no inner installer for ${comp} (channel ${CHANNEL:-stable}): ${inner_install}" >&2; exit 1; }
+        inner_install="$(INNER_DIR="${REPO_ROOT}/inner" inner_script_src "${comp}" install.sh)" \
+            || exit 1
+        [ -n "${inner_install}" ] \
+            || { echo "✗ no inner installer for ${comp} (channel ${CHANNEL:-stable}) under ${REPO_ROOT}/inner/${comp}" >&2; exit 1; }
         cp "${inner_install}" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
