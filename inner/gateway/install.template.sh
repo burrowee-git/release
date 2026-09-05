@@ -4007,13 +4007,13 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
 @STABLE_ONLY_BEGIN@
     remove_legacy_user_units
 @STABLE_ONLY_END@
+@STABLE_ONLY_BEGIN@
     # The migration's own consent gate, asked BEFORE the stop and not at the
     # restart — the same reasoning, and the same call, as the fresh path's:
     # on a host with a pending rung the runner stops the daemon and takes a
     # tunnelled operator's session with it, so a prompt read afterwards is
     # read from a terminal that no longer exists. Silent when nothing is
     # pending, never asked at all with no tty (should_ask_before_migration).
-@STABLE_ONLY_BEGIN@
     if should_ask_before_migration; then
         consent_to_sever migration
     fi
@@ -4577,13 +4577,13 @@ check_service_override
 @STABLE_ONLY_BEGIN@
 remove_legacy_user_units
 @STABLE_ONLY_END@
+@STABLE_ONLY_BEGIN@
 # The migration's own consent gate, asked BEFORE the stop rather than at the
 # restart below — on a host with a pending rung the runner stops the daemon and
 # the operator's tunnelled session goes with it, and the Phase 3 prompt would
 # then be read from a terminal that no longer exists. Silent when nothing is
 # pending, and never asked at all on a run with no tty: see
 # should_ask_before_migration.
-@STABLE_ONLY_BEGIN@
 if should_ask_before_migration; then
     consent_to_sever migration
 fi

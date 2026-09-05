@@ -3978,12 +3978,6 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # downstream acts on.
     txn_phase replacing
 
-    # The migration's own consent gate, asked BEFORE the stop and not at the
-    # restart — the same reasoning, and the same call, as the fresh path's:
-    # on a host with a pending rung the runner stops the daemon and takes a
-    # tunnelled operator's session with it, so a prompt read afterwards is
-    # read from a terminal that no longer exists. Silent when nothing is
-    # pending, never asked at all with no tty (should_ask_before_migration).
     render_units
     # AFTER render_units on THIS path, unlike the fresh one, and the difference
     # is not style. Units-only (`service install`, no bundle) reaches here
@@ -4527,12 +4521,6 @@ place_all_bins
 # here, and a root-scheme unit left behind by an aborted run is bootstrapped by
 # launchd at the next reboot regardless of what this run reported.
 check_service_override
-# The migration's own consent gate, asked BEFORE the stop rather than at the
-# restart below — on a host with a pending rung the runner stops the daemon and
-# the operator's tunnelled session goes with it, and the Phase 3 prompt would
-# then be read from a terminal that no longer exists. Silent when nothing is
-# pending, and never asked at all on a run with no tty: see
-# should_ask_before_migration.
 
 # Keep this installer + its migrations at $GW_HOME so subsequent `service install`
 # verbs can re-render units and run a pending migration without a new download.

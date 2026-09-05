@@ -44,6 +44,15 @@
 #   per-user units the teardown removes belong to the STABLE install running
 #   beside it.
 #
+#   The ladder is dropped WHOLE under beta — every rung, plus the version-gated
+#   config seeds beside it (edge's migrate_config) and the forced pass in
+#   upgrade.sh — never rung by rung. A rung's gate asks "has this host crossed
+#   version X yet", and a root created at 0.3 by the installer itself answers
+#   "no" to all of them, so a per-rung gate would run the entire ladder on a
+#   host with nothing to migrate. Worse, the work those rungs do is reached
+#   through component CLIs and per-user paths that resolve the STABLE roots, so
+#   what they would converge is the other install.
+#
 #   the beta listener defaults (gateway console_port=16519, edge's stable+1
 #   lan/tls listeners) are BETA-ONLY. Stable's defaults are the binaries' own
 #   and are seeded by nothing; beta's exist so the two instances do not fight
