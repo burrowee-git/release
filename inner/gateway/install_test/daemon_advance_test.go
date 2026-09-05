@@ -327,7 +327,7 @@ func TestUnitsOnlyReportsAFailedRestartAndStillBanksTheAnchor(t *testing.T) {
 				t.Fatalf("%s: transaction phase = %q, want %q — the fixture did not exercise reattach's rollback arm", goos, got, "rolled-back")
 			}
 
-			anchor := filepath.Join(home, ".burrowee", "gateway", ".installed-version")
+			anchor := ladderAnchorPath(home)
 			b, readErr := os.ReadFile(anchor)
 			if readErr != nil {
 				t.Fatalf("%s: the version anchor was never written on a run that reached the handoff: %v", goos, readErr)
@@ -391,7 +391,7 @@ func TestUnitsOnlySeveredAtTheHandoffStillLeftTheAnchor(t *testing.T) {
 				t.Fatalf("%s: the run never reached the handoff, so it was not severed there:\n%s", goos, out)
 			}
 
-			anchor := filepath.Join(home, ".burrowee", "gateway", ".installed-version")
+			anchor := ladderAnchorPath(home)
 			b, readErr := os.ReadFile(anchor)
 			if readErr != nil {
 				t.Fatalf("%s: a session severed at the handoff left NO version anchor — this host keeps its migrated state and new units while the ladder still thinks it is on the old release, and every later run gates off the wrong floor: %v\n%s", goos, readErr, out)

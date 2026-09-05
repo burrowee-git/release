@@ -54,8 +54,9 @@ func TestUpdateReplacesOnlyChangedBinaries(t *testing.T) {
 		t.Fatalf("change-set = %q, want BURROWEE_CHANGED=burrowee-gateway", line)
 	}
 
-	// --version must be recorded in $GW_HOME/.installed-version.
-	vf := filepath.Join(home, ".burrowee/gateway/.installed-version")
+	// --version must be recorded where the ladder reads it: the machine-owned
+	// config root, never a home tree.
+	vf := ladderAnchorPath(home)
 	vb, err := os.ReadFile(vf)
 	if err != nil {
 		t.Fatalf("installed-version not written: %v", err)
@@ -452,19 +453,19 @@ func stagedUpdateBundle(t *testing.T, contents map[string]string, logPath string
 	return script, stageDir
 }
 
-// TestUpdateKeepsTheInstallerCopyAfterMigrating: `service install` re-runs
-// $GW_HOME/install.sh, and the runner is resolved beside whichever install.sh is
-// executing — so a $GW_HOME left without a current install.sh + migrations/ is a
-// stale unit-writer that also cannot migrate. The copy must therefore still
-// happen on this path.
+// TestUpdateKeepsTheInstallerCopyWhereRootCanRunIt: `service install` re-runs a
+// kept install.sh, and the runner is resolved beside whichever install.sh is
+// executing — so a kept copy without a current migrations/ beside it is a stale
+// unit-writer that also cannot migrate. The copy must therefore still happen on
+// this path; what changed is WHERE.
 //
-// It happens AFTER the migration, not before, and that ordering is CRITICAL 1:
-// keep_installer_copy mkdir -p's $GW_HOME, and the runner's "$GW_HOME does not
-// exist" guard is the only thing standing between `curl … | sudo sh` and a
-// silently mis-targeted migration under root's $HOME. This test's own probe
-// (KEPT_INSTALLER, recorded from inside the migration) is what pins the
-// direction; migration_ordering_test.go pins the consequence.
-func TestUpdateKeepsTheInstallerCopyAfterMigrating(t *testing.T) {
+// It is the root-owned $BIN_DIR copy, placed by ensure_root_exec_surface, and
+// there is no longer a second one under the operator's home. The per-user copy
+// mkdir -p'd $GW_HOME, which is both a root write into a human's home and the
+// thing that destroyed the 0.2→0.3 rung's "$GW_HOME does not exist" evidence —
+// this test's own probe (KEPT_INSTALLER, recorded from inside the migration)
+// still pins that the tree is absent when the runner looks.
+func TestUpdateKeepsTheInstallerCopyWhereRootCanRunIt(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	binDir := binDir(home)
@@ -480,24 +481,25 @@ func TestUpdateKeepsTheInstallerCopyAfterMigrating(t *testing.T) {
 		t.Fatalf("install.sh update failed: %v\n%s", err, out)
 	}
 
-	// Recorded from INSIDE the migration: the copy must NOT have been in place
-	// yet, because putting it there is what creates $GW_HOME.
+	// Recorded from INSIDE the migration: nothing of ours is in $GW_HOME while
+	// the rung is deciding what to adopt.
 	log := migrationLog(t, logPath)
 	if log == "" {
 		t.Fatal("the migration never ran")
 	}
 	assertContains(t, log, "KEPT_INSTALLER=no")
 
-	// And it must be in place by the end of the run, or `service install` has no
-	// current installer to re-run.
+	// And the root-owned copy must be in place by the end of the run, or
+	// `service install` has no current installer to re-run.
 	for _, p := range []string{
-		filepath.Join(home, ".burrowee", "gateway", "install.sh"),
-		filepath.Join(home, ".burrowee", "gateway", "migrations", "run.sh"),
+		filepath.Join(binDir, "install.sh"),
+		filepath.Join(binDir, "migrations", "run.sh"),
 	} {
 		if _, statErr := os.Stat(p); statErr != nil {
-			t.Errorf("the installer copy was not kept: %s: %v", p, statErr)
+			t.Errorf("the root-owned installer copy was not kept: %s: %v", p, statErr)
 		}
 	}
+	assertOperatorHomeUntouched(t, home)
 }
 
 // TestUpdateRecordsTheVersionOnlyAfterMigrating: recording it first means a failed

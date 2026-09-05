@@ -737,9 +737,13 @@ func TestInstallShFreshInstall(t *testing.T) {
 		}
 	}
 
-	// Self-copy present.
-	if _, err := os.Stat(filepath.Join(home, ".burrowee/gateway/install.sh")); err != nil {
-		t.Errorf("self-copy missing at $GW_HOME/install.sh: %v", err)
+	// The kept self-copy is the ROOT-OWNED one, and it is the only one. A copy
+	// under the operator's home is the defect this installer stopped shipping.
+	if _, err := os.Stat(filepath.Join(binDir, "install.sh")); err != nil {
+		t.Errorf("self-copy missing at $BIN_DIR/install.sh: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".burrowee")); err == nil {
+		t.Errorf("the installer created %s — nothing it does belongs in the operator's home", filepath.Join(home, ".burrowee"))
 	}
 
 	// Both system unit files written.
