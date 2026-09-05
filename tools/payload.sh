@@ -36,6 +36,60 @@ payload_file_extras() {
 # suite — same pattern as SHARED_MIGRATIONS_DIR below.
 INNER_DIR="${INNER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/inner}"
 
+# inner_prefix — the filename prefix the inner installers of THIS CUT'S CHANNEL
+# carry: empty on stable, "beta." on beta. The twins sit beside their stable
+# originals in the same inner/<comp>/ directory (tools/gen-bootstraps.sh renders
+# both), so which one a cut stages is decided here, once, from $CHANNEL — the
+# same variable tools/dispatcher_src.sh already reads for the dispatcher's
+# stamp, version file and channel args.
+#
+# A component with no twin (no *.template.sh, so no beta.*.sh) is unaffected:
+# the callers fall back to the stable name, which is the only one it has.
+inner_prefix() {
+    if [ "${CHANNEL:-stable}" = beta ]; then printf 'beta.'; fi
+    return 0
+}
+
+# inner_script_src <comp> <base> — the inner script this cut stages for <comp>:
+# this channel's twin, or the stable original on the stable channel. Prints
+# nothing when the component has no such script at all (the presence guard the
+# callers rely on for updater.install.sh and guard.sh).
+#
+# THERE IS NO FALLBACK FROM BETA TO STABLE, and that is the whole of this
+# function. A beta cut that quietly staged inner/<comp>/install.sh would build a
+# beta zip whose installer targets /usr/local/burrowee, writes the stable unit
+# names and places the stable dispatcher — i.e. a "beta" install that installs
+# OVER stable, which is the entire defect this channel split exists to remove.
+# It is not hypothetical: versions/cli.beta.stamp exists (the cli's cycle is
+# open) and inner/cli has no twin, so the fallback made `release.sh cli
+# --channel beta` an over-install of stable by the stable installer.
+#
+# So: the component has the script and a twin -> the twin. It has neither ->
+# nothing, the same answer as on stable. It has the script but NO twin on a beta
+# cut -> refuse, naming the file to write. Never the stable file.
+inner_script_src() {
+    local comp="$1" base="$2" twin stable
+    stable="${INNER_DIR}/${comp}/${base}"
+    if [ "${CHANNEL:-stable}" != beta ]; then
+        [ -f "${stable}" ] && printf '%s\n' "${stable}"
+        return 0
+    fi
+    twin="${INNER_DIR}/${comp}/$(inner_prefix)${base}"
+    if [ -f "${twin}" ]; then
+        printf '%s\n' "${twin}"
+        return 0
+    fi
+    if [ -f "${stable}" ]; then
+        echo "✗ ${comp}: a beta cut needs ${twin}, and it is not there." >&2
+        echo "  ${stable} is the STABLE installer: staging it would build a beta zip that" >&2
+        echo "  installs over the stable root, under the stable unit names." >&2
+        echo "  Author inner/${comp}/${base%.sh}.template.sh and re-run tools/gen-bootstraps.sh," >&2
+        echo "  or close ${comp}'s beta cycle (remove versions/${comp}.beta.stamp)." >&2
+        return 1
+    fi
+    return 0
+}
+
 # updater_install_src <comp> — inner/<comp>/updater.install.sh if it exists,
 # nothing otherwise.
 #
@@ -48,9 +102,7 @@ INNER_DIR="${INNER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/inner}"
 # grows the file is simply unaffected; nothing here needs to change to add or
 # drop one. Mirrors updaterInstallPayload in cmd/rkit/assemble.go.
 updater_install_src() {
-    local p="${INNER_DIR}/$1/updater.install.sh"
-    [ -f "${p}" ] && printf '%s\n' "${p}"
-    return 0
+    inner_script_src "$1" updater.install.sh
 }
 
 # guard_install_src <comp> — inner/<comp>/guard.sh if it exists, nothing
@@ -65,8 +117,7 @@ updater_install_src() {
 # so a future component that grows its own guard.sh is picked up with no
 # edit here. Mirrors guardInstallPayload in cmd/rkit/assemble.go.
 guard_install_src() {
-    local p="${INNER_DIR}/$1/guard.sh"
-    [ -f "${p}" ] && printf '%s\n' "${p}"
+    inner_script_src "$1" guard.sh
     return 0
 }
 

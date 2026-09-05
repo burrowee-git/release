@@ -4,7 +4,7 @@
 # Ships at the ROOT of the verified release zip as `install.sh`. The outer
 # bootstrap verifies the zip (minisign + sha256) and ONLY THEN execs this with
 # cwd = the unzipped dir, so the binaries sit alongside this script. It installs
-# them into $BIN_DIR — /usr/local/burrowee/bin, root-owned, ALWAYS — with the
+# them into $BIN_DIR — /usr/local/burrowee/beta/bin, root-owned, ALWAYS — with the
 # placement elevated via run_root the same way a root-owned tree always required. As of
 # 0.2.0 there is no per-user prefix flow at all: a PREFIX that would MISDIRECT
 # the install is REFUSED, loudly (see below), never silently redirected — while
@@ -31,7 +31,7 @@
 # the console child it spawns, the updater agent, the cli the migration shells
 # to), lands in $BIN_DIR — the same directory this script and its migrations/
 # are kept in too — and $BIN_DIR is one of three siblings under
-# /usr/local/burrowee: bin/ (the execution surface), etc/gateway (config, the
+# /usr/local/burrowee/beta: bin/ (the execution surface), etc/gateway (config, the
 # identity) and var/gateway (state). This script CREATES that tree, root-owned,
 # with every level's owner and mode stated (ensure_system_tree), and asserts
 # what it built before a unit may name any of it (assert_system_tree).
@@ -43,11 +43,11 @@
 # argument that a root-owned /usr/local/bin passes the identical root-secure
 # ancestor walk the separate tree existed to guarantee. THAT PREMISE IS FALSE
 # wherever Homebrew owns /usr/local/bin — on an Intel Mac brew creates and
-# chowns /usr/local/{bin,etc,var} to the console user long before burrowee is
+# chowns /usr/local/{bin,etc,var} to the console user long before burroweeb is
 # installed, and 0.2's three independent roots then had two answers of "no" to
 # "is my state root-owned", with no way forward that did not take a directory
 # away from the package manager. 0.3 moves the exec root WITH the config/data
-# pair into one tree burrowee creates beside Homebrew's directories rather
+# pair into one tree burroweeb creates beside Homebrew's directories rather
 # than inside them: that restores the guarantee the libexec split gave without
 # restoring a second tree, because bin/ is inside the same tree as the state it
 # operates on and one ancestor chain answers for all three. The retired
@@ -59,12 +59,12 @@
 # ALL THE WAY TO / may be named in a unit or execed by the root updater. On
 # every host that walk passes through /usr/local, which is root:wheel 755 on
 # macOS and root-owned on every Linux; what Homebrew chowns are its children,
-# and /usr/local/burrowee is not one of them.
+# and /usr/local/burrowee/beta is not one of them.
 #
 # WHY THE DEFAULT MOVED AT ALL: something outside this component now execs
-# `burrowee` off PATH as root to find this gateway — a plain PATH binary a
+# `burroweeb` off PATH as root to find this gateway — a plain PATH binary a
 # unprivileged user could otherwise overwrite is a standing uid-0 grant to
-# whoever owns it, even though no burrowee UNIT ever execs it as root. A
+# whoever owns it, even though no burroweeb UNIT ever execs it as root. A
 # root-owned $BIN_DIR is what makes that PATH lookup safe to trust.
 #
 # WHY THE PER-USER FLOW IS GONE, not merely de-defaulted. The PREFIX branch did
@@ -73,12 +73,12 @@
 # migrate_from_legacy and record_installed_version all gated on it — and the
 # outer bootstrap defaulted PREFIX to $HOME/.local on every `curl … | sh`, so
 # that branch was not the exception, it was the only path anyone took.
-# Observed on a production node, 2026-08-13: burrowee sat at
+# Observed on a production node, 2026-08-13: burroweeb sat at
 # /home/ubuntu/.local/bin/burrowee while a consumer's ROOT daemon resolved the
 # absolute /usr/local/bin/burrowee — correctly, since its unit pins
 # PATH=/usr/bin:/bin:/usr/sbin:/sbin and a PATH lookup can reach nothing else.
 # That daemon crash-looped 50 times on "resolve register socket" while
-# `burrowee gateway doctor` reported a perfectly healthy gateway with 109h
+# `burroweeb gateway doctor` reported a perfectly healthy gateway with 109h
 # uptime. A component that installs where its consumers cannot look has not
 # installed, however cleanly it exits.
 #
@@ -102,7 +102,7 @@
 # writers fight, booting the daemon out on every refresh.
 set -eu
 
-# ONE DESTINATION, decided here and nowhere else: /usr/local/burrowee/bin,
+# ONE DESTINATION, decided here and nowhere else: /usr/local/burrowee/beta/bin,
 # root-owned — the exec root of the machine-owned tree (see the header).
 # There is no branch left to take — every step below that treats $BIN_DIR as the
 # privileged surface (ensure_root_exec_surface, render_units, load_units,
@@ -111,7 +111,7 @@ set -eu
 #
 # BURROWEE_BIN_DIR is the surviving TEST-ONLY seam, and the only one: it
 # redirects this destination so the suite never writes into the real
-# /usr/local/burrowee. Never set it on a real host — nothing about the
+# /usr/local/burrowee/beta. Never set it on a real host — nothing about the
 # install's meaning changes when it is set, which is exactly why it is safe for
 # tests and useless as a user-facing knob. It must end in `bin`: $SYSTEM_ROOT
 # below is its parent, and the migration runner round-trips PREFIX=<that
@@ -121,7 +121,7 @@ set -eu
 # "does this PREFIX name the destination we would have picked anyway?" — it
 # cannot ask that without $BIN_DIR. This is an assignment only: nothing is
 # created, placed or written until well after the gate.
-BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
+BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/beta/bin}"
 
 # normalize_dir PATH — collapse repeated slashes and strip trailing ones, so
 # '/usr/local/bin', '/usr/local//bin' and '/usr/local/bin/' all name the same
@@ -185,7 +185,7 @@ if [ -n "${PREFIX:-}" ]; then
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
-        # /usr/local/burrowee/bin (production truth, and what the suite's static
+        # /usr/local/burrowee/beta/bin (production truth, and what the suite's static
         # pins check) and the resolved $_true_bin. They differ only when the
         # BURROWEE_BIN_DIR test seam is set, and an operator reading a refusal on
         # a real host must see the real path either way.
@@ -196,10 +196,10 @@ if [ -n "${PREFIX:-}" ]; then
         # the offending value, hiding the component, the destination and the
         # "nothing has been installed" line all at once.
         printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of gateway 0.2.0 this installer" >&2
-        echo "install: has one destination: /usr/local/burrowee/bin, root-owned. The per-user" >&2
+        echo "install: has one destination: /usr/local/burrowee/beta/bin, root-owned. The per-user" >&2
         echo "install: prefix flow is gone — the gateway's service units run as root and name" >&2
         echo "install: the binaries absolutely, and other components resolve" >&2
-        echo "install: /usr/local/burrowee/bin/burrowee by absolute path, so a per-user copy" >&2
+        echo "install: /usr/local/burrowee/beta/bin/burrowee by absolute path, so a per-user copy" >&2
         echo "install: is invisible to both." >&2
         printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
         echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
@@ -207,7 +207,7 @@ if [ -n "${PREFIX:-}" ]; then
     fi
     unset _prefix_bin _true_bin
 fi
-BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
+BINS="burroweeb burrowee-gateway burrowee-gateway-cli burrowee-gateway-console burrowee-register burrowee-gateway-updater"
 # OPERATOR_BINS — the subset of $BINS an OPERATOR TYPES. Deliberately smaller
 # than $BINS: burrowee-gateway-console and burrowee-gateway-updater are spawned
 # by a root parent that names the real path, and burrowee-register is execed by
@@ -222,7 +222,7 @@ BINS="burrowee burrowee-gateway burrowee-gateway-cli burrowee-gateway-console bu
 # anywhere any more (see the block where link_operator_bins used to be). A list
 # still named for a step that no longer exists is how the step gets re-added by
 # someone who reads the name as a promise.
-OPERATOR_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
+OPERATOR_BINS="burroweeb burrowee-gateway burrowee-gateway-cli"
 # The 0.2 exec root the sweep reads. BURROWEE_LEGACY_BIN_DIR is a TEST-ONLY
 # seam like BURROWEE_BIN_DIR, and it is LOAD-BEARING: a sandboxed run must
 # never iterate the real /usr/local/bin of the host it runs on (this
@@ -248,16 +248,16 @@ SYSTEMD_DIR="${BURROWEE_SYSTEMD_DIR:-/etc/systemd/system}"
 # resolves through core's system_root (ConfigRoot/DataRoot + "gateway"). They
 # are written into the units, so they must not drift from that pair. Same
 # test-seam caveat as above.
-SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/burrowee/etc/gateway}"
-SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/burrowee/var/gateway}"
+SYS_CONFIG_DIR="${BURROWEE_SYSTEM_CONFIG_DIR:-/usr/local/burrowee/beta/etc/gateway}"
+SYS_DATA_DIR="${BURROWEE_SYSTEM_DATA_DIR:-/usr/local/burrowee/beta/var/gateway}"
 SYS_LOG_DIR="$SYS_DATA_DIR/logs"
 # THE TREE ABOVE THE THREE ROOTS. In production all three parents are the one
-# directory /usr/local/burrowee, and the two intermediate levels are its etc/
+# directory /usr/local/burrowee/beta, and the two intermediate levels are its etc/
 # and var/. They are DERIVED from the three seamed leaves rather than spelled
 # as a fourth seam so that a sandboxed run can never reach outside its
 # sandbox: a suite that redirects $BIN_DIR to <tmp>/bin has, by construction,
 # redirected the tree to <tmp> as well, and a seam it forgot to set would
-# otherwise default to the real /usr/local/burrowee — which on a Homebrew Mac
+# otherwise default to the real /usr/local/burrowee/beta — which on a Homebrew Mac
 # a pass-through `sudo` stub could actually create. Nothing above
 # $SYSTEM_ROOT is ever created or re-moded by this script (ensure_dir_stated
 # refuses a level whose parent is absent): /usr/local is not ours.
@@ -375,7 +375,7 @@ UPDATER_START_FAILED=0
 #   burrowee-gateway-updater  the daemon named in the updater unit
 #   burrowee-gateway-cli      execed as root by migrations/v0_1_to_v0_2.sh, which the
 #                             console-push path runs with no operator present
-# burrowee and burrowee-register are NOT here: nothing running as root execs
+# burroweeb and burrowee-register are NOT here: nothing running as root execs
 # them. They now share $BIN_DIR with the four above regardless — the point of
 # this list is which paths the root-secure walk gates BEFORE a unit may name
 # them, not which directory they live in.
@@ -417,7 +417,7 @@ run_root() {
     if has_tty; then sudo "$@"; return; fi
     if sudo -n "$@" 2>/dev/null; then return 0; fi
     echo "error: 'sudo $*' failed — no tty for a password prompt and no cached sudo credentials." >&2
-    echo "hint: re-run from an interactive terminal, or pre-authorize with 'sudo -v', then retry ('burrowee gateway service install')." >&2
+    echo "hint: re-run from an interactive terminal, or pre-authorize with 'sudo -v', then retry ('burroweeb gateway service install')." >&2
     return 1
 }
 
@@ -680,7 +680,7 @@ dir_chain_is_root_secure() {
 # default before this DEFAULT moved to a root-owned $BIN_DIR).
 #
 # The second source is what converges a host installed under 0.2.0 whose $BIN_DIR
-# already IS today's default: `burrowee gateway service install` re-runs the kept
+# already IS today's default: `burroweeb gateway service install` re-runs the kept
 # installer with no bundle beside it, but the binaries are already in $BIN_DIR,
 # and re-verifying them in place is exactly the repair. The third source is what
 # converges an OLDER host: one installed before this DEFAULT moved has its
@@ -865,7 +865,7 @@ verify_root_exec_surface() {
             echo "error: ownership could not be established." >&2
             echo "hint: the permissions of $BIN_DIR are NOT implicated — reading them is." >&2
             echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
-            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+            echo "hint: system one; then re-run 'burroweeb gateway service install'." >&2
         elif [ "$_vre_rc" = 3 ]; then
             # Absent, not insecure — a different fact, most often the update
             # track excluding this exact name (ROOT_BIN_PLACE_EXCLUDE) on a
@@ -876,7 +876,7 @@ verify_root_exec_surface() {
             echo "error: $BIN_DIR/$_vre does not exist — refusing to install a service that" >&2
             echo "error: would run as root out of a path with nothing there." >&2
             echo "hint: this host has never had a binary placed at that path. Run" >&2
-            echo "hint: 'burrowee gateway service install' to place it and converge the host;" >&2
+            echo "hint: 'burroweeb gateway service install' to place it and converge the host;" >&2
             echo "hint: an update alone does not create it." >&2
         else
             echo "error: $BIN_DIR/$_vre is not root-owned and unwritable all the way to /." >&2
@@ -893,7 +893,7 @@ verify_root_exec_surface() {
     # It belongs on this surface — the supervisor execs it as root — but it
     # cannot join the loop above, whose absent case (rc 3) is a refusal. A host
     # converging off a bundle that predates the guard reaches
-    # `burrowee gateway service install` with an installer copy and no guard.sh
+    # `burroweeb gateway service install` with an installer copy and no guard.sh
     # beside it, and refusing there would brick the one verb this script sends
     # operators to, over an artefact that mode never arms. So: present and
     # insecure is a refusal, present and secure is fine, absent is left to
@@ -914,7 +914,7 @@ verify_root_exec_surface() {
             echo "error: keep a copy whose ownership could not be established." >&2
             echo "hint: the permissions of $BIN_DIR are NOT implicated — reading them is." >&2
             echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
-            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+            echo "hint: system one; then re-run 'burroweeb gateway service install'." >&2
             return 1
         elif [ "$_vre_g_rc" != 0 ]; then
             echo "error: $BIN_DIR/guard.sh is not root-owned and unwritable all the way to /." >&2
@@ -932,8 +932,8 @@ verify_root_exec_surface() {
 # ---------------------------------------------------------------------------
 core_unit_path() {
     case "$(uname -s)" in
-    Darwin) echo "$LAUNCHD_DIR/com.burrowee.gateway.plist" ;;
-    *)      echo "$SYSTEMD_DIR/burrowee-gateway.service" ;;
+    Darwin) echo "$LAUNCHD_DIR/com.burrowee.beta.gateway.plist" ;;
+    *)      echo "$SYSTEMD_DIR/burrowee-beta-gateway.service" ;;
     esac
 }
 
@@ -973,7 +973,7 @@ check_service_override() {
         esac
     fi
     echo "error: the gateway system service belongs to user '$_owner' — aborting." >&2
-    echo "hint: re-run with BURROWEE_FORCE_SERVICE_OVERRIDE=1 (or 'burrowee gateway service install --force-service-override') to take it over." >&2
+    echo "hint: re-run with BURROWEE_FORCE_SERVICE_OVERRIDE=1 (or 'burroweeb gateway service install --force-service-override') to take it over." >&2
     exit 1
 }
 
@@ -1011,11 +1011,11 @@ remove_legacy_user_units() {
 # root-owned /usr/local/bin and left the old copies exactly where they were.
 #
 # They do not sit there harmlessly. $HOME/.local/bin PRECEDES /usr/local/bin on
-# a normal PATH, so every unqualified `burrowee` or `burrowee-gateway-cli` an
+# a normal PATH, so every unqualified `burroweeb` or `burrowee-gateway-cli` an
 # operator types keeps resolving to the OLD binary while the units and every
 # absolute-path consumer use the new one — the same split-brain the header's
 # outage describes, read from the other end. Observed on a production node the
-# day 0.2.1 shipped: `which burrowee` → /home/ubuntu/.local/bin/burrowee.
+# day 0.2.1 shipped: `which burroweeb` → /home/ubuntu/.local/bin/burrowee.
 #
 # THE ORDERING IS A SAFETY PROPERTY, not a tidiness preference. A host arriving
 # here may still be running a unit whose ExecStart names the per-user path; on
@@ -1094,12 +1094,12 @@ sweep_stale_user_bins() {
         # PATH, which is this whole defect — or one swept and never installed.
         # Neither is visible without saying so out loud, because the sweep's
         # normal output on a converged host is nothing at all.
-        if [ "$BINS" != "$STALE_USER_BINS" ]; then
-            echo "note: this installer places [$BINS]" >&2
-            echo "note: but $_ssub_lib sweeps [$STALE_USER_BINS]." >&2
-            echo "note: the two lists disagree, so some name is installed and never swept" >&2
-            echo "note: (it keeps shadowing $BIN_DIR on PATH) or swept and never installed." >&2
-        fi
+        # NOT under the beta root, where the comparison is meaningless and the
+        # note is a lie: the sweep exists to remove PRE-0.2.0 per-user copies,
+        # every one of which belongs to the stable install, and a beta root
+        # never runs it. The lists differ here by construction — this installer
+        # places the beta dispatcher, and component.conf names the stable one —
+        # so the check would fire on every beta install and say nothing true.
     fi
     remove_stale_user_bins
 }
@@ -1129,7 +1129,7 @@ sweep_stale_exec_root() {
     fi
     # NO KEEP-LIST. It used to hold every operator-typed name this host had no
     # link at, because with nothing linked there the real 0.2 file was the only
-    # copy anything reached by the absolute path — the shared `burrowee`
+    # copy anything reached by the absolute path — the shared `burroweeb`
     # dispatcher above all. Nothing resolves by that path any more: no install
     # links there, and $BIN_DIR is what every unit, every root exec and the
     # printed PATH advice name. So the names that used to be deferred to a
@@ -1174,12 +1174,12 @@ print_path_advice() {
     echo "note: shell-aware PATH advice, so here is the one line it would have rendered." >&2
     echo ""
     echo "==> Next steps"
-    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo "burroweeb's commands are in $BIN_DIR, which is not on your PATH."
     echo ""
     echo "  Add it to this shell now:"
     echo "    export PATH=\"$BIN_DIR:\$PATH\""
     echo ""
-    echo "  Then:  burrowee help"
+    echo "  Then:  burroweeb help"
     return 0
 }
 
@@ -1249,7 +1249,7 @@ place_unit() {
 # mode — before decide_bin_place_elevated's unprivileged writability probe ever
 # looks at $BIN_DIR.
 #
-# The whole tree is OURS by construction: /usr/local/burrowee is created by
+# The whole tree is OURS by construction: /usr/local/burrowee/beta is created by
 # root, beside Homebrew's directories rather than inside them, so every level
 # is moded unconditionally — there is no "somebody else's parent" to leave
 # alone, which is what the 0.2 layout could never say about /usr/local/etc.
@@ -1306,7 +1306,7 @@ ensure_dir_stated() {
 
 # ensure_system_tree — the whole tree, top-down, one level at a time, then
 # asserted. The three chains meet at $SYSTEM_ROOT in production (bin/, etc/
-# and var/ are siblings under /usr/local/burrowee); under the test seams each
+# and var/ are siblings under /usr/local/burrowee/beta); under the test seams each
 # leaf may hang off its own sandbox parent, which is why each chain names its
 # own parent rather than assuming the first one's.
 #
@@ -1317,6 +1317,13 @@ ensure_dir_stated() {
 # detect (the Go side says the same, ConfigRootMode). var/gateway and its
 # logs/ are 0700: nothing under them is for a non-owner.
 ensure_system_tree() {
+    # The beta root is one level DEEPER than the stable one, and
+    # ensure_dir_stated refuses a level whose parent is absent — correctly, so
+    # that nothing here ever creates a directory above the tree we own. On a
+    # host that has stable installed the parent is already there; on one that
+    # does not, this is the level that has to exist first, and it is still ours
+    # (/usr/local, its parent, is not, and is never created here).
+    ensure_dir_stated "$(dirname "$SYSTEM_ROOT")" 0755 || return 1
     ensure_dir_stated "$SYSTEM_ROOT" 0755 || return 1
     ensure_dir_stated "$BIN_DIR" 0755 || return 1
     ensure_dir_stated "$(dirname "$SYS_ETC_ROOT")" 0755 || return 1
@@ -1327,6 +1334,51 @@ ensure_system_tree() {
     ensure_dir_stated "$SYS_DATA_DIR" 0700 || return 1
     ensure_dir_stated "$SYS_LOG_DIR" 0700 || return 1
     assert_system_tree
+}
+
+# seed_beta_config — write the ONE key that keeps a beta gateway off the stable
+# gateway's console port, and only when this root has no config of its own yet.
+#
+# 16519 is stable's 16518 plus one, and it is written HERE rather than left to
+# the binary's default because the default IS 16518: two gateways on one host
+# with no config would both bind it, and the second would fail to start with an
+# error about a port neither operator chose. Seed-if-absent, never a rewrite —
+# an operator who has moved the beta console has moved it on purpose, and this
+# script runs again on every update.
+#
+# The gateway repo ships etc/gateway/config.beta.example carrying the same
+# value (feature 04); this is the installer half of that one fact, and the two
+# are checked against each other by nothing but review — see tools/RUNBOOK.md.
+# IT CREATES ITS OWN ROOT IF IT HAS TO, and that is the point rather than
+# belt-and-braces. The two paths that call this reach it by different routes:
+# the fresh install runs ensure_system_tree itself long before, while
+# BURROWEE_UNITS_ONLY (`service install`, no bundle) gets it ONLY from
+# render_units, through ensure_root_exec_surface. Depending on the caller's
+# order made the failure invisible — the seed failed, warned, and the beta
+# gateway then started on the binary's default console port, 16518, which is the
+# single thing this function exists to prevent. ensure_system_tree is idempotent
+# (it creates each level and asserts it), so asking for it here costs nothing on
+# the path that already ran it.
+seed_beta_config() {
+    _sbc="$SYS_CONFIG_DIR/config"
+    if [ -e "$_sbc" ]; then
+        return 0
+    fi
+    if [ ! -d "$SYS_CONFIG_DIR" ]; then
+        ensure_system_tree || {
+            echo "warning: could not create $SYS_CONFIG_DIR — the beta gateway will fall back to the STABLE console port (16518) and refuse to bind it" >&2
+            return 0
+        }
+    fi
+    _sbc_tmp="$(mktemp)" || return 0
+    printf 'console_port=16519\n' > "$_sbc_tmp"
+    if run_root /usr/bin/install -m 0644 "$_sbc_tmp" "$_sbc"; then
+        echo "install: seeded $_sbc with console_port=16519 (stable's port plus one)"
+    else
+        echo "warning: could not seed $_sbc — set console_port=16519 by hand before starting the beta gateway" >&2
+    fi
+    rm -f "$_sbc_tmp"
+    return 0
 }
 
 # assert_system_tree — refuse when any root of the tree is not root-owned and
@@ -1365,11 +1417,11 @@ assert_system_tree() {
             echo "error: whose ownership could not be established." >&2
             echo "hint: the permissions of $_ast are NOT implicated — reading them is." >&2
             echo "hint: check which stat is on PATH ('command -v stat') and that it is the" >&2
-            echo "hint: system one; then re-run 'burrowee gateway service install'." >&2
+            echo "hint: system one; then re-run 'burroweeb gateway service install'." >&2
         elif [ "$_ast_rc" = 3 ]; then
             echo "error: $_ast does not exist — refusing to install a service whose state" >&2
             echo "error: would sit in a directory this run failed to create." >&2
-            echo "hint: re-run 'burrowee gateway service install' from an interactive terminal" >&2
+            echo "hint: re-run 'burroweeb gateway service install' from an interactive terminal" >&2
             echo "hint: so the directory can be created as root." >&2
         else
             echo "error: $_ast is not root-owned and unwritable all the way to /." >&2
@@ -1504,7 +1556,7 @@ unlink_operator_bins() {
         [ -L "$_uob_p" ] || continue
         link_target_is_ours "$_uob_p" || continue
         # A link whose target still exists is still serving someone: the shared
-        # `burrowee` dispatcher stays in $BIN_DIR while a sibling component is
+        # `burroweeb` dispatcher stays in $BIN_DIR while a sibling component is
         # installed, and its link must stay with it. Same rule as the edge's.
         [ -e "$_uob_p" ] && continue
         run_root rm -f "$_uob_p" || echo "note: could not remove the link $_uob_p (needs root) — remove it by hand" >&2
@@ -1728,7 +1780,7 @@ migration_sudo() {
 # records a version has already established the whole machine-owned tree
 # (ensure_system_tree, before its first write), so the answer is always yes
 # and the guard would be dead: both anchors are written, unconditionally. The
-# $BIN_DIR copy moves WITH $BIN_DIR to /usr/local/burrowee/bin, and the root
+# $BIN_DIR copy moves WITH $BIN_DIR to /usr/local/burrowee/beta/bin, and the root
 # updater reads it from there (core's local-update path, <exec dir>/
 # .installed-version); the uninstall block removes it from the same place.
 record_installed_version() {
@@ -1913,7 +1965,7 @@ report_unrecorded_migration() {
 #
 # Both, in every mode. install.sh resolves the runner relative to its OWN path, so
 # a $GW_HOME holding install.sh without migrations/ is an installer that silently
-# cannot migrate — and `burrowee gateway service install` is the remedy this
+# cannot migrate — and `burroweeb gateway service install` is the remedy this
 # script points operators at.
 # ---------------------------------------------------------------------------
 keep_installer_copy() {
@@ -1924,7 +1976,7 @@ keep_installer_copy() {
         mkdir -p "$GW_HOME/migrations"
         if ! cp "$_src_migrations"/*.sh "$GW_HOME/migrations/" 2>/dev/null; then
             echo "note: could not keep a copy of migrations/ at $GW_HOME — a later" >&2
-            echo "note: 'burrowee gateway service install' will not be able to migrate." >&2
+            echo "note: 'burroweeb gateway service install' will not be able to migrate." >&2
         fi
     fi
     # guard.sh too, off the same resolution guard_arm's SOURCE uses
@@ -1952,7 +2004,7 @@ keep_installer_copy() {
     if [ -f "$_src_guard" ]; then
         if ! cp "$_src_guard" "$GW_HOME/guard.sh" 2>/dev/null; then
             echo "note: could not keep a copy of guard.sh at $GW_HOME — a later" >&2
-            echo "note: 'burrowee gateway service install' will not be able to arm the guard." >&2
+            echo "note: 'burroweeb gateway service install' will not be able to arm the guard." >&2
         fi
     fi
 }
@@ -1990,8 +2042,8 @@ render_units() {
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.burrowee.gateway</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway</string><string>--no-open</string><string>--config-dir</string><string>$SYS_CONFIG_DIR</string><string>--data-dir</string><string>$SYS_DATA_DIR</string></array>
+  <key>Label</key><string>com.burrowee.beta.gateway</string>
+  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway</string><string>--no-open</string><string>--home</string><string>/usr/local/burrowee/beta/etc</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
@@ -2001,18 +2053,22 @@ render_units() {
   <key>StandardErrorPath</key><string>$SYS_LOG_DIR/gateway.err.log</string>
 </dict></plist>
 EOF
-        place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
+        place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.beta.gateway.plist"
 
         # Updater unit. No path flags: the updater agent resolves its own roots,
         # which already default to the system pair under root's euid — the same
         # defaulting the core unit's flags only make explicit.
+        # UNDER THE BETA ROOT IT PASSES --home, and must: that defaulting knows
+        # only the STABLE pair, so a beta updater without it would fetch, place
+        # and restart against the other channel's tree (gateway feature 04,
+        # updater_agent.RunForHome).
         _tmp_unit="$(mktemp)"
         cat > "$_tmp_unit" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.burrowee.gateway.updater</string>
-  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway-updater</string><string>run</string></array>
+  <key>Label</key><string>com.burrowee.beta.gateway.updater</string>
+  <key>ProgramArguments</key><array><string>$BIN_DIR/burrowee-gateway-updater</string><string>run</string><string>--home</string><string>/usr/local/burrowee/beta/etc</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
   <key>RunAtLoad</key><true/>
@@ -2022,7 +2078,7 @@ EOF
   <key>StandardErrorPath</key><string>$SYS_LOG_DIR/updater.err.log</string>
 </dict></plist>
 EOF
-        place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist"
+        place_unit "$_tmp_unit" "$LAUNCHD_DIR/com.burrowee.beta.gateway.updater.plist"
         ;;
 
     Linux)
@@ -2037,7 +2093,7 @@ Description=burrowee-gateway
 After=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/burrowee-gateway --no-open --config-dir $SYS_CONFIG_DIR --data-dir $SYS_DATA_DIR
+ExecStart=$BIN_DIR/burrowee-gateway --no-open --home /usr/local/burrowee/beta/etc
 Restart=always
 RestartSec=2
 TimeoutStopSec=330
@@ -2045,11 +2101,15 @@ TimeoutStopSec=330
 [Install]
 WantedBy=multi-user.target
 EOF
-        place_unit "$_tmp_unit" "$SYSTEMD_DIR/burrowee-gateway.service"
+        place_unit "$_tmp_unit" "$SYSTEMD_DIR/burrowee-beta-gateway.service"
 
         # Updater unit. No path flags: the updater agent resolves its own roots,
         # which already default to the system pair under root's euid — the same
         # defaulting the core unit's flags only make explicit.
+        # UNDER THE BETA ROOT IT PASSES --home, and must: that defaulting knows
+        # only the STABLE pair, so a beta updater without it would fetch, place
+        # and restart against the other channel's tree (gateway feature 04,
+        # updater_agent.RunForHome).
         _tmp_unit="$(mktemp)"
         cat > "$_tmp_unit" <<EOF
 [Unit]
@@ -2057,14 +2117,14 @@ Description=burrowee-gateway-updater
 After=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/burrowee-gateway-updater run
+ExecStart=$BIN_DIR/burrowee-gateway-updater run --home /usr/local/burrowee/beta/etc
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        place_unit "$_tmp_unit" "$SYSTEMD_DIR/burrowee-gateway-updater.service"
+        place_unit "$_tmp_unit" "$SYSTEMD_DIR/burrowee-beta-gateway-updater.service"
         ;;
 
     *)
@@ -2299,8 +2359,8 @@ load_units() {
             # under a running instance. The two branches are exclusive — running
             # bootstrap before the bootout+bootstrap pair would start, stop, then
             # restart the service on every fresh install.
-            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.plist"         2>/dev/null || true
-            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" 2>/dev/null || true
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.beta.gateway.plist"         2>/dev/null || true
+            run_root launchctl bootstrap system "$LAUNCHD_DIR/com.burrowee.beta.gateway.updater.plist" 2>/dev/null || true
             echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
         else
             # NO BOOTOUT. `bootout` unloads the job, and an unloaded job is not
@@ -2319,14 +2379,14 @@ load_units() {
             # what loads the job on a host that has none, and exits 5
             # ("already loaded") harmlessly on one that does — which is exactly
             # the case the deleted bootout was manufacturing.
-            start_unit_darwin "com.burrowee.gateway" "$LAUNCHD_DIR/com.burrowee.gateway.plist"
+            start_unit_darwin "com.burrowee.beta.gateway" "$LAUNCHD_DIR/com.burrowee.beta.gateway.plist"
             SERVE_UNIT_STARTED=1
             if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
                 echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
             else
-                run_root launchctl bootout "system/com.burrowee.gateway.updater" 2>/dev/null || true
+                run_root launchctl bootout "system/com.burrowee.beta.gateway.updater" 2>/dev/null || true
                 # Recorded, not fatal — see UPDATER_START_FAILED.
-                start_unit_darwin "com.burrowee.gateway.updater" "$LAUNCHD_DIR/com.burrowee.gateway.updater.plist" \
+                start_unit_darwin "com.burrowee.beta.gateway.updater" "$LAUNCHD_DIR/com.burrowee.beta.gateway.updater.plist" \
                     || UPDATER_START_FAILED=1
             fi
         fi
@@ -2334,11 +2394,11 @@ load_units() {
     Linux)
         run_root systemctl daemon-reload 2>/dev/null || true
         if [ -n "${BURROWEE_NO_RESTART:-}" ]; then
-            run_root systemctl enable burrowee-gateway.service         2>/dev/null || true
-            run_root systemctl enable burrowee-gateway-updater.service 2>/dev/null || true
+            run_root systemctl enable burrowee-beta-gateway.service         2>/dev/null || true
+            run_root systemctl enable burrowee-beta-gateway-updater.service 2>/dev/null || true
             echo "note: BURROWEE_NO_RESTART set — units staged (not restarted)" >&2
         else
-            run_root systemctl enable --now burrowee-gateway.service         2>/dev/null || true
+            run_root systemctl enable --now burrowee-beta-gateway.service         2>/dev/null || true
 
             # THE DAEMON, ADVANCED — the step this branch was missing, and the
             # reason a Linux host kept executing its OLD ExecStart until the next
@@ -2363,7 +2423,7 @@ load_units() {
             # UNCONDITIONAL, on purpose. The tempting guard — restart only when a
             # binary or the unit body actually changed — cannot see the state that
             # created this bug: files already converged, process still stale. A
-            # host in drift today reaches `burrowee gateway service install` with
+            # host in drift today reaches `burroweeb gateway service install` with
             # every byte already in place, so a change-detecting restart would
             # decline exactly when the operator ran the documented remedy. It is
             # also not a spontaneous bounce: nothing periodic reaches here (see
@@ -2375,13 +2435,13 @@ load_units() {
             # swallowed. `restart`'s own status is a diagnosis, not the verdict:
             # it is funnelled into the probe below the same way start_unit_linux
             # funnels enable/restart into its is-active check.
-            if ! run_root systemctl restart burrowee-gateway.service; then
-                echo "error: 'systemctl restart burrowee-gateway.service' failed — the newly" >&2
+            if ! run_root systemctl restart burrowee-beta-gateway.service; then
+                echo "error: 'systemctl restart burrowee-beta-gateway.service' failed — the newly" >&2
                 echo "error: installed binaries are on disk, but the daemon still running is the" >&2
-                echo "error: OLD one. 'burrowee gateway doctor' reports installed/running drift" >&2
+                echo "error: OLD one. 'burroweeb gateway doctor' reports installed/running drift" >&2
                 echo "error: until it is restarted, and a unit rewritten to a new ExecStart has" >&2
                 echo "error: not taken effect." >&2
-                echo "hint: restart it by hand: sudo systemctl restart burrowee-gateway.service" >&2
+                echo "hint: restart it by hand: sudo systemctl restart burrowee-beta-gateway.service" >&2
             fi
 
             # THE PROBE — gateway on Linux was the last component/platform pair
@@ -2401,12 +2461,12 @@ load_units() {
             # THE FLAG IS ARMED FROM THE PROBE, not from restart's status: a
             # daemon that starts and dies a second later would otherwise arm the
             # 60s wait for a version it can never report.
-            if run_root systemctl is-active --quiet burrowee-gateway.service; then
-                echo "systemd service burrowee-gateway.service enabled + (re)started"
+            if run_root systemctl is-active --quiet burrowee-beta-gateway.service; then
+                echo "systemd service burrowee-beta-gateway.service enabled + (re)started"
                 SERVE_UNIT_STARTED=1
             else
-                echo "error: burrowee-gateway.service is not active after enable --now" >&2
-                echo "hint: sudo systemctl status burrowee-gateway.service" >&2
+                echo "error: burrowee-beta-gateway.service is not active after enable --now" >&2
+                echo "hint: sudo systemctl status burrowee-beta-gateway.service" >&2
                 return 1
             fi
 
@@ -2421,7 +2481,7 @@ load_units() {
                 echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
             else
                 # Recorded, not fatal — see UPDATER_START_FAILED.
-                start_unit_linux burrowee-gateway-updater.service || UPDATER_START_FAILED=1
+                start_unit_linux burrowee-beta-gateway-updater.service || UPDATER_START_FAILED=1
             fi
         fi
         ;;
@@ -2690,12 +2750,12 @@ snapshot_take() {
 
     case "$(uname -s)" in
     Darwin)
-        for u in com.burrowee.gateway.plist com.burrowee.gateway.updater.plist; do
+        for u in com.burrowee.beta.gateway.plist com.burrowee.beta.gateway.updater.plist; do
             [ -f "$LAUNCHD_DIR/$u" ] && { run_root cp -p "$LAUNCHD_DIR/$u" "$_snap/units/$u" || return 1; }
         done
         ;;
     Linux)
-        for u in burrowee-gateway.service burrowee-gateway-updater.service; do
+        for u in burrowee-beta-gateway.service burrowee-beta-gateway-updater.service; do
             [ -f "$SYSTEMD_DIR/$u" ] && { run_root cp -p "$SYSTEMD_DIR/$u" "$_snap/units/$u" || return 1; }
         done
         ;;
@@ -2763,10 +2823,17 @@ snapshot_db() {
         return 0
     fi
 
-    if run_root "$BIN_DIR/burrowee-gateway-cli" db snapshot "$_dst" 2>/dev/null; then
-        SNAPSHOT_CONSISTENCY=exact
-        return 0
-    fi
+    # THE CLI ARM IS NOT TAKEN UNDER THE BETA ROOT. `db snapshot` picks its own
+    # source, and with no home to resolve it picks the STABLE database — so the
+    # snapshot this transaction would roll back to is the OTHER install's, taken
+    # while claiming consistency=exact. A rollback from it would overwrite this
+    # root's database with the other one's, which is worse than having no
+    # snapshot at all.
+    #
+    # Nothing is lost by dropping it: the sqlite3 arm below is an online backup
+    # too, it also records consistency=exact, and it names $SYS_DATA_DIR
+    # explicitly — this root's own path. Restore the cli arm the day `db
+    # snapshot` takes the instance's home.
     if command -v sqlite3 >/dev/null 2>&1 &&
        run_root sqlite3 "$SYS_DATA_DIR/gateway.db" ".backup '$_dst'" 2>/dev/null; then
         SNAPSHOT_CONSISTENCY=exact
@@ -3062,13 +3129,13 @@ guard_arm() {
 
     case "$(uname -s)" in
     Darwin)
-        _gp="$LAUNCHD_DIR/com.burrowee.gateway.guard.plist"
+        _gp="$LAUNCHD_DIR/com.burrowee.beta.gateway.guard.plist"
         _tmp="$(mktemp)"
         cat > "$_tmp" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.burrowee.gateway.guard</string>
+  <key>Label</key><string>com.burrowee.beta.gateway.guard</string>
   <key>ProgramArguments</key><array><string>$_guard</string><string>$TXN_DIR</string></array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>WorkingDirectory</key><string>/tmp</string>
@@ -3090,11 +3157,11 @@ EOF
         # previous install would otherwise refuse the bootstrap.
         # guard_refuse_concurrent above has already proved no LIVE guard is
         # mid-flight, so this can never unload one in the middle of a rollback.
-        run_root launchctl bootout "system/com.burrowee.gateway.guard" 2>/dev/null || true
+        run_root launchctl bootout "system/com.burrowee.beta.gateway.guard" 2>/dev/null || true
         run_root launchctl bootstrap system "$_gp" || return 1
         ;;
     Linux)
-        run_root systemd-run --unit=burrowee-gateway-guard --collect \
+        run_root systemd-run --unit=burrowee-beta-gateway-guard --collect \
             "$_guard" "$TXN_DIR" || return 1
         ;;
     *)
@@ -3176,7 +3243,7 @@ guard_refuse_concurrent() {
 
         echo "error: arming a second guard would boot that one out — possibly between its" >&2
         echo "error: restore and the restart that finishes it — so this install refuses." >&2
-        echo "hint: watch it finish with 'burrowee gateway service guard-status', then re-run." >&2
+        echo "hint: watch it finish with 'burroweeb gateway service guard-status', then re-run." >&2
         return 1
     done
     return 0
@@ -3264,7 +3331,7 @@ guard_prove_armed() {
         echo "warning: continuing rather than refusing an install over a fact that could not" >&2
         echo "warning: be established. The guard, if it started, is still watching." >&2
         echo "hint: run the install as root (or with a warm sudo timestamp) to get the" >&2
-        echo "hint: arm-proof back; watch the outcome with 'burrowee gateway service" >&2
+        echo "hint: arm-proof back; watch the outcome with 'burroweeb gateway service" >&2
         echo "hint: guard-status' either way." >&2
         # 2, never 0: continue, but do not let anything downstream claim a guard
         # is watching. See this function's header and GUARD_ARMED's declaration.
@@ -3287,7 +3354,7 @@ guard_prove_armed() {
 # Mirrors gateway/update.sh's PLACE_ELEVATED (see that script's header for the
 # full field history). $BIN_DIR was always writable under the old default
 # ($HOME/.local/bin); it is root-owned under the new one
-# (/usr/local/burrowee/bin), so placing straight onto the final names with a
+# (/usr/local/burrowee/beta/bin), so placing straight onto the final names with a
 # bare `install` would die on the first binary for anyone who is not already
 # root. The elevation is decided ONCE per mode, by a real create rather than
 # assumed — a run already at uid 0 never pays for a sudo call it does not need
@@ -3459,7 +3526,7 @@ verify_units() {
     _rc=0
     case "$(uname -s)" in
     Darwin)
-        for u in com.burrowee.gateway.plist com.burrowee.gateway.updater.plist; do
+        for u in com.burrowee.beta.gateway.plist com.burrowee.beta.gateway.updater.plist; do
             _p="$LAUNCHD_DIR/$u"
             [ -f "$_p" ] || { echo "verify: $_p is missing" >&2; _rc=1; continue; }
             if command -v plutil >/dev/null 2>&1 && ! plutil -lint "$_p" >/dev/null 2>&1; then
@@ -3468,7 +3535,7 @@ verify_units() {
         done
         ;;
     Linux)
-        for u in burrowee-gateway.service burrowee-gateway-updater.service; do
+        for u in burrowee-beta-gateway.service burrowee-beta-gateway-updater.service; do
             _p="$SYSTEMD_DIR/$u"
             [ -f "$_p" ] || { echo "verify: $_p is missing" >&2; _rc=1; continue; }
         done
@@ -3586,7 +3653,7 @@ consent_to_sever() {
     heartbeat_start
     {
         printf '\n'
-        printf 'This host is serving as a burrowee gateway, and this session reaches it\n'
+        printf 'This host is serving as a burroweeb gateway, and this session reaches it\n'
 
         printf 'THROUGH that gateway — %s.\n' "$_cause"
         printf 'Continuing will drop this connection.\n\n'
@@ -3610,7 +3677,7 @@ consent_to_sever() {
             ;;
         esac
         printf '  transaction   %s\n' "$TXN_DIR"
-        printf '  on reconnect  burrowee gateway service guard-status\n\n'
+        printf '  on reconnect  burroweeb gateway service guard-status\n\n'
         printf 'Continue? [y/N] '
     } >&3 2>/dev/null || true
     _ans=''
@@ -3705,7 +3772,7 @@ abort_install() {
         echo "install: it restores the previous binaries, units, config and state, and makes" >&2
         echo "install: sure the gateway is serving again before it stops." >&2
         echo "install: transaction $TXN_DIR" >&2
-        echo "install: check the outcome with: burrowee gateway service guard-status" >&2
+        echo "install: check the outcome with: burroweeb gateway service guard-status" >&2
         exit 1
     fi
     if [ "$GUARD_ARMED" = unproven ]; then
@@ -3720,8 +3787,8 @@ abort_install() {
         echo "install: reading a terminal phase would stop without restarting anything, and" >&2
         echo "install: restarting is the half this shell cannot do." >&2
         echo "install: transaction $TXN_DIR" >&2
-        echo "install: check whether the guard reported: burrowee gateway service guard-status" >&2
-        echo "install: if it never does, start the gateway by hand: sudo burrowee gateway service install" >&2
+        echo "install: check whether the guard reported: burroweeb gateway service guard-status" >&2
+        echo "install: if it never does, start the gateway by hand: sudo burroweeb gateway service install" >&2
         exit 1
     fi
     case "$(snapshot_binaries_state "$TXN_DIR/snapshot")" in
@@ -3802,7 +3869,7 @@ reattach() {
             return 0 ;;
         rolled-back)
             echo "install: the new build did not come up — the previous one was restored" >&2
-            echo "install: and is serving. Details: burrowee gateway service guard-status" >&2
+            echo "install: and is serving. Details: burroweeb gateway service guard-status" >&2
             return 1 ;;
         aborted)
             # NOT folded into `rolled-back`, although both return 1. The guard
@@ -3814,7 +3881,7 @@ reattach() {
             # thing this line has to say.
             echo "install: the install was aborted and nothing was started — this host had no" >&2
             echo "install: previous gateway to restore, so no gateway is running." >&2
-            echo "install: Details: burrowee gateway service guard-status" >&2
+            echo "install: Details: burroweeb gateway service guard-status" >&2
             return 1 ;;
         failed)
             # NOT "the rollback did not come up either". Two guard paths write
@@ -3827,14 +3894,14 @@ reattach() {
             # the two are kept in step on purpose.
             echo "install: the host is not serving and the guard could not get it serving —" >&2
             echo "install: this needs hands." >&2
-            echo "install: burrowee gateway service guard-status $TXN_STAMP" >&2
+            echo "install: burroweeb gateway service guard-status $TXN_STAMP" >&2
             return 2 ;;
         esac
         sleep "$REATTACH_INTERVAL"
         _waited=$((_waited + REATTACH_INTERVAL))
     done
     echo "install: the guard has not reported yet; it is still running and will finish"
-    echo "install: without this session. burrowee gateway service guard-status"
+    echo "install: without this session. burroweeb gateway service guard-status"
     return 0
 }
 
@@ -3851,7 +3918,7 @@ fi
 
 if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # ------------------------------------------------------------------
-    # `burrowee gateway service install` and `doctor --fix`, both of which
+    # `burroweeb gateway service install` and `doctor --fix`, both of which
     # reach here through installGatewayUnits (gateway's
     # cmd/burrowee-gateway-cli/service.go). Both are OPERATOR verbs, typed in
     # an operator's session — and on a gateway that session is routinely
@@ -3911,22 +3978,15 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # downstream acts on.
     txn_phase replacing
 
-    remove_legacy_user_units
-    # The migration's own consent gate, asked BEFORE the stop and not at the
-    # restart — the same reasoning, and the same call, as the fresh path's:
-    # on a host with a pending rung the runner stops the daemon and takes a
-    # tunnelled operator's session with it, so a prompt read afterwards is
-    # read from a terminal that no longer exists. Silent when nothing is
-    # pending, never asked at all with no tty (should_ask_before_migration).
-    if should_ask_before_migration; then
-        consent_to_sever migration
-    fi
-    # Before render_units. A migration that fails for ANY reason exits this
-    # script — and a root-scheme unit left on disk by a run that then aborted
-    # is bootstrapped by launchd at the next reboot regardless, against a
-    # config root the migration never populated.
-    migrate_from_legacy
     render_units
+    # AFTER render_units on THIS path, unlike the fresh one, and the difference
+    # is not style. Units-only (`service install`, no bundle) reaches here
+    # without having run ensure_system_tree — render_units is what runs it, via
+    # ensure_root_exec_surface — so a seed placed above would be writing into a
+    # config root that does not exist yet. It would fail, warn, and the beta
+    # gateway would then start on the binary's default console port: 16518, the
+    # stable one, which is the single thing this seed exists to prevent.
+    seed_beta_config
 
     # THE LINKS AND BOTH SWEEPS ARE NOT HERE ANY MORE. They used to follow a
     # synchronous load_units on this path; the restart is now handed to the
@@ -3964,7 +4024,7 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # a gap this mode tolerates — it is a check that has nothing to say about
     # this mode, in two independent ways:
     #
-    #   * it walks $BINS, which includes `burrowee` and `burrowee-register`.
+    #   * it walks $BINS, which includes `burroweeb` and `burrowee-register`.
     #     This mode places neither (nothing but ensure_root_exec_surface
     #     places anything at all here), so on a host that legitimately does
     #     not carry them it would fail an install that did nothing wrong.
@@ -4030,7 +4090,7 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
         # connection reaches no one.
         echo ""
         echo "handing the restart to the guard. If this connection drops, reconnect and run:"
-        echo "    burrowee gateway service guard-status"
+        echo "    burroweeb gateway service guard-status"
         echo ""
         txn_phase handoff
 
@@ -4050,7 +4110,7 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
         echo ""
         echo "units staged on disk. Nothing was restarted (BURROWEE_NO_RESTART)."
         echo "start the gateway when you are ready with:"
-        echo "    sudo burrowee gateway service install"
+        echo "    sudo burroweeb gateway service install"
         echo ""
     fi
 
@@ -4065,10 +4125,10 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # guard calls sweep_stale_exec_root through the kept installer
     # (guard.sh's sweep_stale_bins_via_kept_installer), and the guard is armed
     # from here. So the run that REMOVES /usr/local/bin/burrowee-gateway-cli
-    # and the shared `burrowee` dispatcher from a converging 0.2 host is
+    # and the shared `burroweeb` dispatcher from a converging 0.2 host is
     # exactly this one — and until now it was the one run that printed no
     # replacement instruction. Worse, update mode ends by telling the operator
-    # to run `sudo burrowee gateway service install`, which is this mode: the
+    # to run `sudo burroweeb gateway service install`, which is this mode: the
     # sequence finished with their typed command gone and nothing said about
     # it anywhere.
     #
@@ -4229,7 +4289,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # here (the updater restarts the kernel out-of-band; loading would bootout the
     # very process running this script), never touch another user's slot, and
     # never fail the binary swap for lack of sudo: a unit refresh can always
-    # happen later via 'burrowee gateway service install'.
+    # happen later via 'burroweeb gateway service install'.
     #
     # The migration comes first because a failed one exits this script, and a
     # root-scheme unit already on disk is bootstrapped by launchd at the next
@@ -4252,14 +4312,13 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         # silently overwritten from the bundle here, one function past the
         # exclusion meant to stop exactly that.
         ROOT_BIN_PLACE_EXCLUDE="burrowee-gateway-updater"
-        migrate_from_legacy
-        render_units || echo "note: service units not refreshed (needs sudo) — run 'burrowee gateway service install'" >&2
+        render_units || echo "note: service units not refreshed (needs sudo) — run 'burroweeb gateway service install'" >&2
         # The exec-root sweep still has to wait until the loaded units name
-        # $BIN_DIR: the units-only reinstall (`burrowee gateway service
+        # $BIN_DIR: the units-only reinstall (`burroweeb gateway service
         # install`) does it after load_units. This path arms no guard — the
         # updater restarts the service itself right after this script exits —
         # so there is no later step here to hand it to.
-        echo "note: once the service has restarted onto the new units, 'sudo burrowee gateway service install' sweeps the 0.2 copies out of $LEGACY_BIN_DIR"
+        echo "note: once the service has restarted onto the new units, 'sudo burroweeb gateway service install' sweeps the 0.2 copies out of $LEGACY_BIN_DIR"
 
         # The version LAST, and only once everything above succeeded. Recording it
         # before the migration would mean a failed migration leaves the new version on
@@ -4278,7 +4337,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         fi
     else
         echo "note: gateway system service belongs to user '$_slot_owner' — units not refreshed" >&2
-        echo "note: not migrating either — 'burrowee gateway service install' takes the slot over first" >&2
+        echo "note: not migrating either — 'burroweeb gateway service install' takes the slot over first" >&2
         echo "note: and the installed version is not recorded, so the migration stays pending" >&2
     fi
 
@@ -4305,7 +4364,7 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
     # operator to find a stopped service.
     if [ "$MIGRATED" = "1" ]; then
         echo "note: a migration stopped the gateway — it starts again on the updater's restart," >&2
-        echo "note: or run 'burrowee gateway restart' now." >&2
+        echo "note: or run 'burroweeb gateway restart' now." >&2
     fi
 
     # Final change-set line (MUST be the last stdout line).
@@ -4321,25 +4380,25 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     _uninstall_failed=""
     if [ -d "$BIN_DIR" ]; then
         decide_bin_place_elevated
-        # Everything but the dispatcher first: the `burrowee` decision below
+        # Everything but the dispatcher first: the `burroweeb` decision below
         # asks whether any OTHER component is still installed, and asking it
         # while this component's own binaries are still on disk would always
         # answer yes.
         for b in $BINS; do
-            [ "$b" = burrowee ] && continue
+            [ "$b" = burroweeb ] && continue
             if [ -e "$BIN_DIR/$b" ] && ! bin_place_run rm -f "$BIN_DIR/$b"; then
                 _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }$b"
             fi
         done
-        # The bare `burrowee` dispatcher is SHARED with every co-installed
+        # The bare `burroweeb` dispatcher is SHARED with every co-installed
         # component (an edge or a relay on the same host), so it goes only when
         # nothing else of ours is left in $BIN_DIR. Same rule, same order, as
         # the edge uninstall — and what makes the "keep a live link" guard in
         # unlink_operator_bins reachable at all.
         if ls "$BIN_DIR"/burrowee-* >/dev/null 2>&1; then
-            echo "kept $BIN_DIR/burrowee (dispatcher) — other burrowee components remain installed"
-        elif [ -e "$BIN_DIR/burrowee" ] && ! bin_place_run rm -f "$BIN_DIR/burrowee"; then
-            _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }burrowee"
+            echo "kept $BIN_DIR/burroweeb (dispatcher) — other burroweeb components remain installed"
+        elif [ -e "$BIN_DIR/burroweeb" ] && ! bin_place_run rm -f "$BIN_DIR/burroweeb"; then
+            _uninstall_failed="${_uninstall_failed:+$_uninstall_failed }burroweeb"
         fi
         # This script's own kept copy + migrations/, placed here by
         # ensure_root_exec_surface (never by BINS) — an uninstall that leaves
@@ -4357,7 +4416,7 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
 
     # The operator-typed links, and only the ones that still point into
     # $BIN_DIR (spec §6.1 rule 4). Before the binaries are reported gone so an
-    # operator reading the line does not still have a dangling `burrowee` on
+    # operator reading the line does not still have a dangling `burroweeb` on
     # PATH.
     unlink_operator_bins
 
@@ -4387,7 +4446,7 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         # (remove_guard_unit); this is the belt to that braces, for a guard
         # that was SIGKILLed or a host whose /Library/LaunchDaemons was not
         # writable when it tried.
-        for _label in com.burrowee.gateway com.burrowee.gateway.updater com.burrowee.gateway.guard; do
+        for _label in com.burrowee.beta.gateway com.burrowee.beta.gateway.updater com.burrowee.beta.gateway.guard; do
             if [ -f "$LAUNCHD_DIR/$_label.plist" ]; then
                 run_root launchctl bootout "system/$_label" 2>/dev/null || true
                 run_root rm -f "$LAUNCHD_DIR/$_label.plist" || true
@@ -4397,7 +4456,7 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
 
     Linux)
         _removed=""
-        for _unit in burrowee-gateway.service burrowee-gateway-updater.service; do
+        for _unit in burrowee-beta-gateway.service burrowee-beta-gateway-updater.service; do
             if [ -f "$SYSTEMD_DIR/$_unit" ]; then
                 run_root systemctl disable --now "$_unit" 2>/dev/null || true
                 run_root rm -f "$SYSTEMD_DIR/$_unit" || true
@@ -4409,7 +4468,6 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         fi
         ;;
     esac
-    remove_legacy_user_units
 
     exit 0
 fi
@@ -4455,7 +4513,7 @@ txn_phase replacing
 
 place_all_bins
 
-"$BIN_DIR/burrowee" --version 2>/dev/null || true
+"$BIN_DIR/burroweeb" --version 2>/dev/null || true
 
 # Write both SYSTEM service units (single-slot consent first, then migrate any
 # legacy per-user units out of the way). The state migration runs before
@@ -4463,17 +4521,6 @@ place_all_bins
 # here, and a root-scheme unit left behind by an aborted run is bootstrapped by
 # launchd at the next reboot regardless of what this run reported.
 check_service_override
-remove_legacy_user_units
-# The migration's own consent gate, asked BEFORE the stop rather than at the
-# restart below — on a host with a pending rung the runner stops the daemon and
-# the operator's tunnelled session goes with it, and the Phase 3 prompt would
-# then be read from a terminal that no longer exists. Silent when nothing is
-# pending, and never asked at all on a run with no tty: see
-# should_ask_before_migration.
-if should_ask_before_migration; then
-    consent_to_sever migration
-fi
-migrate_from_legacy
 
 # Keep this installer + its migrations at $GW_HOME so subsequent `service install`
 # verbs can re-render units and run a pending migration without a new download.
@@ -4489,6 +4536,7 @@ migrate_from_legacy
 # written into root's tree, exit 0, and a daemon that then refused to start.
 keep_installer_copy
 
+seed_beta_config
 render_units
 
 # load_units USED TO run right here, restarting the daemon in the foreground —
@@ -4595,17 +4643,17 @@ elif ( exec 3<>/dev/tty ) 2>/dev/null; then
         printf 'pin>  ' >&3 2>/dev/null || true
         pin=''; IFS= read -r pin <&3 2>/dev/null || pin=''
         if [ -n "$pin" ]; then
-            "$BIN_DIR/burrowee" "$COMP" bootstrap "$blob" "$pin" <&3 || true
+            "$BIN_DIR/burroweeb" "$COMP" bootstrap "$blob" "$pin" <&3 || true
         else
-            printf 'No PIN — skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
+            printf 'No PIN — skipped. Run later: burroweeb %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
         fi
     else
-        printf 'Skipped. Run later: burrowee %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
+        printf 'Skipped. Run later: burroweeb %s bootstrap <blob> <pin>\n' "$COMP" >&3 2>/dev/null || true
     fi
     heartbeat_stop
     exec 3>&- 2>/dev/null || true
 else
-    echo "next: burrowee $COMP bootstrap <blob> <pin>"
+    echo "next: burroweeb $COMP bootstrap <blob> <pin>"
 fi
 
 # ---------------------------------------------------------------------------
@@ -4648,7 +4696,7 @@ if [ "$GUARD_ARMED" != 0 ]; then
     # connection reaches no one.
     echo ""
     echo "handing the restart to the guard. If this connection drops, reconnect and run:"
-    echo "    burrowee gateway service guard-status"
+    echo "    burroweeb gateway service guard-status"
     echo ""
     txn_phase handoff
 
@@ -4668,7 +4716,7 @@ else
     echo ""
     echo "units staged on disk. Nothing was restarted (BURROWEE_NO_RESTART)."
     echo "start the gateway when you are ready with:"
-    echo "    sudo burrowee gateway service install"
+    echo "    sudo burroweeb gateway service install"
     echo ""
 fi
 
@@ -4689,7 +4737,12 @@ fi
 # components, since this script does not require root of itself and reaches
 # privileged work through run_root. Only `--fix` remediates or prompts, and this
 # is the read-only verb.
-"$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
+# NOT run under the beta root. `doctor` takes no --home (verified on the CI VM:
+# "flag provided but not defined: -home"), so it would diagnose the STABLE
+# install and print its rows as if they were this one's -- worse than printing
+# nothing, because the operator has no way to tell which install answered.
+# Restore this the moment the cli's doctor takes the instance's home.
+echo "beta root — skipping the post-install doctor: it has no --home yet, and would report the stable install"
 
 # ---- the last thing printed on a SUCCESSFUL install ------------------------
 # The operator's own next step: how to reach $BIN_DIR from the shell they

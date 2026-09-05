@@ -609,6 +609,95 @@ worktree, straight to R2, and never touches GitHub. Design:
 `docs/specs/2026-08-27-beta-channel-design.md` (burrowee-git/resources).
 `--channel` defaults to `stable`; every stable invocation is unaffected.
 
+### Side by side, not over the top
+
+A beta cut installs **beside** the stable install, never over it. Three
+constants say where, and they are the only difference between the two renders
+(`tools/channels.sh`):
+
+| | stable | beta |
+|---|---|---|
+| install root | `/usr/local/burrowee` | `/usr/local/burrowee/beta` |
+| dispatcher | `burrowee` | `burroweeb` |
+| unit names | `com.burrowee.gateway` / `burrowee-gateway.service` | `com.burrowee.beta.gateway` / `burrowee-beta-gateway.service` |
+
+`tools/gen-bootstraps.sh` renders both channels of both halves — the outer
+bootstraps a host curls (`<comp>/install.sh` and `<comp>/beta.install.sh`) and
+the inner installers that ride inside the signed zips
+(`inner/<comp>/install.sh` and `inner/<comp>/beta.install.sh`). All of them are
+committed, and `tools/test-bootstraps.sh` fails while any of them is out of
+step with its template — **run it after every merge that touches
+`inner/*/\*.template.sh`, `tools/bootstrap.template.sh`, `tools/channels.sh`
+or a `versions/*.stamp`.** Its first assertion is that the stable render did
+not move; that is the whole safety argument for the change that introduced the
+twins.
+
+Two facts the beta installers place that stable's do not, both seed-if-absent
+so an operator value survives an update:
+
+- gateway `console_port=16519` (stable's 16518 plus one). The gateway repo
+  ships `etc/gateway/config.beta.example` carrying the same number — the two
+  are kept in step by review, nothing else.
+- edge `lan_listen=127.0.0.1:9449`, `lan_advertise_port=8449`,
+  `tls_listen=127.0.0.1:9444`. Only `tls_listen` can be corrected from the
+  console afterwards: the signed manifest carries exactly one listener
+  address. The other two are fixed by editing `etc/edge/config` on the host.
+
+**A BETA EDGE IS NOT READY TO RUN YET, and the reason is a cross-channel
+write.** Its unit is `ExecStart=… burrowee-edge run` with no `--home`, so the
+daemon resolves the STABLE config root and persists its listener defaults
+there — measured on the CI VM: a beta-only install created
+`/usr/local/burrowee/etc/edge/config` carrying `lan_listen=127.0.0.1:9448`,
+under a root nothing had installed into. Adding `--home <beta root>/etc` to the
+unit stops that (also measured) but is not yet correct either: the edge refuses
+to persist into a root-owned tree through `--home`, and derives its data root as
+`<beta root>/edge` instead of `<beta root>/var/edge`, which would put the LAN
+cert in the wrong place on a host where the edge does come up. Both are edge
+feature 06's `--home` gap. **Until it closes, install the beta edge only on a
+host with no stable edge, and expect `/usr/local/burrowee/etc/edge` to appear.**
+The gateway has no such gap — its unit names the beta root and its daemon
+honours it.
+
+Two cosmetic gaps a beta host will show, both waiting on another repo:
+`burroweeb gateway status` reports the STABLE instance (the cli's `status` /
+`service status` / `service uninstall` are still fixed to the stable roots), and
+the "Next steps" PATH advice at the end of an install says `burrowee help` where
+it means `burroweeb help` — that line lives inside the SHARED SWEEP CONTRACT
+region of `inner/_shared/migrations/lib_stale_user_bins.sh`, whose digest is
+pinned here **and** in the gateway repo's copy, so fixing it is a coordinated
+change in both.
+
+And three the beta installers deliberately do **not** do, because each of them
+acts on the STABLE install running beside it: the 0.2→0.3 migration ladder, the
+legacy per-user unit teardown, and the stale-bin / exec-root sweeps.
+
+### Uninstall a beta instance
+
+There is no `burroweeb gateway service uninstall` yet — the gateway cli's
+`service status` and `service uninstall` verbs are still fixed to the stable
+unit names (gateway feature 04's remaining follow-up). Until they take the
+instance's home, remove a beta gateway by hand:
+
+```sh
+# Linux
+sudo systemctl disable --now burrowee-beta-gateway.service burrowee-beta-gateway-updater.service
+sudo rm -f /etc/systemd/system/burrowee-beta-gateway.service \
+           /etc/systemd/system/burrowee-beta-gateway-updater.service
+sudo systemctl daemon-reload
+# macOS
+sudo launchctl bootout system/com.burrowee.beta.gateway
+sudo launchctl bootout system/com.burrowee.beta.gateway.updater
+sudo rm -f /Library/LaunchDaemons/com.burrowee.beta.gateway.plist \
+           /Library/LaunchDaemons/com.burrowee.beta.gateway.updater.plist
+# then the tree itself — the beta root and nothing above it
+sudo rm -rf /usr/local/burrowee/beta
+```
+
+`BURROWEE_UNINSTALL=1` through `beta.install.sh` removes the binaries and the
+beta units, but goes through the same cli verbs for the rest; the by-hand list
+above is what makes the removal complete today. **Never `rm -rf
+/usr/local/burrowee`** to clear a beta instance — that is the stable install.
+
 ### Open a cycle
 
 A beta cycle is two files' presence, nothing more — there is no `open` verb:

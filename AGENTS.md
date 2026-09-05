@@ -31,8 +31,11 @@ internal/register/              publish/prune/keygen/r2 logic for burrowee-relea
 internal/gate/                  relay-gate server: fingerprinting, nonce, rate-limit, registry
 internal/relconfig/             per-component release config + version stamping
 internal/r2/                    R2 (S3-compatible) client + request signer
+inner/<comp>/*.template.sh      the AUTHORED inner installers — edit these
 inner/<comp>/install.sh         inner installer shipped inside each component's signed zip
-cli/ gateway/ edge/ agent/      per-component outer bootstrap (install.sh, generated)
+                                 (generated; beta.install.sh beside it is its twin)
+cli/ gateway/ edge/ agent/      per-component outer bootstrap (install.sh, generated;
+                                 beta.install.sh etc. while a cycle is open)
 relay/install.sh                relay's (gated, non-public) install path
 config/console-pub.hex          console signing pubkey baked into edge builds
 site/index.html                 release.burrowee.com landing page
@@ -55,22 +58,41 @@ tools/                          build/version/bootstrap-generation scripts + the
 ops/                            nginx/systemd unit files for the hosting side (reference only)
 ```
 
-## Channel ruling — beta-only cuts while the 0.3 cycle is open (2026-09-01)
+## Channels — a beta install sits BESIDE the stable one (2026-09-04)
 
-The inner installers (`inner/gateway/install.sh`, `inner/edge/install.sh`, the two
-`updater.install.sh`) target the **0.3** system root, `/usr/local/burrowee/{etc,var,bin}`,
-and this repo has no per-channel installer: a stable cut from `main` would ship them under
-0.2 binaries whose daemons still write `/usr/local/var/burrowee/<comp>`. The operator's
-ruling: **only `beta` cuts are made until 0.3 graduates. No stable cut of gateway or edge
-unless the operator explicitly starts a stable-cut session** — and that session first
-resolves the installer split (the candidate design is relay's: the installer travels with
-the component source, so rkit picks it from the tree it is building).
+The ruling this replaces (2026-09-01, beta-only cuts while the 0.3 cycle is
+open) existed because there was one installer and one root: `inner/<comp>/install.sh`
+targeted `/usr/local/burrowee/{bin,etc,var}` unconditionally, so installing a
+beta build meant installing OVER the stable one, and a stable cut from `main`
+would have shipped that installer under 0.2 binaries. Neither is true any more.
 
-Consequence to expect and not "fix": `tools/install-waits-for-daemon.test.sh` is **red**
-while this ruling stands. It reads the daemons from the sibling `*/code/main` checkouts,
-which are 0.2 — the mismatch it reports is the exact hazard the ruling guards against, and
-it goes green by itself when 0.3 graduates to `main`. Every other suite is green or
-name-identical to `main`'s container baseline.
+The installers are now rendered per channel from three constants —
+`tools/channels.sh`: the install root, the dispatcher name, and the channel
+segment in the unit names. A beta install goes to `/usr/local/burrowee/beta`,
+carries the `burroweeb` dispatcher, and runs as `burrowee-beta-<comp>` /
+`com.burrowee.beta.<comp>`. (The **gateway** twin is complete; the **edge**
+twin still writes into the stable config root at daemon start — see
+`tools/RUNBOOK.md`, "Side by side, not over the top".) **Beta twins install beside stable, never over it,
+and a beta cut is allowed for every component that ships a twin.** So is a
+stable cut: nothing about an open beta cycle blocks one.
+
+Two things to know before editing anything under `inner/` or `tools/*.template.sh`:
+
+- **The generated files are committed, and the stable render must not move.**
+  `tools/gen-bootstraps.sh` writes both channels of the outer bootstraps and
+  the inner installers; `tools/test-bootstraps.sh` fails while the tree and
+  the generator disagree, and its first assertion is that every stable
+  artefact came back byte-identical. Edit the `*.template.sh`, re-run the
+  generator, commit both.
+- **A channel difference is a render-time substitution or a dropped block**,
+  never a runtime branch — `@ROOT@` / `@DISPATCHER@` / `@UNIT_PREFIX@`, or an
+  `@STABLE_ONLY_BEGIN@` / `@BETA_ONLY_BEGIN@` block. A runtime branch would
+  move the literal and make every stable installer in the world a new file.
+
+The former ruling's expected-red note stands on its own terms:
+`tools/install-waits-for-daemon.test.sh` reads the daemons from the sibling
+`*/code/main` checkouts, which are 0.2, and goes green by itself when 0.3
+graduates to `main`.
 
 ## Core principles
 

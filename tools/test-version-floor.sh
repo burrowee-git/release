@@ -231,6 +231,9 @@ BSCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/test-version-floor-beta-XXXXXX")"
 mkdir -p "${BSCRATCH}/tools/modules" "${BSCRATCH}/versions"
 cp "${REPO_ROOT}/tools/gen-bootstraps.sh" "${BSCRATCH}/tools/gen-bootstraps.sh"
 cp "${REPO_ROOT}/tools/public_components.sh" "${BSCRATCH}/tools/public_components.sh"
+# channels.sh too: gen-bootstraps.sh sources it for the three per-channel
+# install constants, so a scratch root without it cannot render at all.
+cp "${REPO_ROOT}/tools/channels.sh" "${BSCRATCH}/tools/channels.sh"
 cp "${REPO_ROOT}/tools/bootstrap.template.sh" "${BSCRATCH}/tools/bootstrap.template.sh"
 cp "${REPO_ROOT}/tools/preflight.template.sh" "${BSCRATCH}/tools/preflight.template.sh"
 cp "${REPO_ROOT}/tools/relay-bootstrap.template.sh" "${BSCRATCH}/tools/relay-bootstrap.template.sh"

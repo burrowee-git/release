@@ -35,6 +35,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${HERE}/payload.sh"
+# The channel table: the assembly block now names the dispatcher and resolves
+# the inner installer through it, so the fixture has to be able to answer the
+# same questions release.sh does rather than restate them.
+# shellcheck source=tools/channels.sh
+source "${HERE}/channels.sh"
 
 fail=0
 check() { # check <label> <got> <want>
@@ -109,9 +114,14 @@ done
     # extracted code owns.
     comp=""
     bins=""
+    # CHANNEL steers the fixture the way it steers a cut: which dispatcher name
+    # the assembly copies, and which of inner/<comp>/{install.sh,beta.install.sh}
+    # it stages. Default stable — the beta cases below set it and reset it.
+    CHANNEL="stable"
     src=""
     out_bins=""
     DISP_DIR=""
+    DISP_NAME=""
     stage=""
     REPO_ROOT=""
     EDGE_WEB=""
@@ -140,7 +150,8 @@ fixture() {
     local f
     # shellcheck disable=SC2086  # ${bins} is the same intentional space-list release.sh uses.
     for f in ${bins}; do printf 'bin:%s\n' "${f}" > "${out_bins}/${f}"; done
-    printf 'bin:burrowee\n' > "${DISP_DIR}/${plat}/burrowee"
+    DISP_NAME="$(channel_dispatcher "${CHANNEL}")"
+    printf 'bin:%s\n' "${DISP_NAME}" > "${DISP_DIR}/${plat}/${DISP_NAME}"
 }
 
 # members — the finished zip's file entries, comma-joined, sorted. Read out of
@@ -206,6 +217,67 @@ printf '#!/bin/sh\n'                                     > "${src}/migrations/li
 if run_public; then ok "gateway: assembly succeeds"; else bad "gateway: assembly failed"; fi
 check "gateway payload members" "$(members "${stage}/${asset}")" \
     "burrowee,burrowee-gateway,guard.sh,install.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,update.sh,updater.install.sh"
+
+# --- gateway, beta channel: the twins, and only the twins --------------------
+# The zip MEMBER names never change — a kit's entrypoint is install.sh on both
+# channels, because the outer bootstrap that unpacks it is the same template.
+# What changes is which FILE each member was copied from, and that is what this
+# case reads back out of the archive rather than inferring from the staging dir.
+CHANNEL=beta
+fixture gateway burrowee-gateway
+printf 'STABLE inner installer\n' > "${REPO_ROOT}/inner/gateway/install.sh"
+printf 'BETA inner installer\n'   > "${REPO_ROOT}/inner/gateway/beta.install.sh"
+printf 'update\n'          > "${src}/update.sh"
+mkdir -p "${src}/migrations"
+printf '#!/bin/sh\nMIGRATIONS="\n0.2.0 v0_1_to_v0_2.sh\n"\n' > "${src}/migrations/run.sh"
+printf '#!/bin/sh\n'                                     > "${src}/migrations/v0_1_to_v0_2.sh"
+printf '#!/bin/sh\n'                                     > "${src}/migrations/lib_stale_user_bins.sh"
+if run_public; then ok "gateway (beta): assembly succeeds"; else bad "gateway (beta): assembly failed"; fi
+check "gateway (beta) payload members — burroweeb, and the member names unchanged" \
+    "$(members "${stage}/${asset}")" \
+    "burrowee-gateway,burroweeb,guard.sh,install.sh,migrations/lib_stale_user_bins.sh,migrations/run.sh,migrations/v0_1_to_v0_2.sh,update.sh,updater.install.sh"
+check "gateway (beta) install.sh is the BETA twin, not the stable original" \
+    "$(unzip -p "${stage}/${asset}" install.sh)" "BETA inner installer"
+CHANNEL=stable
+fixture gateway burrowee-gateway
+printf 'STABLE inner installer\n' > "${REPO_ROOT}/inner/gateway/install.sh"
+printf 'BETA inner installer\n'   > "${REPO_ROOT}/inner/gateway/beta.install.sh"
+printf 'update\n'          > "${src}/update.sh"
+mkdir -p "${src}/migrations"
+printf '#!/bin/sh\nMIGRATIONS="\n0.2.0 v0_1_to_v0_2.sh\n"\n' > "${src}/migrations/run.sh"
+printf '#!/bin/sh\n'                                     > "${src}/migrations/v0_1_to_v0_2.sh"
+printf '#!/bin/sh\n'                                     > "${src}/migrations/lib_stale_user_bins.sh"
+if run_public; then ok "gateway (stable, twin present): assembly succeeds"; else bad "gateway (stable, twin present): assembly failed"; fi
+check "a beta twin sitting in the tree does not reach a STABLE cut" \
+    "$(unzip -p "${stage}/${asset}" install.sh)" "STABLE inner installer"
+
+# --- a beta cut with no twin REFUSES, and says which file to write ------------
+# The one that shipped: versions/cli.beta.stamp exists, inner/cli has no twin,
+# and the resolver used to fall back to the stable installer -- so a beta cli cut
+# built a zip whose installer targets the stable root, under the stable unit
+# names, placing the stable dispatcher. A "beta" install that installs over
+# stable is the entire defect this channel split exists to remove, so it is a
+# refusal and not a warning.
+CHANNEL=beta
+fixture cli burrowee-cli
+printf 'STABLE inner installer\n' > "${REPO_ROOT}/inner/cli/install.sh"
+printf 'update\n'                 > "${src}/update.sh"
+printf 'updater self-update\n'    > "${src}/updater.update.sh"
+shared_ladder_src "${src}"
+# A SUBSHELL, because the refusal is an `exit 1` inside the extracted block --
+# release.sh's own spelling, and the reason it is a refusal rather than a
+# warning. Run bare, it would take this suite with it.
+if ( run_public ) 2>"${TMP}/beta-refusal.err"; then
+    bad "cli (beta, no twin): assembly SUCCEEDED — it staged the stable installer into a beta zip"
+else
+    ok "cli (beta, no twin): assembly refuses"
+fi
+if grep -q 'inner/cli/beta.install.sh' "${TMP}/beta-refusal.err"; then
+    ok "the refusal names the file that is missing"
+else
+    bad "the refusal does not name inner/cli/beta.install.sh: $(cat "${TMP}/beta-refusal.err")"
+fi
+CHANNEL=stable
 
 # --- edge: a directory member whose content comes from another tree ----------
 fixture edge burrowee-edge

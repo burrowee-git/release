@@ -117,6 +117,13 @@ PREFLIGHT_TEMPLATE="$ROOT/tools/preflight.template.sh"
 # second hardcoded copy that can drift from it) — see tools/public_components.sh.
 . "$ROOT/tools/public_components.sh"
 
+# CHANNEL CONSTANTS — @ROOT@ / @DISPATCHER@ / @UNIT_PREFIX@ and what derives
+# from them, one definition, in tools/channels.sh. Sourced rather than restated
+# for the same reason PUBLIC_COMPONENTS is: tools/test-bootstraps.sh asserts
+# against the SAME table this renders from, so a table that drifted would take
+# its own test with it.
+. "$ROOT/tools/channels.sh"
+
 # sha256 of a file (shasum on mac, sha256sum on linux) — for the preflight pin.
 sha256_of() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
@@ -163,6 +170,61 @@ expand_includes() {
         }
         { print }
     ' "$1"
+}
+
+# render_channel_blocks <channel> <file> — write <file> to stdout with the
+# other channel's @…_ONLY_BEGIN@/@…_ONLY_END@ blocks REMOVED and this channel's
+# unwrapped. Runs before the sed substitution pass, like expand_includes.
+#
+# The blocks are DROPPED, never commented out. That is the whole reason the
+# stable render of an inner installer is byte-identical to the hand-written file
+# it replaces: a commented-out beta seed would still be a line, and every stable
+# host in the world would be installing a different file for no behavioural
+# reason. tools/test-bootstraps.sh is what holds that identity.
+#
+# Unbalanced markers are fatal, not tolerated: a template whose @BETA_ONLY_END@
+# was lost would otherwise render every remaining line of the installer into the
+# beta arm and drop it from stable — a silent, total truncation.
+render_channel_blocks() {
+    awk -v ch="$1" '
+        /^@STABLE_ONLY_BEGIN@$/ { if (in_blk) { bad = "nested"; exit 1 } in_blk = "stable"; next }
+        /^@BETA_ONLY_BEGIN@$/   { if (in_blk) { bad = "nested"; exit 1 } in_blk = "beta";   next }
+        /^@STABLE_ONLY_END@$/   { if (in_blk != "stable") { bad = "unopened"; exit 1 } in_blk = ""; next }
+        /^@BETA_ONLY_END@$/     { if (in_blk != "beta")   { bad = "unopened"; exit 1 } in_blk = ""; next }
+        { if (in_blk == "" || in_blk == ch) print }
+        END {
+            if (bad != "") { printf("✗ %s channel block marker\n", bad) > "/dev/stderr"; exit 1 }
+            if (in_blk != "") { printf("✗ unclosed @%s_ONLY_BEGIN@ block\n", toupper(in_blk)) > "/dev/stderr"; exit 1 }
+        }
+    ' "$2"
+}
+
+# render_inner <channel> <template> <out> — the inner installer twin. Same two
+# passes as the outer bootstrap (blocks, then substitution), same tmp-then-mv,
+# and the same post-render guard: an unsubstituted @…@ never reaches a file that
+# is about to be zipped into a signed kit.
+render_inner() {
+    _ri_ch="$1"; _ri_tpl="$2"; _ri_out="$3"
+    _ri_tmp="$_ri_out.tmp.$$"
+    _ri_exp="$_ri_out.exp.$$"
+    render_channel_blocks "$_ri_ch" "$_ri_tpl" > "$_ri_exp"
+    sed -e "s|@ROOT@|$(channel_root "$_ri_ch")|g" \
+        -e "s|@DISPATCHER@|$(channel_dispatcher "$_ri_ch")|g" \
+        -e "s|@UNIT_PREFIX@|$(channel_unit_prefix "$_ri_ch")|g" \
+        -e "s|@UNIT_DOT@|$(channel_unit_dot "$_ri_ch")|g" \
+        -e "s|@UNIT_DASH@|$(channel_unit_dash "$_ri_ch")|g" \
+        -e "s|@UNIT_ROOT_ARGS@|$(channel_unit_root_args "$_ri_ch")|g" \
+        -e "s|@UNIT_ROOT_PLIST_ARGS@|$(channel_unit_root_plist_args "$_ri_ch")|g" \
+        -e "s|@UPDATER_HOME_ARGS@|$(channel_updater_home_args "$_ri_ch")|g" \
+        -e "s|@UPDATER_HOME_PLIST_ARGS@|$(channel_updater_home_plist_args "$_ri_ch")|g" \
+        "$_ri_exp" > "$_ri_tmp"
+    rm -f "$_ri_exp"
+    if grep -q '@[A-Z_]*@' "$_ri_tmp"; then
+        rm -f "$_ri_tmp"; echo "✗ unsubstituted placeholder in $_ri_out" >&2; exit 1
+    fi
+    chmod +x "$_ri_tmp"
+    mv -f "$_ri_tmp" "$_ri_out"
+    echo "✓ wrote $_ri_out  (channel $_ri_ch)"
 }
 
 # ---- resolve the pubkey -------------------------------------------------
@@ -300,7 +362,7 @@ for comp in $PUBLIC_COMPONENTS; do
             beta_stamp="$ROOT/versions/${comp}.beta.stamp"
             if [ ! -f "$beta_stamp" ]; then
                 stale=""
-                for f in "$ROOT/$comp"/beta.*.sh; do
+                for f in "$ROOT/$comp"/beta.*.sh "$ROOT/inner/$comp"/beta.*.sh; do
                     [ -e "$f" ] || continue   # glob matched nothing
                     rm -f "$f"
                     stale="$stale $(basename "$f")"
@@ -318,6 +380,24 @@ for comp in $PUBLIC_COMPONENTS; do
             min_version="$(min_version_of "$comp")"
             prefix=""
         fi
+        # (2a) the INNER installers, for whichever of them this component
+        # authors as a template. The three channel constants only mean anything
+        # here — the outer bootstrap verifies and unpacks, the inner one is what
+        # actually creates the root, writes the units and places the dispatcher.
+        # A component with no *.template.sh (cli, agent: no beta root of their
+        # own) keeps its single hand-written inner/<comp>/install.sh and is
+        # simply not reached by this loop.
+        #
+        # The STABLE render overwrites the committed inner/<comp>/install.sh
+        # in place, and must reproduce it byte for byte — that is the
+        # regression test (tools/test-bootstraps.sh), and the reason every
+        # channel difference above is a render-time substitution or a dropped
+        # block rather than a runtime branch.
+        for inner_tpl in "$ROOT/inner/$comp"/*.template.sh; do
+            [ -e "$inner_tpl" ] || continue   # glob matched nothing
+            inner_base="$(basename "$inner_tpl" .template.sh)"
+            render_inner "$channel" "$inner_tpl" "$ROOT/inner/$comp/${prefix}${inner_base}.sh"
+        done
         for mode in $modes; do
             out="$ROOT/$comp/${prefix}${mode}.sh"
             tmp="$out.tmp.$$"
@@ -331,9 +411,15 @@ for comp in $PUBLIC_COMPONENTS; do
             # shape: a malformed include name (e.g. `@INCLUDE:Helpers@`) that the
             # awk regex declines to match and so passes through literally.
             expand_includes "$TEMPLATE" > "$exp"
+            # Channel blocks AFTER the includes, so a module may carry one too,
+            # and BEFORE the substitution pass, for the same reason
+            # expand_includes runs there: a dropped block must never leave a
+            # placeholder behind for the guard to find.
+            render_channel_blocks "$channel" "$exp" > "$exp.ch"
+            mv -f "$exp.ch" "$exp"
             sed -e "s|@COMP@|$comp|g" -e "s|@MODE@|$mode|g" -e "s|@PUBKEY@|$PUBKEY|g" \
                 -e "s|@PREFLIGHT_SHA256@|$pf_sha|g" -e "s|@MIN_VERSION@|$min_version|g" \
-                -e "s|@CHANNEL@|$channel|g" \
+                -e "s|@CHANNEL@|$channel|g" -e "s|@ROOT@|$(channel_root "$channel")|g" \
                 -e "s|@BRAND@|BURROWEE|g" -e "s|@brand@|burrowee|g" \
                 "$exp" > "$tmp"
             rm -f "$exp"

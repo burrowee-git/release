@@ -6,19 +6,19 @@
 # cwd = the unzipped dir, so the binaries sit alongside this script.
 #
 # ROOT-ONLY, ONE DESTINATION, ONE MACHINE-OWNED TREE. The binaries go to
-# $BIN_DIR — /usr/local/burrowee/bin, root-owned, ALWAYS — and the run sets up
+# $BIN_DIR — /usr/local/burrowee/beta/bin, root-owned, ALWAYS — and the run sets up
 # a MANAGED ROOT SERVICE: a systemd system unit on Linux, a launchd
 # LaunchDaemon on macOS, running `burrowee-edge run`, enabled and
-# (re)started. $BIN_DIR is one of three siblings under /usr/local/burrowee:
+# (re)started. $BIN_DIR is one of three siblings under /usr/local/burrowee/beta:
 # bin/ (the execution surface), etc/edge (config: the identity) and var/edge
 # (state). This script CREATES that tree with every level's owner and mode
 # stated (ensure_system_tree) and asserts what it built before a unit names
 # any of it (assert_system_tree). 0.2 placed the three roots under
 # /usr/local/{bin,etc,var} — three directories that each had to be
 # root-secure on their own, and on an Intel Mac with Homebrew two of them
-# are not: brew chowns etc and var to the console user before burrowee is
-# installed. One tree burrowee creates beside Homebrew's directories has one
-# ancestor chain to verify, and it is one burrowee established rather than
+# are not: brew chowns etc and var to the console user before burroweeb is
+# installed. One tree burroweeb creates beside Homebrew's directories has one
+# ancestor chain to verify, and it is one burroweeb established rather than
 # inherited. The units, the updater and every root exec name the real path.
 # The documented entry point is `curl ... | sudo sh`, which is what the
 # console mints.
@@ -37,7 +37,7 @@
 # problem 0.3 solved re-introduced one directory over. So the step is DELETED,
 # and every install ends by printing how to reach $BIN_DIR from the INVOKING
 # operator's own login shell (print_path_advice). One install shape on every
-# host, and one answer to "where does `burrowee` resolve from?".
+# host, and one answer to "where does `burroweeb` resolve from?".
 #
 # THE PER-USER FLOW IS GONE, not de-defaulted. A PREFIX that would MISDIRECT the
 # install is REFUSED, loudly (one that merely names this same destination is
@@ -47,7 +47,7 @@
 # (inner/gateway/install.sh, whose header carries the full reasoning) and exists
 # for the same failure: a per-user install is invisible to every root-scheme
 # consumer. The dispatcher resolves gateway/edge/register at the ABSOLUTE
-# /usr/local/burrowee/bin, and a root daemon's unit pins
+# /usr/local/burrowee/beta/bin, and a root daemon's unit pins
 # PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a PATH lookup from one can reach
 # nothing under $HOME. Observed on a production node, 2026-08-13: a consumer's
 # root daemon crash-looped 50 times unable to find a component that had
@@ -83,7 +83,7 @@
 # run by the component's LocalReinstall.
 set -eu
 
-BINS="burrowee burrowee-edge burrowee-edge-cli burrowee-edge-updater"
+BINS="burroweeb burrowee-edge burrowee-edge-cli burrowee-edge-updater"
 COMP=edge
 
 # ── system install paths ─────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ COMP=edge
 # gate's whole question is "does this PREFIX name the destination we would have
 # picked anyway?" — it cannot ask that without $BIN_DIR. These are assignments
 # only: nothing is created, placed or written until well after the gate.
-SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/burrowee/bin}"
+SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/local/burrowee/beta/bin}"
 # BIN_DIR and SYS_BIN_DIR are ONE destination under two names: the units and the
 # test harness spell it SYS_BIN_DIR, the placement/uninstall code below spells it
 # BIN_DIR, and since the 0.2.0 collapse they can never differ. Resolved HERE, at
@@ -117,7 +117,7 @@ BIN_DIR="$SYS_BIN_DIR"
 # anywhere any more (see the header). A list still named for a step that no
 # longer exists is how the step gets re-added by someone who reads the name as
 # a promise.
-OPERATOR_BINS="burrowee burrowee-edge burrowee-edge-cli"
+OPERATOR_BINS="burroweeb burrowee-edge burrowee-edge-cli"
 # The 0.2 exec root the sweep reads. BURROWEE_LEGACY_BIN_DIR is a test-only
 # seam like SYS_BIN_DIR, and it is LOAD-BEARING: a sandboxed run must never
 # iterate the real /usr/local/bin of the host it runs on. It used to chain
@@ -184,7 +184,7 @@ if [ -n "${PREFIX:-}" ]; then
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
-        # /usr/local/burrowee/bin (production truth, and what the suite's static
+        # /usr/local/burrowee/beta/bin (production truth, and what the suite's static
         # pins check) and the resolved $_true_bin. They differ only when the
         # SYS_BIN_DIR test seam is set, and an operator reading a refusal on a
         # real host must see the real path either way.
@@ -195,10 +195,10 @@ if [ -n "${PREFIX:-}" ]; then
         # the offending value, hiding the component, the destination and the
         # "nothing has been installed" line all at once.
         printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of edge 0.2.0 this installer" >&2
-        echo "install: has one destination: /usr/local/burrowee/bin, root-owned. The per-user" >&2
+        echo "install: has one destination: /usr/local/burrowee/beta/bin, root-owned. The per-user" >&2
         echo "install: prefix flow is gone — edge's service units run as root and name the" >&2
         echo "install: binaries absolutely, and other components resolve" >&2
-        echo "install: /usr/local/burrowee/bin/burrowee by absolute path, so a per-user copy" >&2
+        echo "install: /usr/local/burrowee/beta/bin/burrowee by absolute path, so a per-user copy" >&2
         echo "install: is invisible to both." >&2
         printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
         echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
@@ -208,13 +208,13 @@ if [ -n "${PREFIX:-}" ]; then
 fi
 
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
-SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge.service"
-SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-edge-updater.service"
+SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/burrowee-beta-edge.service"
+SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-beta-edge-updater.service"
 LAUNCHD_PLIST_DIR="${LAUNCHD_PLIST_DIR:-/Library/LaunchDaemons}"
-LAUNCHD_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.edge.plist"
-LAUNCHD_LABEL="com.burrowee.edge"
-LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.edge.updater.plist"
-LAUNCHD_UPDATER_LABEL="com.burrowee.edge.updater"
+LAUNCHD_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.beta.edge.plist"
+LAUNCHD_LABEL="com.burrowee.beta.edge"
+LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.beta.edge.updater.plist"
+LAUNCHD_UPDATER_LABEL="com.burrowee.beta.edge.updater"
 # Legacy pre-rename system labels/plists earlier installers wrote — migrated
 # away on install, removed on uninstall.
 LEGACY_LAUNCHD_LABEL="org.burrowee.edge"
@@ -462,7 +462,7 @@ dir_chain_is_root_secure() {
 # only shape an edge install took. A host converging onto the root scheme gets
 # everything in the root-owned exec root (/usr/local/bin in 0.2, $BIN_DIR since
 # 0.3) and keeps the old copies — and $HOME/.local/bin PRECEDES either on a
-# normal PATH, so every unqualified `burrowee` or
+# normal PATH, so every unqualified `burroweeb` or
 # `burrowee-edge-cli` an operator types resolves to the OLD binary while the
 # system unit runs the new one.
 #
@@ -546,12 +546,12 @@ if [ -n "$MIGRATIONS_DIR" ]; then
         # swept and never installed. Neither is visible without saying so out
         # loud, because the sweep's normal output on a converged host is nothing
         # at all.
-        if [ "$BINS" != "$STALE_USER_BINS" ]; then
-            echo "note: this installer places [$BINS]" >&2
-            echo "note: but $MIGRATIONS_DIR/component.conf sweeps [$STALE_USER_BINS]." >&2
-            echo "note: the two lists disagree, so some name is installed and never swept" >&2
-            echo "note: (it keeps shadowing $BIN_DIR on PATH) or swept and never installed." >&2
-        fi
+        # NOT under the beta root, where the comparison is meaningless and the
+        # note is a lie: the sweep exists to remove PRE-0.2.0 per-user copies,
+        # every one of which belongs to the stable install, and a beta root
+        # never runs it. The lists differ here by construction — this installer
+        # places the beta dispatcher, and component.conf names the stable one —
+        # so the check would fire on every beta install and say nothing true.
     else
         echo "note: $MIGRATIONS_DIR carries no lib_stale_user_bins.sh + lib_paths.sh pair —" >&2
         echo "note: THIS RELEASE IS INCOMPLETE. The pre-0.2.0 per-user copies of these" >&2
@@ -591,7 +591,7 @@ sweep_stale_exec_root() {
     fi
     # NO KEEP-LIST. It used to hold every operator-typed name this host had no
     # link at, because with nothing linked there the real 0.2 file was the only
-    # copy anything reached by the absolute path — the shared `burrowee`
+    # copy anything reached by the absolute path — the shared `burroweeb`
     # dispatcher above all. Nothing resolves by that path any more: no install
     # links there, and $BIN_DIR is what every unit, every root exec and the
     # printed PATH advice name. So the names that used to be deferred to a
@@ -628,12 +628,12 @@ print_path_advice() {
     echo "note: shell-aware PATH advice, so here is the one line it would have rendered." >&2
     echo ""
     echo "==> Next steps"
-    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo "burroweeb's commands are in $BIN_DIR, which is not on your PATH."
     echo ""
     echo "  Add it to this shell now:"
     echo "    export PATH=\"$BIN_DIR:\$PATH\""
     echo ""
-    echo "  Then:  burrowee help"
+    echo "  Then:  burroweeb help"
     return 0
 }
 
@@ -712,7 +712,7 @@ run_migration_ladder() {
         if [ "$(uname -s)" = "Darwin" ]; then
             echo "hint: start it with: sudo launchctl kickstart -k system/$LAUNCHD_LABEL" >&2
         else
-            echo "hint: start it with: sudo systemctl start burrowee-edge" >&2
+            echo "hint: start it with: sudo systemctl start burrowee-beta-edge" >&2
         fi
         echo "hint: fix the cause reported above and re-run this installer." >&2
         exit 1
@@ -767,7 +767,7 @@ note_orphaned_user_state() {
         echo "note: but the managed service reads $COMP_HOME — this edge starts UNPAIRED." >&2
         echo "hint: the migration ladder adopts it (root's tree first when both exist);" >&2
         echo "hint: force it with  sh $COMP_HOME/migrations/upgrade.sh 0.2.0" >&2
-        echo "hint: or pair again (burrowee $COMP cli bootstrap <blob> <pin>). Nothing was removed." >&2
+        echo "hint: or pair again (burroweeb $COMP cli bootstrap <blob> <pin>). Nothing was removed." >&2
     done
 }
 
@@ -784,15 +784,15 @@ note_orphaned_user_state() {
 # move without the layout and the daemon kept reading
 # $ROOT_HOME/.burrowee/edge — i.e. whichever home the supervisor exported.
 #
-#   $COMP_HOME  /usr/local/burrowee/etc/edge  config: identity/, console.json,
+#   $COMP_HOME  /usr/local/burrowee/beta/etc/edge  config: identity/, console.json,
 #               the operator's `config`, bridge/, host-cert/, lan-cert/,
 #               cf-token, installed-version, migration-receipts/, migrations/,
 #               this installer's self-copy. Backed up, never cleared.
-#   $COMP_DATA  /usr/local/burrowee/var/edge  state: config.json, logs/, stats/,
+#   $COMP_DATA  /usr/local/burrowee/beta/var/edge  state: config.json, logs/, stats/,
 #               covers/, running.json. Rewritten while the daemon serves and
 #               reclaimable.
 #
-# Both under /usr/local/burrowee since 0.3, beside $BIN_DIR — the same
+# Both under /usr/local/burrowee/beta since 0.3, beside $BIN_DIR — the same
 # constants the Go side resolves through core's system_root (ConfigRoot /
 # DataRoot + "edge"). The 0.2 pair (/usr/local/etc/burrowee/edge,
 # /usr/local/var/burrowee/edge) is what the shared ladder's v0_2_to_v0_3.sh
@@ -801,8 +801,8 @@ note_orphaned_user_state() {
 # SYS_CONFIG_ROOT / SYS_DATA_ROOT are overridable only for the Go install-test
 # harness, like SYS_BIN_DIR. They are NOT a supported operator knob and no
 # shipped unit names anything derived from them but these two paths.
-SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/burrowee/etc}"
-SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/var}"
+SYS_CONFIG_ROOT="${SYS_CONFIG_ROOT:-/usr/local/burrowee/beta/etc}"
+SYS_DATA_ROOT="${SYS_DATA_ROOT:-/usr/local/burrowee/beta/var}"
 # The 0.2 roots, handed to the ladder so its transitional anchor read stays
 # inside whatever tree this run was pointed at. Left to default there, the
 # runner would resolve the REAL /usr/local/etc/burrowee/edge on a sandboxed
@@ -814,7 +814,7 @@ COMP_HOME="$SYS_CONFIG_ROOT/$COMP"
 COMP_DATA="$SYS_DATA_ROOT/$COMP"
 VERSION_MARKER="$COMP_HOME/installed-version"
 # THE TREE ABOVE THE THREE ROOTS. In production all three parents are the one
-# directory /usr/local/burrowee. It is DERIVED from the seamed leaves rather
+# directory /usr/local/burrowee/beta. It is DERIVED from the seamed leaves rather
 # than spelled as a fourth seam so that a sandboxed run can never reach
 # outside its sandbox: a suite that redirects $SYS_BIN_DIR to <tmp>/bin has,
 # by construction, redirected the tree to <tmp> as well. Nothing above it is
@@ -893,7 +893,7 @@ fi
 # fully controls. Edge's installer is root-only, so is_root is the whole
 # check; a non-root run refuses here rather than half-creating the tree.
 #
-# The whole tree is OURS by construction: /usr/local/burrowee is created by
+# The whole tree is OURS by construction: /usr/local/burrowee/beta is created by
 # root beside Homebrew's directories rather than inside them, so every level
 # is moded unconditionally — there is no "somebody else's parent" to leave
 # alone, which the 0.2 layout could never say about /usr/local/etc. The one
@@ -942,7 +942,7 @@ ensure_dir_stated() {
 
 # ensure_system_tree — the whole tree, top-down, one level at a time, then
 # asserted. The three chains meet at $SYSTEM_ROOT in production (bin/, etc/
-# and var/ are siblings under /usr/local/burrowee); under the test seams
+# and var/ are siblings under /usr/local/burrowee/beta); under the test seams
 # each leaf may hang off its own sandbox parent, which is why each chain
 # names its own parent rather than assuming the first one's. Refuses a
 # non-root run before creating anything.
@@ -952,6 +952,10 @@ ensure_system_tree() {
         echo "error: and whatever an unprivileged process creates, that user owns." >&2
         exit 1
     fi
+    # The beta root is one level deeper than the stable one, and
+    # ensure_dir_stated refuses a level whose parent is absent. On a host with
+    # no stable edge that parent does not exist yet, and it is still ours.
+    ensure_dir_stated "$(dirname "$SYSTEM_ROOT")" 0755 || exit 1
     ensure_dir_stated "$SYSTEM_ROOT" 0755 || exit 1
     ensure_dir_stated "$SYS_BIN_DIR" 0755 || exit 1
     ensure_dir_stated "$(dirname "$SYS_CONFIG_ROOT")" 0755 || exit 1
@@ -1142,7 +1146,7 @@ unlink_operator_bins() {
         [ -L "$_uob_p" ] || continue
         link_target_is_ours "$_uob_p" || continue
         # A link whose target still exists is still serving someone: the shared
-        # `burrowee` dispatcher stays in $BIN_DIR while a sibling component is
+        # `burroweeb` dispatcher stays in $BIN_DIR while a sibling component is
         # installed, and its link must stay with it.
         [ -e "$_uob_p" ] && continue
         rm -f "$_uob_p" || echo "note: could not remove the link $_uob_p — remove it by hand" >&2
@@ -1184,6 +1188,50 @@ migrate_config() {
         seed_if_absent buffer_stream  32m
         seed_if_absent buffer_session 256m
     fi
+}
+
+# seed_beta_defaults — the three listener values that keep a beta edge off the
+# stable edge's ports on the same host. Each is stable's default PLUS ONE (edge
+# feature 06 ships etc/edge/config.beta.example carrying the same three,
+# derived there from the stable defaults as the code spells them):
+#
+#   lan_listen          127.0.0.1:9448 -> 127.0.0.1:9449
+#   lan_advertise_port  8448           -> 8449
+#   tls_listen          127.0.0.1:9443 -> 127.0.0.1:9444
+#
+# WRITTEN DIRECTLY, not through `burrowee-edge-cli config set` the way
+# seed_if_absent above does, and that is not a shortcut. The cli resolves the
+# STABLE config root unless it is told otherwise, so a bare call here seeds the
+# OTHER install's file -- which is exactly what the first side-by-side run on
+# the CI VM did, putting beta's 8449 and 9444 into the stable edge's config.
+# And it cannot be told otherwise today: `--home` is rejected after the
+# positionals, and before them it forces the per-user scheme and refuses a
+# root-owned tree ("refusing to write ... as root: owned by uid 0"). That is a
+# gap in the edge cli, filed as a follow-up; until it closes, the installer
+# writes its own root's file itself, which it is already privileged to do.
+#
+# Whole-file seed-if-absent, so an operator who has re-ported this edge keeps
+# every value: none of these is reachable from the console afterwards except
+# tls_listen (the signed manifest carries exactly one listener address, edge
+# feature 06), so the other two are only ever fixed by editing this file.
+seed_beta_defaults() {
+    _sbd="$COMP_HOME/config"
+    if [ -e "$_sbd" ]; then
+        return 0
+    fi
+    _sbd_tmp="$(mktemp)" || return 0
+    {
+        printf 'lan_listen=127.0.0.1:9449\n'
+        printf 'lan_advertise_port=8449\n'
+        printf 'tls_listen=127.0.0.1:9444\n'
+    } > "$_sbd_tmp"
+    if install -m 0644 "$_sbd_tmp" "$_sbd"; then
+        echo "seeded $_sbd with the stable+1 listeners (lan 9449/8449, tls 9444)"
+    else
+        echo "warning: could not seed $_sbd — set lan_listen, lan_advertise_port and tls_listen by hand before starting the beta edge" >&2
+    fi
+    rm -f "$_sbd_tmp"
+    return 0
 }
 
 # $_RUNROOT / $_SYSTEMCTL — the two seams the start helpers below are
@@ -1440,7 +1488,7 @@ EOF
         mkdir -p "$(dirname "$SYSTEMD_UNIT")"
         cat > "$SYSTEMD_UNIT" <<EOF
 [Unit]
-Description=burrowee edge (self-hosted relay-edge)
+Description=burroweeb edge (self-hosted relay-edge)
 After=network-online.target
 Wants=network-online.target
 
@@ -1464,7 +1512,7 @@ EOF
         # install leaves it running so the host keeps receiving fixes.
         cat > "$SYSTEMD_UPDATER_UNIT" <<EOF
 [Unit]
-Description=burrowee edge updater
+Description=burroweeb edge updater
 After=network-online.target
 Wants=network-online.target
 
@@ -1483,7 +1531,7 @@ EOF
         echo "wrote systemd unit → $SYSTEMD_UPDATER_UNIT"
 
         systemctl daemon-reload
-        start_unit_linux burrowee-edge
+        start_unit_linux burrowee-beta-edge
         # See the Darwin branch: reached only on a verified start, and the only
         # thing that arms the post-start wait.
         SERVE_UNIT_STARTED=1
@@ -1498,7 +1546,7 @@ EOF
         if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
             echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
         else
-            start_unit_linux burrowee-edge-updater
+            start_unit_linux burrowee-beta-edge-updater
         fi
     fi
 }
@@ -1511,7 +1559,7 @@ if [ -n "${BURROWEE_INSTALLER_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || ex
 # ---------------------------------------------------------------------------
 # ROOT IS REQUIRED, and refused here — still before anything is placed, and
 # before every mode below, because every one of them writes somewhere only root
-# may write: /usr/local/burrowee, /etc/systemd/system, /Library/LaunchDaemons.
+# may write: /usr/local/burrowee/beta, /etc/systemd/system, /Library/LaunchDaemons.
 #
 # The alternative is worse than an error. /usr/local is group-writable on an
 # Intel Mac with Homebrew, so an unprivileged run would place the binaries, fail
@@ -1525,7 +1573,7 @@ if [ -n "${BURROWEE_INSTALLER_SOURCE_ONLY:-}" ]; then return 0 2>/dev/null || ex
 # an ordinary user.
 # ---------------------------------------------------------------------------
 if ! is_root; then
-    echo "install: this installer must run as root — it installs to /usr/local/burrowee/bin and" >&2
+    echo "install: this installer must run as root — it installs to /usr/local/burrowee/beta/bin and" >&2
     echo "install: manages a system service (systemd unit / launchd LaunchDaemon)." >&2
     echo "install: as of edge 0.2.0 there is no per-user install; nothing has been installed." >&2
     echo "install: the published installer elevates on its own — you are seeing this" >&2
@@ -1556,11 +1604,10 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # naming /usr/local/bin/<name>, so the library correctly refused to unlink a
     # file a supervisor may be running and kept every copy. The sweep has to
     # happen here, after the units moved.
-    sweep_stale_exec_root
     echo "edge units-only reinstall: service units re-rendered + reloaded."
     # THE SWEEP JUST RAN, so this path owes the operator the advice as much as
     # a full install does — more, in fact: this is the run that REMOVES
-    # /usr/local/bin/burrowee-edge-cli and the shared `burrowee` dispatcher
+    # /usr/local/bin/burrowee-edge-cli and the shared `burroweeb` dispatcher
     # from a converging 0.2 host, and until now it was the one run that
     # printed no replacement instruction. "Units-only places no binaries, so
     # it is not an install" was the wrong test; placement never was the test.
@@ -1579,28 +1626,28 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
         remove_legacy_launchd_units
     else
-        systemctl disable --now burrowee-edge 2>/dev/null || true
-        systemctl disable --now burrowee-edge-updater 2>/dev/null || true
+        systemctl disable --now burrowee-beta-edge 2>/dev/null || true
+        systemctl disable --now burrowee-beta-edge-updater 2>/dev/null || true
         rm -f "$SYSTEMD_UNIT" "$SYSTEMD_UPDATER_UNIT"
         systemctl daemon-reload 2>/dev/null || true
     fi
     removed=""
     for b in $BINS; do
-        case "$b" in burrowee) continue ;; esac
+        case "$b" in burroweeb) continue ;; esac
         rm -f "$BIN_DIR/$b"
         removed="$removed $b"
     done
-    # The bare `burrowee` dispatcher is SHARED across co-installed components
+    # The bare `burroweeb` dispatcher is SHARED across co-installed components
     # (e.g. a relay on the same host) — remove it only when no other
     # burrowee-* binary remains in $BIN_DIR.
     if ls "$BIN_DIR"/burrowee-* >/dev/null 2>&1; then
-        echo "kept $BIN_DIR/burrowee (dispatcher) — other burrowee components remain installed"
+        echo "kept $BIN_DIR/burroweeb (dispatcher) — other burroweeb components remain installed"
     else
-        rm -f "$BIN_DIR/burrowee"
-        removed="$removed burrowee"
+        rm -f "$BIN_DIR/burroweeb"
+        removed="$removed burroweeb"
     fi
     # The operator-typed links, and only the ones that still point into
-    # $BIN_DIR (spec §6.1 rule 4). The shared `burrowee` link goes with the
+    # $BIN_DIR (spec §6.1 rule 4). The shared `burroweeb` link goes with the
     # dispatcher itself: it is removed only when the binary it points at was.
     unlink_operator_bins
     echo "removed from $BIN_DIR:$removed"
@@ -1622,7 +1669,12 @@ echo "installed to $BIN_DIR: $BINS"
 # ---- state migrations -------------------------------------------------------
 # Unconditional and a no-op unless a rung applies. See run_migration_ladder for
 # why it sits exactly here: after the binaries, before the version anchor.
-run_migration_ladder
+# The 0.2→0.3 ladder does NOT run under the beta root. Every rung it carries
+# converges a host FROM an older stable layout, and this root has no such
+# history: it was created by this installer, at 0.3, with nothing above it to
+# climb from. A rung that ran here would either no-op or reach across into the
+# stable tree it was actually written for.
+echo "beta root — skipping the migration ladder (it converges the 0.2 stable layout)"
 
 # ---- cover assets (decoy pages for handleCover file mode) -------------------
 # Always refresh the two SHIPPED defaults (admin.html + default.html) on every
@@ -1641,7 +1693,7 @@ if [ -d "./covers" ]; then
     done
 fi
 
-"$BIN_DIR/burrowee" --version 2>/dev/null || true
+"$BIN_DIR/burroweeb" --version 2>/dev/null || true
 
 # ---- version-gated config migration ---------------------------------------
 # Roll new default config onto existing installs (seed-if-absent), gated by the
@@ -1655,7 +1707,18 @@ fi
 if [ -n "${BURROWEE_VERSION:-}" ]; then
     OLD_VER=""
     [ -f "$VERSION_MARKER" ] && OLD_VER="$(cat "$VERSION_MARKER" 2>/dev/null || true)"
-    migrate_config "$OLD_VER" || echo "warning: config migration step failed; continuing" >&2
+    # migrate_config is NOT run under the beta root, for the same reason the
+    # ladder is not: every block in it converges a host across a version
+    # boundary this root has no history of. It is also actively harmful here,
+    # and that is the sharper point — its seeds go through seed_if_absent, which
+    # calls `burrowee-edge-cli config get|set` with no home, and the cli
+    # resolves the STABLE config root. On a FRESH beta install ($OLD_VER is
+    # empty, so every gate is crossed) that writes buffer_stream and
+    # buffer_session into the OTHER install's config file, silently.
+    #
+    # seed_beta_defaults below is the beta root's whole config story, and it
+    # writes the file itself rather than going through the cli — see its note.
+    seed_beta_defaults || echo "warning: beta default seeding failed; continuing" >&2
     mkdir -p "$COMP_HOME" 2>/dev/null || true
     if [ "$MIGRATE_UNRECORDED" = 1 ]; then
         report_unrecorded_migration
@@ -1693,17 +1756,18 @@ setup_root_service
 # mode above — that path places no binaries at all, so the precondition
 # this sweep's safety rests on ("the new copies are already in place") is
 # not something that mode establishes.
-sweep_stale_user_bins
-sweep_stale_exec_root
+# NOT under the beta root: both sweeps hunt 0.2-era copies in the per-user tree
+# and in /usr/local/bin, and every copy they would find belongs to the STABLE
+# edge installed beside this one.
 "$SYS_BIN_DIR/burrowee-edge" version 2>/dev/null || true
 echo "edge system install complete."
 # The managed service runs the daemon; pairing is a separate operator step:
-#   burrowee edge cli bootstrap <blob> <pin>   (or via the console)
+#   burroweeb edge cli bootstrap <blob> <pin>   (or via the console)
 if [ ! -d "$COMP_HOME/identity" ] && [ ! -f "$COMP_HOME/console.json" ]; then
     # A host converging off the pre-collapse per-user layout may already own an
     # identity — under the operator's home, which this daemon does not read.
     note_orphaned_user_state
-    echo "next: pair this edge — burrowee edge cli bootstrap <blob> <pin>"
+    echo "next: pair this edge — burroweeb edge cli bootstrap <blob> <pin>"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1750,7 +1814,10 @@ fi
 # false whoever is running — this script is already root, but the redirect is
 # what makes that structural rather than incidental. Only `--fix` remediates or
 # prompts, and this is the read-only verb.
-"$SYS_BIN_DIR/burrowee-edge-cli" doctor < /dev/null || true
+# NOT run under the beta root — see the gateway installer's note: the cli
+# resolves the stable roots unless told otherwise, and `doctor` has no way to
+# be told. It would diagnose the other install and print its rows here.
+echo "beta root — skipping the post-install doctor: it has no --home yet, and would report the stable install"
 
 # ---- the last thing printed on the success path ----------------------------
 # After the units are loaded, after the sweeps, after doctor: the operator's own

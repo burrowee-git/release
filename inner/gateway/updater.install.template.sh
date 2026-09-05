@@ -13,8 +13,8 @@
 #
 # *** ENROLLMENT-PRESERVING — CRITICAL ***
 # Touches ONLY the updater binary + its unit. NEVER renames, moves, backs up,
-# or deletes $HOME/.burrowee/gateway, /usr/local/burrowee/etc/gateway,
-# /usr/local/burrowee/var/gateway (nor a 0.2 host's not-yet-migrated
+# or deletes $HOME/.burrowee/gateway, @ROOT@/etc/gateway,
+# @ROOT@/var/gateway (nor a 0.2 host's not-yet-migrated
 # /usr/local/{etc,var}/burrowee/gateway), or anything under any of them — the full
 # installer's ladder owns that state; this script does not resolve a
 # component home at all. Its own migration step (below) walks the updater's
@@ -57,7 +57,7 @@
 #
 # Env seams (production defaults shown; override in tests to avoid systemd):
 #   BURROWEE_BIN_DIR   the one binary destination (default:
-#                      /usr/local/burrowee/bin, the machine-owned tree's bin/) —
+#                      @ROOT@/bin, the machine-owned tree's bin/) —
 #                      named to match gateway/install.sh's own seam, since the
 #                      guard below is a byte-identical copy of that file's.
 #   SYSTEMD_UNIT_DIR   systemd system-unit dir (default: /etc/systemd/system)
@@ -90,7 +90,7 @@ set -eu
 # gateway/install.sh itself names this seam, and the guard's whole point is to
 # be provably identical to that file's copy.
 # ── system install paths ─────────────────────────────────────────────────────
-# ONE DESTINATION, decided here and nowhere else: /usr/local/burrowee/bin,
+# ONE DESTINATION, decided here and nowhere else: @ROOT@/bin,
 # root-owned — the exec root of the machine-owned tree.
 # There is no branch left to take — every step below that treats $BIN_DIR as the
 # privileged surface (ensure_root_exec_surface, render_units, load_units,
@@ -99,7 +99,7 @@ set -eu
 #
 # BURROWEE_BIN_DIR is the surviving TEST-ONLY seam, and the only one: it
 # redirects this destination so the suite never writes into the real
-# /usr/local/burrowee. Never set it on a real host — nothing about the
+# @ROOT@. Never set it on a real host — nothing about the
 # install's meaning changes when it is set, which is exactly why it is safe for
 # tests and useless as a user-facing knob.
 #
@@ -107,7 +107,7 @@ set -eu
 # "does this PREFIX name the destination we would have picked anyway?" — it
 # cannot ask that without $BIN_DIR. This is an assignment only: nothing is
 # created, placed or written until well after the gate.
-BIN_DIR="${BURROWEE_BIN_DIR:-/usr/local/burrowee/bin}"
+BIN_DIR="${BURROWEE_BIN_DIR:-@ROOT@/bin}"
 # The 0.2 exec root, for the ladder invocation below — same contract as the
 # edge's updater track. An unset LEGACY_BIN_DIR would point the sweep at the
 # real /usr/local/bin even under a seamed test, so BURROWEE_LEGACY_BIN_DIR is
@@ -183,7 +183,7 @@ if [ -n "${PREFIX:-}" ]; then
         unset PREFIX
     else
         # The refusal carries BOTH spellings of the destination: the literal
-        # /usr/local/burrowee/bin (production truth, and what the suite's static
+        # @ROOT@/bin (production truth, and what the suite's static
         # pins check) and the resolved $_true_bin. They differ only when the
         # BURROWEE_BIN_DIR test seam is set, and an operator reading a refusal on
         # a real host must see the real path either way.
@@ -194,10 +194,10 @@ if [ -n "${PREFIX:-}" ]; then
         # the offending value, hiding the component, the destination and the
         # "nothing has been installed" line all at once.
         printf '%s\n' "install: PREFIX is set to '$PREFIX', but as of gateway 0.2.0 this installer" >&2
-        echo "install: has one destination: /usr/local/burrowee/bin, root-owned. The per-user" >&2
+        echo "install: has one destination: @ROOT@/bin, root-owned. The per-user" >&2
         echo "install: prefix flow is gone — the gateway's service units run as root and name" >&2
         echo "install: the binaries absolutely, and other components resolve" >&2
-        echo "install: /usr/local/burrowee/bin/burrowee by absolute path, so a per-user copy" >&2
+        echo "install: @ROOT@/bin/burrowee by absolute path, so a per-user copy" >&2
         echo "install: is invisible to both." >&2
         printf '%s\n' "install: (a PREFIX resolving to $_true_bin is honoured; '$_prefix_bin' is not it.)" >&2
         echo "hint: unset PREFIX and re-run; nothing has been installed." >&2
@@ -208,10 +208,10 @@ fi
 # ── end of the byte-identical guard copy ─────────────────────────────────────
 
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
-SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-gateway-updater.service"
+SYSTEMD_UPDATER_UNIT="$SYSTEMD_UNIT_DIR/burrowee-@UNIT_DASH@gateway-updater.service"
 LAUNCHD_PLIST_DIR="${LAUNCHD_PLIST_DIR:-/Library/LaunchDaemons}"
-LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.gateway.updater.plist"
-LAUNCHD_UPDATER_LABEL="com.burrowee.gateway.updater"
+LAUNCHD_UPDATER_PLIST="$LAUNCHD_PLIST_DIR/com.burrowee.@UNIT_DOT@gateway.updater.plist"
+LAUNCHD_UPDATER_LABEL="com.burrowee.@UNIT_DOT@gateway.updater"
 
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 SUDO="${SUDO:-sudo -n}"
@@ -260,7 +260,7 @@ place_bin() {
 # gateway/install.sh once wrote before the system-level model, SCOPED TO THE
 # UPDATER LABEL ONLY. install.sh's own remove_legacy_user_units is the
 # authority on which legacy per-user labels exist for gateway: on Darwin it
-# tears down com.burrowee.gateway, com.burrowee.gateway.updater and
+# tears down com.burrowee.@UNIT_DOT@gateway, com.burrowee.@UNIT_DOT@gateway.updater and
 # org.burrowee.gateway (all three, gui/<uid> domain); on Linux,
 # burrowee-gateway.service and burrowee-gateway-updater.service (systemd
 # --user). The first and third Darwin labels and the serve .service name are
@@ -556,12 +556,12 @@ print_path_advice() {
     echo "note: shell-aware PATH advice, so here is the one line it would have rendered." >&2
     echo ""
     echo "==> Next steps"
-    echo "burrowee's commands are in $BIN_DIR, which is not on your PATH."
+    echo "@DISPATCHER@'s commands are in $BIN_DIR, which is not on your PATH."
     echo ""
     echo "  Add it to this shell now:"
     echo "    export PATH=\"$BIN_DIR:\$PATH\""
     echo ""
-    echo "  Then:  burrowee help"
+    echo "  Then:  @DISPATCHER@ help"
     return 0
 }
 
