@@ -54,6 +54,9 @@ BETA_UNIT="$(channel_unit_prefix beta)"
 
 has() { grep -q -- "$2" "$1" || fail "$1 does not carry: $2"; }
 hasnt() { grep -q -- "$2" "$1" && fail "$1 must not carry: $2"; return 0; }
+# The -E pair, for the assertions that must match a STATEMENT and not the
+# comments that discuss it — an installer this heavily commented has both.
+hasnt_re() { grep -Eq -- "$2" "$1" && fail "$1 must not carry a line matching: $2"; return 0; }
 
 for comp in gateway edge; do
     outer="${comp}/beta.install.sh"
@@ -69,8 +72,9 @@ for comp in gateway edge; do
 
     # The ladder and the legacy teardown are the stable install's, and a beta
     # twin that still ran them would converge — or delete — the OTHER channel.
-    hasnt "${inner}" 'migrate_from_legacy$'
-    hasnt "${inner}" '^run_migration_ladder$'
+    hasnt_re "${inner}" '^[[:space:]]*migrate_from_legacy[[:space:]]*$'
+    hasnt_re "${inner}" '^[[:space:]]*run_migration_ladder[[:space:]]*$'
+    hasnt_re "${inner}" '^[[:space:]]*remove_legacy_user_units[[:space:]]*$'
 
     # And the stable twin still has to be the file it always was.
     has "${comp}/install.sh" '/usr/local/burrowee/bin'
