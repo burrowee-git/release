@@ -35,6 +35,12 @@
 # Cross-compiled (linux) outputs are left untouched.
 #
 # Optional env:
+#   DISPATCHER_NAME COMP=burrowee ONLY — the name the dispatcher is built AS, and
+#                   the per-user binary prefix it resolves with. Default
+#                   `burrowee`. A beta cut passes `burroweeb`, which is a
+#                   different binary and not a rename: see below.
+#   DISPATCHER_ROOT COMP=burrowee ONLY — the install root the dispatcher resolves
+#                   system binaries in. Default /usr/local/burrowee.
 #   APPLE_SIGN     non-empty → Developer ID sign darwin outputs (release mode)
 #   MODERNECH_SIGN path to the modernech-sign tool (default: PATH, then ~/bin)
 set -euo pipefail
@@ -122,6 +128,23 @@ if [ "${COMP}" = "agent" ]; then
     # silent no-op there.
     LDFLAGS="${LDFLAGS} -X github.com/burrowee-git/agent/internal/agent/command.version=${STAMP}"
 fi
+# The dispatcher's two channel variables. Both default to what the source already
+# compiles in, and when BOTH are at their default no -X term is added at all —
+# so the stable dispatcher stays the exact build it has always been rather than
+# acquiring flags that happen to restate its defaults.
+#
+# systemBinDir is where it looks for the PINNED component binaries (which keep
+# their `burrowee-<comp>` names in every root); userPrefix is what it puts on the
+# per-user ones, so a `burroweeb cli` execs `burroweeb-cli` and cannot reach the
+# stable install's. Two variables and not one because they answer different
+# questions — the dispatcher repo's own tests pin that (feature 02).
+DISPATCHER_NAME="${DISPATCHER_NAME:-burrowee}"
+DISPATCHER_ROOT="${DISPATCHER_ROOT:-/usr/local/burrowee}"
+if [ "${COMP}" = "burrowee" ] && \
+   { [ "${DISPATCHER_NAME}" != "burrowee" ] || [ "${DISPATCHER_ROOT}" != "/usr/local/burrowee" ]; }; then
+    LDFLAGS="${LDFLAGS} -X main.systemBinDir=${DISPATCHER_ROOT}/bin -X main.userPrefix=${DISPATCHER_NAME}-"
+fi
+
 if [ "${COMP}" = "edge" ]; then
     # Resolve the console signing pubkey: prefer CONSOLE_PUB_HEX (passed by
     # release.sh from config/console-pub.hex), then the legacy CLOUD_PUB_HEX, then
@@ -185,6 +208,12 @@ esac
 for pair in ${MAP}; do
     bin="${pair%%:*}"
     pkg="${pair#*:}"
+    # The dispatcher is the one binary whose OUTPUT NAME is a channel fact: a
+    # beta host carries both, on one PATH, so they cannot share a name. Nothing
+    # else in the map is renameable — every component binary keeps its
+    # `burrowee-<comp>` name in every root, because that is the name the units
+    # and the dispatcher itself resolve.
+    if [ "${COMP}" = "burrowee" ]; then bin="${DISPATCHER_NAME}"; fi
     out="${OUT_DIR}/${bin}"
     # Per-binary ldflags: relay bakes console identity into the cli + updater only.
     bin_ldflags="${LDFLAGS}"

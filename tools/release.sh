@@ -108,6 +108,8 @@ source "${REPO_ROOT}/tools/updater_pin.sh"
 source "${REPO_ROOT}/tools/release_origin.sh"
 # shellcheck source=tools/dispatcher_src.sh
 source "${REPO_ROOT}/tools/dispatcher_src.sh"
+# shellcheck source=tools/channels.sh
+source "${REPO_ROOT}/tools/channels.sh"
 # shellcheck source=tools/payload.sh
 source "${REPO_ROOT}/tools/payload.sh"
 # shellcheck source=tools/binmap.sh
@@ -1820,6 +1822,13 @@ console_pub_hex() {
 # marker commit (`git commit` with no pathspec commits all staged files).
 DISP_STAMP="$(resolve_disp_stamp)"
 DISP_DIR="${REPO_ROOT}/dist/.dispatcher/${DISP_STAMP}"
+# DISP_NAME — what the bundled dispatcher is CALLED, in the cache and in the
+# zip: `burrowee` on stable, `burroweeb` on beta. It is a different binary, not
+# a renamed one — it is built with the beta root and the beta per-user prefix
+# baked in (tools/build.sh, dispatcher feature 02) — and it has to be a
+# different NAME because both end up on one host's PATH, in two different
+# roots, at the same time.
+DISP_NAME="$(channel_dispatcher "${CHANNEL:-stable}")"
 
 # THE CACHE IS SIGNING-AWARE, and has to be. Its key is the dispatcher SOURCE —
 # DISP_STAMP — which says nothing about signing mode, and BOTH modes write into
@@ -1844,18 +1853,25 @@ build_dispatcher() {
     local os="$1" arch="$2" variant="$3" plat out
     plat="$(plat_of "${os}" "${arch}" "${variant}")"
     out="${DISP_DIR}/${plat}"
-    if [ -x "${out}/burrowee" ]; then
+    if [ -x "${out}/${DISP_NAME}" ]; then
         # Off darwin, and in every non-Apple mode, the cache means what it always
         # meant: one build per target per run.
         if [ -z "${APPLE_SIGN}" ] || [ "${os}" != darwin ]; then return 0; fi
-        if developer_id_signed "${out}/burrowee"; then return 0; fi
+        if developer_id_signed "${out}/${DISP_NAME}"; then return 0; fi
         echo "→ dispatcher cache ${DISP_STAMP}/${plat} is not Developer-ID signed (an" >&2
         echo "  earlier non-Apple build or --dry-run left it) — rebuilding and re-signing" >&2
-        rm -f "${out}/burrowee"
+        rm -f "${out}/${DISP_NAME}"
     fi
     mkdir -p "${out}"
+    # DISPATCHER_NAME + DISPATCHER_ROOT are what make this the BETA dispatcher
+    # rather than a copy of the stable one under another name: build.sh bakes
+    # the root it resolves system binaries in and the prefix it puts on the
+    # per-user ones. On stable both are the defaults and build.sh adds no
+    # -X term at all, so the stable dispatcher is byte-for-byte the build it
+    # has always been.
     COMP=burrowee SRC_DIR="$(src_for dispatcher)" TARGETOS="${os}" TARGETARCH="${arch}" VARIANT="${variant}" \
         STAMP="${DISP_STAMP}" OUT_DIR="${out}" GO_BIN="${GO_BIN}" \
+        DISPATCHER_NAME="${DISP_NAME}" DISPATCHER_ROOT="$(channel_root "${CHANNEL:-stable}")" \
         bash "${REPO_ROOT}/tools/build.sh" >&2
 }
 
@@ -1959,7 +1975,7 @@ do_release_relay() {
         mkdir -p "${assemble}"
         # shellcheck disable=SC2086  # ${bins} is an intentional space-list from bins_for(); word-splitting is the point.
         for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
-        cp "${DISP_DIR}/${plat}/burrowee" "${assemble}/burrowee"
+        cp "${DISP_DIR}/${plat}/${DISP_NAME}" "${assemble}/${DISP_NAME}"
         [ -f "${src}/install.sh" ] \
             || { echo "✗ relay script missing in source: ${src}/install.sh" >&2; exit 1; }
         cp "${src}/install.sh" "${assemble}/install.sh"
@@ -2221,8 +2237,16 @@ do_release() {
         mkdir -p "${assemble}"
         # shellcheck disable=SC2086  # ${bins} is an intentional space-list of bin names from bins_for(); word-splitting is the point.
         for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
-        cp "${DISP_DIR}/${plat}/burrowee" "${assemble}/burrowee"
-        cp "${REPO_ROOT}/inner/${comp}/install.sh" "${assemble}/install.sh"
+        cp "${DISP_DIR}/${plat}/${DISP_NAME}" "${assemble}/${DISP_NAME}"
+        # The inner installer of THIS CUT'S CHANNEL — inner/<comp>/install.sh on
+        # stable, its inner/<comp>/beta.install.sh twin on beta. Resolved through
+        # payload.sh's inner_script_src, the same function that picks the
+        # channel's updater.install.sh and guard.sh, so one cut cannot ship a
+        # beta guard beside a stable installer.
+        inner_install="$(inner_script_src "${comp}" install.sh)"
+        [ -n "${inner_install}" ] \
+            || { echo "✗ no inner installer for ${comp} (channel ${CHANNEL:-stable})" >&2; exit 1; }
+        cp "${inner_install}" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
         # Cloud-push update scripts: the burrowee-<comp>-updater (and core's Phase-0
