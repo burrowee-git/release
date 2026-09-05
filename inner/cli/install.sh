@@ -424,13 +424,25 @@ fi
 # units-only reinstall (BURROWEE_UNITS_ONLY=1, run by cli's LocalReinstall) has a
 # local installer to invoke. Written AFTER the setup check above so it never
 # makes a fresh install look already-set-up.
-cp "$0" "$COMP_HOME/install.sh" 2>/dev/null || true
+#
+# $COMP_HOME exists and is ours by now — ensure_user_tree made that the first
+# act of this run — so a failure here is a real one and is reported. It is not
+# fatal: the binaries are installed and working, and what is lost is the OFFLINE
+# reinstall path. That is worth a line on stderr and not a failed install;
+# silently swallowed it was worth neither, and LocalReinstall then failed on a
+# host that had been told it was fully installed.
+if ! cp "$0" "$COMP_HOME/install.sh" 2>/dev/null; then
+    echo "note: could not keep a copy of this installer at $COMP_HOME/install.sh —" >&2
+    echo "note: an offline reinstall has no local installer to run." >&2
+fi
 # THE MIGRATIONS GO WITH IT. This script resolves the runner and the sweep
 # library relative to its OWN path, so a $COMP_HOME holding install.sh without
 # migrations/ is an installer that silently cannot migrate and silently stops
 # sweeping — both of which look exactly like a clean run.
 if [ -n "$MIGRATIONS_DIR" ] && [ "$MIGRATIONS_DIR" != "$COMP_HOME/migrations" ]; then
-    mkdir -p "$COMP_HOME/migrations" 2>/dev/null || true
+    if ! mkdir -p "$COMP_HOME/migrations" 2>/dev/null; then
+        echo "note: could not create $COMP_HOME/migrations" >&2
+    fi
     cp "$MIGRATIONS_DIR"/* "$COMP_HOME/migrations/" 2>/dev/null \
         || echo "note: could not keep a copy of migrations/ at $COMP_HOME" >&2
 fi
