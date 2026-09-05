@@ -656,23 +656,18 @@ edge unit carried no `--home` at all, created
 root nothing had installed into; a host that saw that can delete the stray
 stable config root if nothing stable is installed there.
 
-Still open, and it bites any SUDO-ELEVATED write into the beta tree — the cli's
-`doctor --fix`, and the daemon's `sudo burrowee-edge-cli nginx` re-exec, but not
-the daemon under systemd (root, no `SUDO_UID`, measured): core's
-`setup.IsSystemOwnedPath` knows only the STABLE pair, so a root-owned beta tree
-fails the per-user ownership question and the write is refused with
-`refusing to write … owned by uid 0, not the invoking user`, naming a
-`chown -R <you>` that would hand the beta install to an unprivileged account.
-It is a core change and a core tag; the units above are unaffected.
-
-**Do not run that `chown`.** No operator step here or anywhere else may act on
-the remedy this core version prints against the beta tree: root ownership of
-`/usr/local/burrowee/beta/{etc,var}` is the CORRECT state — it is where the beta
-node's identity, its bridge key and its host cert's private key live — and
-handing it to an unprivileged account is the escalation the root-only model
-exists to remove. The refusal is the gap, not the ownership. Until the core fix
-lands, do the write as the daemon does it (root with no `SUDO_UID`: `sudo -i`,
-or the systemd unit itself) or edit `beta/etc/edge/config` by hand.
+**Fixed** — `github.com/burrowee-git/core/setup` tag `v0.3.19-beta` teaches
+`setup.IsSystemOwnedPath` every system root `SystemRootsFor` knows, stable and
+beta alike, so a SUDO-ELEVATED write into the beta tree (the cli's
+`doctor --fix`, the daemon's `sudo burrowee-edge-cli nginx` re-exec) is now
+judged against the correct owner (root) instead of falling through to the
+per-user question and naming a `chown -R <you>` that would have handed the
+beta install to an unprivileged account. edge's `beta-side-by-side` branch
+(PR burrowee-git/edge#222) pins this setup version and adds a call-site test
+at `lanCertDir.openRoot`; the fix reaches a beta host once that PR lands on
+`beta` and a beta build is cut from it — check the edge version in a given
+beta cut's manifest against `setup/v0.3.19-beta` or newer before relying on
+this being fixed there.
 
 Two cosmetic gaps a beta host will show, both waiting on another repo:
 `burroweeb gateway status` reports the STABLE instance (the cli's `status` /
