@@ -54,8 +54,9 @@ func TestUpdateReplacesOnlyChangedBinaries(t *testing.T) {
 		t.Fatalf("change-set = %q, want BURROWEE_CHANGED=burrowee-gateway", line)
 	}
 
-	// --version must be recorded in $GW_HOME/.installed-version.
-	vf := filepath.Join(home, ".burrowee/gateway/.installed-version")
+	// --version must be recorded where the ladder reads it: the machine-owned
+	// config root, never a home tree.
+	vf := ladderAnchorPath(home)
 	vb, err := os.ReadFile(vf)
 	if err != nil {
 		t.Fatalf("installed-version not written: %v", err)

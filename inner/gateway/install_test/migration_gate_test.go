@@ -74,10 +74,22 @@ func stageFaithfulRunner(t *testing.T, dir, logPath string) {
 	}
 }
 
+// ladderAnchorPath is where the migration ladder's version anchor lives: the
+// MACHINE-OWNED config root, never the operator's home.
+//
+// It used to be $GW_HOME/.installed-version, which was wrong twice over — a
+// root-run installer creating a tree in a human's home, and a file the runner
+// never read anyway (the gateway is a `system`-scheme component, so
+// migrations/run.sh reads $SYS_CONFIG_ROOT/<comp>/.installed-version). One
+// helper, so a test can never assert the old location by hand again.
+func ladderAnchorPath(home string) string {
+	return filepath.Join(sysConfigDir(home), ".installed-version")
+}
+
 // installedVersion returns the recorded ladder anchor, or "" when absent.
 func installedVersion(t *testing.T, home string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(home, ".burrowee", "gateway", ".installed-version"))
+	b, err := os.ReadFile(ladderAnchorPath(home))
 	if os.IsNotExist(err) {
 		return ""
 	}

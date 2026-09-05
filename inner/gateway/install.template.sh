@@ -1761,7 +1761,17 @@ migration_sudo() {
 
 # ---------------------------------------------------------------------------
 # record_installed_version <version> — write the migration ladder's version
-# anchor at $GW_HOME/.installed-version.
+# anchor at $SYS_CONFIG_DIR/.installed-version.
+#
+# IT USED TO BE WRITTEN AT $GW_HOME, and that was two defects in one line. The
+# write itself was a root process creating a tree in the operator's home under
+# `curl … | sudo sh` — the root-owned ~/.burrowee this project exists to stop.
+# And the destination was wrong regardless of who wrote it: the gateway is a
+# `system`-scheme component, so migrations/run.sh reads its anchor out of the
+# machine-owned config root ($SYS_CONFIG_ROOT/<comp>) and never looked at the
+# per-user tree at all. The writer and the reader named different files, which
+# is why essentially every host reached the ladder through the --applies
+# fallback the runner's own header calls exceptional.
 #
 # The runner gates each migration on `installed_version < target` and falls back
 # to the migration's own --applies probe only when NOTHING is recorded. Leaving
@@ -1782,12 +1792,18 @@ migration_sudo() {
 # platform review's H8.
 # ---------------------------------------------------------------------------
 #
-# It is written to BOTH roots, and they answer different questions. $GW_HOME's
-# copy is the migration ladder's anchor — run.sh reads it and it describes the
-# per-user tree the rungs migrate FROM. The $BIN_DIR copy is the updater's: on a
-# root-scheme host core's local-update path reads <component home>/.installed-
-# version to decide whether an install is already current, and that home is now
-# $BIN_DIR. One writer for both keeps them from disagreeing.
+# It is written to BOTH machine-owned roots, and they answer different
+# questions. The $SYS_CONFIG_DIR copy is the migration ladder's anchor — run.sh
+# reads it, and for a `system`-scheme component that root IS the tree the rungs
+# migrate INTO. The $BIN_DIR copy is the updater's: on a root-scheme host core's
+# local-update path reads <component home>/.installed-version to decide whether
+# an install is already current, and that home is now $BIN_DIR. One writer for
+# both keeps them from disagreeing.
+#
+# BOTH GO THROUGH run_root. Every mode that records a version has already
+# established the whole machine-owned tree (ensure_system_tree), root-owned, so
+# an unprivileged `>` redirect into either of them fails — and failing is the
+# correct answer for a step that has no business writing anywhere else.
 #
 # The $BIN_DIR copy used to be guarded on $SYS_CONFIG_DIR existing — "has this
 # host been converged to the root scheme yet". Since 0.3 every mode that
@@ -1800,8 +1816,15 @@ migration_sudo() {
 record_installed_version() {
     _ver="${1##*/}"
     if [ -z "$_ver" ]; then return 0; fi
-    mkdir -p "$GW_HOME"
-    printf '%s\n' "$_ver" > "$GW_HOME/.installed-version"
+    if ! printf '%s\n' "$_ver" | run_root tee "$SYS_CONFIG_DIR/.installed-version" >/dev/null; then
+        # Not fatal: an absent anchor sends the next run down the --applies
+        # fallback, which is worse than an anchor but far better than a wrong
+        # one. Said out loud, because it used to be neither written nor
+        # mentioned.
+        echo "note: could not write the migration ladder's version anchor at" >&2
+        echo "note: $SYS_CONFIG_DIR/.installed-version — the next install asks each" >&2
+        echo "note: migration whether it applies instead of reading the version." >&2
+    fi
     printf '%s\n' "$_ver" | run_root tee "$BIN_DIR/.installed-version" >/dev/null || true
 }
 

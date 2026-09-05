@@ -228,8 +228,8 @@ func TestUnitsOnlyDoesNotRecordTheVersionOnAnUnrecordedMigration(t *testing.T) {
 // second anchor moved with it (spec §9.3).
 //
 // A host with no tree at all is not a case this can model any more: the run
-// creates it. What it asserts instead is that the copy lands in the new
-// $BIN_DIR and nowhere else.
+// creates it. What it asserts instead is that both copies land in the two
+// MACHINE-OWNED roots and nowhere else.
 func TestRecordInstalledVersionWritesBothAnchors(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
@@ -247,6 +247,10 @@ func TestRecordInstalledVersionWritesBothAnchors(t *testing.T) {
 		t.Errorf("root-updater anchor = %q, want v0.2.0.2026.08.07.4f1c3ec8", strings.TrimSpace(string(got)))
 	}
 	if got, want := installedVersion(t, home), "v0.2.0.2026.08.07.4f1c3ec8"; got != want {
-		t.Errorf("the ordinary $GW_HOME anchor was not written: got %q, want %q", got, want)
+		t.Errorf("the ladder anchor at %s was not written: got %q, want %q", ladderAnchorPath(home), got, want)
+	}
+	// And neither home holds one: the anchor is a machine fact.
+	if _, err := os.Stat(filepath.Join(home, ".burrowee", "gateway", ".installed-version")); err == nil {
+		t.Errorf("the version anchor was written into a home tree: %s", filepath.Join(home, ".burrowee", "gateway", ".installed-version"))
 	}
 }
