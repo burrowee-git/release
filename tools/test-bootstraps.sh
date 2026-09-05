@@ -109,25 +109,24 @@ has inner/gateway/beta.install.sh "burrowee-gateway --no-open --home ${BETA_ROOT
 has inner/gateway/beta.install.sh "burrowee-gateway-updater run --home ${BETA_ROOT}/etc"
 pass "beta gateway units name the beta root, updater included"
 
-# Every seed_beta_config CALL must be reached with the config root already
-# created — i.e. after an ensure_system_tree, directly or through render_units,
-# which runs it via ensure_root_exec_surface. The two paths spell that
-# differently (the fresh one runs ensure_system_tree itself; units-only gets it
-# only from render_units), so the assertion is on the ORDER and not on a fixed
-# neighbour. A seed that runs too early fails, warns, and leaves the beta
-# gateway on the binary's default console port — 16518, the stable one.
-awk '
-    /^[[:space:]]*ensure_system_tree/ { ready = 1 }
-    /^[[:space:]]*render_units[[:space:]]*$/ { ready = 1 }
-    /^[[:space:]]*seed_beta_config[[:space:]]*$/ {
-        seen++
-        if (!ready) { printf("line %d: seed_beta_config runs before the config root exists\n", NR); bad = 1 }
-    }
-    END {
-        if (seen == 0) { print "no seed_beta_config call in the beta render at all"; bad = 1 }
-        exit bad ? 1 : 0
-    }
-' inner/gateway/beta.install.sh || fail "inner/gateway/beta.install.sh seeds the beta console port too early"
-pass "every seed_beta_config call is reached with the config root already created"
+# seed_beta_config must not depend on WHERE it is called from. Its two callers
+# reach it by different routes — the fresh install has run ensure_system_tree
+# itself, BURROWEE_UNITS_ONLY (`service install`, no bundle) gets it only from
+# render_units — and when it depended on that, the units-only path wrote into a
+# config root that did not exist: the seed failed, warned, and the beta gateway
+# started on the binary's default console port, 16518, the stable one.
+#
+# Asserted on the FUNCTION, not on the call order, because the call order is not
+# something a linear read of the file can decide (a call inside another
+# function's body is not a call on this path) — while "the function creates its
+# own root" is, and it is the property that actually makes the defect
+# impossible.
+sed -n '/^seed_beta_config() {/,/^}/p' inner/gateway/beta.install.sh > "${TMPDIR:-/tmp}/sbc.$$"
+grep -q 'ensure_system_tree' "${TMPDIR:-/tmp}/sbc.$$" \
+    || { rm -f "${TMPDIR:-/tmp}/sbc.$$"; fail "seed_beta_config does not create its own config root — a units-only run seeds nothing and the beta gateway falls back to the stable console port"; }
+grep -q '16519' "${TMPDIR:-/tmp}/sbc.$$" \
+    || { rm -f "${TMPDIR:-/tmp}/sbc.$$"; fail "seed_beta_config no longer writes 16519"; }
+rm -f "${TMPDIR:-/tmp}/sbc.$$"
+pass "seed_beta_config creates its own config root, so neither caller's ordering can silence it"
 
 echo "PASS tools/test-bootstraps.sh"

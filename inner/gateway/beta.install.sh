@@ -1349,10 +1349,26 @@ ensure_system_tree() {
 # The gateway repo ships etc/gateway/config.beta.example carrying the same
 # value (feature 04); this is the installer half of that one fact, and the two
 # are checked against each other by nothing but review — see tools/RUNBOOK.md.
+# IT CREATES ITS OWN ROOT IF IT HAS TO, and that is the point rather than
+# belt-and-braces. The two paths that call this reach it by different routes:
+# the fresh install runs ensure_system_tree itself long before, while
+# BURROWEE_UNITS_ONLY (`service install`, no bundle) gets it ONLY from
+# render_units, through ensure_root_exec_surface. Depending on the caller's
+# order made the failure invisible — the seed failed, warned, and the beta
+# gateway then started on the binary's default console port, 16518, which is the
+# single thing this function exists to prevent. ensure_system_tree is idempotent
+# (it creates each level and asserts it), so asking for it here costs nothing on
+# the path that already ran it.
 seed_beta_config() {
     _sbc="$SYS_CONFIG_DIR/config"
     if [ -e "$_sbc" ]; then
         return 0
+    fi
+    if [ ! -d "$SYS_CONFIG_DIR" ]; then
+        ensure_system_tree || {
+            echo "warning: could not create $SYS_CONFIG_DIR — the beta gateway will fall back to the STABLE console port (16518) and refuse to bind it" >&2
+            return 0
+        }
     fi
     _sbc_tmp="$(mktemp)" || return 0
     printf 'console_port=16519\n' > "$_sbc_tmp"
