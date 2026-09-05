@@ -3968,8 +3968,15 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # tunnelled operator's session with it, so a prompt read afterwards is
     # read from a terminal that no longer exists. Silent when nothing is
     # pending, never asked at all with no tty (should_ask_before_migration).
-    seed_beta_config
     render_units
+    # AFTER render_units on THIS path, unlike the fresh one, and the difference
+    # is not style. Units-only (`service install`, no bundle) reaches here
+    # without having run ensure_system_tree — render_units is what runs it, via
+    # ensure_root_exec_surface — so a seed placed above would be writing into a
+    # config root that does not exist yet. It would fail, warn, and the beta
+    # gateway would then start on the binary's default console port: 16518, the
+    # stable one, which is the single thing this seed exists to prevent.
+    seed_beta_config
 
     # THE LINKS AND BOTH SWEEPS ARE NOT HERE ANY MORE. They used to follow a
     # synchronous load_units on this path; the restart is now handed to the

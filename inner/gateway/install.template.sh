@@ -4007,10 +4007,17 @@ if [ -n "${BURROWEE_UNITS_ONLY:-}" ]; then
     # config root the migration never populated.
     migrate_from_legacy
 @STABLE_ONLY_END@
+    render_units
 @BETA_ONLY_BEGIN@
+    # AFTER render_units on THIS path, unlike the fresh one, and the difference
+    # is not style. Units-only (`service install`, no bundle) reaches here
+    # without having run ensure_system_tree — render_units is what runs it, via
+    # ensure_root_exec_surface — so a seed placed above would be writing into a
+    # config root that does not exist yet. It would fail, warn, and the beta
+    # gateway would then start on the binary's default console port: 16518, the
+    # stable one, which is the single thing this seed exists to prevent.
     seed_beta_config
 @BETA_ONLY_END@
-    render_units
 
     # THE LINKS AND BOTH SWEEPS ARE NOT HERE ANY MORE. They used to follow a
     # synchronous load_units on this path; the restart is now handed to the
