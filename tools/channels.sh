@@ -117,24 +117,43 @@ channel_unit_root_plist_args() {
     esac
 }
 
-# channel_updater_home_args / channel_updater_home_plist_args <channel> — what
-# the UPDATER unit adds after `run`. Empty on stable, where the agent's own
-# defaulting already resolves the system pair; --home on beta, where that same
-# defaulting resolves the STABLE pair and a unit without it would fetch, place
-# and restart against the other channel's tree (gateway feature 04, RunForHome).
-channel_updater_home_args() {
+# channel_home_args / channel_home_plist_args <channel> — the --home a unit adds
+# after its verb to name the tree it serves. Empty on stable, where every
+# daemon's own defaulting already resolves the system pair; `--home <root>/etc`
+# on beta, where that same defaulting resolves the STABLE pair.
+#
+# EMPTY IS WHAT KEEPS THE STABLE RENDER BYTE-IDENTICAL, and it is why this is a
+# constant appended to the ExecStart line rather than a block: the stable unit
+# comes out the file it has always been, character for character.
+#
+# A unit without it does not fail, it succeeds against the OTHER install. That
+# is the whole defect class: measured on the CI machine (release feature 08), a
+# beta-only edge whose unit carried no --home created
+# /usr/local/burrowee/etc/edge/config with stable's listener defaults in it,
+# under a root nothing had installed into — and the gateway updater without one
+# would fetch, place and restart the stable tree's binaries (gateway feature 04,
+# RunForHome).
+channel_home_args() {
     case "$1" in
         beta) printf -- ' --home %s/etc' "$(channel_root "$1")" ;;
         *)    printf '' ;;
     esac
 }
 
-channel_updater_home_plist_args() {
+channel_home_plist_args() {
     case "$1" in
         beta) printf -- '<string>--home</string><string>%s/etc</string>' "$(channel_root "$1")" ;;
         *)    printf '' ;;
     esac
 }
+
+# channel_updater_home_args / channel_updater_home_plist_args <channel> — the
+# same fact, under the name the updater templates already spell. Kept as
+# delegating aliases rather than a second copy: an updater unit's --home and a
+# serve unit's --home are one rule, and two copies of it drift.
+channel_updater_home_args() { channel_home_args "$1"; }
+
+channel_updater_home_plist_args() { channel_home_plist_args "$1"; }
 
 # channel_file_prefix <channel> — the filename prefix a rendered artefact takes.
 channel_file_prefix() {

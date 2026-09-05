@@ -109,6 +109,24 @@ has inner/gateway/beta.install.sh "burrowee-gateway --no-open --home ${BETA_ROOT
 has inner/gateway/beta.install.sh "burrowee-gateway-updater run --home ${BETA_ROOT}/etc"
 pass "beta gateway units name the beta root, updater included"
 
+# The same for EDGE, and it is the fix for what feature 08 measured on the CI
+# machine: with no --home, a beta-only edge install created
+# /usr/local/burrowee/etc/edge/config carrying stable's lan_listen — a cross-
+# channel write into a root nothing had installed into. Both units, both
+# platforms: the launchd plist is a second spelling of the same fact and a beta
+# host that got only one of them would run half-isolated.
+has inner/edge/beta.install.sh "burrowee-edge run --home ${BETA_ROOT}/etc"
+has inner/edge/beta.install.sh "burrowee-edge-updater run --home ${BETA_ROOT}/etc"
+for _bin in burrowee-edge burrowee-edge-updater; do
+    has inner/edge/beta.install.sh "<string>\$SYS_BIN_DIR/${_bin}</string><string>run</string><string>--home</string><string>${BETA_ROOT}/etc</string>"
+done
+# And the stable edge units still carry NO --home: the daemon's own defaulting
+# resolves the stable pair, and a flag there would be a new line in every
+# stable installer in the field.
+hasnt inner/edge/install.sh "burrowee-edge run --home"
+hasnt inner/edge/install.sh "burrowee-edge-updater run --home"
+pass "beta edge units name the beta root on both platforms, updater included; stable edge names none"
+
 # seed_beta_config must not depend on WHERE it is called from. Its two callers
 # reach it by different routes — the fresh install has run ensure_system_tree
 # itself, BURROWEE_UNITS_ONLY (`service install`, no bundle) gets it only from

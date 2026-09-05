@@ -1423,7 +1423,7 @@ setup_root_service() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LAUNCHD_LABEL</string>
-  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge</string><string>run</string></array>
+  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge</string><string>run</string><string>--home</string><string>/usr/local/burrowee/beta/etc</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -1442,7 +1442,7 @@ EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LAUNCHD_UPDATER_LABEL</string>
-  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge-updater</string><string>run</string></array>
+  <key>ProgramArguments</key><array><string>$SYS_BIN_DIR/burrowee-edge-updater</string><string>run</string><string>--home</string><string>/usr/local/burrowee/beta/etc</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>PathState</key><dict><key>$SYS_BIN_DIR/burrowee-edge-updater</key><true/></dict></dict>
   <key>ThrottleInterval</key><integer>10</integer>
@@ -1481,6 +1481,9 @@ EOF
         # ── Linux: systemd system unit ([Service] mirrors the relay unit) ─────
         # HOME=/root so the daemon's os.UserHomeDir() resolves /root/.burrowee/edge
         # (a root system service has no HOME otherwise).
+        # The ExecStart below carries the channel's home flag: nothing on
+        # stable, --home on beta, where a unit without it resolves the STABLE
+        # roots (channel_home_args in tools/channels.sh).
         # Restart=always (matching core/setup's system units, which land on the
         # SAME paths): the update-restart rung SIGTERMs the running daemon and
         # relies on systemd respawning it after a CLEAN exit — on-failure would
@@ -1495,7 +1498,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HOME=/root
-ExecStart=$SYS_BIN_DIR/burrowee-edge run
+ExecStart=$SYS_BIN_DIR/burrowee-edge run --home /usr/local/burrowee/beta/etc
 Restart=always
 RestartSec=2
 TimeoutStopSec=30
@@ -1519,7 +1522,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HOME=/root
-ExecStart=$SYS_BIN_DIR/burrowee-edge-updater run
+ExecStart=$SYS_BIN_DIR/burrowee-edge-updater run --home /usr/local/burrowee/beta/etc
 Restart=always
 RestartSec=2
 TimeoutStopSec=30
