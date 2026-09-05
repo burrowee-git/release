@@ -672,9 +672,20 @@ render_path_advice() {
         _rpa_permanent="echo '$_rpa_now' >> $_rpa_profile"
     fi
 
+    # WHICH DISPATCHER TO NAME, DERIVED FROM THE DIRECTORY WE ARE ADVISING
+    # ABOUT — not a literal. This library is shared by every inner installer
+    # and, unlike them, is not rendered per channel; a beta install advising
+    # the operator to run `burrowee` would send them to the STABLE dispatcher,
+    # which resolves the stable root and would report the other instance. The
+    # directory is the one thing here that already knows which install this is.
+    _rpa_disp=burrowee
+    case "$_rpa_dir" in
+        */burrowee/beta/bin | */burrowee/beta/bin/) _rpa_disp=burroweeb ;;
+    esac
+
     echo ""
     echo "==> Next steps"
-    echo "burrowee's commands are in $_rpa_dir, which is not on your PATH."
+    echo "$_rpa_disp's commands are in $_rpa_dir, which is not on your PATH."
     echo ""
     echo "  Add it to this shell now:"
     echo "    $_rpa_now"
@@ -689,7 +700,7 @@ render_path_advice() {
         echo "  Make it permanent by adding the line above to your shell's startup file."
     fi
     echo ""
-    echo "  Then:  burrowee help"
+    echo "  Then:  $_rpa_disp help"
     # An advisory message must never be able to end an install: every caller
     # runs under `set -e` and calls this last.
     return 0

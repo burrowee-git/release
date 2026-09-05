@@ -1094,12 +1094,12 @@ sweep_stale_user_bins() {
         # PATH, which is this whole defect — or one swept and never installed.
         # Neither is visible without saying so out loud, because the sweep's
         # normal output on a converged host is nothing at all.
-        if [ "$BINS" != "$STALE_USER_BINS" ]; then
-            echo "note: this installer places [$BINS]" >&2
-            echo "note: but $_ssub_lib sweeps [$STALE_USER_BINS]." >&2
-            echo "note: the two lists disagree, so some name is installed and never swept" >&2
-            echo "note: (it keeps shadowing $BIN_DIR on PATH) or swept and never installed." >&2
-        fi
+        # NOT under the beta root, where the comparison is meaningless and the
+        # note is a lie: the sweep exists to remove PRE-0.2.0 per-user copies,
+        # every one of which belongs to the stable install, and a beta root
+        # never runs it. The lists differ here by construction — this installer
+        # places the beta dispatcher, and component.conf names the stable one —
+        # so the check would fire on every beta install and say nothing true.
     fi
     remove_stale_user_bins
 }
@@ -3138,7 +3138,7 @@ EOF
         run_root launchctl bootstrap system "$_gp" || return 1
         ;;
     Linux)
-        run_root systemd-run --unit=burrowee-gateway-guard --collect \
+        run_root systemd-run --unit=burrowee-beta-gateway-guard --collect \
             "$_guard" "$TXN_DIR" || return 1
         ;;
     *)

@@ -546,12 +546,22 @@ if [ -n "$MIGRATIONS_DIR" ]; then
         # swept and never installed. Neither is visible without saying so out
         # loud, because the sweep's normal output on a converged host is nothing
         # at all.
+@BETA_ONLY_BEGIN@
+        # NOT under the beta root, where the comparison is meaningless and the
+        # note is a lie: the sweep exists to remove PRE-0.2.0 per-user copies,
+        # every one of which belongs to the stable install, and a beta root
+        # never runs it. The lists differ here by construction — this installer
+        # places the beta dispatcher, and component.conf names the stable one —
+        # so the check would fire on every beta install and say nothing true.
+@BETA_ONLY_END@
+@STABLE_ONLY_BEGIN@
         if [ "$BINS" != "$STALE_USER_BINS" ]; then
             echo "note: this installer places [$BINS]" >&2
             echo "note: but $MIGRATIONS_DIR/component.conf sweeps [$STALE_USER_BINS]." >&2
             echo "note: the two lists disagree, so some name is installed and never swept" >&2
             echo "note: (it keeps shadowing $BIN_DIR on PATH) or swept and never installed." >&2
         fi
+@STABLE_ONLY_END@
     else
         echo "note: $MIGRATIONS_DIR carries no lib_stale_user_bins.sh + lib_paths.sh pair —" >&2
         echo "note: THIS RELEASE IS INCOMPLETE. The pre-0.2.0 per-user copies of these" >&2
@@ -712,7 +722,7 @@ run_migration_ladder() {
         if [ "$(uname -s)" = "Darwin" ]; then
             echo "hint: start it with: sudo launchctl kickstart -k system/$LAUNCHD_LABEL" >&2
         else
-            echo "hint: start it with: sudo systemctl start burrowee-edge" >&2
+            echo "hint: start it with: sudo systemctl start burrowee-@UNIT_DASH@edge" >&2
         fi
         echo "hint: fix the cause reported above and re-run this installer." >&2
         exit 1
@@ -1507,7 +1517,7 @@ EOF
         echo "wrote systemd unit → $SYSTEMD_UPDATER_UNIT"
 
         systemctl daemon-reload
-        start_unit_linux burrowee-edge
+        start_unit_linux burrowee-@UNIT_DASH@edge
         # See the Darwin branch: reached only on a verified start, and the only
         # thing that arms the post-start wait.
         SERVE_UNIT_STARTED=1
@@ -1522,7 +1532,7 @@ EOF
         if [ -n "${BURROWEE_NO_UPDATER:-}" ]; then
             echo "note: BURROWEE_NO_UPDATER set — updater unit staged, not started" >&2
         else
-            start_unit_linux burrowee-edge-updater
+            start_unit_linux burrowee-@UNIT_DASH@edge-updater
         fi
     fi
 }
@@ -1605,8 +1615,8 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
         rm -f "$LAUNCHD_PLIST" "$LAUNCHD_UPDATER_PLIST"
         remove_legacy_launchd_units
     else
-        systemctl disable --now burrowee-edge 2>/dev/null || true
-        systemctl disable --now burrowee-edge-updater 2>/dev/null || true
+        systemctl disable --now burrowee-@UNIT_DASH@edge 2>/dev/null || true
+        systemctl disable --now burrowee-@UNIT_DASH@edge-updater 2>/dev/null || true
         rm -f "$SYSTEMD_UNIT" "$SYSTEMD_UPDATER_UNIT"
         systemctl daemon-reload 2>/dev/null || true
     fi
