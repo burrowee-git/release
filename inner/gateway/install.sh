@@ -231,11 +231,11 @@ OPERATOR_BINS="burrowee burrowee-gateway burrowee-gateway-cli"
 # would sweep the developer's own machine.
 LEGACY_BIN_DIR="${LEGACY_BIN_DIR:-${BURROWEE_LEGACY_BIN_DIR:-/usr/local/bin}}"
 COMP=gateway
-GW_HOME="$HOME/.burrowee/gateway"
-# The per-user component tree. Identical to $GW_HOME for this component, spelled
-# separately because the first-run bootstrap probe at the bottom is written in
-# terms of "this component's home" and reads better that way.
-COMP_HOME="$HOME/.burrowee/$COMP"
+# $GW_HOME / $COMP_HOME — the LEGACY per-user tree — are NOT defined here any
+# more. They are derived from operator_home() beside prior_install_present,
+# because that function is what resolves whose home they belong to and a value
+# spelled from $HOME up here could not use it. Nothing between this line and
+# that one reads either name; see their definition for what they now mean.
 # The invoking user. No longer rendered into any unit (the daemon runs as root)
 # — it is only compared against the owner a LEGACY per-user unit still records,
 # to decide whether taking over the slot needs consent.
@@ -789,10 +789,11 @@ ensure_root_exec_surface() {
         fi
     done
 
-    # This script and its migrations, so the root updater's offline reinstall has
-    # a root-owned installer to exec. The per-user copy at $GW_HOME stays too
-    # (keep_installer_copy) — a host with no system install has nothing else to
-    # re-run — but root never runs that one.
+    # This script and its migrations, so the root updater's offline reinstall
+    # has a root-owned installer to exec. THIS IS THE ONLY KEPT COPY: the
+    # per-user one at $GW_HOME is gone (see where keep_installer_copy used to
+    # be), so a `service install` re-run resolves migrations/ and guard.sh
+    # beside THIS file, on a path no unprivileged user can rewrite.
     if [ ! -f "$BIN_DIR/install.sh" ] || ! cmp -s "$0" "$BIN_DIR/install.sh"; then
         run_root /usr/bin/install -m 0755 "$0" "$BIN_DIR/install.sh" || return 1
     fi
@@ -1051,8 +1052,9 @@ remove_legacy_user_units() {
 # got wrong.
 
 # stale_sweep_lib — the library shipped beside this installer, or empty when
-# this bundle carries no migrations/ at all (a $GW_HOME self-copy from an
-# install that predates the directory). Same shape and same tolerance as
+# this bundle carries no migrations/ at all (a kept self-copy from an install
+# that predates the directory — the $BIN_DIR one, or, on a host last installed
+# before this file stopped making it, the $GW_HOME one). Same shape and same tolerance as
 # migration_runner: a bundle with no migrations/ is an OLD bundle, not a broken
 # one, and it stays silent — while a bundle that HAS migrations/ and is missing
 # this file is a mis-assembled release, which this project has shipped once and
@@ -1513,7 +1515,7 @@ unlink_operator_bins() {
 
 # ---------------------------------------------------------------------------
 # migration_runner — the path of the runner shipped beside this installer, or
-# empty when this bundle carries none (a $GW_HOME self-copy from an install that
+# empty when this bundle carries none (a kept self-copy from an install that
 # predates migrations/, or a component zip built before the dir existed).
 # ---------------------------------------------------------------------------
 migration_runner() {
@@ -1617,12 +1619,17 @@ assert_can_migrate() {
 # fresh install stopped before placing a single binary.
 #
 # Every way a prior install shows itself is probed on its own — no shared
-# gate: the tree the ladder reads, the cli at $BIN_DIR, the cli at the
-# historical per-user default, and — running as root on another user's behalf
-# — that user's copies of both, because that is the tree the runner will name
-# (run.sh's $SUDO_USER rule). An explicit $ADOPT_FROM is a prior install by
+# gate: the tree the ladder reads, the cli at $BIN_DIR, and the cli at the
+# historical per-user default. An explicit $ADOPT_FROM is a prior install by
 # declaration. Only the pre-flight hangs on this answer: the runner is handed
 # the host either way and stays the one authority on what it needs.
+#
+# THE TWO PER-USER PROBES ASK operator_home, NOT $HOME, and there is no longer
+# a `$(id -u) = 0` branch beside them holding a second, differently-spelled
+# copy of the same question. That shape asked $HOME first and $SUDO_USER's
+# home second, so under `curl … | sudo sh` it probed root's tree — a tree no
+# per-user install ever wrote to — and only reached the operator's as an
+# afterthought. One resolver, one answer, consumed everywhere.
 # ---------------------------------------------------------------------------
 #
 # home_of_user <name> — the account's home, or non-zero. The lookup the
@@ -1641,21 +1648,66 @@ home_of_user() {
     echo "$_hou"
 }
 
+# operator_home — the home of the account whose PER-USER tree a pre-0.2.0
+# install actually wrote to. The same function, and the same three cases, as
+# the shared sweep library's (inner/_shared/migrations/lib_paths.sh): the
+# sweep has resolved the operator this way since it shipped, and the two must
+# not answer differently about one host.
+#
+# $SUDO_USER is who invoked sudo; it is unset for a genuine root login, where
+# $HOME is already the right answer, and `root` is treated as unset because
+# `sudo -u root` names no per-user tree this is about. An unresolvable
+# $SUDO_USER is NOTED rather than fatal — the fallback to $HOME is a narrower
+# answer than the caller asked for, and narrowing in silence is the failure
+# this file is removing, not one to add.
+operator_home() {
+    case "${SUDO_USER:-}" in
+    '' | root) ;;
+    *)
+        if _oh="$(home_of_user "$SUDO_USER")" && [ -n "$_oh" ]; then
+            echo "$_oh"
+            return 0
+        fi
+        echo "note: \$SUDO_USER='$SUDO_USER' has no resolvable home — falling back to \$HOME," >&2
+        echo "note: which under sudo is root's and holds no per-user burrowee tree." >&2
+        ;;
+    esac
+    echo "${HOME:-}"
+}
+
+# ---------------------------------------------------------------------------
+# $GW_HOME / $COMP_HOME — THE LEGACY PER-USER TREE, AND NOTHING ELSE.
+#
+# This installer no longer creates, copies into, or writes anything at either
+# path: the kit root runs is the root-owned one under $BIN_DIR
+# (ensure_root_exec_surface), and the migration ladder's version anchor is at
+# $SYS_CONFIG_DIR (record_installed_version). What is left is READ-ONLY — the
+# pre-flight probe below, the first-run "is this host already set up" probe at
+# the bottom, and the $GW_HOME the 0.2→0.3 rung is handed so it knows which
+# tree to adopt FROM.
+#
+# They are defined HERE, below operator_home, rather than beside $COMP at the
+# top, because that is the only resolver of "whose home is this" in the file
+# and a definition above it could only have spelled $HOME. Nothing between the
+# top and this line reads either name.
+#
+# RESOLVED ONCE, into $OPERATOR_HOME. Calling operator_home per consumer would
+# re-run the passwd lookup and re-print its unresolvable-$SUDO_USER note once
+# per caller, and — worse — leave open the possibility of two callers getting
+# two answers about one host.
+# ---------------------------------------------------------------------------
+OPERATOR_HOME="$(operator_home)"
+GW_HOME="$OPERATOR_HOME/.burrowee/gateway"
+# The per-user component tree. Identical to $GW_HOME for this component, spelled
+# separately because the first-run bootstrap probe at the bottom is written in
+# terms of "this component's home" and reads better that way.
+COMP_HOME="$OPERATOR_HOME/.burrowee/$COMP"
+
 prior_install_present() {
     if [ -d "$GW_HOME" ]; then return 0; fi
     if [ -e "$BIN_DIR/burrowee-gateway-cli" ]; then return 0; fi
-    if [ -e "$HOME/.local/bin/burrowee-gateway-cli" ]; then return 0; fi
+    if [ -n "$OPERATOR_HOME" ] && [ -e "$OPERATOR_HOME/.local/bin/burrowee-gateway-cli" ]; then return 0; fi
     if [ -n "${ADOPT_FROM:-}" ]; then return 0; fi
-    if [ "$(id -u)" = 0 ]; then
-        case "${SUDO_USER:-}" in
-        '' | root) ;;
-        *)
-            _pip_home="$(home_of_user "$SUDO_USER" || true)"
-            if [ -n "$_pip_home" ] && [ -d "$_pip_home/.burrowee/gateway" ]; then return 0; fi
-            if [ -n "$_pip_home" ] && [ -e "$_pip_home/.local/bin/burrowee-gateway-cli" ]; then return 0; fi
-            ;;
-        esac
-    fi
     return 1
 }
 
@@ -1699,7 +1751,7 @@ migration_sudo() {
 #
 # IT USED TO BE WRITTEN AT $GW_HOME, and that was two defects in one line. The
 # write itself was a root process creating a tree in the operator's home under
-# `curl … | sudo sh` — the root-owned ~/.burrowee this project exists to stop.
+# `curl … | sudo sh` — the root-owned ~/.burrowee this change exists to stop.
 # And the destination was wrong regardless of who wrote it: the gateway is a
 # `system`-scheme component, so migrations/run.sh reads its anchor out of the
 # machine-owned config root ($SYS_CONFIG_ROOT/<comp>) and never looked at the
@@ -1798,10 +1850,11 @@ record_installed_version() {
 # THE RUNNER IS READ BEFORE IT IS INVOKED, and that grep is not belt-and-braces.
 # The first shipped runner (gateway #246) parsed no arguments at all: handed
 # --probe-pending it would ignore it and RUN THE LADDER, stopping the daemon at
-# the precise moment this function exists to warn about. `keep_installer_copy`
-# leaves a runner under $GW_HOME for later `service install` runs, so a runner
-# that old is reachable from a real host rather than only from history. A file
-# that does not carry the mode is never handed it.
+# the precise moment this function exists to warn about. $BIN_DIR keeps this
+# installer and its migrations/ for later `service install` runs, and a host
+# that has not been reinstalled since then still has that old runner sitting
+# there — so a runner that old is reachable from a real host rather than only
+# from history. A file that does not carry the mode is never handed it.
 #
 # NOBODY TO WARN, NO PROBE. consent_to_sever returns immediately without a tty
 # and under BURROWEE_ASSUME_YES, so on a console push, in CI and under
@@ -1865,8 +1918,8 @@ should_ask_before_migration() {
 # a fresh one, and a new relay_ed.key re-registers this host as a NEW node,
 # orphaning its console pairing, targets and domains.
 #
-# Not found is not an error: BURROWEE_UNITS_ONLY can run from $GW_HOME's
-# self-copy, and an install predating the migrations/ dir has none beside it.
+# Not found is not an error: BURROWEE_UNITS_ONLY can run from a kept self-copy,
+# and an install predating the migrations/ dir has none beside it.
 # ---------------------------------------------------------------------------
 MIGRATED=0
 MIGRATE_UNRECORDED=0
@@ -1930,55 +1983,41 @@ report_unrecorded_migration() {
 }
 
 # ---------------------------------------------------------------------------
-# keep_installer_copy — keep this installer AND the migrations beside it under
-# $GW_HOME, so a later `service install` can re-render units and run any pending
-# migration without a fresh download.
+# THERE IS NO keep_installer_copy, AND THIS IS WHERE IT USED TO BE.
 #
-# Both, in every mode. install.sh resolves the runner relative to its OWN path, so
-# a $GW_HOME holding install.sh without migrations/ is an installer that silently
-# cannot migrate — and `burrowee gateway service install` is the remedy this
-# script points operators at.
+# It copied this script, migrations/ and guard.sh into $GW_HOME — unconditionally,
+# in every mode — so that a later `burrowee gateway service install` could
+# re-render units and run a pending migration without a fresh download.
+#
+# THE COPY WAS MADE BY ROOT INTO A HUMAN'S HOME. The documented install is
+# `curl … | sudo sh`, and macOS preserves $HOME across sudo, so this ran as
+# root with the operator's home: `mkdir -p "$GW_HOME"` created ~/.burrowee
+# owned by root, and every unprivileged thing that then wanted to create a
+# sibling under it — the cli installer's ~/.burrowee/cli above all — got EACCES
+# on the operator's own tree, silently. Observed on a workstation 2026-09-05:
+# `drwxr-xr-x root staff ~/.burrowee`, a cli that could not pair, and a
+# `doctor --fix` with nothing it could repair. Neither of the two things
+# elevation exists for (a system config file, a system daemon) is a file in
+# somebody's home, so the write had no business being elevated at all — and
+# unprivileged is not the fix either, because then a root-run install simply
+# fails to keep the copy on every host administered as root.
+#
+# NOTHING REPLACES IT, because the copy it made was already the second one.
+# ensure_root_exec_surface places THE SAME three artefacts — $0, guard.sh and
+# migrations/ — into the root-owned $BIN_DIR on every mode that renders units,
+# and that is the copy root actually execs: guard_arm re-places and PROVES it,
+# the root updater's offline reinstall runs it, and the gateway cli's
+# gatewayInstallScript resolves the privileged component home BEFORE the
+# per-user one. What a host loses by dropping the per-user copy is a fallback
+# that only ever answered on a host with no system install at all — which,
+# since 0.3 refuses to install without establishing the machine-owned tree, is
+# no host that reached the end of this script.
+#
+# A ROOT-OWNED ~/.burrowee ALREADY ON A HOST IS NOT REPAIRED HERE, by ruling:
+# ~/.burrowee belongs to the cli installer running as the user, and an
+# installer that chowned its way out of this would be making exactly the class
+# of privileged decision about somebody else's tree that produced the mess.
 # ---------------------------------------------------------------------------
-keep_installer_copy() {
-    mkdir -p "$GW_HOME"
-    cp "$0" "$GW_HOME/install.sh" 2>/dev/null || true
-    _src_migrations="$(dirname "$0")/migrations"
-    if [ -d "$_src_migrations" ]; then
-        mkdir -p "$GW_HOME/migrations"
-        if ! cp "$_src_migrations"/*.sh "$GW_HOME/migrations/" 2>/dev/null; then
-            echo "note: could not keep a copy of migrations/ at $GW_HOME — a later" >&2
-            echo "note: 'burrowee gateway service install' will not be able to migrate." >&2
-        fi
-    fi
-    # guard.sh too, off the same resolution guard_arm's SOURCE uses
-    # ("$(dirname "$0")/guard.sh"), so a later default-mode re-run of this kept
-    # copy has a guard to place onto the root-secure surface.
-    #
-    # FOR A UNITS-ONLY RE-RUN TOO, and that is a correction of a correction.
-    # This note twice said the opposite: first that units-only needed the copy,
-    # then that it never reaches guard_arm at all. The second was true of the
-    # unguarded units-only mode and is not true now — `service install` and
-    # `doctor --fix` arm the same guard the fresh path does, out of
-    # "$(dirname "$0")/guard.sh", and $GW_HOME/install.sh is one of the two
-    # scripts the cli resolves to run (gatewayInstallScript). A $GW_HOME
-    # holding install.sh with no guard.sh beside it is therefore a host on
-    # which `service install` REFUSES, the same way the fresh path refuses,
-    # rather than one that quietly installs unguarded.
-    #
-    # This copy stays a SOURCE and never an exec target either way. The copy a
-    # guard is actually run from is the ROOT-OWNED one under $BIN_DIR
-    # (ensure_root_exec_surface places it, guard_arm re-places and PROVES it);
-    # root never runs this file — see ensure_root_exec_surface's note beside
-    # the install.sh copy, and guard.sh's own header.
-
-    _src_guard="$(dirname "$0")/guard.sh"
-    if [ -f "$_src_guard" ]; then
-        if ! cp "$_src_guard" "$GW_HOME/guard.sh" 2>/dev/null; then
-            echo "note: could not keep a copy of guard.sh at $GW_HOME — a later" >&2
-            echo "note: 'burrowee gateway service install' will not be able to arm the guard." >&2
-        fi
-    fi
-}
 
 # ---------------------------------------------------------------------------
 # render_units — write both SYSTEM service unit FILES for the host init
@@ -2917,9 +2956,11 @@ snapshot_restore() {
 # It used to be copied into a freshly created /usr/local/libexec/burrowee and
 # run from there, unchecked at both ends. Neither end was safe. The SOURCE was
 # "$(dirname "$0")/guard.sh", which for a default-mode re-run of the kept
-# $GW_HOME/install.sh is the OPERATOR-WRITABLE copy keep_installer_copy leaves
-# under $HOME — the very path guard.sh's own header argues must never be
-# sourced as root. And the DESTINATION was never walked by path_is_root_secure,
+# $GW_HOME/install.sh was an OPERATOR-WRITABLE copy under $HOME — the very path
+# guard.sh's own header argues must never be sourced as root. (That per-user
+# copy is gone entirely now, so the only re-run this resolution can reach is
+# the root-owned $BIN_DIR one; the argument stands unchanged for the source it
+# still resolves.) And the DESTINATION was never walked by path_is_root_secure,
 # so on an Intel macOS host where Homebrew chowns /usr/local it was a
 # user-writable path a root LaunchDaemon execs at every arm.
 #
@@ -4305,23 +4346,16 @@ if [ -n "${BURROWEE_UPDATE:-}" ]; then
         echo "note: and the installed version is not recorded, so the migration stays pending" >&2
     fi
 
-    # AFTER the migration, never before — and that ordering is the whole point.
-    # keep_installer_copy mkdir -p's $GW_HOME, and the runner's "$GW_HOME does
-    # not exist" guard is the only thing standing between `curl … | sudo sh` and
-    # a silently mis-targeted migration under ROOT's $HOME. Creating the
-    # directory the runner uses as its evidence, before the runner is allowed to
-    # look at it, made that guard unreachable from every entry point on this
-    # host: root's tree always existed by the time it was asked about.
-    #
-    # The copy still has to happen: `service install` re-runs $GW_HOME/install.sh
-    # and resolves migrations/ beside whichever install.sh is executing, so a
-    # stale copy is a stale unit-writer that also cannot migrate. It is simply
-    # not urgent — nothing between the top of this mode and here reads it, and a
-    # migration that fails exits the script, at which point leaving the PREVIOUS
-    # installer in place is the same "old is better than half-new" choice the
-    # unit ordering already makes.
-    keep_installer_copy
-
+    # THE PER-USER INSTALLER COPY USED TO BE MADE HERE, and its whole ordering
+    # problem went with it. It mkdir -p'd $GW_HOME, and the ladder's "$GW_HOME
+    # does not exist" evidence is the only thing standing between
+    # `curl … | sudo sh` and a silently mis-targeted migration under ROOT's
+    # $HOME — so creating that directory before the runner was allowed to look
+    # at it made the guard unreachable from every entry point on this host.
+    # The ordering fix put the copy after the migration; deleting the copy
+    # removes the question. The kept installer this mode still leaves behind is
+    # the root-owned one ensure_root_exec_surface places into $BIN_DIR, written
+    # long before the migration and touching nobody's home.
     report_unrecorded_migration
 
     # This mode has no start step of its own; say so rather than leaving the
@@ -4498,19 +4532,13 @@ if should_ask_before_migration; then
 fi
 migrate_from_legacy
 
-# Keep this installer + its migrations at $GW_HOME so subsequent `service install`
-# verbs can re-render units and run a pending migration without a new download.
-#
-# AFTER migrate_from_legacy, never before. This function mkdir -p's $GW_HOME, and
-# the runner's "$GW_HOME does not exist" guard is the only thing standing between
-# `curl … | sudo sh` and a silently mis-targeted migration under ROOT's $HOME:
-# under sudo $GW_HOME is /var/root/.burrowee/gateway, a tree the enrolled user
-# never had. Running first, this created that tree — so the guard was asked a
-# question whose answer this script had already falsified, on every entry point.
-# The observed result was a clean-looking "no recorded version, and --applies
-# does not recognise …", root-scheme units written AND loaded, the version anchor
-# written into root's tree, exit 0, and a daemon that then refused to start.
-keep_installer_copy
+# NOTHING IS KEPT UNDER $GW_HOME HERE ANY MORE. This is where the per-user
+# installer copy was made — after migrate_from_legacy, because the function
+# mkdir -p'd $GW_HOME and the ladder's "$GW_HOME does not exist" evidence is
+# the only thing standing between `curl … | sudo sh` and a silently
+# mis-targeted migration under ROOT's $HOME. The kept installer a later
+# `service install` runs is the root-owned $BIN_DIR copy that
+# ensure_root_exec_surface placed before the migration ever started.
 
 render_units
 
@@ -4570,16 +4598,20 @@ echo "verified: binaries and units are in place and consistent"
 # if /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
 # next step. All tty I/O is fault-tolerant so it can never abort the install.
 #
-# gateway_already_set_up probes for the state itself, never for a non-empty
-# $COMP_HOME. keep_installer_copy above creates that directory and writes
-# install.sh + migrations/ into it a few dozen lines earlier, so "non-empty" is
-# something THIS script guarantees: on a genuinely virgin host the old test
-# printed "already set up — skipping setup" and the blob + PIN prompt never ran.
+# gateway_already_set_up probes for the STATE itself, never for a non-empty
+# $COMP_HOME. That distinction was forced by an installer copy this script made
+# into $COMP_HOME a few dozen lines earlier, so "non-empty" was something the
+# run guaranteed about itself: on a genuinely virgin host the old test printed
+# "already set up — skipping setup" and the blob + PIN prompt never ran. The
+# copy is gone, and the distinction stays — a directory is not an enrolment,
+# and nothing should have to re-derive that the next time something lands in
+# there.
 #
-# Both layouts count. Pre-0.2.0 state lives in the per-user tree; on a migrated
-# or root-installed host the identity and the store are under the SYSTEM roots
-# and $COMP_HOME holds nothing but the installer copy — so a probe that looked
-# only at $COMP_HOME would re-prompt a fully enrolled 0.2.x host.
+# Both layouts count, and both are READS of somebody else's tree. Pre-0.2.0
+# state lives in the operator's per-user tree ($COMP_HOME, resolved through
+# operator_home); on a migrated or root-installed host the identity and the
+# store are under the SYSTEM roots — so a probe that looked only at one of them
+# would re-prompt a fully enrolled host.
 gateway_already_set_up() {
     for _p in \
         "$COMP_HOME/identity/relay_ed.key" \

@@ -1,20 +1,22 @@
 // Package install_test: CRITICAL 1 — the installer must not create $GW_HOME
-// before the migration runner is allowed to look at it.
+// AT ALL, and the 0.2→0.3 rung must still see the tree it migrates from.
 //
-// migrations/run.sh refuses to evaluate anything when $GW_HOME does not exist,
-// because every ladder input lives inside it: the version anchor is read from it
-// and every --applies probe recognises the host by the shape of the tree. That
-// guard is the only thing standing between `curl … | sudo sh` and a silently
-// mis-targeted migration — under sudo $HOME is root's, so $GW_HOME names a tree
-// the enrolled user never had.
+// The 0.2→0.3 rung refuses to adopt anything when $GW_HOME does not exist,
+// because that tree is what it copies the host's identity out of. That
+// evidence is the only thing standing between `curl … | sudo sh` and a
+// silently mis-targeted migration.
 //
-// keep_installer_copy mkdir -p's $GW_HOME, and it ran BEFORE migrate_from_legacy
-// in both modes. So the guard could never fire from either path: root's tree
-// always existed by the time it was asked about. The observed field result was
-// an ordinary-looking "no recorded version, and --applies does not recognise …",
-// root-scheme units written AND loaded, the anchor written into root's tree,
-// exit 0, and "next: burrowee gateway bootstrap" — followed by a daemon that hit
-// GuardFreshInstallNotOrphaning and crash-looped.
+// keep_installer_copy mkdir -p'd $GW_HOME, and it ran BEFORE
+// migrate_from_legacy in both modes. So the guard could never fire from either
+// path: the tree always existed by the time it was asked about. The observed
+// field result was an ordinary-looking "no recorded version, and --applies does
+// not recognise …", root-scheme units written AND loaded, the anchor written
+// into a home tree, exit 0, and "next: burrowee gateway bootstrap" — followed
+// by a daemon that hit GuardFreshInstallNotOrphaning and crash-looped.
+//
+// The ordering fix moved the copy behind the migration. THIS feature deletes
+// the copy, so the tests below assert the stronger property: the runner sees an
+// absent $GW_HOME, and it is still absent when the installer exits.
 package install_test
 
 import (
@@ -67,15 +69,17 @@ func TestFreshInstallDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 			"the runner's \"does not exist\" guard is unreachable from this path")
 	}
 
-	// The copy still has to happen, just later: `service install` re-runs
-	// $GW_HOME/install.sh and resolves migrations/ beside it, so an installer
-	// that stopped keeping the copy would be a different regression.
+	// And it is STILL absent when the run ends — the copy that used to create
+	// it is gone, not merely reordered behind the runner.
+	assertOperatorHomeUntouched(t, home)
+
+	// The kept installer a later `service install` runs is the root-owned one.
 	for _, p := range []string{
-		filepath.Join(home, ".burrowee", "gateway", "install.sh"),
-		filepath.Join(home, ".burrowee", "gateway", "migrations", "run.sh"),
+		filepath.Join(binDir(home), "install.sh"),
+		filepath.Join(binDir(home), "migrations", "run.sh"),
 	} {
 		if _, statErr := os.Stat(p); statErr != nil {
-			t.Errorf("the installer copy was not kept at all: %s: %v", p, statErr)
+			t.Errorf("the root-owned installer copy was not kept: %s: %v", p, statErr)
 		}
 	}
 }
@@ -108,18 +112,18 @@ func TestUpdateDoesNotCreateGwHomeBeforeMigrating(t *testing.T) {
 	if strings.Contains(log, "GW_HOME_EXISTED=yes") {
 		t.Errorf("update mode created $GW_HOME before the runner could evaluate it")
 	}
-	if _, statErr := os.Stat(filepath.Join(home, ".burrowee", "gateway", "install.sh")); statErr != nil {
-		t.Errorf("the installer copy was not kept after the migration: %v", statErr)
+	assertOperatorHomeUntouched(t, home)
+	if _, statErr := os.Stat(filepath.Join(binDir, "install.sh")); statErr != nil {
+		t.Errorf("the root-owned installer copy was not kept after the migration: %v", statErr)
 	}
 }
 
-// TestUpdateKeepsTheInstallerCopyOnADeferredSlot: the copy moved behind the
-// migration, and the migration lives inside the own-slot branch. It must not
-// have moved INSIDE that branch as well, or a host whose service slot belongs to
-// another user stops getting a current installer — and `burrowee gateway service
-// install --force`, the documented way to take that slot over, re-runs the copy
-// at $GW_HOME.
-func TestUpdateKeepsTheInstallerCopyOnADeferredSlot(t *testing.T) {
+// TestUpdateOnADeferredSlotWritesNothingUnderTheOperatorHome: the branch that
+// defers — another user owns the service slot — used to be the one place a
+// reader might argue the per-user copy was still owed, because it is the branch
+// that skips the migration and the units alike. It is not owed: nothing this
+// installer leaves behind belongs in somebody's home, on any branch.
+func TestUpdateOnADeferredSlotWritesNothingUnderTheOperatorHome(t *testing.T) {
 	home := t.TempDir()
 	stub := stubInitSystem(t)
 	binDir := binDir(home)
@@ -139,9 +143,7 @@ func TestUpdateKeepsTheInstallerCopyOnADeferredSlot(t *testing.T) {
 	if got := migrationLog(t, logPath); got != "" {
 		t.Fatalf("migrated while another user owns the slot, so this test proves nothing:\n%s", got)
 	}
-	if _, statErr := os.Stat(filepath.Join(home, ".burrowee", "gateway", "install.sh")); statErr != nil {
-		t.Errorf("the installer copy was lost on the deferring branch: %v", statErr)
-	}
+	assertOperatorHomeUntouched(t, home)
 }
 
 // ---------------------------------------------------------------------------
@@ -249,8 +251,5 @@ func TestRecordInstalledVersionWritesBothAnchors(t *testing.T) {
 	if got, want := installedVersion(t, home), "v0.2.0.2026.08.07.4f1c3ec8"; got != want {
 		t.Errorf("the ladder anchor at %s was not written: got %q, want %q", ladderAnchorPath(home), got, want)
 	}
-	// And neither home holds one: the anchor is a machine fact.
-	if _, err := os.Stat(filepath.Join(home, ".burrowee", "gateway", ".installed-version")); err == nil {
-		t.Errorf("the version anchor was written into a home tree: %s", filepath.Join(home, ".burrowee", "gateway", ".installed-version"))
-	}
+	assertOperatorHomeUntouched(t, home)
 }

@@ -7,11 +7,12 @@
 #     dash tools/guard-arm.test.sh
 #
 # WHY THE RESOLUTION IS THE WHOLE TEST. A prior draft of guard_arm resolved
-# "$GW_HOME/guard.sh" — a path keep_installer_copy has not populated yet on a
-# fresh install (it runs AFTER guard_arm, see install-guard-arms-first.test.sh)
-# and never populates at all on the payload's own first run. That would refuse
-# every fresh install outright. The regression test below plants a DECOY
-# guard.sh at the old, wrong location and proves guard_arm never reads it.
+# "$GW_HOME/guard.sh" — a per-user path an installer once wrote to and no
+# longer does at all, and which on the payload's own first run never existed
+# anyway. That would refuse every fresh install outright. The regression test
+# below plants a DECOY guard.sh at the old, wrong location — the shape a host
+# installed by an older release still has on disk — and proves guard_arm never
+# reads it.
 #
 # BOTH PLATFORM SHAPES. guard_arm's Darwin branch writes a transient
 # LaunchDaemon and drives launchctl; its Linux branch drives systemd-run
@@ -131,8 +132,8 @@ STUB
 # "$(dirname "$0")/guard.sh" resolve to where THIS harness staged guard.sh,
 # the same way a real invocation's $0 is the installer's own path — then run
 # <snippet> against its functions. $HOME (not GW_HOME directly: install.sh
-# assigns GW_HOME="$HOME/.burrowee/gateway" unconditionally, so HOME is the
-# only seam that reaches it) defaults to <root>/home.
+# derives GW_HOME from operator_home, which with no $SUDO_USER set is $HOME, so
+# HOME is the only seam that reaches it) defaults to <root>/home.
 run_guard_arm() {
     _rga_root="$1"; _rga_plat="$2"; _rga_installer="$3"; _rga_snippet="$4"
     _rga_home="${5:-$_rga_root/home}"
@@ -393,47 +394,33 @@ t_guard_arm_honours_no_restart() {
     rm -rf "$_root"
 }
 
-# keep_installer_copy must keep guard.sh at $GW_HOME too, off the SAME
-# resolution guard_arm uses — a later DEFAULT-MODE re-run of the kept copy has
-# $0 = $GW_HOME/install.sh, and without this copy that run finds no guard.sh
-# beside it and refuses.
+# THE PER-USER COPY IS GONE, AND THIS IS WHAT STOPS IT COMING BACK.
 #
-# NOT a units-only re-run, and the earlier wording here said so and was wrong —
-# the same correction install.sh's own comment beside keep_installer_copy
-# already carries. BURROWEE_UNITS_ONLY exits inside its own mode block
-# (finish_with_updater_verdict) and never reaches guard_arm at all; what it does
-# reach is ensure_root_exec_surface, which places this copy into $BIN_DIR. The
-# copy that matters to a guard is the ROOT-OWNED one under $BIN_DIR; this one is
-# a source, never an exec target.
-t_keep_installer_copy_copies_guard_sh() {
-    _root="$(mktemp -d)"
-    setup_root "$_root"
-    _installer="$(stage_payload "$_root" yes)"
-    _home="$_root/home"
-
-    run_guard_arm "$_root" Linux "$_installer" 'keep_installer_copy' "$_home" >/dev/null 2>&1
-
-    _gw_home="$_home/.burrowee/gateway"
-    [ -f "$_gw_home/install.sh" ] || fail "keep_installer_copy regressed: install.sh is no longer kept at \$GW_HOME"
-    [ -f "$_gw_home/guard.sh" ]   || fail "keep_installer_copy did not keep guard.sh at \$GW_HOME"
-    cmp -s "$GUARD_SRC" "$_gw_home/guard.sh" || fail "the kept guard.sh copy does not match inner/gateway/guard.sh"
-    rm -rf "$_root"
-}
-
-# keep_installer_copy must not fail an install merely because THIS bundle
-# carries no guard.sh (an old bundle predating Task 5, or install.sh's own
-# $GW_HOME self-copy re-run) — same tolerance as the migrations/ copy beside it.
-t_keep_installer_copy_tolerates_missing_guard_sh() {
-    _root="$(mktemp -d)"
-    setup_root "$_root"
-    _installer="$(stage_payload "$_root" no)"
-    _home="$_root/home"
-
-    _rc=0
-    run_guard_arm "$_root" Linux "$_installer" 'keep_installer_copy' "$_home" >/dev/null 2>"$_root/stderr" || _rc=$?
-    [ "$_rc" = 0 ] || fail "keep_installer_copy failed outright when the bundle carries no guard.sh: $(cat "$_root/stderr")"
-    [ -f "$_home/.burrowee/gateway/install.sh" ] || fail "keep_installer_copy did not keep install.sh when guard.sh was absent"
-    rm -rf "$_root"
+# keep_installer_copy used to copy this installer, migrations/ and guard.sh
+# into $GW_HOME — as root, with the operator's preserved $HOME, in every mode.
+# The result observed on a workstation 2026-09-05 was `drwxr-xr-x root staff
+# ~/.burrowee`, after which the cli installer could not create its own subtree
+# and said nothing. The kept copy a later `service install` runs is the
+# root-owned $BIN_DIR one that ensure_root_exec_surface places; the guard a
+# supervisor execs was never the per-user copy in the first place (see the
+# decoy case above).
+#
+# Structural, like t_handoff_gate_accepts_an_unproven_guard below: what is
+# being pinned is that no statement in the file writes to either per-user name.
+# READS stay legal and are deliberate — the 0.2->0.3 rung is handed $GW_HOME as
+# the tree it adopts FROM, and the first-run probe reads $COMP_HOME for a 0.2
+# enrolment. The behavioural half (a real install leaves the home empty) is
+# driven end to end in inner/gateway/install_test/operator_home_test.go.
+t_no_installer_writes_under_a_users_home() {
+    for _f in "$INSTALL_SRC" "$HERE/inner/gateway/beta.install.sh"; do
+        [ -f "$_f" ] || continue
+        grep -q '^keep_installer_copy()' "$_f" &&
+            fail "$_f defines keep_installer_copy again — a root-run installer must not copy itself into a user's home"
+        _w="$(grep -nE '^[[:space:]]*[^#]*((mkdir|cp|mv|ln|touch|rm|chmod|chown|/usr/bin/install)[^|#]*\$(GW|COMP)_HOME|>[[:space:]]*"?\$(GW|COMP)_HOME)' "$_f" || true)"
+        [ -z "$_w" ] ||
+            fail "$_f writes into the operator's per-user tree — reads are fine, writes are the defect:
+$_w"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -581,8 +568,7 @@ done
 t_guard_arm_refuses_an_unsupported_platform
 t_handoff_gate_accepts_an_unproven_guard
 
-t_keep_installer_copy_copies_guard_sh
-t_keep_installer_copy_tolerates_missing_guard_sh
+t_no_installer_writes_under_a_users_home
 
 if [ "$fails" -ne 0 ]; then
     printf '%s: %d check(s) failed\n' "$0" "$fails" >&2

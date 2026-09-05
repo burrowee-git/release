@@ -607,19 +607,22 @@ func TestFreshInstallPromptsSetupOnAVirginHost(t *testing.T) {
 	}
 	assertContains(t, string(out), "next: burrowee gateway bootstrap")
 
-	// And the installer copy really is sitting in $GW_HOME: without it the test
-	// would pass simply because the directory was empty, which is the shape the
-	// bug needs to be reproduced against.
-	if _, statErr := os.Stat(filepath.Join(home, ".burrowee", "gateway", "install.sh")); statErr != nil {
-		t.Fatalf("the installer copy is missing, so this test is not exercising the bug: %v", statErr)
+	// The probe reads STATE, and the run must reach the prompt without any
+	// help from an empty-directory accident. It used to be the installer's own
+	// self-copy sitting in $GW_HOME that made "$COMP_HOME is non-empty" the
+	// wrong question; that copy is gone, so what this now pins is the other
+	// half — the installer left nothing of its own in the operator's home for
+	// a future probe to mistake for enrolment.
+	if _, statErr := os.Stat(filepath.Join(home, ".burrowee")); statErr == nil {
+		t.Fatalf("the installer created %s — a root-run install must leave the operator's home alone", filepath.Join(home, ".burrowee"))
 	}
 }
 
 // TestFreshInstallSkipsSetupWhenStateExists is the half the probe must not
 // lose: an enrolled host must never be re-prompted for a setup blob. Both
-// layouts count — the pre-0.2.0 per-user tree, and the SYSTEM roots a migrated
-// or root-installed host keeps its identity in, where $GW_HOME holds nothing
-// but the installer copy.
+// layouts count — the pre-0.2.0 per-user tree, which this installer now only
+// ever READS, and the SYSTEM roots a migrated or root-installed host keeps its
+// identity in.
 func TestFreshInstallSkipsSetupWhenStateExists(t *testing.T) {
 	seed := map[string]func(home string) string{
 		"legacy per-user identity": func(home string) string {
