@@ -88,11 +88,11 @@
 #                                (<COMP> = the component name upper-cased, e.g. BURROWEE_CLI_VERSION)
 #   PREFIX                       install root (bins at PREFIX/bin). cli/agent: default
 #                                $HOME/.local. GATEWAY and EDGE: not defaulted — they
-#                                install only to the root-owned /usr/local/burrowee/bin (gateway
+#                                install only to the root-owned @ROOT@/bin (gateway
 #                                since 0.2.0, edge since 0.2.0). Their inner installers
 #                                REFUSE a PREFIX that would MISDIRECT the install rather
 #                                than quietly overriding it; one that resolves to that
-#                                same /usr/local/burrowee/bin misdirects nothing and is honoured.
+#                                same @ROOT@/bin misdirects nothing and is honoured.
 #   (elevation)                  gateway/edge/relay need root: the bootstrap runs the
 #                                VERIFIED inner installer under sudo and says so.
 #                                Resolution, download and signature checks stay at the
@@ -166,7 +166,7 @@ REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 # resolve_prefix — the install root this bootstrap hands the inner installer.
 #
 # PER COMPONENT, because this template is shared and they no longer agree. The
-# gateway and the edge install to /usr/local/burrowee/bin, root-owned, and
+# gateway and the edge install to @ROOT@/bin, root-owned, and
 # nowhere else — nothing is linked back into /usr/local/bin any more, and their
 # inner installers end by printing how to reach the exec root from the
 # operator's own login shell. They REFUSE a PREFIX that names anywhere else, so
@@ -176,7 +176,7 @@ REPO="${BURROWEE_RELEASE_REPO:-burrowee-git/release}"
 # install down the per-user branch, which also switched off unit rendering,
 # migration and version recording. Their PREFIX therefore stays EMPTY unless the
 # operator set one, and an operator who did set one gets either the refusal
-# they earned or, if it resolves to /usr/local/burrowee/bin anyway, a line saying
+# they earned or, if it resolves to @ROOT@/bin anyway, a line saying
 # so — never a silent override. cli/agent keep the per-user default until that
 # is decided separately. $COMP is a literal baked at render time.
 #
@@ -281,7 +281,7 @@ fi
 
 # ---- elevation ----------------------------------------------------------
 # THE POLICY: a root-only surface never dead-ends. gateway, edge and relay
-# install to /usr/local/burrowee/bin and manage a system service; they cannot install any
+# install to @ROOT@/bin and manage a system service; they cannot install any
 # other way. So the bootstrap elevates rather than printing a one-liner for the
 # operator to retype.
 #
@@ -327,7 +327,7 @@ resolve_elevate() {
     needs_root_comp || return 0
     [ "$(id -u)" != 0 ] || return 0
     if ! command -v sudo >/dev/null 2>&1; then
-        fail "$COMP installs to /usr/local/burrowee/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
+        fail "$COMP installs to @ROOT@/bin and manages a system service, so it needs root — and sudo is not installed on this host. Re-run this installer as root."
     fi
     if ! has_tty && ! sudo -n true 2>/dev/null; then
         fail "$COMP needs root to install, and this run has no terminal for a sudo password prompt and no cached sudo credentials. Re-run it from an interactive terminal, pre-authorize with \`sudo -v\`, or run:
@@ -753,7 +753,7 @@ run_inner() {
     # unset and read as "the operator set nothing", turning a deliberate
     # PREFIX=/usr/local into a silent default.
     if [ -n "$ELEVATE" ]; then
-        info "$COMP installs to /usr/local/burrowee/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
+        info "$COMP installs to @ROOT@/bin and manages a system service — elevating with sudo for the install step (the download and its signature check already ran as $(id -un))"
     fi
     if [ -n "$PREFIX" ]; then
         ( cd "$TMP/x" && $ELEVATE env PREFIX="$PREFIX" \
@@ -794,6 +794,20 @@ run_inner
 # be two different beliefs. The kit's own cross-check stays the judge of an
 # operator-named floor (it refuses one above its ladder top).
 if [ "$MODE" = upgrade ]; then
+@BETA_ONLY_BEGIN@
+    # NOT under the beta root. The forced pass exists to converge a host from
+    # the 0.2 stable layout, and the beta root has no such history: it is
+    # created by the inner installer, at 0.3, with nothing above it to climb
+    # from. Forcing a rung here would either no-op or reach across into the
+    # STABLE tree the rung was actually written for — and the operator would
+    # read the ladder's "rungs ran" as if it had done beta work.
+    #
+    # The install itself already happened above (run_inner), so this is the end
+    # of the run and not a refusal: beta.upgrade.sh installs exactly what
+    # beta.install.sh does, and differs only in the pass it now declines.
+    ok "installed — no migration ladder is forced under the beta root (@ROOT@)"
+    exit 0
+@BETA_ONLY_END@
     # A kit with no ladder SAYS SO AND FAILS. Silent success here is the defect
     # this month keeps producing: a zip shipped without migrations/, an update
     # that skipped its state migration, and nothing in the output to show it.
