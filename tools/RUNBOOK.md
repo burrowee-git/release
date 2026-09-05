@@ -665,6 +665,15 @@ fails the per-user ownership question and the write is refused with
 `chown -R <you>` that would hand the beta install to an unprivileged account.
 It is a core change and a core tag; the units above are unaffected.
 
+**Do not run that `chown`.** No operator step here or anywhere else may act on
+the remedy this core version prints against the beta tree: root ownership of
+`/usr/local/burrowee/beta/{etc,var}` is the CORRECT state — it is where the beta
+node's identity, its bridge key and its host cert's private key live — and
+handing it to an unprivileged account is the escalation the root-only model
+exists to remove. The refusal is the gap, not the ownership. Until the core fix
+lands, do the write as the daemon does it (root with no `SUDO_UID`: `sudo -i`,
+or the systemd unit itself) or edit `beta/etc/edge/config` by hand.
+
 Two cosmetic gaps a beta host will show, both waiting on another repo:
 `burroweeb gateway status` reports the STABLE instance (the cli's `status` /
 `service status` / `service uninstall` are still fixed to the stable roots), and
