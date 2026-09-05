@@ -952,6 +952,10 @@ ensure_system_tree() {
         echo "error: and whatever an unprivileged process creates, that user owns." >&2
         exit 1
     fi
+    # The beta root is one level deeper than the stable one, and
+    # ensure_dir_stated refuses a level whose parent is absent. On a host with
+    # no stable edge that parent does not exist yet, and it is still ours.
+    ensure_dir_stated "$(dirname "$SYSTEM_ROOT")" 0755 || exit 1
     ensure_dir_stated "$SYSTEM_ROOT" 0755 || exit 1
     ensure_dir_stated "$SYS_BIN_DIR" 0755 || exit 1
     ensure_dir_stated "$(dirname "$SYS_CONFIG_ROOT")" 0755 || exit 1
@@ -1187,25 +1191,47 @@ migrate_config() {
 }
 
 # seed_beta_defaults — the three listener values that keep a beta edge off the
-# stable edge's ports on the same host. Each is stable's default PLUS ONE
-# (edge feature 06 ships etc/edge/config.beta.example carrying the same three,
+# stable edge's ports on the same host. Each is stable's default PLUS ONE (edge
+# feature 06 ships etc/edge/config.beta.example carrying the same three,
 # derived there from the stable defaults as the code spells them):
 #
 #   lan_listen          127.0.0.1:9448 -> 127.0.0.1:9449
 #   lan_advertise_port  8448           -> 8449
 #   tls_listen          127.0.0.1:9443 -> 127.0.0.1:9444
 #
-# Seeded, not forced: an operator who re-ported this edge keeps their value,
-# and this runs again on every update. Unlike the gateway's console_port, none
-# of these can be repaired from the console afterwards — the signed manifest
-# carries exactly ONE listener address, tls_listen (edge feature 06), so
-# lan_listen and lan_advertise_port are reachable only by editing the config on
-# the host. Getting them right at install time is the whole point of seeding
-# them here.
+# WRITTEN DIRECTLY, not through `burrowee-edge-cli config set` the way
+# seed_if_absent above does, and that is not a shortcut. The cli resolves the
+# STABLE config root unless it is told otherwise, so a bare call here seeds the
+# OTHER install's file -- which is exactly what the first side-by-side run on
+# the CI VM did, putting beta's 8449 and 9444 into the stable edge's config.
+# And it cannot be told otherwise today: `--home` is rejected after the
+# positionals, and before them it forces the per-user scheme and refuses a
+# root-owned tree ("refusing to write ... as root: owned by uid 0"). That is a
+# gap in the edge cli, filed as a follow-up; until it closes, the installer
+# writes its own root's file itself, which it is already privileged to do.
+#
+# Whole-file seed-if-absent, so an operator who has re-ported this edge keeps
+# every value: none of these is reachable from the console afterwards except
+# tls_listen (the signed manifest carries exactly one listener address, edge
+# feature 06), so the other two are only ever fixed by editing this file.
 seed_beta_defaults() {
-    seed_if_absent lan_listen         127.0.0.1:9449
-    seed_if_absent lan_advertise_port 8449
-    seed_if_absent tls_listen         127.0.0.1:9444
+    _sbd="$COMP_HOME/config"
+    if [ -e "$_sbd" ]; then
+        return 0
+    fi
+    _sbd_tmp="$(mktemp)" || return 0
+    {
+        printf 'lan_listen=127.0.0.1:9449\n'
+        printf 'lan_advertise_port=8449\n'
+        printf 'tls_listen=127.0.0.1:9444\n'
+    } > "$_sbd_tmp"
+    if install -m 0644 "$_sbd_tmp" "$_sbd"; then
+        echo "seeded $_sbd with the stable+1 listeners (lan 9449/8449, tls 9444)"
+    else
+        echo "warning: could not seed $_sbd — set lan_listen, lan_advertise_port and tls_listen by hand before starting the beta edge" >&2
+    fi
+    rm -f "$_sbd_tmp"
+    return 0
 }
 
 # $_RUNROOT / $_SYSTEMCTL — the two seams the start helpers below are
@@ -1778,7 +1804,10 @@ fi
 # false whoever is running — this script is already root, but the redirect is
 # what makes that structural rather than incidental. Only `--fix` remediates or
 # prompts, and this is the read-only verb.
-"$SYS_BIN_DIR/burrowee-edge-cli" doctor < /dev/null || true
+# NOT run under the beta root — see the gateway installer's note: the cli
+# resolves the stable roots unless told otherwise, and `doctor` has no way to
+# be told. It would diagnose the other install and print its rows here.
+echo "beta root — skipping the post-install doctor: it has no --home yet, and would report the stable install"
 
 # ---- the last thing printed on the success path ----------------------------
 # After the units are loaded, after the sweeps, after doctor: the operator's own

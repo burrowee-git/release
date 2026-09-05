@@ -4719,7 +4719,12 @@ fi
 # components, since this script does not require root of itself and reaches
 # privileged work through run_root. Only `--fix` remediates or prompts, and this
 # is the read-only verb.
-"$BIN_DIR/burrowee-gateway-cli" doctor < /dev/null || true
+# NOT run under the beta root. `doctor` takes no --home (verified on the CI VM:
+# "flag provided but not defined: -home"), so it would diagnose the STABLE
+# install and print its rows as if they were this one's -- worse than printing
+# nothing, because the operator has no way to tell which install answered.
+# Restore this the moment the cli's doctor takes the instance's home.
+echo "beta root — skipping the post-install doctor: it has no --home yet, and would report the stable install"
 
 # ---- the last thing printed on a SUCCESSFUL install ------------------------
 # The operator's own next step: how to reach $BIN_DIR from the shell they
