@@ -34,7 +34,9 @@ set -eu
 BIN_DIR="${PREFIX:-$HOME/.local}/bin"
 BINS="burrowee burrowee-cli burrowee-cli-updater"
 COMP=cli
-COMP_HOME="$HOME/.burrowee/$COMP"
+TREE_ROOT="$HOME/.burrowee"
+COMP_HOME="$TREE_ROOT/$COMP"
+SOCKET_DIR="$COMP_HOME/sockets"
 # The ladder's version anchor. Nothing wrote one before this ladder existed, so
 # there is no name in the field to keep compatibility with; migrations/run.sh
 # reads it as $COMP_HOME/$VERSION_FILE and migrations/component.conf in the cli
@@ -56,6 +58,215 @@ if [ -n "${BURROWEE_UNINSTALL:-}" ]; then
     exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# THE USER'S OWN TREE — created FIRST, and loudly.
+#
+# ~/.burrowee belongs to the account that runs this installer, and this
+# installer is the ONLY thing that creates it (operator ruling 2026-09-05). No
+# root-run component installer creates or repairs it any more, and nothing here
+# ever chowns it: a tree an older root-run installer already took is the
+# operator's to hand back by hand. `burrowee doctor` reports the same row and
+# names the same remedy, and `doctor --fix` deliberately repairs a missing tree
+# but never an owner.
+#
+# WHAT THIS REPLACES: three `mkdir -p "$COMP_HOME" 2>/dev/null || true` — one
+# before the ladder, one before the version anchor, one before the self-copy.
+# On a host whose ~/.burrowee a root-run gateway installer had taken, all three
+# failed silently and the install still reported success; the first thing to
+# say anything was `burrowee bootstrap`, long after the operator had been told
+# the cli was installed. The tree is a PRECONDITION of the install, not a side
+# effect of three later steps, so it is created once, before any binary is
+# placed, and a failure stops with nothing half-done.
+#
+# It runs AFTER the units-only and uninstall branches above: neither places
+# anything, and neither should leave a directory behind on a host that has none.
+# ---------------------------------------------------------------------------
+
+# The stat dialect, decided once. Same probe, and the same reason, as
+# inner/gateway/install.sh: `stat` takes its format as `-c` on GNU and `-f` on
+# BSD/macOS, and on GNU `-f` is --file-system — so `stat -f '%u' PATH` there
+# does not fail cleanly. It reads '%u' as a second path, dumps PATH's
+# filesystem geometry to stdout and exits 1, and a `-f … || -c …` chain hands
+# the caller that dump concatenated with the real answer. That shipped once and
+# stranded a node. Probe against a path that certainly exists, then only ever
+# use the flag that was proved to work.
+#
+# is_digits is what makes a multi-line blob unmistakable: every newline and
+# every word of a filesystem dump is a non-digit.
+is_digits() {
+    case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+STAT_FLAVOR=none
+if is_digits "$(stat -L -c '%u' / 2>/dev/null)"; then
+    STAT_FLAVOR=gnu
+elif is_digits "$(stat -L -f '%u' / 2>/dev/null)"; then
+    STAT_FLAVOR=bsd
+fi
+
+# stat_uid <path> — the owner's uid, or NOTHING and non-zero. There is no third
+# outcome: a helper that can put junk on stdout turns the comparison below into
+# a silent false, which reads to an operator as "your tree is wrong" rather
+# than "I could not look".
+#
+# `-L` FOLLOWS SYMLINKS, and it is the probe's flags too so the invocation
+# proved to work is the invocation used. Without it a ~/.burrowee an operator
+# symlinked onto another volume would be judged by the LINK's owner while
+# everything else in this script — `[ -d ]`, the `[ -O ]` fallback, `mkdir`
+# itself — acts on the target. Judging one object and writing into another is
+# the failure mode this check exists to remove, and refusing the symlink
+# instead would break a host that works today for a layout the installer has no
+# business having an opinion about. (The two-owner case cannot be built by an
+# unprivileged suite — link and target are both the tester's — so this is
+# argued rather than asserted.)
+stat_uid() {
+    case "$STAT_FLAVOR" in
+    gnu) _su_v="$(stat -L -c '%u' "$1" 2>/dev/null)" || return 1 ;;
+    bsd) _su_v="$(stat -L -f '%u' "$1" 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
+    esac
+    is_digits "$_su_v" || return 1
+    printf '%s\n' "$_su_v"
+}
+
+# uid_label <uid> — "root (uid 0)" where the account has a name here, "uid 0"
+# where it does not. A message names an account; it never fails to print one.
+uid_label() {
+    [ -n "$1" ] || { printf 'this account\n'; return 0; }
+    _ul_name="$(id -un "$1" 2>/dev/null || true)"
+    if [ -n "$_ul_name" ]; then
+        printf '%s (uid %s)\n' "$_ul_name" "$1"
+    else
+        printf 'uid %s\n' "$1"
+    fi
+}
+
+# tree_is_mine <dir> <my-uid> — true when <dir> belongs to the account running
+# this.
+#
+# The comparison is `stat`'s owner against `id -u` rather than the shell's own
+# `[ -O ]` so that the REFUSAL is reachable from an unprivileged suite: no test
+# can create a directory owned by somebody else, but it can put an `id` on PATH
+# that reports a different uid (inner/cli/install_test/user_tree_test.go, and
+# the gateway suite's fakeRootUID before it). `[ -O ]` reads the euid straight
+# out of the process, where no test can reach it, and a refusal nothing
+# exercises is a refusal that rots.
+#
+# `[ -O ]` is still the FALLBACK, for a host where `stat` speaks neither
+# dialect or `id` is not there: an installer that cannot look must not answer
+# "not yours" about a tree that is fine. A false refusal here removes the only
+# path the operator has left.
+#
+# The uid is passed in rather than read again here: one `id -u` per run, and
+# the number in the refusal is then the same number the decision was made on.
+tree_is_mine() {
+    _tim_owner="$(stat_uid "$1" || true)"
+    if [ -z "$_tim_owner" ] || ! is_digits "$2"; then
+        [ -O "$1" ]
+        return
+    fi
+    [ "$_tim_owner" = "$2" ]
+}
+
+# refuse_foreign_tree <dir> <my-uid> — the loud half. Never returns.
+#
+# TWO MESSAGES, because the two directions have different remedies. Running as
+# a user against a root-owned tree, the repair is the operator's chown and then
+# this installer again. Running as ROOT against a human's tree — `sudo sh
+# install.sh` — the repair is the invocation: advising `chown -R 0` on somebody's
+# own directory would hand their tree to root, which is the defect this whole
+# change exists to remove. `burrowee doctor --fix` grew the same pair of
+# branches for the same reason.
+refuse_foreign_tree() {
+    _rf_dir="$1"
+    _rf_me="$2"
+    _rf_owner="$(stat_uid "$_rf_dir" || true)"
+    if [ -n "$_rf_owner" ]; then
+        _rf_who="$(uid_label "$_rf_owner")"
+    else
+        _rf_who="another account"
+    fi
+    echo "error: $_rf_dir is owned by $_rf_who, not by $(uid_label "$_rf_me")." >&2
+    if [ "$_rf_me" = 0 ]; then
+        echo "error: ~/.burrowee is the user's own tree and root does not create or repair it." >&2
+        echo "error: Re-run this installer WITHOUT sudo, as $_rf_who." >&2
+    else
+        # The owner to chown TO, resolved to numbers so the line pastes into any
+        # shell. Where this run could not learn its own uid the command is
+        # printed with the substitutions left in: it still pastes, and it still
+        # resolves to the account that runs it, which is the account that owns
+        # the tree.
+        #
+        # A GROUP IS NAMED ONLY WHEN IT WAS READ. `chown -R <uid>` leaves the
+        # group alone, which is what handing a tree back means; filling the
+        # group's place with the uid because `id -g` did not answer spells a
+        # real command — `chown -R 4242:4242` — that confidently moves the tree
+        # into whatever group happens to carry that gid.
+        if is_digits "$_rf_me"; then
+            _rf_gid="$(id -g 2>/dev/null || true)"
+            if is_digits "$_rf_gid"; then
+                _rf_own="$_rf_me:$_rf_gid"
+            else
+                _rf_own="$_rf_me"
+            fi
+        else
+            _rf_own='$(id -u):$(id -g)'
+        fi
+        echo "error: This installer creates ~/.burrowee/$COMP itself and never changes the" >&2
+        echo "error: ownership of a tree it does not own. Repair it by hand — look at what" >&2
+        echo "error: the tree holds first, because -R takes everything under it:" >&2
+        echo "error:" >&2
+        echo "error:     sudo chown -R $_rf_own $_rf_dir" >&2
+        echo "error:" >&2
+        echo "error: then re-run this installer. \`burrowee doctor\` reports the same tree." >&2
+    fi
+    echo "error: Nothing has been installed." >&2
+    exit 1
+}
+
+# ensure_user_tree — $HOME/.burrowee, $COMP_HOME and $COMP_HOME/sockets, each
+# created at 0700 if absent and each proved ours if present.
+#
+# EVERY LEVEL IS CHECKED, not just the root: the host this exists for has a
+# root-owned ~/.burrowee, but one whose ~/.burrowee/cli alone was taken is the
+# same defect one directory down, and the message has to name the directory
+# that is actually wrong.
+#
+# The mode is set ON CREATION ONLY (`mkdir -m`, which the umask does not touch;
+# a plain `mkdir -p` under the release umask would leave 0755 and put the
+# daemon's socket where anyone can read it). An existing directory is left
+# exactly as found — an installer that re-moded a tree it did not create would
+# be overruling an operator, and `doctor` already reports the mode it sees.
+ensure_user_tree() {
+    _eut_me="$(id -u 2>/dev/null || true)"
+    is_digits "$_eut_me" || _eut_me=""
+    for _eut_d in "$TREE_ROOT" "$COMP_HOME" "$SOCKET_DIR"; do
+        if [ -d "$_eut_d" ]; then
+            tree_is_mine "$_eut_d" "$_eut_me" || refuse_foreign_tree "$_eut_d" "$_eut_me"
+            continue
+        fi
+        if [ -e "$_eut_d" ]; then
+            echo "error: $_eut_d exists and is not a directory." >&2
+            echo "error: the cli keeps its own state there. Move it aside and re-run this installer." >&2
+            echo "error: Nothing has been installed." >&2
+            exit 1
+        fi
+        if ! mkdir -m 0700 "$_eut_d" 2>/dev/null; then
+            echo "error: could not create $_eut_d." >&2
+            echo "error: the cli keeps its identity, its config and its socket there, so the" >&2
+            echo "error: install stops here rather than reporting success without it." >&2
+            echo "error: Check that $(dirname "$_eut_d") exists and is writable by $(uid_label "$_eut_me")." >&2
+            echo "error: Nothing has been installed." >&2
+            exit 1
+        fi
+    done
+}
+
+ensure_user_tree
+
 mkdir -p "$BIN_DIR"
 for b in $BINS; do
     [ -f "./$b" ] || { echo "missing $b in archive" >&2; exit 1; }
@@ -75,7 +286,16 @@ echo "installed to $BIN_DIR: $BINS"
 # controlling terminal (stdin is the curl pipe, not a tty): prompt only if
 # /dev/tty is genuinely usable (fd 3); if not (CI / detached) just print the
 # next step. All tty I/O is fault-tolerant so it can never abort the install.
-if [ -d "$COMP_HOME" ] && [ -n "$(ls -A "$COMP_HOME" 2>/dev/null || true)" ]; then
+#
+# THE EMPTY TREE IS NOT STATE, and saying so is what lets ensure_user_tree run
+# first. This check used to read "$COMP_HOME is non-empty" as "already set up";
+# now that the install CREATES $COMP_HOME/sockets before reaching here, that
+# spelling would report every fresh install as already-configured and silently
+# skip the setup prompt — the exact trap the ladder was kept below this check to
+# avoid. So sockets/ is discounted, and nothing else is: the identity, the
+# config, the self-copied installer and the version anchor all still mean this
+# host has been here before.
+if [ -d "$COMP_HOME" ] && [ -n "$(ls -A "$COMP_HOME" 2>/dev/null | grep -v '^sockets$' || true)" ]; then
     echo "$COMP already set up ($COMP_HOME) — skipping setup."
 elif ( exec 3<>/dev/tty ) 2>/dev/null; then
     # PROBED IN A SUBSHELL, then opened for real. dash treats a FAILED `exec`
@@ -111,11 +331,17 @@ fi
 
 # ---------------------------------------------------------------------------
 # EVERYTHING BELOW RUNS AFTER THE FIRST-RUN SETUP CHECK, and that ordering is
-# load-bearing rather than incidental. That check reads "$COMP_HOME is non-empty"
-# as "this cli is already set up", so anything that creates $COMP_HOME earlier —
-# the ladder's tree, the version anchor — would make every FRESH install look
-# already-configured and silently skip the setup prompt. The self-copy below
-# already carried that constraint; the ladder now shares it.
+# load-bearing rather than incidental. That check reads a $COMP_HOME holding
+# anything but the empty tree as "this cli is already set up", so anything that
+# PUTS SOMETHING IN IT earlier — the ladder's receipts, the version anchor, the
+# self-copy — would make every FRESH install look already-configured and
+# silently skip the setup prompt. The self-copy below carried that constraint
+# first; the ladder shares it.
+#
+# ensure_user_tree is the one thing that runs before the check, and it is why
+# the check discounts sockets/ rather than testing for an empty directory: it
+# creates the tree and puts NOTHING in it, so "empty tree" and "no tree" have to
+# mean the same thing to a fresh install.
 #
 # Nothing here is destructive on a fresh host, so running it last costs only
 # that a refusing ladder is reported after the prompt rather than before it.
@@ -144,7 +370,6 @@ fi
 
 MIGRATE_UNRECORDED=0
 if [ -n "$MIGRATIONS_DIR" ] && [ -f "$MIGRATIONS_DIR/run.sh" ]; then
-    mkdir -p "$COMP_HOME" 2>/dev/null || true
     set +e
     COMP_HOME="$COMP_HOME" BIN_DIR="$BIN_DIR" sh "$MIGRATIONS_DIR/run.sh"
     _rc=$?
@@ -209,7 +434,6 @@ fi
 # are the two gates on a rung, and recording the version with the receipt lost
 # closes the last one on work nothing on this host can prove finished.
 if [ -n "${BURROWEE_VERSION:-}" ]; then
-    mkdir -p "$COMP_HOME" 2>/dev/null || true
     if [ "$MIGRATE_UNRECORDED" = 1 ]; then
         echo "note: a migration completed but its receipt could not be written." >&2
         echo "note: the installed version is deliberately NOT recorded, so the next install" >&2
@@ -226,14 +450,25 @@ fi
 # units-only reinstall (BURROWEE_UNITS_ONLY=1, run by cli's LocalReinstall) has a
 # local installer to invoke. Written AFTER the setup check above so it never
 # makes a fresh install look already-set-up.
-mkdir -p "$COMP_HOME" 2>/dev/null || true
-cp "$0" "$COMP_HOME/install.sh" 2>/dev/null || true
+#
+# $COMP_HOME exists and is ours by now — ensure_user_tree made that the first
+# act of this run — so a failure here is a real one and is reported. It is not
+# fatal: the binaries are installed and working, and what is lost is the OFFLINE
+# reinstall path. That is worth a line on stderr and not a failed install;
+# silently swallowed it was worth neither, and LocalReinstall then failed on a
+# host that had been told it was fully installed.
+if ! cp "$0" "$COMP_HOME/install.sh" 2>/dev/null; then
+    echo "note: could not keep a copy of this installer at $COMP_HOME/install.sh —" >&2
+    echo "note: an offline reinstall has no local installer to run." >&2
+fi
 # THE MIGRATIONS GO WITH IT. This script resolves the runner and the sweep
 # library relative to its OWN path, so a $COMP_HOME holding install.sh without
 # migrations/ is an installer that silently cannot migrate and silently stops
 # sweeping — both of which look exactly like a clean run.
 if [ -n "$MIGRATIONS_DIR" ] && [ "$MIGRATIONS_DIR" != "$COMP_HOME/migrations" ]; then
-    mkdir -p "$COMP_HOME/migrations" 2>/dev/null || true
+    if ! mkdir -p "$COMP_HOME/migrations" 2>/dev/null; then
+        echo "note: could not create $COMP_HOME/migrations" >&2
+    fi
     cp "$MIGRATIONS_DIR"/* "$COMP_HOME/migrations/" 2>/dev/null \
         || echo "note: could not keep a copy of migrations/ at $COMP_HOME" >&2
 fi
