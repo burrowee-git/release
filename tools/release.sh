@@ -2239,13 +2239,16 @@ do_release() {
         for b in ${bins}; do cp "${out_bins}/${b}" "${assemble}/${b}"; done
         cp "${DISP_DIR}/${plat}/${DISP_NAME}" "${assemble}/${DISP_NAME}"
         # The inner installer of THIS CUT'S CHANNEL — inner/<comp>/install.sh on
-        # stable, its inner/<comp>/beta.install.sh twin on beta. Resolved through
-        # payload.sh's inner_script_src, the same function that picks the
-        # channel's updater.install.sh and guard.sh, so one cut cannot ship a
-        # beta guard beside a stable installer.
-        inner_install="$(inner_script_src "${comp}" install.sh)"
-        [ -n "${inner_install}" ] \
-            || { echo "✗ no inner installer for ${comp} (channel ${CHANNEL:-stable})" >&2; exit 1; }
+        # stable, its inner/<comp>/beta.install.sh twin on beta. Same prefix
+        # payload.sh applies to the channel's updater.install.sh and guard.sh
+        # (inner_prefix), so one cut cannot ship a beta guard beside a stable
+        # installer; spelled REPO_ROOT-relative here, like the line it replaces,
+        # because this site's whole point is that install.sh comes from THIS
+        # repo's tree and not from the component source.
+        inner_install="${REPO_ROOT}/inner/${comp}/$(inner_prefix)install.sh"
+        [ -f "${inner_install}" ] || inner_install="${REPO_ROOT}/inner/${comp}/install.sh"
+        [ -f "${inner_install}" ] \
+            || { echo "✗ no inner installer for ${comp} (channel ${CHANNEL:-stable}): ${inner_install}" >&2; exit 1; }
         cp "${inner_install}" "${assemble}/install.sh"
         chmod 0755 "${assemble}/install.sh"
 
